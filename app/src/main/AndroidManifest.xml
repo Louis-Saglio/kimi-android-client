@@ -1,10 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Cleartext allowed: the server is plain HTTP inside the Tailscale network. -->
     <application
         android:name=".KimiApplication"
         android:label="Kimi"
-        android:theme="@style/Theme.Kimi">
+        android:theme="@style/Theme.Kimi"
+        android:usesCleartextTraffic="true">
         <activity
             android:name=".MainActivity"
             android:exported="true">

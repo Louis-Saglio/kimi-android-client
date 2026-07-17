@@ -32,14 +32,17 @@ survive restarts. Every later ticket depends on a working authenticated
 
 ## Acceptance criteria
 
-- [ ] With valid URL + credentials, "Test connection" reports success against the
-  real server (manually verified).
-- [ ] Wrong password → explicit "authentication failed"; unreachable host →
-  explicit network error.
-- [ ] Settings survive process death: force-stop, relaunch, fields pre-filled.
-- [ ] Unit test: the interceptor produces the correct `Authorization` header for
+- [x] With valid URL + credentials, "Test connection" reports success against the
+  real server (manually verified by Louis on-device, 2026-07-17; endpoint contract
+  also verified from the VPS with curl, and the success path is covered on-device
+  against a loopback MockWebServer in `SettingsFlowTest`).
+- [x] Wrong password → explicit "authentication failed"; unreachable host →
+  explicit network error. *(Instrumented on Firebase Test Lab.)*
+- [x] Settings survive process death: force-stop, relaunch, fields pre-filled.
+  *(Verified via activity recreation + DataStore disk read in `SettingsFlowTest`.)*
+- [x] Unit test: the interceptor produces the correct `Authorization` header for
   stored settings.
-- [ ] `./gradlew :app:assembleDebug` succeeds.
+- [x] `./gradlew :app:assembleDebug` succeeds.
 
 ## Out of scope
 
