@@ -22,6 +22,13 @@ android {
         compose = true
     }
 
+    buildTypes {
+        release {
+            // No release keystore yet: sign with the debug config so the APK is installable.
+            signingConfig = signingConfigs.getByName("debug")
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
