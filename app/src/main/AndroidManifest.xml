@@ -2,8 +2,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <application
+        android:name=".KimiApplication"
         android:label="Kimi"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        android:theme="@style/Theme.Kimi">
         <activity
             android:name=".MainActivity"
             android:exported="true">
