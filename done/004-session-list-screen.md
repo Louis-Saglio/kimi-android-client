@@ -28,13 +28,21 @@ Creation and session actions are deliberately split into tickets 008 and later.
 
 ## Acceptance criteria
 
-- [ ] Real sessions from the live server render with title and timestamp
-  (manually verified against the web client's session list for the same server).
-- [ ] Airplane mode or wrong URL → error state; Retry recovers.
-- [ ] Pull-to-refresh reloads the list.
-- [ ] Tapping a session opens the stub chat with the correct session id in the
-  app bar.
-- [ ] `./gradlew :app:assembleDebug` succeeds.
+- [x] Real sessions from the live server render with title and timestamp
+  (DTO mapping covered by `SessionsRepositoryTest` against the documented wire
+  format; rendering manually verified by Louis on-device against the web
+  client's session list, 2026-07-18 — modulo the missing pagination, now
+  ticket 010).
+- [x] Airplane mode or wrong URL → error state; Retry recovers. *(Error mapping
+  unit-tested (`Network`, `Auth`, `Api`, `InvalidUrl` → `DataError`); Retry
+  path manually verified by Louis on-device, 2026-07-18.)*
+- [x] Pull-to-refresh reloads the list. *(Manually verified by Louis
+  on-device, 2026-07-18.)*
+- [x] Tapping a session opens the stub chat with the correct session id in the
+  app bar. *(Manually verified by Louis on-device, 2026-07-18.)*
+- [x] `./gradlew :app:assembleDebug` succeeds. *(2026-07-18, plus 5 new unit
+  tests green and Firebase Test Lab robo smoke test passed on
+  MediumPhone.arm-34.)*
 
 ## Out of scope
 
