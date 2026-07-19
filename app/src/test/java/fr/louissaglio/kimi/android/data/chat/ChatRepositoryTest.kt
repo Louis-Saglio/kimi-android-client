@@ -139,6 +139,42 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun `abortPrompt posts an empty body to the abort endpoint`() = runBlocking {
+        server.enqueue(
+            MockResponse().setBody("""{"code":0,"msg":"success","data":{"aborted":true},"request_id":"01KX"}"""),
+        )
+
+        val result = repository.abortPrompt(settings(), "session_1")
+
+        assertTrue(result.isSuccess)
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/sessions/session_1:abort", request.path)
+        assertEquals("{}", request.body.readUtf8())
+    }
+
+    @Test
+    fun `abortPrompt maps non-zero envelope code to Api error`() = runBlocking {
+        server.enqueue(
+            MockResponse().setBody("""{"code":40001,"msg":"no running prompt","data":null,"request_id":"01KX"}"""),
+        )
+
+        val result = repository.abortPrompt(settings(), "session_1")
+
+        assertTrue(result.exceptionOrNull() is DataError.Api)
+    }
+
+    @Test
+    fun `isSessionRunning maps the busy flag`() = runBlocking {
+        server.enqueue(
+            MockResponse().setBody("""{"code":0,"msg":"success","data":{"busy":true},"request_id":"01KX"}"""),
+        )
+
+        assertEquals(true, repository.isSessionRunning(settings(), "session_1").getOrThrow())
+        assertEquals("/api/v1/sessions/session_1/status", server.takeRequest().path)
+    }
+
+    @Test
     fun `socket subscribes, answers pings, and emits parsed events`() = runBlocking {
         val clientFrames = CopyOnWriteArrayList<String>()
         server.enqueue(

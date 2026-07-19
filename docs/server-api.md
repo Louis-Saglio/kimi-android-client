@@ -11,6 +11,28 @@ goals, workspaces, providers, skills.
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<password>`).
 
+## Server 0.27.0 deltas (verified 2026-07-19)
+
+The server was upgraded 0.23.3 → 0.27.0 (`"backend": "v2"` in `/meta`) after the
+sections below were written. Everything not listed here still matches, but these
+shapes changed:
+
+- `GET /sessions/{id}/status` returns `{"busy": bool, "model", "thinking_level",
+  "permission", "plan_mode", "swarm_mode", "context_tokens", ...}` instead of
+  `{"status": "idle|running|aborted", ...}`.
+- The session object likewise replaces `status` with `busy: bool`,
+  `main_turn_active: bool`, `pending_interaction`, and `last_turn_reason`
+  (`"cancelled"` after an abort).
+- WS `event.session.status_changed` is renamed `event.session.work_changed`;
+  the payload carries `busy`, `main_turn_active`, `pending_interaction` (plus
+  `last_turn_reason` when going idle).
+- WS `prompt.submitted` is no longer emitted; the new user message arrives
+  inline in a `context.spliced` frame.
+- The abort chain is unchanged: `POST :abort` acks `{"aborted": true}`, then
+  `turn.step.interrupted` (`"aborted"`) → `turn.ended` (`"cancelled"`) →
+  `event.session.work_changed` (idle) → `prompt.aborted`.
+- `/meta` capabilities rename `background_tasks` → `tasks`.
+
 ## Base URL & auth
 
 | Path | Base URL | Auth |

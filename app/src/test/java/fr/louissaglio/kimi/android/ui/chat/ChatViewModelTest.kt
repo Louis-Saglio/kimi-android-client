@@ -34,6 +34,8 @@ import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -51,6 +53,9 @@ class ChatViewModelTest {
 
     @Volatile
     private var approvalsSucceed = true
+
+    @Volatile
+    private var abortsSucceed = true
 
     @Volatile
     private var serverSocket: WebSocket? = null
@@ -74,8 +79,18 @@ class ChatViewModelTest {
                         """{"code":0,"msg":"success","data":{"items":[],"has_more":false},"request_id":"r"}""",
                     )
                     path == "/api/v1/sessions/session_1/status" -> MockResponse().setBody(
-                        """{"code":0,"msg":"success","data":{"status":"idle"},"request_id":"r"}""",
+                        """{"code":0,"msg":"success","data":{"busy":false},"request_id":"r"}""",
                     )
+                    path == "/api/v1/sessions/session_1:abort" ->
+                        if (abortsSucceed) {
+                            MockResponse().setBody(
+                                """{"code":0,"msg":"success","data":{"aborted":true},"request_id":"r"}""",
+                            )
+                        } else {
+                            MockResponse().setBody(
+                                """{"code":40001,"msg":"no running prompt","data":null,"request_id":"r"}""",
+                            )
+                        }
                     path.startsWith("/api/v1/sessions/session_1/approvals/") ->
                         if (approvalsSucceed) {
                             MockResponse().setBody(
@@ -217,6 +232,66 @@ class ChatViewModelTest {
         }
     }
 
+    @Test
+    fun `stop posts abort and turn ended clears the working state`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(turnStartedFrame())
+        awaitState { it.isWorking }
+
+        viewModel.onStop()
+
+        val request = awaitRequest(":abort")
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/sessions/session_1:abort", request.path)
+        assertEquals("{}", request.body.readUtf8())
+
+        // The ack alone must not clear the indicator — the server's turn.ended does.
+        assertTrue(viewModel.uiState.value.isWorking)
+        socket.send(turnEndedFrame(reason = "cancelled"))
+        awaitState { !it.isWorking }
+    }
+
+    @Test
+    fun `stop without a running turn sends no request`() = runBlocking {
+        viewModel.onScreenStarted()
+        awaitServerSocket()
+        awaitState { !it.isLoading }
+        // Drain the history/status/WS requests recorded so far.
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        viewModel.onStop()
+
+        delay(200)
+        assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun `failed abort emits AbortFailed and keeps the working state`() = runBlocking {
+        abortsSucceed = false
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(turnStartedFrame())
+        awaitState { it.isWorking }
+
+        val effects = CopyOnWriteArrayList<ChatViewModel.Effect>()
+        val effectJob = launch { viewModel.effects.collect { effects += it } }
+        try {
+            viewModel.onStop()
+            awaitRequest(":abort")
+            withTimeout(5_000) { while (effects.isEmpty()) delay(10) }
+
+            assertEquals(
+                ChatViewModel.Effect.AbortFailed("no running prompt"),
+                effects.single(),
+            )
+            // The turn is still running: the indicator and the Stop action stay up.
+            assertTrue(viewModel.uiState.value.isWorking)
+        } finally {
+            effectJob.cancel()
+        }
+    }
+
     private suspend fun awaitServerSocket(): WebSocket = withTimeout(5_000) {
         while (serverSocket == null) delay(10)
         serverSocket!!
@@ -234,6 +309,16 @@ class ChatViewModelTest {
         }
         error("Timed out waiting for request to $pathSubstring")
     }
+
+    private fun turnStartedFrame(): String =
+        """{"type":"turn.started","seq":20,"epoch":"ep_1","session_id":"session_1",""" +
+            """"timestamp":"2026-07-19T00:00:00.000Z","payload":{"type":"turn.started","turnId":1,""" +
+            """"origin":{"kind":"user"},"agentId":"main","sessionId":"session_1"}}"""
+
+    private fun turnEndedFrame(reason: String): String =
+        """{"type":"turn.ended","seq":21,"epoch":"ep_1","session_id":"session_1",""" +
+            """"timestamp":"2026-07-19T00:00:01.000Z","payload":{"type":"turn.ended","turnId":1,""" +
+            """"reason":"$reason","durationMs":1000,"agentId":"main","sessionId":"session_1"}}"""
 
     private fun approvalRequestedFrame(id: String, tool: String, action: String, command: String): String =
         """{"type":"event.approval.requested","seq":7,"epoch":"ep_1","session_id":"session_1",""" +

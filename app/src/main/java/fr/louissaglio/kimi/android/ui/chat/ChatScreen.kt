@@ -1,5 +1,6 @@
 package fr.louissaglio.kimi.android.ui.chat
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,6 +47,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontStyle
@@ -83,6 +85,8 @@ fun ChatScreen(
                 }
                 is ChatViewModel.Effect.ApprovalFailed ->
                     snackbarHostState.showSnackbar(effect.message)
+                is ChatViewModel.Effect.AbortFailed ->
+                    snackbarHostState.showSnackbar(effect.message)
             }
         }
     }
@@ -97,6 +101,7 @@ fun ChatScreen(
         onRetry = viewModel::onRetry,
         onInputChange = viewModel::onInputChange,
         onSend = viewModel::onSend,
+        onStop = viewModel::onStop,
         onAllow = viewModel::onAllow,
         onDeny = viewModel::onDeny,
     )
@@ -112,6 +117,7 @@ private fun ChatContent(
     onRetry: () -> Unit,
     onInputChange: (String) -> Unit,
     onSend: () -> Unit,
+    onStop: () -> Unit,
     onAllow: () -> Unit,
     onDeny: () -> Unit,
 ) {
@@ -132,7 +138,19 @@ private fun ChatContent(
                                 .semantics { contentDescription = "Agent working" },
                             strokeWidth = 2.dp,
                         )
-                        Spacer(Modifier.width(16.dp))
+                        Spacer(Modifier.width(8.dp))
+                        // No stop glyph in material-icons-core: a plain filled square.
+                        IconButton(
+                            onClick = onStop,
+                            modifier = Modifier.semantics { contentDescription = "Stop" },
+                        ) {
+                            Box(
+                                Modifier
+                                    .size(14.dp)
+                                    .clip(RoundedCornerShape(3.dp))
+                                    .background(MaterialTheme.colorScheme.onSurfaceVariant),
+                            )
+                        }
                     }
                 },
             )
@@ -412,6 +430,7 @@ private fun ChatContentPreview() {
             onRetry = {},
             onInputChange = {},
             onSend = {},
+            onStop = {},
             onAllow = {},
             onDeny = {},
         )

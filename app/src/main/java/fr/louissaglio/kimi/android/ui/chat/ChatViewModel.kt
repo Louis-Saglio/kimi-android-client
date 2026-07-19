@@ -55,6 +55,9 @@ class ChatViewModel @Inject constructor(
         /** The typed text stays in [UiState.inputText]; the snackbar's Retry re-calls [onSend]. */
         data class SendFailed(val message: String) : Effect
 
+        /** The turn is still running; the Stop action stays available. */
+        data class AbortFailed(val message: String) : Effect
+
         /** The card stays up: with no resolved event coming, the request is still pending. */
         data class ApprovalFailed(val message: String) : Effect
     }
@@ -102,8 +105,9 @@ class ChatViewModel @Inject constructor(
         viewModelScope.launch {
             chatRepository.sendPrompt(settingsRepository.current(), sessionId, text)
                 .onSuccess {
-                    // No local echo: the user message comes back via prompt.submitted →
-                    // history refetch, the reply via the streaming events. The prompt is
+                    // No local echo: the user message comes back via the next history
+                    // refetch (prompt.submitted on 0.23.3; turn.ended on 0.27.0), the
+                    // reply via the streaming events. The prompt is
                     // already running server-side, so gate the button until turn.ended.
                     _uiState.update { it.copy(inputText = "", isSending = false, isWorking = true) }
                 }
@@ -111,6 +115,17 @@ class ChatViewModel @Inject constructor(
                     _uiState.update { it.copy(isSending = false) }
                     _effects.send(Effect.SendFailed(error.toUserMessage()))
                 }
+        }
+    }
+
+    /** POSTs `:abort` for the running turn. On success nothing is cleared locally: the
+     * server's turn.ended frame (docs/server-api.md) drives isWorking=false and the
+     * history refetch that commits the partial reply, so a dropped socket just retries. */
+    fun onStop() {
+        if (!_uiState.value.isWorking) return
+        viewModelScope.launch {
+            chatRepository.abortPrompt(settingsRepository.current(), sessionId)
+                .onFailure { error -> _effects.send(Effect.AbortFailed(error.toUserMessage())) }
         }
     }
 

@@ -148,6 +148,35 @@ class ChatRepository @Inject constructor(
         }
 
     /**
+     * Aborts the running turn (`POST /api/v1/sessions/{id}:abort`, docs/server-api.md).
+     * The ack only confirms the request; the teardown (prompt.aborted → turn.ended)
+     * arrives over the WebSocket, so success carries no payload.
+     */
+    suspend fun abortPrompt(settings: ServerSettings, sessionId: String): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            val body = "{}".toRequestBody("application/json; charset=utf-8".toMediaType())
+            val request = try {
+                Request.Builder()
+                    .url(settings.serverUrl.trim().trimEnd('/') + "/api/v1/sessions/$sessionId:abort")
+                    .post(body)
+                    .build()
+            } catch (e: IllegalArgumentException) {
+                return@withContext Result.failure(DataError.InvalidUrl)
+            }
+            try {
+                client.newCall(request).execute().use { response ->
+                    when {
+                        response.code == 401 -> Result.failure(DataError.Auth)
+                        !response.isSuccessful -> Result.failure(DataError.Http(response.code))
+                        else -> parseAck(response.body?.string().orEmpty())
+                    }
+                }
+            } catch (e: IOException) {
+                Result.failure(DataError.Network(e))
+            }
+        }
+
+    /**
      * Posts the user's decision for one approval request
      * (`POST /api/v1/sessions/{id}/approvals/{approvalId}`, docs/server-api.md). The ack
      * only confirms the decision was registered; the pending UI clears when the
@@ -204,7 +233,7 @@ class ChatRepository @Inject constructor(
                             )
                             when {
                                 envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
-                                else -> Result.success(envelope.data?.status == "running")
+                                else -> Result.success(envelope.data?.busy == true)
                             }
                         } catch (e: SerializationException) {
                             Result.failure(DataError.MalformedResponse(e))

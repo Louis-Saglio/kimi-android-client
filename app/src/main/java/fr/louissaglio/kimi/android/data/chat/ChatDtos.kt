@@ -33,7 +33,7 @@ data class ContentPartDto(
 
 @Serializable
 data class SessionStatusData(
-    val status: String = "",
+    val busy: Boolean = false,
 )
 
 /** Envelope of one WebSocket frame; [payload] is decoded per [type] by the repository. */
