@@ -1,0 +1,13 @@
+The Kimi Code server on this machine was updated and restarted. The wire protocol the Android app depends on may have changed.
+
+Your job: re-verify the protocol, refresh the documentation, and file tickets for anything the update breaks. Work in `/home/ubuntu/kimi-android-client`. Do not modify app source code, and do not run any git mutation (no commit, no push) — Louis reviews and commits your changes.
+
+1. Read `docs/server-api.md` — it describes the protocol as last verified (server version in the header). Also read `AGENTS.md`.
+2. Get the running version: `curl -s http://127.0.0.1:58627/api/v1/meta`. If it matches the doc header, spot-check two or three shapes (session object, `/status`, one WS subscription on a throwaway session). If everything matches, stop and report "no drift".
+3. Otherwise re-verify every core-loop shape against the running server: sessions list/create/get/status, messages history, prompts POST (pass `"model":"kimi-code/k3"`), `:abort`, approvals POST, WS hello/subscribe/ack/cursor-resume, and one full prompt round-trip capturing every event type and verbatim payloads (use `~/tools/websocat-bin/websocat`; create throwaway sessions with `{"metadata":{"cwd":"/tmp/spike"}}` after `mkdir -p /tmp/spike`; abort long turns to keep it fast).
+4. Rewrite `docs/server-api.md` so it describes the RUNNING server: header version/date, every drifted shape, fresh verbatim payload captures, and a current verification log. Keep the document's structure and voice.
+5. For each change that breaks or degrades the Android app — compare the live shapes against the DTOs and parsers under `app/src/main/java/fr/louissaglio/kimi/android/data/` — create one small ticket in `todo/` per the product-owner skill: sequential zero-padded IDs (highest of `todo/` + `done/`, plus one), the canonical template sections, verifiable acceptance criteria, aggressive out-of-scope. Do not fix the app in this run.
+6. Run the unit tests — they encode the documented shapes, so failures confirm breakage. Use:
+   `export JAVA_HOME=/home/ubuntu/tools/jdk-21.0.7+6 ANDROID_HOME=/home/ubuntu/tools/android-sdk PATH="$JAVA_HOME/bin:$PATH"` then `./gradlew :app:testDebugUnitTest --console=plain`.
+   List failures in your report; do not fix them (the tickets cover the fixes).
+7. End with a plain summary: old → new version, shapes that changed, tickets created (IDs + titles), test status.

@@ -28,3 +28,12 @@ sudo chown fileserver:fileserver /home/fileserver/files/app-debug.apk
 
 It then appears in the listing at `https://agent.example.com` (basic auth,
 same `louis` credentials as the web UI).
+
+## Server drift automation
+
+`scripts/` holds the `kimi-protocol-watch` machinery (systemd timer on the
+VPS): when the auto-updating Kimi server restarts on a new version, a headless
+agent re-verifies the wire protocol, rewrites `docs/server-api.md`, and files
+`todo/` tickets for breakage. `docs/server-api.md` is the protocol reference —
+keep it accurate when touching the data layer, and keep
+`scripts/protocol-update-prompt.md` aligned with the doc's structure.
