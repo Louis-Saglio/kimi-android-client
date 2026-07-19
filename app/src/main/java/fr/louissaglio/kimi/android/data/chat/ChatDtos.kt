@@ -65,3 +65,23 @@ data class ToolResultPayload(
 
 @Serializable
 data class TurnEndedPayload(val reason: String = "")
+
+@Serializable
+data class ApprovalRequestedPayload(
+    @SerialName("approval_id") val approvalId: String = "",
+    @SerialName("tool_name") val toolName: String = "",
+    val action: String = "",
+    @SerialName("tool_input_display") val toolInputDisplay: ToolInputDisplayDto? = null,
+)
+
+/** `tool_input_display` of an approval request; only `command` (kind "command") is consumed. */
+@Serializable
+data class ToolInputDisplayDto(
+    val kind: String = "",
+    val command: String? = null,
+)
+
+@Serializable
+data class ApprovalResolvedPayload(
+    @SerialName("approval_id") val approvalId: String = "",
+)

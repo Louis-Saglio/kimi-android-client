@@ -29,6 +29,13 @@ class ChatViewModel @Inject constructor(
 
     private val sessionId: String = checkNotNull(savedStateHandle["sessionId"])
 
+    /** One pending permission request, surfaced as the approval card above the input row. */
+    data class PendingApproval(
+        val approvalId: String,
+        val toolName: String,
+        val summary: String,
+    )
+
     /** [items] is empty until the first load; [error] is shown only when there is nothing to display. */
     data class UiState(
         val isLoading: Boolean = true,
@@ -38,6 +45,8 @@ class ChatViewModel @Inject constructor(
         val isReconnecting: Boolean = false,
         val inputText: String = "",
         val isSending: Boolean = false,
+        /** Approval queue in arrival order; the card shows the head and the size. */
+        val pendingApprovals: List<PendingApproval> = emptyList(),
     )
 
     sealed interface Effect {
@@ -45,6 +54,9 @@ class ChatViewModel @Inject constructor(
 
         /** The typed text stays in [UiState.inputText]; the snackbar's Retry re-calls [onSend]. */
         data class SendFailed(val message: String) : Effect
+
+        /** The card stays up: with no resolved event coming, the request is still pending. */
+        data class ApprovalFailed(val message: String) : Effect
     }
 
     private val _uiState = MutableStateFlow(UiState())
@@ -102,6 +114,22 @@ class ChatViewModel @Inject constructor(
         }
     }
 
+    fun onAllow() = postDecision(approved = true)
+
+    fun onDeny() = postDecision(approved = false)
+
+    /** Decides the head of the queue (arrival order). The card clears on the server's
+     * approval.resolved event — for our own decisions too — so a failed POST leaves the
+     * card up and only reports the error. */
+    private fun postDecision(approved: Boolean) {
+        val approval = _uiState.value.pendingApprovals.firstOrNull() ?: return
+        viewModelScope.launch {
+            chatRepository.postApprovalDecision(
+                settingsRepository.current(), sessionId, approval.approvalId, approved,
+            ).onFailure { error -> _effects.send(Effect.ApprovalFailed(error.toUserMessage())) }
+        }
+    }
+
     private fun startSocket() {
         socketJob?.cancel()
         socketJob = viewModelScope.launch {
@@ -137,13 +165,27 @@ class ChatViewModel @Inject constructor(
                 _uiState.update { it.copy(isWorking = true, items = timeline.items()) }
             }
             is SessionEvent.TurnEnded -> {
-                _uiState.update { it.copy(isWorking = false) }
+                // A turn that ends takes its pending approvals with it (e.g. abort).
+                _uiState.update { it.copy(isWorking = false, pendingApprovals = emptyList()) }
                 // Replace live rows with the canonical committed turn.
                 refreshHistory(clearLive = true)
             }
             SessionEvent.PromptSubmitted ->
                 // Pick up the new user message (the event carries no text).
                 refreshHistory(clearLive = false)
+            is SessionEvent.ApprovalRequested ->
+                _uiState.update {
+                    // Deduped: a reconnect replay must not queue the same request twice.
+                    it.copy(
+                        pendingApprovals = it.pendingApprovals
+                            .filterNot { a -> a.approvalId == event.approvalId } +
+                            PendingApproval(event.approvalId, event.toolName, event.summary),
+                    )
+                }
+            is SessionEvent.ApprovalResolved ->
+                _uiState.update {
+                    it.copy(pendingApprovals = it.pendingApprovals.filterNot { a -> a.approvalId == event.approvalId })
+                }
             else -> {
                 timeline.apply(event)
                 _uiState.update { it.copy(items = timeline.items()) }

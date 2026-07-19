@@ -48,6 +48,13 @@ sealed interface SessionEvent {
     data class ToolCallStarted(val toolCallId: String, val name: String) : SessionEvent
     data class ToolCallResult(val toolCallId: String, val isError: Boolean) : SessionEvent
     data object PromptSubmitted : SessionEvent
+
+    /** A tool call waits on the user's decision. [summary] is the compact argument
+     * preview for the approval card (the command for shell calls, else the action). */
+    data class ApprovalRequested(val approvalId: String, val toolName: String, val summary: String) : SessionEvent
+
+    /** The request was decided — by this client or another one (event.approval.resolved). */
+    data class ApprovalResolved(val approvalId: String) : SessionEvent
 }
 
 /** What the socket reports to the collector: connection lifecycle + session events. */
@@ -139,6 +146,42 @@ class ChatRepository @Inject constructor(
                 Result.failure(DataError.Network(e))
             }
         }
+
+    /**
+     * Posts the user's decision for one approval request
+     * (`POST /api/v1/sessions/{id}/approvals/{approvalId}`, docs/server-api.md). The ack
+     * only confirms the decision was registered; the pending UI clears when the
+     * `event.approval.resolved` frame arrives over the WebSocket.
+     */
+    suspend fun postApprovalDecision(
+        settings: ServerSettings,
+        sessionId: String,
+        approvalId: String,
+        approved: Boolean,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        val body = buildJsonObject {
+            put("decision", if (approved) "approved" else "rejected")
+        }.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+        val request = try {
+            Request.Builder()
+                .url(settings.serverUrl.trim().trimEnd('/') + "/api/v1/sessions/$sessionId/approvals/$approvalId")
+                .post(body)
+                .build()
+        } catch (e: IllegalArgumentException) {
+            return@withContext Result.failure(DataError.InvalidUrl)
+        }
+        try {
+            client.newCall(request).execute().use { response ->
+                when {
+                    response.code == 401 -> Result.failure(DataError.Auth)
+                    !response.isSuccessful -> Result.failure(DataError.Http(response.code))
+                    else -> parseAck(response.body?.string().orEmpty())
+                }
+            }
+        } catch (e: IOException) {
+            Result.failure(DataError.Network(e))
+        }
+    }
 
     /** Lightweight live status (`GET /api/v1/sessions/{id}/status`): true when the session is mid-turn. */
     suspend fun isSessionRunning(settings: ServerSettings, sessionId: String): Result<Boolean> =
@@ -305,6 +348,10 @@ class ChatRepository @Inject constructor(
                 ?.let { onEvent(SessionEvent.ToolCallStarted(it.toolCallId, it.name)) }
             "tool.result" -> frame.decodePayload<ToolResultPayload>()
                 ?.let { onEvent(SessionEvent.ToolCallResult(it.toolCallId, it.isError)) }
+            "event.approval.requested" -> frame.decodePayload<ApprovalRequestedPayload>()
+                ?.let { onEvent(SessionEvent.ApprovalRequested(it.approvalId, it.toolName, it.summary())) }
+            "event.approval.resolved" -> frame.decodePayload<ApprovalResolvedPayload>()
+                ?.let { onEvent(SessionEvent.ApprovalResolved(it.approvalId)) }
             "turn.started" -> onEvent(SessionEvent.TurnStarted)
             "turn.ended" -> onEvent(SessionEvent.TurnEnded(frame.decodePayload<TurnEndedPayload>()?.reason.orEmpty()))
             "prompt.submitted" -> onEvent(SessionEvent.PromptSubmitted)
@@ -364,6 +411,9 @@ class ChatRepository @Inject constructor(
     } catch (e: SerializationException) {
         Result.failure(DataError.MalformedResponse(e))
     }
+
+    private fun ApprovalRequestedPayload.summary(): String =
+        toolInputDisplay?.command?.takeIf { it.isNotBlank() } ?: action
 
     private fun MessageDto.toDomain(): ChatMessage = ChatMessage(
         id = id,

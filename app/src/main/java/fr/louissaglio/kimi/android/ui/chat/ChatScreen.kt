@@ -22,12 +22,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarDuration
@@ -78,6 +81,8 @@ fun ChatScreen(
                     // The typed text was preserved in the UiState; Retry re-sends it as-is.
                     if (result == SnackbarResult.ActionPerformed) viewModel.onSend()
                 }
+                is ChatViewModel.Effect.ApprovalFailed ->
+                    snackbarHostState.showSnackbar(effect.message)
             }
         }
     }
@@ -92,6 +97,8 @@ fun ChatScreen(
         onRetry = viewModel::onRetry,
         onInputChange = viewModel::onInputChange,
         onSend = viewModel::onSend,
+        onAllow = viewModel::onAllow,
+        onDeny = viewModel::onDeny,
     )
 }
 
@@ -105,6 +112,8 @@ private fun ChatContent(
     onRetry: () -> Unit,
     onInputChange: (String) -> Unit,
     onSend: () -> Unit,
+    onAllow: () -> Unit,
+    onDeny: () -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -130,13 +139,25 @@ private fun ChatContent(
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
-            ChatInputBar(
-                text = uiState.inputText,
-                isSending = uiState.isSending,
-                isWorking = uiState.isWorking,
-                onTextChange = onInputChange,
-                onSend = onSend,
-            )
+            Column {
+                // The card shows the head of the approval queue and stays until the
+                // matching approval.resolved event, however the decision was made.
+                uiState.pendingApprovals.firstOrNull()?.let { approval ->
+                    ApprovalCard(
+                        approval = approval,
+                        queueSize = uiState.pendingApprovals.size,
+                        onAllow = onAllow,
+                        onDeny = onDeny,
+                    )
+                }
+                ChatInputBar(
+                    text = uiState.inputText,
+                    isSending = uiState.isSending,
+                    isWorking = uiState.isWorking,
+                    onTextChange = onInputChange,
+                    onSend = onSend,
+                )
+            }
         },
     ) { innerPadding ->
         Column(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
@@ -183,6 +204,51 @@ private fun MessageList(items: List<ChatItem>, modifier: Modifier = Modifier) {
                 is ChatItem.UserMessage -> UserBubble(item)
                 is ChatItem.AssistantMessage -> AssistantBubble(item)
                 is ChatItem.ToolActivity -> ToolRow(item)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ApprovalCard(
+    approval: ChatViewModel.PendingApproval,
+    queueSize: Int,
+    onAllow: () -> Unit,
+    onDeny: () -> Unit,
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = buildString {
+                    append("Permission request")
+                    if (queueSize > 1) append(" — 1 of $queueSize")
+                },
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onTertiaryContainer,
+            )
+            Text(text = approval.toolName, style = MaterialTheme.typography.titleSmall)
+            if (approval.summary.isNotBlank()) {
+                Text(
+                    text = approval.summary,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 4,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+            ) {
+                OutlinedButton(onClick = onDeny) { Text("Deny") }
+                Button(onClick = onAllow) { Text("Allow") }
             }
         }
     }
@@ -335,6 +401,10 @@ private fun ChatContentPreview() {
                 isWorking = true,
                 isReconnecting = true,
                 inputText = "Draft message",
+                pendingApprovals = listOf(
+                    ChatViewModel.PendingApproval("ap_1", "Bash", "echo hello-from-spike"),
+                    ChatViewModel.PendingApproval("ap_2", "Write", "Writing /tmp/spike/notes.txt"),
+                ),
             ),
             sessionId = "session_86df049a-e22b-480e-842e-488b77c5469b",
             snackbarHostState = remember { SnackbarHostState() },
@@ -342,6 +412,8 @@ private fun ChatContentPreview() {
             onRetry = {},
             onInputChange = {},
             onSend = {},
+            onAllow = {},
+            onDeny = {},
         )
     }
 }
