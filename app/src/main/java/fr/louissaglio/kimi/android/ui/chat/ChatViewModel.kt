@@ -36,10 +36,15 @@ class ChatViewModel @Inject constructor(
         val error: String? = null,
         val isWorking: Boolean = false,
         val isReconnecting: Boolean = false,
+        val inputText: String = "",
+        val isSending: Boolean = false,
     )
 
     sealed interface Effect {
         data class RefreshFailed(val message: String) : Effect
+
+        /** The typed text stays in [UiState.inputText]; the snackbar's Retry re-calls [onSend]. */
+        data class SendFailed(val message: String) : Effect
     }
 
     private val _uiState = MutableStateFlow(UiState())
@@ -68,6 +73,33 @@ class ChatViewModel @Inject constructor(
     fun onRetry() {
         _uiState.update { it.copy(isLoading = it.items.isEmpty(), error = null) }
         onScreenStarted()
+    }
+
+    fun onInputChange(value: String) {
+        _uiState.update { it.copy(inputText = value) }
+    }
+
+    /** POSTs the current input. No-ops on blank text, while a send is in flight, or mid-turn
+     * (the send button is disabled then anyway — this is the non-UI guard). On failure the
+     * text stays in the field and [Effect.SendFailed] drives a snackbar with Retry. */
+    fun onSend() {
+        val state = _uiState.value
+        val text = state.inputText.trim()
+        if (text.isEmpty() || state.isSending || state.isWorking) return
+        _uiState.update { it.copy(isSending = true) }
+        viewModelScope.launch {
+            chatRepository.sendPrompt(settingsRepository.current(), sessionId, text)
+                .onSuccess {
+                    // No local echo: the user message comes back via prompt.submitted →
+                    // history refetch, the reply via the streaming events. The prompt is
+                    // already running server-side, so gate the button until turn.ended.
+                    _uiState.update { it.copy(inputText = "", isSending = false, isWorking = true) }
+                }
+                .onFailure { error ->
+                    _uiState.update { it.copy(isSending = false) }
+                    _effects.send(Effect.SendFailed(error.toUserMessage()))
+                }
+        }
     }
 
     private fun startSocket() {

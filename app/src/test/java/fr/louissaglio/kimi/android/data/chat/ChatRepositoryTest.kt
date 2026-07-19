@@ -103,6 +103,42 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun `sendPrompt posts text content parts to the prompts endpoint`() = runBlocking {
+        server.enqueue(
+            MockResponse().setBody(
+                """
+                {"code":0,"msg":"success","data":{"prompt_id":"prompt_1",
+                  "user_message_id":"msg_session_1_pending_prompt_1","status":"running",
+                  "content":[{"type":"text","text":"Reply with exactly: ok"}],
+                  "created_at":"2026-07-17T04:10:56.484Z"},"request_id":"01KX"}
+                """.trimIndent(),
+            ),
+        )
+
+        val result = repository.sendPrompt(settings(), "session_1", "Reply with exactly: ok")
+
+        assertTrue(result.isSuccess)
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/sessions/session_1/prompts", request.path)
+        assertEquals(
+            """{"content":[{"type":"text","text":"Reply with exactly: ok"}]}""",
+            request.body.readUtf8(),
+        )
+    }
+
+    @Test
+    fun `sendPrompt maps non-zero envelope code to Api error`() = runBlocking {
+        server.enqueue(
+            MockResponse().setBody("""{"code":40401,"msg":"session session_1 does not exist","data":null,"request_id":"01KX"}"""),
+        )
+
+        val result = repository.sendPrompt(settings(), "session_1", "hello")
+
+        assertTrue(result.exceptionOrNull() is DataError.Api)
+    }
+
+    @Test
     fun `socket subscribes, answers pings, and emits parsed events`() = runBlocking {
         val clientFrames = CopyOnWriteArrayList<String>()
         server.enqueue(

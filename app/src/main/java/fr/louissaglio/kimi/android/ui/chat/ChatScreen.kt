@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -15,17 +16,24 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -38,6 +46,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -60,6 +69,15 @@ fun ChatScreen(
             when (effect) {
                 is ChatViewModel.Effect.RefreshFailed ->
                     snackbarHostState.showSnackbar(effect.message)
+                is ChatViewModel.Effect.SendFailed -> {
+                    val result = snackbarHostState.showSnackbar(
+                        message = effect.message,
+                        actionLabel = "Retry",
+                        duration = SnackbarDuration.Short,
+                    )
+                    // The typed text was preserved in the UiState; Retry re-sends it as-is.
+                    if (result == SnackbarResult.ActionPerformed) viewModel.onSend()
+                }
             }
         }
     }
@@ -72,6 +90,8 @@ fun ChatScreen(
         snackbarHostState = snackbarHostState,
         onNavigateBack = onNavigateBack,
         onRetry = viewModel::onRetry,
+        onInputChange = viewModel::onInputChange,
+        onSend = viewModel::onSend,
     )
 }
 
@@ -83,6 +103,8 @@ private fun ChatContent(
     snackbarHostState: SnackbarHostState,
     onNavigateBack: () -> Unit,
     onRetry: () -> Unit,
+    onInputChange: (String) -> Unit,
+    onSend: () -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -107,6 +129,15 @@ private fun ChatContent(
             )
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
+        bottomBar = {
+            ChatInputBar(
+                text = uiState.inputText,
+                isSending = uiState.isSending,
+                isWorking = uiState.isWorking,
+                onTextChange = onInputChange,
+                onSend = onSend,
+            )
+        },
     ) { innerPadding ->
         Column(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
             if (uiState.isReconnecting) {
@@ -152,6 +183,49 @@ private fun MessageList(items: List<ChatItem>, modifier: Modifier = Modifier) {
                 is ChatItem.UserMessage -> UserBubble(item)
                 is ChatItem.AssistantMessage -> AssistantBubble(item)
                 is ChatItem.ToolActivity -> ToolRow(item)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChatInputBar(
+    text: String,
+    isSending: Boolean,
+    isWorking: Boolean,
+    onTextChange: (String) -> Unit,
+    onSend: () -> Unit,
+) {
+    // Sending is gated on an active turn (turn.started/turn.ended drive isWorking) and on
+    // blank input; the field itself stays editable so a message can be drafted mid-turn.
+    val canSend = text.isNotBlank() && !isSending && !isWorking
+    // imePadding docks the bar above the keyboard (the manifest sets adjustResize).
+    Surface(modifier = Modifier.imePadding()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedTextField(
+                value = text,
+                onValueChange = onTextChange,
+                modifier = Modifier
+                    .weight(1f)
+                    .semantics { contentDescription = "Message input" },
+                placeholder = { Text("Message Kimi…") },
+                // Grows with content up to 5 lines, then scrolls internally.
+                maxLines = 5,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                keyboardActions = KeyboardActions(onSend = { if (canSend) onSend() }),
+            )
+            FilledIconButton(
+                onClick = onSend,
+                enabled = canSend,
+                modifier = Modifier.semantics { contentDescription = "Send" },
+            ) {
+                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null)
             }
         }
     }
@@ -260,11 +334,14 @@ private fun ChatContentPreview() {
                 ),
                 isWorking = true,
                 isReconnecting = true,
+                inputText = "Draft message",
             ),
             sessionId = "session_86df049a-e22b-480e-842e-488b77c5469b",
             snackbarHostState = remember { SnackbarHostState() },
             onNavigateBack = {},
             onRetry = {},
+            onInputChange = {},
+            onSend = {},
         )
     }
 }

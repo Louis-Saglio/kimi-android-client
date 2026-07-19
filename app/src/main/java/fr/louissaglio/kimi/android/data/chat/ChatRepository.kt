@@ -20,7 +20,9 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
+import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -28,8 +30,10 @@ import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
@@ -93,6 +97,42 @@ class ChatRepository @Inject constructor(
                         response.code == 401 -> Result.failure(DataError.Auth)
                         !response.isSuccessful -> Result.failure(DataError.Http(response.code))
                         else -> parseMessages(response.body?.string().orEmpty())
+                    }
+                }
+            } catch (e: IOException) {
+                Result.failure(DataError.Network(e))
+            }
+        }
+
+    /**
+     * Sends a user prompt (`POST /api/v1/sessions/{id}/prompts`). The response only
+     * acknowledges the prompt: the user message and the agent's reply arrive over the
+     * WebSocket (docs/server-api.md), so success carries no payload.
+     */
+    suspend fun sendPrompt(settings: ServerSettings, sessionId: String, text: String): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            val body = buildJsonObject {
+                putJsonArray("content") {
+                    addJsonObject {
+                        put("type", "text")
+                        put("text", text)
+                    }
+                }
+            }.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+            val request = try {
+                Request.Builder()
+                    .url(settings.serverUrl.trim().trimEnd('/') + "/api/v1/sessions/$sessionId/prompts")
+                    .post(body)
+                    .build()
+            } catch (e: IllegalArgumentException) {
+                return@withContext Result.failure(DataError.InvalidUrl)
+            }
+            try {
+                client.newCall(request).execute().use { response ->
+                    when {
+                        response.code == 401 -> Result.failure(DataError.Auth)
+                        !response.isSuccessful -> Result.failure(DataError.Http(response.code))
+                        else -> parseAck(response.body?.string().orEmpty())
                     }
                 }
             } catch (e: IOException) {
@@ -302,6 +342,16 @@ class ChatRepository @Inject constructor(
         put("type", "pong")
         putJsonObject("payload") { put("nonce", nonce) }
     }.toString()
+
+    private fun parseAck(body: String): Result<Unit> = try {
+        val envelope = json.decodeFromString<Envelope<JsonObject>>(body)
+        when {
+            envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
+            else -> Result.success(Unit)
+        }
+    } catch (e: SerializationException) {
+        Result.failure(DataError.MalformedResponse(e))
+    }
 
     private fun parseMessages(body: String): Result<List<ChatMessage>> = try {
         val envelope = json.decodeFromString<Envelope<MessageListData>>(body)
