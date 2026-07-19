@@ -29,10 +29,17 @@ class SessionListViewModel @Inject constructor(
         val isRefreshing: Boolean = false,
         val sessions: List<Session>? = null,
         val error: String? = null,
+        val showCreateDialog: Boolean = false,
+        val newSessionCwd: String = "",
+        val newSessionTitle: String = "",
+        val newSessionCwdError: String? = null,
+        val isCreating: Boolean = false,
     )
 
     sealed interface Effect {
         data class RefreshFailed(val message: String) : Effect
+        data class CreateFailed(val message: String) : Effect
+        data class SessionCreated(val sessionId: String) : Effect
     }
 
     private val _uiState = MutableStateFlow(UiState())
@@ -48,6 +55,53 @@ class SessionListViewModel @Inject constructor(
     fun onRetry() = reload()
 
     fun onPullToRefresh() = reload()
+
+    fun onNewSessionClick() {
+        _uiState.update {
+            it.copy(
+                showCreateDialog = true,
+                newSessionCwd = DEFAULT_NEW_SESSION_CWD,
+                newSessionTitle = "",
+                newSessionCwdError = null,
+            )
+        }
+    }
+
+    fun onCreateDialogDismiss() = _uiState.update { it.copy(showCreateDialog = false) }
+
+    fun onNewSessionCwdChange(value: String) =
+        _uiState.update { it.copy(newSessionCwd = value, newSessionCwdError = null) }
+
+    fun onNewSessionTitleChange(value: String) =
+        _uiState.update { it.copy(newSessionTitle = value) }
+
+    fun onCreateSessionConfirm() {
+        val cwd = _uiState.value.newSessionCwd.trim()
+        val validationError = when {
+            cwd.isEmpty() -> "Enter a working directory"
+            !cwd.startsWith("/") -> "Path must be absolute"
+            else -> null
+        }
+        if (validationError != null) {
+            _uiState.update { it.copy(newSessionCwdError = validationError) }
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update { it.copy(isCreating = true) }
+            sessionsRepository.createSession(
+                settings = settingsRepository.current(),
+                cwd = cwd,
+                title = _uiState.value.newSessionTitle.trim().ifBlank { null },
+            ).onSuccess { session ->
+                _uiState.update { it.copy(isCreating = false, showCreateDialog = false) }
+                _effects.send(Effect.SessionCreated(session.id))
+            }.onFailure { error ->
+                // Inputs are kept so the user can fix and retry after the snackbar.
+                _uiState.update { it.copy(isCreating = false) }
+                _effects.send(Effect.CreateFailed(error.toUserMessage()))
+            }
+        }
+    }
 
     private fun reload() {
         // Cancel rather than skip so a pull-to-refresh during an in-flight load still completes.
@@ -81,5 +135,9 @@ class SessionListViewModel @Inject constructor(
         is DataError.Api -> serverMessage.ifBlank { "Server error $code" }
         is DataError.MalformedResponse -> "Malformed server response"
         else -> message ?: "Unknown error"
+    }
+
+    private companion object {
+        const val DEFAULT_NEW_SESSION_CWD = "/home/ubuntu"
     }
 }

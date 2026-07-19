@@ -105,4 +105,61 @@ class SessionsRepositoryTest {
 
         assertTrue(result.exceptionOrNull() is DataError.InvalidUrl)
     }
+
+    @Test
+    fun `create posts cwd and title and maps the created session`() = runBlocking {
+        server.enqueue(MockResponse().setBody(CREATED_SESSION_BODY))
+
+        val result = repository.createSession(settings(), "/tmp/spike-008", "My session")
+
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/sessions", request.path)
+        assertEquals("""{"metadata":{"cwd":"/tmp/spike-008"},"title":"My session"}""", request.body.readUtf8())
+        assertEquals(
+            Session(
+                id = "session_new",
+                title = "My session",
+                cwd = "/tmp/spike-008",
+                updatedAt = Instant.parse("2026-07-19T05:29:30.815Z"),
+                isRunning = false,
+            ),
+            result.getOrThrow(),
+        )
+    }
+
+    @Test
+    fun `create without title omits the field from the body`() = runBlocking {
+        server.enqueue(MockResponse().setBody(CREATED_SESSION_BODY))
+
+        repository.createSession(settings(), "/tmp/spike-008", null)
+
+        assertEquals("""{"metadata":{"cwd":"/tmp/spike-008"}}""", server.takeRequest().body.readUtf8())
+    }
+
+    @Test
+    fun `create surfaces a non-zero envelope code as Api error`() = runBlocking {
+        // Shape of the server's refusal for a missing directory (verified live 2026-07-19).
+        server.enqueue(
+            MockResponse().setBody(
+                """{"code":40409,"msg":"workspace root /tmp/nope does not exist","data":null,"request_id":"01KX"}""",
+            ),
+        )
+
+        val error = repository.createSession(settings(), "/tmp/nope", null).exceptionOrNull()
+
+        assertTrue(error is DataError.Api)
+        assertEquals("workspace root /tmp/nope does not exist", (error as DataError.Api).serverMessage)
+    }
+
+    private companion object {
+        const val CREATED_SESSION_BODY = """
+            {"code":0,"msg":"success","data":{"id":"session_new","workspace_id":"wd_spike-008_1",
+             "title":"My session","created_at":"2026-07-19T05:29:30.796Z",
+             "updated_at":"2026-07-19T05:29:30.815Z","status":"idle","archived":false,
+             "metadata":{"cwd":"/tmp/spike-008"},"agent_config":{"model":""},
+             "usage":{"input_tokens":0},"permission_rules":[],"message_count":0,"last_seq":0},
+             "request_id":"01KX"}
+        """
+    }
 }

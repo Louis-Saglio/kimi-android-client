@@ -14,18 +14,23 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.pulltorefresh.PullToRefreshContainer
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
@@ -65,6 +70,10 @@ fun SessionsScreen(
             when (effect) {
                 is SessionListViewModel.Effect.RefreshFailed ->
                     snackbarHostState.showSnackbar(effect.message)
+                is SessionListViewModel.Effect.CreateFailed ->
+                    snackbarHostState.showSnackbar(effect.message)
+                is SessionListViewModel.Effect.SessionCreated ->
+                    onNavigateToChat(effect.sessionId)
             }
         }
     }
@@ -78,6 +87,11 @@ fun SessionsScreen(
         onSessionClick = onNavigateToChat,
         onRetry = viewModel::onRetry,
         onPullToRefresh = viewModel::onPullToRefresh,
+        onNewSessionClick = viewModel::onNewSessionClick,
+        onNewSessionCwdChange = viewModel::onNewSessionCwdChange,
+        onNewSessionTitleChange = viewModel::onNewSessionTitleChange,
+        onCreateDialogDismiss = viewModel::onCreateDialogDismiss,
+        onCreateSessionConfirm = viewModel::onCreateSessionConfirm,
     )
 }
 
@@ -90,6 +104,11 @@ private fun SessionsContent(
     onSessionClick: (String) -> Unit,
     onRetry: () -> Unit,
     onPullToRefresh: () -> Unit,
+    onNewSessionClick: () -> Unit,
+    onNewSessionCwdChange: (String) -> Unit,
+    onNewSessionTitleChange: (String) -> Unit,
+    onCreateDialogDismiss: () -> Unit,
+    onCreateSessionConfirm: () -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -101,6 +120,11 @@ private fun SessionsContent(
                     }
                 },
             )
+        },
+        floatingActionButton = {
+            FloatingActionButton(onClick = onNewSessionClick) {
+                Icon(Icons.Filled.Add, contentDescription = "New session")
+            }
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { innerPadding ->
@@ -132,7 +156,62 @@ private fun SessionsContent(
                 modifier = Modifier.align(Alignment.TopCenter),
             )
         }
+        if (uiState.showCreateDialog) {
+            CreateSessionDialog(
+                uiState = uiState,
+                onCwdChange = onNewSessionCwdChange,
+                onTitleChange = onNewSessionTitleChange,
+                onDismiss = onCreateDialogDismiss,
+                onConfirm = onCreateSessionConfirm,
+            )
+        }
     }
+}
+
+@Composable
+private fun CreateSessionDialog(
+    uiState: SessionListViewModel.UiState,
+    onCwdChange: (String) -> Unit,
+    onTitleChange: (String) -> Unit,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("New session") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = uiState.newSessionCwd,
+                    onValueChange = onCwdChange,
+                    label = { Text("Working directory") },
+                    isError = uiState.newSessionCwdError != null,
+                    supportingText = { uiState.newSessionCwdError?.let { Text(it) } },
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = uiState.newSessionTitle,
+                    onValueChange = onTitleChange,
+                    label = { Text("Title (optional)") },
+                    singleLine = true,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm, enabled = !uiState.isCreating) {
+                if (uiState.isCreating) {
+                    CircularProgressIndicator(Modifier.size(18.dp))
+                } else {
+                    Text("Create")
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !uiState.isCreating) {
+                Text("Cancel")
+            }
+        },
+    )
 }
 
 @Composable
@@ -215,6 +294,29 @@ private fun SessionsContentPreview() {
             onSessionClick = {},
             onRetry = {},
             onPullToRefresh = {},
+            onNewSessionClick = {},
+            onNewSessionCwdChange = {},
+            onNewSessionTitleChange = {},
+            onCreateDialogDismiss = {},
+            onCreateSessionConfirm = {},
+        )
+    }
+}
+
+@Preview
+@Composable
+private fun CreateSessionDialogPreview() {
+    KimiTheme {
+        CreateSessionDialog(
+            uiState = SessionListViewModel.UiState(
+                showCreateDialog = true,
+                newSessionCwd = "/home/ubuntu",
+                newSessionCwdError = "Path must be absolute",
+            ),
+            onCwdChange = {},
+            onTitleChange = {},
+            onDismiss = {},
+            onConfirm = {},
         )
     }
 }
