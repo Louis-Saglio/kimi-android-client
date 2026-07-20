@@ -17,7 +17,7 @@ data class SessionDto(
     val id: String,
     val title: String? = null,
     @SerialName("updated_at") val updatedAt: String = "",
-    val status: String = "",
+    val busy: Boolean = false,
     val metadata: SessionMetadataDto? = null,
 )
 

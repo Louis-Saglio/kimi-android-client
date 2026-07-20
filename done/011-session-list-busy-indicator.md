@@ -23,9 +23,14 @@ already fixed there.
 
 ## Acceptance criteria
 
-- [ ] A session that is mid-turn shows the running indicator in the list
+- [x] A session that is mid-turn shows the running indicator in the list
   (unit-tested: envelope with `"busy": true` maps to `isRunning = true`).
-- [ ] `./gradlew :app:assembleDebug` succeeds with all unit tests green.
+  *(`SessionsRepositoryTest.envelope items are mapped to domain sessions`:
+  the first fixture item carries `"busy":true` and asserts
+  `isRunning = true`; the second carries `"busy":false` and asserts
+  `false`.)*
+- [x] `./gradlew :app:assembleDebug` succeeds with all unit tests green.
+  *(2026-07-20: 45 unit tests green, assembleDebug successful.)*
 
 ## Out of scope
 

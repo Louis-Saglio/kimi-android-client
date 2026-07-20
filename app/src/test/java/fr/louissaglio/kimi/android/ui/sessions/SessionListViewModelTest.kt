@@ -129,7 +129,7 @@ class SessionListViewModelTest {
         server.enqueue(
             MockResponse().setBody(
                 """{"code":0,"msg":"success","data":{"id":"session_new","title":"My session",""" +
-                    """"updated_at":"2026-07-19T05:29:30.815Z","status":"idle",""" +
+                    """"updated_at":"2026-07-19T05:29:30.815Z","busy":false,""" +
                     """"metadata":{"cwd":"/tmp/spike-008"}},"request_id":"r"}""",
             ),
         )
@@ -260,7 +260,7 @@ class SessionListViewModelTest {
     private fun pageBody(hasMore: Boolean, vararg ids: String): String {
         val items = ids.joinToString(",") { id ->
             """{"id":"$id","title":"Title $id","updated_at":"2026-07-17T03:48:31.606Z",""" +
-                """"status":"idle","metadata":{"cwd":"/tmp/$id"}}"""
+                """"busy":false,"metadata":{"cwd":"/tmp/$id"}}"""
         }
         return """{"code":0,"msg":"success","data":{"items":[$items],"has_more":$hasMore},"request_id":"r"}"""
     }

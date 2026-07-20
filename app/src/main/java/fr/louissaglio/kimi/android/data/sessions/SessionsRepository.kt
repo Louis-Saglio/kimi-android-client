@@ -120,6 +120,6 @@ class SessionsRepository @Inject constructor(
         title = title?.takeIf { it.isNotBlank() },
         cwd = metadata?.cwd,
         updatedAt = runCatching { Instant.parse(updatedAt) }.getOrDefault(Instant.EPOCH),
-        isRunning = status == "running",
+        isRunning = busy,
     )
 }

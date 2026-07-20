@@ -36,11 +36,11 @@ class SessionsRepositoryTest {
                 """
                 {"code":0,"msg":"success","data":{"items":[
                   {"id":"session_1","title":"Build an Android clone","created_at":"2026-07-17T03:34:49.193Z",
-                   "updated_at":"2026-07-17T03:48:31.606Z","status":"running","archived":false,
+                   "updated_at":"2026-07-17T03:48:31.606Z","busy":true,"archived":false,
                    "metadata":{"cwd":"/home/ubuntu/kimi-android-client"},
                    "usage":{"input_tokens":0},"permission_rules":[],"message_count":0,"last_seq":0},
                   {"id":"session_2","title":"","updated_at":"2026-07-16T10:00:00.000Z",
-                   "status":"idle","metadata":{"cwd":"/tmp/spike"}}
+                   "busy":false,"metadata":{"cwd":"/tmp/spike"}}
                 ],"has_more":true},"request_id":"01KX"}
                 """.trimIndent(),
             ),
@@ -64,7 +64,7 @@ class SessionsRepositoryTest {
             ),
             sessions[0],
         )
-        // Blank title maps to null so the UI falls back to the cwd; only "running" is active.
+        // Blank title maps to null so the UI falls back to the cwd; busy maps to isRunning.
         assertNull(sessions[1].title)
         assertEquals(false, sessions[1].isRunning)
     }
@@ -76,7 +76,7 @@ class SessionsRepositoryTest {
                 """
                 {"code":0,"msg":"success","data":{"items":[
                   {"id":"session_21","title":"Older session","updated_at":"2026-07-10T10:00:00.000Z",
-                   "status":"idle","metadata":{"cwd":"/tmp/old"}}
+                   "busy":false,"metadata":{"cwd":"/tmp/old"}}
                 ],"has_more":false},"request_id":"01KX"}
                 """.trimIndent(),
             ),
@@ -181,7 +181,7 @@ class SessionsRepositoryTest {
         const val CREATED_SESSION_BODY = """
             {"code":0,"msg":"success","data":{"id":"session_new","workspace_id":"wd_spike-008_1",
              "title":"My session","created_at":"2026-07-19T05:29:30.796Z",
-             "updated_at":"2026-07-19T05:29:30.815Z","status":"idle","archived":false,
+             "updated_at":"2026-07-19T05:29:30.815Z","busy":false,"archived":false,
              "metadata":{"cwd":"/tmp/spike-008"},"agent_config":{"model":""},
              "usage":{"input_tokens":0},"permission_rules":[],"message_count":0,"last_seq":0},
              "request_id":"01KX"}
