@@ -1,6 +1,6 @@
-The Kimi Code server on this machine was updated and restarted. The wire protocol the Android app depends on may have changed.
+The Kimi Code server on this machine was updated to a new version and restarted (nightly update job). The wire protocol the Android app depends on may have changed.
 
-Your job: re-verify the protocol, refresh the documentation, and file tickets for anything the update breaks. Work in `/home/ubuntu/kimi-android-client`. Do not modify app source code, and do not run any git mutation (no commit, no push) — Louis reviews and commits your changes.
+Your job: re-verify the protocol, refresh the documentation, file tickets for anything the update breaks, and commit + push the result. Work in `/home/ubuntu/kimi-android-client`. Do not modify app source code.
 
 1. Read `docs/server-api.md` — it describes the protocol as last verified (server version in the header). Also read `AGENTS.md`.
 2. Get the running version: `curl -s http://127.0.0.1:58627/api/v1/meta`. If it matches the doc header, spot-check two or three shapes (session object, `/status`, one WS subscription on a throwaway session). If everything matches, stop and report "no drift".
@@ -10,4 +10,5 @@ Your job: re-verify the protocol, refresh the documentation, and file tickets fo
 6. Run the unit tests — they encode the documented shapes, so failures confirm breakage. Use:
    `export JAVA_HOME=/home/ubuntu/tools/jdk-21.0.7+6 ANDROID_HOME=/home/ubuntu/tools/android-sdk PATH="$JAVA_HOME/bin:$PATH"` then `./gradlew :app:testDebugUnitTest --console=plain`.
    List failures in your report; do not fix them (the tickets cover the fixes).
-7. End with a plain summary: old → new version, shapes that changed, tickets created (IDs + titles), test status.
+7. If you changed any files (`docs/server-api.md`, `todo/`), commit them and push to `origin main`. Commit only the files you changed in this run — leave any other working-tree changes alone. Use one short imperative commit message in the repo's style, e.g. `Document server 0.28.0 wire protocol`. Git identity and push credentials are already configured; a plain `git push` works.
+8. End with a plain summary: old → new version, shapes that changed, tickets created (IDs + titles), test status, commit hash (or "no changes").

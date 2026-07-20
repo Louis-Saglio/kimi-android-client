@@ -31,9 +31,11 @@ same `louis` credentials as the web UI).
 
 ## Server drift automation
 
-`scripts/` holds the `kimi-protocol-watch` machinery (systemd timer on the
-VPS): when the auto-updating Kimi server restarts on a new version, a headless
-agent re-verifies the wire protocol, rewrites `docs/server-api.md`, and files
-`todo/` tickets for breakage. `docs/server-api.md` is the protocol reference —
-keep it accurate when touching the data layer, and keep
-`scripts/protocol-update-prompt.md` aligned with the doc's structure.
+`scripts/` holds the `kimi-nightly-update` machinery (systemd timer on the
+VPS, fires at 03:23): it installs any new Kimi server version (auto-update is
+disabled in `~/.kimi-code/tui.toml`), restarts the server, then a headless
+agent re-verifies the wire protocol, rewrites `docs/server-api.md`, files
+`todo/` tickets for breakage, and commits + pushes the result.
+`docs/server-api.md` is the protocol reference — keep it accurate when
+touching the data layer, and keep `scripts/protocol-update-prompt.md` aligned
+with the doc's structure.

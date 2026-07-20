@@ -15,9 +15,8 @@ used are shown with each section. Secrets are redacted (`<password>`).
 **Protocol history:** this document previously described server `0.23.3`
 (verified 2026-07-17). The 0.27.0 server ships a reworked backend (`v2`) that
 changed several shapes; see git history for the 0.23.3 version of this file.
-The auto-updating server can change this protocol on any restart — the
-`kimi-protocol-watch` systemd timer (see `scripts/`) re-verifies it
-periodically.
+Server updates are installed by the `kimi-nightly-update` systemd timer (see
+`scripts/`), which re-verifies this protocol after every update.
 
 ## Base URL & auth
 
