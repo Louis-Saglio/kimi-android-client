@@ -44,13 +44,27 @@ throwaway sessions as in earlier spikes; websocat at
 
 ## Acceptance criteria
 
-- [ ] `docs/server-api.md` contains Steer and Questions sections with payload
+- [x] `docs/server-api.md` contains Steer and Questions sections with payload
   shapes verified against the live server (commands + verbatim responses
   inline), and the header scope note no longer lists steer/questions as
   skipped.
-- [ ] Every shape claimed in the new sections was observed live (curl/websocat
+  *(2026-07-20, server 0.27.0: new "Steer" and "Questions" sections, steer +
+  question round-trip sequences and verbatim `prompt.steered` /
+  `event.question.*` payloads in the WS section, `pending_interaction`
+  gains `"question"` in Sessions and `work_changed`. Scope line now reads
+  "core loop + user interaction".)*
+- [x] Every shape claimed in the new sections was observed live (curl/websocat
   output in the ticket or doc), not inferred from the web bundle.
-- [ ] `scripts/protocol-update-prompt.md` reviewed; updated if needed.
+  *(All claims come from 2026-07-20 curl/websocat captures. Live findings that
+  contradicted the bundle leads: `GET /questions/{qid}` is 404 (only
+  `GET /questions?status=pending` exists), a successful dismiss returns HTTP
+  200 with non-zero envelope `code:40909`, `question_id` == `toolCallId`, no
+  v2 camelCase question events. Bundle hints not observed live (`multi` /
+  `multi_with_other` / `skipped` answer kinds, `method`/`note` fields) are
+  explicitly marked "not verified live" in the doc.)*
+- [x] `scripts/protocol-update-prompt.md` reviewed; updated if needed.
+  *(Step 3 now also re-verifies `prompts:steer` and the questions flow so the
+  watch catches drift in the new sections.)*
 
 ## Out of scope
 

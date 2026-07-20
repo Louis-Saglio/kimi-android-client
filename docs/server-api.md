@@ -2,11 +2,12 @@
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
 by Kimi Code Web. Documented and verified against the live server on 2026-07-19
-(server version `0.27.0`, `"backend": "v2"`, WS `protocol_version: 2`).
+(server version `0.27.0`, `"backend": "v2"`, WS `protocol_version: 2`); the Steer
+and Questions sections were verified on 2026-07-20 against the same version.
 
-Scope: core loop only — auth check, sessions, messages, prompts, abort,
-permissions, WebSocket events. Explicitly skipped: `fs:*`, terminals, cron,
-goals, workspaces, providers, skills.
+Scope: core loop + user interaction — auth check, sessions, messages, prompts,
+steer, questions, abort, permissions, WebSocket events. Explicitly skipped:
+`fs:*`, terminals, cron, goals, workspaces, providers, skills.
 
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<password>`).
@@ -124,8 +125,8 @@ Session object shape (0.27.0):
 ```
 
 - Runtime state fields replacing 0.23.3's `status` string: `busy` (bool),
-  `main_turn_active` (bool), `pending_interaction` (`"none"` | `"approval"`),
-  `last_turn_reason` (`"completed"` | `"cancelled"`).
+  `main_turn_active` (bool), `pending_interaction` (`"none"` | `"approval"` |
+  `"question"`), `last_turn_reason` (`"completed"` | `"cancelled"`).
 - `message_count` and `last_seq` are still present but observed stuck at `0` —
   do not rely on them.
 - The list envelope carries `has_more` for pagination (verified with
@@ -248,6 +249,45 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_24a24af8.../promp
   `goal_objective`, `goal_control`.
 - The server is asynchronous: the HTTP response only acknowledges the prompt;
   results arrive over the WebSocket.
+- While the session is busy, a posted prompt is accepted but queued: the
+  response comes back with `"status": "queued"` instead of `"running"`
+  (verified 2026-07-20). A queued prompt can be steered into the running turn —
+  see the next section.
+
+## Steer
+
+Steering injects a queued prompt into the currently running turn. The client
+flow (verified 2026-07-20 on 0.27.0): while the session is busy, POST the new
+prompt as usual (response `"status": "queued"`), then steer the returned
+`prompt_id` into the active turn.
+
+### Steer queued prompts — `POST /api/v1/sessions/{id}/prompts:steer`
+
+Body: `{"prompt_ids": ["<prompt id>", ...]}` — at least one id.
+
+```bash
+curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_6cef6010.../prompts:steer \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  -d '{"prompt_ids":["msg_01KXZ1YD3W8BYB3AWETAARR97K"]}'
+```
+
+```json
+{"code":0,"msg":"success",
+ "data":{"steered":true,"prompt_ids":["msg_01KXZ1YD3W8BYB3AWETAARR97K"]},
+ "request_id":"01KXZ1YF3HEF7PED02J69SR67P"}
+```
+
+- **Idle session** (nothing to steer into): HTTP 200 with
+  `{"code":40402,"msg":"no active prompt to steer into","data":null,...}`.
+- Empty `prompt_ids`:
+  `{"code":40001,"msg":"prompt_ids: Too small: expected array to have >=1 items",...}`.
+- WS sequence when the steer lands mid-turn (verbatim capture in the WS
+  section): `prompt.steered` → the current step runs to `turn.step.completed`
+  → the steered user message arrives via `context.spliced` → a new
+  `turn.step.started` **in the same turn** (no new `turn.started`) →
+  `turn.ended` `"completed"` → a single `prompt.completed` carrying the
+  **original** active prompt id. The agent then follows the steered
+  instruction.
 
 ## Abort
 
@@ -290,6 +330,73 @@ Body fields: `decision` (`"approved"` | `"rejected"`), optional `scope`,
 `feedback`, `selected_label`. After the decision the WS emits
 `event.approval.resolved` and `permission.approval.resolved`, then the tool
 runs.
+
+## Questions
+
+The agent's user-question tool (`AskUserQuestion`) surfaces as **WebSocket
+events**; the answer or dismissal is posted back via REST. Verified 2026-07-20
+on 0.27.0 by prompting a session to call the tool — the question surfaced
+directly, with no approval gate, under the session's default `manual`
+permission mode.
+
+1. Surface sequence: `tool.call.started` (`"name": "AskUserQuestion"`) →
+   `event.session.work_changed` with `pending_interaction: "question"` →
+   `event.question.requested` (verbatim payload in the WS section). **The
+   question id is the `toolCallId`** (same convention as approvals). Unlike
+   approvals there is **no v2 camelCase duplicate** — only the
+   `event.question.*` family exists.
+2. While a question is pending, the session object shows
+   `"pending_interaction": "question"`.
+3. Pending questions can also be polled —
+   `GET /api/v1/sessions/{id}/questions?status=pending` returns
+   `{"code":0,...,"data":{"items":[<same payload as event.question.requested>]}}`.
+   The `status` query param is mandatory and only accepts `"pending"`; without
+   it: `{"code":40001,"msg":"status: Invalid input: expected \"pending\"",...}`.
+   **`GET /api/v1/sessions/{id}/questions/{qid}` does not exist** (plain HTTP
+   404, `{"statusCode":404,"error":"Not Found",...}`) — the single-question
+   shape only exists inside the list item / WS event payload.
+4. Answer — `POST /api/v1/sessions/{id}/questions/{qid}`. `answers` keys are
+   the per-question item ids from the request payload (`q_0`); values carry
+   `kind` plus `option_id` (selected option) or `text` (free text):
+
+```bash
+# selected option
+curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_68500739.../questions/tool_mU6ITagcpKjwSyiUKLHPZYWw \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  -d '{"answers":{"q_0":{"kind":"single","option_id":"opt_0_1"}}}'
+# free text (the question had "allow_other": true)
+curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_68500739.../questions/tool_MpHIZQr76briFmJyfKLXR4Ib \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  -d '{"answers":{"q_0":{"kind":"other","text":"ramen"}}}'
+```
+
+Both returned HTTP 200
+`{"code":0,"msg":"success","data":{"resolved":true,"resolved_at":"..."},...}`.
+On the wire: `event.session.work_changed` (`pending_interaction` back to
+`"none"`) → `event.question.answered` → `tool.result` whose output is
+`{"answers":{"<question text>":"<option label or free text>"}}` → the turn
+continues. Answering an already-resolved question:
+`{"code":40405,"msg":"question <qid> not found","data":null,...}`.
+
+5. Dismiss — `POST /api/v1/sessions/{id}/questions/{qid}:dismiss`, body `{}`:
+
+```json
+{"code":40909,"msg":"question tool_n7OfQDnRJ46s9vVgpof0zuhT dismissed",
+ "data":{"dismissed":true,"dismissed_at":"2026-07-20T06:17:24.711Z"},
+ "request_id":"01KXZ2R3Z5RGVZYBBRQDFG6RY0"}
+```
+
+**Beware: a successful dismiss comes back over HTTP 200 with the non-zero
+envelope code `40909`** — do not gate success on `code == 0` here; check
+`data.dismissed`. Re-dismissing a resolved question returns `code:40405`
+("not found"). On the wire: `event.session.work_changed` (`"none"`) →
+`event.question.dismissed` → `tool.result` with output
+`{"answers":{},"note":"User dismissed the question without answering."}` → the
+turn continues.
+
+The web bundle hints at further answer kinds (`multi`, `multi_with_other`,
+`skipped`) and optional `method`/`note` body fields — **not verified live**;
+treat as leads only.
 
 ## WebSocket
 
@@ -404,6 +511,35 @@ seq 37  event.session.work_changed   busy=false, last_turn_reason "cancelled"
 seq 38  prompt.aborted               {"promptId": "msg_...", "abortedAt": "..."}
 ```
 
+Steer round-trip (2026-07-20): prompt A ("count to 100000") running, prompt B
+posted while busy (`"status": "queued"`), then `POST prompts:steer` with B's id:
+
+```
+seq 8   prompt.steered               activePromptId=A, promptIds=[B], B's content inline
+seq 11  turn.step.completed          the current step finishes normally
+seq 12  context.spliced              the steered user message (no `id` field on it)
+seq 13  turn.step.started            step 2 — SAME turn, no new turn.started
+seq 15  turn.ended                   reason "completed"
+seq 17  prompt.completed             promptId = A (the original active prompt)
+```
+
+Question round-trip (2026-07-20; the prompt asked the agent to use its
+`AskUserQuestion` tool):
+
+```
+seq 7   tool.call.started            name "AskUserQuestion"
+seq 8   event.session.work_changed   pending_interaction "question"
+seq 9   event.question.requested     question_id = toolCallId, questions inline
+-- answer posted via REST --
+seq 10  event.session.work_changed   pending_interaction "none"
+seq 11  event.question.answered      answers {"<question text>": "<label or free text>"}
+seq 12  tool.result                  output {"answers":{...}}; the turn continues
+```
+
+Dismiss path instead of the answer: `event.session.work_changed` (`"none"`) →
+`event.question.dismissed` → `tool.result` with output
+`{"answers":{},"note":"User dismissed the question without answering."}`.
+
 ### Core event payloads (verbatim captures, 0.27.0)
 
 **New user message** (`context.spliced`; `messages` carries full message
@@ -418,7 +554,7 @@ objects — `start`/`deleteCount` are splice coordinates into the context):
 ```
 
 **Work state** (`event.session.work_changed`; `pending_interaction` observed:
-`"none"`, `"approval"`; `last_turn_reason` present only when idle):
+`"none"`, `"approval"`, `"question"`; `last_turn_reason` present only when idle):
 
 ```json
 {"type":"event.session.work_changed","seq":8,
@@ -513,6 +649,52 @@ payload).
             "agentId":"main","sessionId":"session_..."}}
 ```
 
+**Prompt steered** (`prompt.steered`, 2026-07-20; `activePromptId` is the
+running prompt, `promptIds` the steered-in queued ones, their content inline):
+
+```json
+{"type":"prompt.steered","seq":8,
+ "payload":{"type":"prompt.steered","activePromptId":"msg_01KXZ1Y3AA2QCVYDCWBPTYVAA1",
+            "promptIds":["msg_01KXZ1YD3W8BYB3AWETAARR97K"],
+            "content":[{"type":"text","text":"Stop counting. Reply with exactly: steered-ok"}],
+            "steeredAt":"2026-07-20T06:03:24.146Z","agentId":"main","sessionId":"session_..."}}
+```
+
+**Question requested** (`event.question.requested`, 2026-07-20; snake_case;
+**`question_id` == `tool_call_id`** — no v2 duplicate). `options[].description`
+is omitted when the option has none; `multi_select` did not appear on this
+single-select question:
+
+```json
+{"type":"event.question.requested","seq":9,
+ "payload":{"type":"event.question.requested","question_id":"tool_mU6ITagcpKjwSyiUKLHPZYWw",
+            "session_id":"session_...","turn_id":0,
+            "tool_call_id":"tool_mU6ITagcpKjwSyiUKLHPZYWw",
+            "questions":[{"id":"q_0","question":"Red or blue?","header":"Color",
+                          "options":[{"id":"opt_0_0","label":"red","description":"warm color"},
+                                     {"id":"opt_0_1","label":"blue","description":"cool color"}],
+                          "allow_other":true}],
+            "created_at":"2026-07-20T06:06:49.808Z","agentId":"main","sessionId":"session_..."}}
+```
+
+**Question answered** (`event.question.answered`; `answers` is keyed by
+**question text**, values are option labels or free text):
+
+```json
+{"type":"event.question.answered","seq":11,
+ "payload":{"type":"event.question.answered","question_id":"tool_mU6ITagcpKjwSyiUKLHPZYWw",
+            "answers":{"Red or blue?":"blue"},"resolved_at":"2026-07-20T06:08:12.548Z",
+            "agentId":"main","sessionId":"session_..."}}
+```
+
+**Question dismissed:**
+
+```json
+{"type":"event.question.dismissed","seq":28,
+ "payload":{"type":"event.question.dismissed","question_id":"tool_TThzzORvQB8tHTKyLhIL5bQt",
+            "dismissed_at":"2026-07-20T06:12:37.844Z","agentId":"main","sessionId":"session_..."}}
+```
+
 ## Verification log
 
 - REST probes: `curl` against `http://127.0.0.1:58627/api/v1/...` (commands
@@ -526,4 +708,11 @@ payload).
   0.27.0: tool call with manual approval (approve path included), plain text
   reply, mid-run abort, cursor-resume replay (seq 35 → 36–38), and an
   unsubscribe ack. No heartbeat frames observed in 95 s.
+- 2026-07-20 round-trips on 0.27.0 (same server process): mid-turn steer of a
+  queued prompt (`prompts:steer`), idle-session steer error (`code:40402`),
+  question surface + answer (selected option and free text), question dismiss
+  (HTTP 200 with `code:40909`), `GET questions?status=pending` polling,
+  `GET questions/{qid}` confirmed 404, re-answer/re-dismiss of resolved
+  questions (`code:40405`). Questions triggered by prompting the session to
+  call its `AskUserQuestion` tool.
 - 2026-07-17 round-trips on 0.23.3 (superseded shapes): see git history.
