@@ -66,6 +66,13 @@ data class ToolResultPayload(
 @Serializable
 data class TurnEndedPayload(val reason: String = "")
 
+/** `context.spliced` payload: full message objects, decoded with the history MessageDto
+ * (its extra fields — toolCalls, origin — are ignored). */
+@Serializable
+data class ContextSplicedPayload(
+    val messages: List<MessageDto> = emptyList(),
+)
+
 @Serializable
 data class ApprovalRequestedPayload(
     @SerialName("approval_id") val approvalId: String = "",

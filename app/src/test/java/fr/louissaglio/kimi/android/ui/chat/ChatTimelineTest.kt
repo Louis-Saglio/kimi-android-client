@@ -151,4 +151,55 @@ class ChatTimelineTest {
             timeline.items(),
         )
     }
+
+    @Test
+    fun `context spliced commits the sent user message mid-turn`() {
+        val timeline = ChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted)
+
+        timeline.apply(SessionEvent.ContextSpliced(listOf(userMessage("msg_1", "hello from the phone"))))
+
+        assertEquals(
+            listOf(ChatItem.UserMessage("msg_1", "hello from the phone")),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `context spliced is deduplicated by message id`() {
+        val timeline = ChatTimeline()
+        timeline.replaceHistory(listOf(userMessage("msg_1", "hi")), keepLive = false)
+
+        // Reconnect replay of the same splice, then a new one.
+        timeline.apply(SessionEvent.ContextSpliced(listOf(userMessage("msg_1", "hi"))))
+        timeline.apply(SessionEvent.ContextSpliced(listOf(userMessage("msg_2", "second"))))
+
+        assertEquals(
+            listOf(
+                ChatItem.UserMessage("msg_1", "hi"),
+                ChatItem.UserMessage("msg_2", "second"),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `context spliced ignores non-user messages`() {
+        val timeline = ChatTimeline()
+
+        timeline.apply(
+            SessionEvent.ContextSpliced(
+                listOf(
+                    ChatMessage("msg_1", ChatMessage.Role.Assistant, listOf(ChatMessage.Part.Text("reply"))),
+                    ChatMessage(
+                        "msg_2",
+                        ChatMessage.Role.Tool,
+                        listOf(ChatMessage.Part.ToolResult("tool_1", false)),
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(emptyList<ChatItem>(), timeline.items())
+    }
 }

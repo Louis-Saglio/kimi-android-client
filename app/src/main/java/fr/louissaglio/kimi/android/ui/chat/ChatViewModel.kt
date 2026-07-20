@@ -105,9 +105,9 @@ class ChatViewModel @Inject constructor(
         viewModelScope.launch {
             chatRepository.sendPrompt(settingsRepository.current(), sessionId, text)
                 .onSuccess {
-                    // No local echo: the user message comes back via the next history
-                    // refetch (prompt.submitted on 0.23.3; turn.ended on 0.27.0), the
-                    // reply via the streaming events. The prompt is
+                    // No local echo: the user message arrives inline in the socket's
+                    // context.spliced frame (0.27.0; prompt.submitted on older servers),
+                    // the reply via the streaming events. The prompt is
                     // already running server-side, so gate the button until turn.ended.
                     _uiState.update { it.copy(inputText = "", isSending = false, isWorking = true) }
                 }

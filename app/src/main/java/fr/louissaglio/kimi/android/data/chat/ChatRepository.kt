@@ -49,6 +49,10 @@ sealed interface SessionEvent {
     data class ToolCallResult(val toolCallId: String, val isError: Boolean) : SessionEvent
     data object PromptSubmitted : SessionEvent
 
+    /** Messages spliced into the context inline (0.27.0): carries the just-sent user
+     * message, which replaced prompt.submitted as the sent-prompt echo. */
+    data class ContextSpliced(val messages: List<ChatMessage>) : SessionEvent
+
     /** A tool call waits on the user's decision. [summary] is the compact argument
      * preview for the approval card (the command for shell calls, else the action). */
     data class ApprovalRequested(val approvalId: String, val toolName: String, val summary: String) : SessionEvent
@@ -384,6 +388,8 @@ class ChatRepository @Inject constructor(
             "turn.started" -> onEvent(SessionEvent.TurnStarted)
             "turn.ended" -> onEvent(SessionEvent.TurnEnded(frame.decodePayload<TurnEndedPayload>()?.reason.orEmpty()))
             "prompt.submitted" -> onEvent(SessionEvent.PromptSubmitted)
+            "context.spliced" -> frame.decodePayload<ContextSplicedPayload>()
+                ?.let { onEvent(SessionEvent.ContextSpliced(it.messages.map { msg -> msg.toDomain() })) }
             // server_hello, ack, and events we don't render yet: ignore.
         }
     }

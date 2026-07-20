@@ -217,4 +217,47 @@ class ChatRepositoryTest {
         assertTrue(pong.contains("n1"))
         Unit
     }
+
+    @Test
+    fun `context spliced frame emits the spliced user message`() = runBlocking {
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: Response) {
+                        // Verbatim 0.27.0 shape (docs/server-api.md, "Core event payloads").
+                        webSocket.send(
+                            """{"type":"context.spliced","seq":5,"epoch":"ep_1","session_id":"session_1",""" +
+                                """"timestamp":"2026-07-19T00:00:00.500Z","payload":{"type":"context.spliced",""" +
+                                """"start":0,"deleteCount":0,"messages":[{"role":"user",""" +
+                                """"content":[{"type":"text","text":"hello from the phone"}],"toolCalls":[],""" +
+                                """"origin":{"kind":"user"},"id":"msg_1"}],"agentId":"main","sessionId":"session_1"}}""",
+                        )
+                    }
+                },
+            ),
+        )
+
+        val emitted = CopyOnWriteArrayList<SocketEvent>()
+        val job = launch { repository.observeSession(settings(), "session_1").collect { emitted += it } }
+        try {
+            withTimeout(5_000) { while (emitted.none { it is SocketEvent.Event }) delay(10) }
+        } finally {
+            job.cancel()
+        }
+
+        assertEquals(
+            SocketEvent.Event(
+                SessionEvent.ContextSpliced(
+                    listOf(
+                        ChatMessage(
+                            "msg_1",
+                            ChatMessage.Role.User,
+                            listOf(ChatMessage.Part.Text("hello from the phone")),
+                        ),
+                    ),
+                ),
+            ),
+            emitted.first { it is SocketEvent.Event },
+        )
+    }
 }

@@ -56,9 +56,21 @@ class ChatTimeline {
                 upsertTool(event.toolCallId, event.name, ToolStatus.Running)
             is SessionEvent.ToolCallResult ->
                 upsertTool(event.toolCallId, "", if (event.isError) ToolStatus.Error else ToolStatus.Done)
+            is SessionEvent.ContextSpliced -> event.messages.forEach(::appendSpliced)
             // TurnEnded / PromptSubmitted: the ViewModel refetches history instead.
             else -> Unit
         }
+    }
+
+    /** The just-sent user message arrives spliced mid-turn (0.27.0 dropped
+     * prompt.submitted): commit it immediately so the chat does not look dead for the
+     * whole turn. Deduped by message id — a reconnect replay or a racing refetch must
+     * not add a second bubble; the turn.ended refetch then replaces committed rows
+     * wholesale. Assistant/tool splices are ignored: deltas and history cover them. */
+    private fun appendSpliced(message: ChatMessage) {
+        if (message.role != ChatMessage.Role.User) return
+        if (committed.any { it.id == message.id }) return
+        flatten(message)
     }
 
     /** Deltas extend the last live bubble; after a tool row a new bubble starts, so a

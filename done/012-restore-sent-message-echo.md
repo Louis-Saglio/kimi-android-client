@@ -27,13 +27,22 @@ whole turn.
 
 ## Acceptance criteria
 
-- [ ] A prompt sent from the phone shows the user bubble within ~1 s of the
+- [x] A prompt sent from the phone shows the user bubble within ~1 s of the
   prompts POST, while the turn is still running (unit-tested at the ViewModel
   level: socket `context.spliced` frame → item appears, no HTTP refetch
   required).
-- [ ] No duplicate user bubble after the `turn.ended` history refetch
+  *(`ChatViewModelTest.context spliced shows the sent prompt bubble without a
+  history refetch`: the bubble is in `items` right after the frame and no
+  further HTTP request is recorded. Parsing covered end-to-end in
+  `ChatRepositoryTest.context spliced frame emits the spliced user message`
+  with the verbatim 0.27.0 payload.)*
+- [x] No duplicate user bubble after the `turn.ended` history refetch
   (unit-tested).
-- [ ] `./gradlew :app:assembleDebug` succeeds with all unit tests green.
+  *(`ChatViewModelTest.no duplicate user bubble after the turn ended
+  refetch`; dedup-by-id replay cases in
+  `ChatTimelineTest.context spliced is deduplicated by message id`.)*
+- [x] `./gradlew :app:assembleDebug` succeeds with all unit tests green.
+  *(2026-07-20: 51 unit tests green — 6 new; assembleDebug successful.)*
 
 ## Out of scope
 

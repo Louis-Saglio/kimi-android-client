@@ -58,6 +58,10 @@ class ChatViewModelTest {
     private var abortsSucceed = true
 
     @Volatile
+    private var messagesBody =
+        """{"code":0,"msg":"success","data":{"items":[],"has_more":false},"request_id":"r"}"""
+
+    @Volatile
     private var serverSocket: WebSocket? = null
 
     private class FakePreferencesDataStore(prefs: Preferences) : DataStore<Preferences> {
@@ -75,9 +79,7 @@ class ChatViewModelTest {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 val path = request.path.orEmpty()
                 return when {
-                    path.startsWith("/api/v1/sessions/session_1/messages") -> MockResponse().setBody(
-                        """{"code":0,"msg":"success","data":{"items":[],"has_more":false},"request_id":"r"}""",
-                    )
+                    path.startsWith("/api/v1/sessions/session_1/messages") -> MockResponse().setBody(messagesBody)
                     path == "/api/v1/sessions/session_1/status" -> MockResponse().setBody(
                         """{"code":0,"msg":"success","data":{"busy":false},"request_id":"r"}""",
                     )
@@ -292,6 +294,54 @@ class ChatViewModelTest {
         }
     }
 
+    @Test
+    fun `context spliced shows the sent prompt bubble without a history refetch`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState { !it.isLoading }
+        // Drain the history/status/WS requests recorded so far.
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        socket.send(contextSplicedFrame(id = "msg_1", text = "hello from the phone"))
+
+        awaitState { it.items.isNotEmpty() }
+        assertEquals(
+            listOf(ChatItem.UserMessage("msg_1", "hello from the phone")),
+            viewModel.uiState.value.items,
+        )
+        // The echo came from the socket frame alone: no HTTP refetch fired.
+        delay(200)
+        assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun `no duplicate user bubble after the turn ended refetch`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState { !it.isLoading }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+        socket.send(contextSplicedFrame(id = "msg_1", text = "hello from the phone"))
+        awaitState { it.items.size == 1 }
+
+        // The server committed the message; the turn.ended refetch returns it in history.
+        messagesBody = """
+            {"code":0,"msg":"success","data":{"items":[
+              {"id":"msg_1","session_id":"session_1","role":"user",
+               "content":[{"type":"text","text":"hello from the phone"}],
+               "created_at":"2026-07-19T00:00:00.500Z"}
+            ],"has_more":false},"request_id":"r"}
+        """.trimIndent()
+        socket.send(turnEndedFrame(reason = "completed"))
+
+        // The refetch replaces committed rows wholesale: still exactly one bubble.
+        awaitRequest("/messages")
+        delay(300)
+        assertEquals(
+            listOf(ChatItem.UserMessage("msg_1", "hello from the phone")),
+            viewModel.uiState.value.items,
+        )
+    }
+
     private suspend fun awaitServerSocket(): WebSocket = withTimeout(5_000) {
         while (serverSocket == null) delay(10)
         serverSocket!!
@@ -319,6 +369,12 @@ class ChatViewModelTest {
         """{"type":"turn.ended","seq":21,"epoch":"ep_1","session_id":"session_1",""" +
             """"timestamp":"2026-07-19T00:00:01.000Z","payload":{"type":"turn.ended","turnId":1,""" +
             """"reason":"$reason","durationMs":1000,"agentId":"main","sessionId":"session_1"}}"""
+
+    private fun contextSplicedFrame(id: String, text: String): String =
+        """{"type":"context.spliced","seq":6,"epoch":"ep_1","session_id":"session_1",""" +
+            """"timestamp":"2026-07-19T00:00:00.500Z","payload":{"type":"context.spliced","start":0,""" +
+            """"deleteCount":0,"messages":[{"role":"user","content":[{"type":"text","text":"$text"}],""" +
+            """"toolCalls":[],"origin":{"kind":"user"},"id":"$id"}],"agentId":"main","sessionId":"session_1"}}"""
 
     private fun approvalRequestedFrame(id: String, tool: String, action: String, command: String): String =
         """{"type":"event.approval.requested","seq":7,"epoch":"ep_1","session_id":"session_1",""" +
