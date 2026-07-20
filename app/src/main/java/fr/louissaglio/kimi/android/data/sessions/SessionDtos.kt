@@ -9,6 +9,7 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class SessionListData(
     val items: List<SessionDto> = emptyList(),
+    @SerialName("has_more") val hasMore: Boolean = false,
 )
 
 @Serializable

@@ -14,6 +14,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -25,21 +26,24 @@ class SessionsRepository @Inject constructor(
     private val json: Json,
 ) {
     /**
-     * Fetches the session list from `GET /api/v1/sessions`. Settings are passed per
-     * call (same pattern as ConnectionChecker) so saved-settings edits apply immediately.
-     * This is the error boundary: failures come back as [Result.failure] of [DataError].
+     * Fetches one page of the session list from `GET /api/v1/sessions`. Settings are
+     * passed per call (same pattern as ConnectionChecker) so saved-settings edits apply
+     * immediately. [beforeId] is sent as the `before_id` cursor to page backwards;
+     * null fetches the first page. This is the error boundary: failures come back as
+     * [Result.failure] of [DataError].
      */
-    suspend fun listSessions(settings: ServerSettings): Result<List<Session>> =
+    suspend fun listSessions(settings: ServerSettings, beforeId: String? = null): Result<SessionPage> =
         withContext(Dispatchers.IO) {
-            val request = try {
-                Request.Builder()
-                    .url(settings.serverUrl.trim().trimEnd('/') + "/api/v1/sessions")
+            val url = try {
+                (settings.serverUrl.trim().trimEnd('/') + "/api/v1/sessions").toHttpUrl()
+                    .newBuilder()
+                    .apply { if (beforeId != null) addQueryParameter("before_id", beforeId) }
                     .build()
             } catch (e: IllegalArgumentException) {
                 return@withContext Result.failure(DataError.InvalidUrl)
             }
             try {
-                client.newCall(request).execute().use { response ->
+                client.newCall(Request.Builder().url(url).build()).execute().use { response ->
                     when {
                         response.code == 401 -> Result.failure(DataError.Auth)
                         !response.isSuccessful -> Result.failure(DataError.Http(response.code))
@@ -95,12 +99,17 @@ class SessionsRepository @Inject constructor(
         Result.failure(DataError.MalformedResponse(e))
     }
 
-    private fun parseBody(body: String): Result<List<Session>> = try {
+    private fun parseBody(body: String): Result<SessionPage> = try {
         val envelope = json.decodeFromString<Envelope<SessionListData>>(body)
         when {
             envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
             envelope.data == null -> Result.failure(DataError.Api(envelope.code, "missing data"))
-            else -> Result.success(envelope.data.items.map { it.toDomain() })
+            else -> Result.success(
+                SessionPage(
+                    items = envelope.data.items.map { it.toDomain() },
+                    hasMore = envelope.data.hasMore,
+                ),
+            )
         }
     } catch (e: SerializationException) {
         Result.failure(DataError.MalformedResponse(e))

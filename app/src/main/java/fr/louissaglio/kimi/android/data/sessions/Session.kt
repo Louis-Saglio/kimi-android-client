@@ -11,3 +11,9 @@ data class Session(
     val updatedAt: Instant,
     val isRunning: Boolean,
 )
+
+/** One page of the session list; [hasMore] mirrors the envelope's `has_more` flag. */
+data class SessionPage(
+    val items: List<Session>,
+    val hasMore: Boolean,
+)

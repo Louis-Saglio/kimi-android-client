@@ -185,6 +185,86 @@ class SessionListViewModelTest {
         }
     }
 
+    @Test
+    fun `onEndReached appends the next page deduplicated and stops when has_more is false`() = runBlocking {
+        server.enqueue(MockResponse().setBody(pageBody(hasMore = true, "session_1", "session_2")))
+        viewModel.onScreenStarted()
+        awaitState { it.sessions != null }
+        // Page 2 overlaps page 1 by one row; the duplicate must not appear twice.
+        server.enqueue(MockResponse().setBody(pageBody(hasMore = false, "session_2", "session_3")))
+
+        viewModel.onEndReached()
+
+        awaitState { it.sessions?.size == 3 }
+        val state = viewModel.uiState.value
+        assertEquals(listOf("session_1", "session_2", "session_3"), state.sessions!!.map { it.id })
+        assertFalse(state.hasMore)
+        assertFalse(state.isLoadingMore)
+        assertNull(state.loadMoreError)
+        assertEquals("/api/v1/sessions", server.takeRequest().path)
+        assertEquals("/api/v1/sessions?before_id=session_2", server.takeRequest().path)
+    }
+
+    @Test
+    fun `failed next page keeps the loaded list and exposes a footer error`() = runBlocking {
+        server.enqueue(MockResponse().setBody(pageBody(hasMore = true, "session_1", "session_2")))
+        viewModel.onScreenStarted()
+        awaitState { it.sessions != null }
+        server.enqueue(MockResponse().setResponseCode(500))
+
+        viewModel.onEndReached()
+
+        awaitState { it.loadMoreError != null }
+        val state = viewModel.uiState.value
+        assertEquals(listOf("session_1", "session_2"), state.sessions!!.map { it.id })
+        assertEquals("Unexpected server response (HTTP 500)", state.loadMoreError)
+        assertFalse(state.isLoadingMore)
+        // Still true so the footer retry can attempt the same page again.
+        assertTrue(state.hasMore)
+    }
+
+    @Test
+    fun `onEndReached is a no-op when the server reported no more pages`() = runBlocking {
+        server.enqueue(MockResponse().setBody(pageBody(hasMore = false, "session_1")))
+        viewModel.onScreenStarted()
+        awaitState { it.sessions != null }
+
+        viewModel.onEndReached()
+
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun `refresh after paging resets to the first page`() = runBlocking {
+        server.enqueue(MockResponse().setBody(pageBody(hasMore = true, "session_1", "session_2")))
+        viewModel.onScreenStarted()
+        awaitState { it.sessions != null }
+        server.enqueue(MockResponse().setBody(pageBody(hasMore = false, "session_3")))
+        viewModel.onEndReached()
+        awaitState { it.sessions?.size == 3 }
+        server.enqueue(MockResponse().setBody(pageBody(hasMore = true, "session_9")))
+
+        viewModel.onPullToRefresh()
+
+        awaitState { it.sessions?.map { s -> s.id } == listOf("session_9") }
+        val state = viewModel.uiState.value
+        assertTrue(state.hasMore)
+        assertNull(state.loadMoreError)
+        // The refresh hit the endpoint without a cursor.
+        val paths = (1..3).map { server.takeRequest(5, TimeUnit.SECONDS)!!.path }
+        assertEquals("/api/v1/sessions", paths[0])
+        assertEquals("/api/v1/sessions?before_id=session_2", paths[1])
+        assertEquals("/api/v1/sessions", paths[2])
+    }
+
+    private fun pageBody(hasMore: Boolean, vararg ids: String): String {
+        val items = ids.joinToString(",") { id ->
+            """{"id":"$id","title":"Title $id","updated_at":"2026-07-17T03:48:31.606Z",""" +
+                """"status":"idle","metadata":{"cwd":"/tmp/$id"}}"""
+        }
+        return """{"code":0,"msg":"success","data":{"items":[$items],"has_more":$hasMore},"request_id":"r"}"""
+    }
+
     private suspend fun awaitState(predicate: (SessionListViewModel.UiState) -> Boolean) =
         withTimeout(5_000) { while (!predicate(viewModel.uiState.value)) delay(10) }
 }

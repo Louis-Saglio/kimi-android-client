@@ -10,6 +10,7 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -47,8 +48,11 @@ class SessionsRepositoryTest {
 
         val result = repository.listSessions(settings())
 
-        val sessions = result.getOrThrow()
+        val page = result.getOrThrow()
+        // First page: no pagination cursor is sent.
         assertEquals("/api/v1/sessions", server.takeRequest().path)
+        assertTrue(page.hasMore)
+        val sessions = page.items
         assertEquals(2, sessions.size)
         assertEquals(
             Session(
@@ -63,6 +67,27 @@ class SessionsRepositoryTest {
         // Blank title maps to null so the UI falls back to the cwd; only "running" is active.
         assertNull(sessions[1].title)
         assertEquals(false, sessions[1].isRunning)
+    }
+
+    @Test
+    fun `next page sends before_id and parses has_more`() = runBlocking {
+        server.enqueue(
+            MockResponse().setBody(
+                """
+                {"code":0,"msg":"success","data":{"items":[
+                  {"id":"session_21","title":"Older session","updated_at":"2026-07-10T10:00:00.000Z",
+                   "status":"idle","metadata":{"cwd":"/tmp/old"}}
+                ],"has_more":false},"request_id":"01KX"}
+                """.trimIndent(),
+            ),
+        )
+
+        val result = repository.listSessions(settings(), beforeId = "session_20")
+
+        val page = result.getOrThrow()
+        assertEquals("/api/v1/sessions?before_id=session_20", server.takeRequest().path)
+        assertEquals(listOf("session_21"), page.items.map { it.id })
+        assertFalse(page.hasMore)
     }
 
     @Test

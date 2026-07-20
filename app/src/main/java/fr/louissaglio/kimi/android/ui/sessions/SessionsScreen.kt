@@ -5,11 +5,14 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
@@ -36,6 +39,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshContainer
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -87,6 +91,7 @@ fun SessionsScreen(
         onSessionClick = onNavigateToChat,
         onRetry = viewModel::onRetry,
         onPullToRefresh = viewModel::onPullToRefresh,
+        onEndReached = viewModel::onEndReached,
         onNewSessionClick = viewModel::onNewSessionClick,
         onNewSessionCwdChange = viewModel::onNewSessionCwdChange,
         onNewSessionTitleChange = viewModel::onNewSessionTitleChange,
@@ -104,6 +109,7 @@ private fun SessionsContent(
     onSessionClick: (String) -> Unit,
     onRetry: () -> Unit,
     onPullToRefresh: () -> Unit,
+    onEndReached: () -> Unit,
     onNewSessionClick: () -> Unit,
     onNewSessionCwdChange: (String) -> Unit,
     onNewSessionTitleChange: (String) -> Unit,
@@ -149,7 +155,7 @@ private fun SessionsContent(
                         CircularProgressIndicator()
                     }
                 uiState.sessions.isEmpty() -> EmptyState()
-                else -> SessionList(uiState.sessions, onSessionClick)
+                else -> SessionList(uiState, onSessionClick, onEndReached)
             }
             PullToRefreshContainer(
                 state = pullRefreshState,
@@ -215,10 +221,51 @@ private fun CreateSessionDialog(
 }
 
 @Composable
-private fun SessionList(sessions: List<Session>, onSessionClick: (String) -> Unit) {
-    LazyColumn(Modifier.fillMaxSize()) {
+private fun SessionList(
+    uiState: SessionListViewModel.UiState,
+    onSessionClick: (String) -> Unit,
+    onEndReached: () -> Unit,
+) {
+    val sessions = uiState.sessions.orEmpty()
+    val listState = rememberLazyListState()
+    // Fires when scrolling within a few rows of the end; the ViewModel no-ops unless
+    // another page is actually available, so repeated triggers near the end are cheap.
+    val endReached by remember {
+        derivedStateOf {
+            val layoutInfo = listState.layoutInfo
+            val lastVisibleIndex = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: return@derivedStateOf false
+            lastVisibleIndex >= layoutInfo.totalItemsCount - LOAD_MORE_THRESHOLD
+        }
+    }
+    LaunchedEffect(endReached) { if (endReached) onEndReached() }
+    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
         items(sessions, key = Session::id) { session ->
             SessionRow(session, onClick = { onSessionClick(session.id) })
+        }
+        if (uiState.isLoadingMore || uiState.loadMoreError != null) {
+            item(key = "load_more_footer") {
+                LoadMoreFooter(error = uiState.loadMoreError, onRetry = onEndReached)
+            }
+        }
+    }
+}
+
+@Composable
+private fun LoadMoreFooter(error: String?, onRetry: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(16.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (error == null) {
+            CircularProgressIndicator(Modifier.size(24.dp))
+        } else {
+            Text(
+                text = error,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            TextButton(onClick = onRetry) { Text("Retry") }
         }
     }
 }
@@ -278,6 +325,9 @@ private fun EmptyState() {
 private fun formatTimestamp(instant: Instant): String =
     DateTimeFormatter.ofPattern("MMM d, HH:mm").withZone(ZoneId.systemDefault()).format(instant)
 
+/** How close (in rows) to the list end the scroll must get before the next page loads. */
+private const val LOAD_MORE_THRESHOLD = 3
+
 @Preview
 @Composable
 private fun SessionsContentPreview() {
@@ -294,6 +344,7 @@ private fun SessionsContentPreview() {
             onSessionClick = {},
             onRetry = {},
             onPullToRefresh = {},
+            onEndReached = {},
             onNewSessionClick = {},
             onNewSessionCwdChange = {},
             onNewSessionTitleChange = {},

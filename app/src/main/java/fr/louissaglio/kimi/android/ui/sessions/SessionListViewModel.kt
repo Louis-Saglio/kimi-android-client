@@ -29,6 +29,10 @@ class SessionListViewModel @Inject constructor(
         val isRefreshing: Boolean = false,
         val sessions: List<Session>? = null,
         val error: String? = null,
+        val hasMore: Boolean = false,
+        val isLoadingMore: Boolean = false,
+        /** Set when a next-page load failed; shown inline at the bottom of the list. */
+        val loadMoreError: String? = null,
         val showCreateDialog: Boolean = false,
         val newSessionCwd: String = "",
         val newSessionTitle: String = "",
@@ -49,12 +53,43 @@ class SessionListViewModel @Inject constructor(
     val effects = _effects.receiveAsFlow()
 
     private var loadJob: Job? = null
+    private var loadMoreJob: Job? = null
 
     fun onScreenStarted() = reload()
 
     fun onRetry() = reload()
 
     fun onPullToRefresh() = reload()
+
+    /**
+     * Loads the next page when the list scrolls near its end. No-op while any load is
+     * in flight or once the server reported no more pages. The job check (not the
+     * state flag) is the re-entrancy guard: the UI calls this on every recomposition
+     * near the end, and state updates are not visible synchronously across dispatches.
+     */
+    fun onEndReached() {
+        val state = _uiState.value
+        if (state.isLoading || state.isRefreshing || !state.hasMore) return
+        if (loadMoreJob?.isActive == true) return
+        val beforeId = state.sessions?.lastOrNull()?.id ?: return
+        loadMoreJob = viewModelScope.launch {
+            _uiState.update { it.copy(isLoadingMore = true, loadMoreError = null) }
+            sessionsRepository.listSessions(settingsRepository.current(), beforeId = beforeId)
+                .onSuccess { page ->
+                    _uiState.update {
+                        it.copy(
+                            isLoadingMore = false,
+                            sessions = (it.sessions.orEmpty() + page.items).distinctBy(Session::id),
+                            hasMore = page.hasMore,
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    // The loaded list stays visible; the footer offers a retry.
+                    _uiState.update { it.copy(isLoadingMore = false, loadMoreError = error.toUserMessage()) }
+                }
+        }
+    }
 
     fun onNewSessionClick() {
         _uiState.update {
@@ -106,13 +141,28 @@ class SessionListViewModel @Inject constructor(
     private fun reload() {
         // Cancel rather than skip so a pull-to-refresh during an in-flight load still completes.
         loadJob?.cancel()
+        loadMoreJob?.cancel()
         loadJob = viewModelScope.launch {
             val hadSessions = _uiState.value.sessions != null
-            _uiState.update { it.copy(isLoading = !hadSessions, isRefreshing = hadSessions, error = null) }
+            _uiState.update {
+                it.copy(
+                    isLoading = !hadSessions,
+                    isRefreshing = hadSessions,
+                    error = null,
+                    isLoadingMore = false,
+                    loadMoreError = null,
+                )
+            }
             sessionsRepository.listSessions(settingsRepository.current())
-                .onSuccess { sessions ->
+                .onSuccess { page ->
                     _uiState.update {
-                        it.copy(isLoading = false, isRefreshing = false, sessions = sessions, error = null)
+                        it.copy(
+                            isLoading = false,
+                            isRefreshing = false,
+                            sessions = page.items,
+                            hasMore = page.hasMore,
+                            error = null,
+                        )
                     }
                 }
                 .onFailure { error ->

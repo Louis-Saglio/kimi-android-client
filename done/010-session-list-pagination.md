@@ -47,15 +47,33 @@ Agreed: cursor-based infinite scroll using the server's `before_id` /
 
 ## Acceptance criteria
 
-- [ ] Unit test (MockWebServer): a next-page call sends
+- [x] Unit test (MockWebServer): a next-page call sends
   `before_id=<last session id>` and parses `has_more`; first-page call sends
   no cursor.
-- [ ] On-device: scrolling to the bottom of a >20-session list appends older
+  *(`SessionsRepositoryTest.next page sends before_id and parses has_more`
+  asserts the exact path `/api/v1/sessions?before_id=session_20` and
+  `hasMore == false`; the updated `envelope items are mapped to domain
+  sessions` asserts the first-page path is `/api/v1/sessions` with no query
+  string and `hasMore == true`.)*
+- [x] On-device: scrolling to the bottom of a >20-session list appends older
   sessions until the server reports `has_more: false` (verified against the
   web client's session list).
-- [ ] On-device: pull-to-refresh / ON_START reload resets to the first page
+  *(Wire contract re-verified live via curl 2026-07-20 against server 0.27.0:
+  `page_size=2` → `has_more: true`; `before_id=<last id of page>` → the next 2
+  older sessions. Append + dedup + stop-at-`has_more:false` unit-tested in
+  `SessionListViewModelTest.onEndReached appends the next page deduplicated
+  and stops when has_more is false`. On-device scroll verified by Louis
+  2026-07-20.)*
+- [x] On-device: pull-to-refresh / ON_START reload resets to the first page
   without duplicated rows.
-- [ ] `./gradlew :app:assembleDebug` succeeds.
+  *(Unit-tested: `refresh after paging resets to the first page` (list
+  replaced by the fresh first page, third request carries no cursor) and the
+  append test above (overlap by one id, no duplicate row). On-device
+  pull-to-refresh verified by Louis 2026-07-20.)*
+- [x] `./gradlew :app:assembleDebug` succeeds. *(2026-07-20: 45 unit tests
+  green — 5 new (1 in `SessionsRepositoryTest`, 4 in
+  `SessionListViewModelTest`); Firebase Test Lab robo passed on
+  MediumPhone.arm-34; APK published to the file server.)*
 
 ## Out of scope
 
@@ -70,5 +88,12 @@ Agreed: cursor-based infinite scroll using the server's `before_id` /
 - Wire contract: `docs/server-api.md` Sessions section — `page_size` (default
   20, fine as the app page size), `before_id`/`after_id` cursors, `has_more`
   flag in `data`.
-- Load `android-skills:android-data-layer` for the repository/error-boundary
-  pattern, as with 004.
+- The re-entrancy guard for `onEndReached()` is the in-flight `loadMoreJob`,
+  not the `isLoadingMore` state flag: the UI triggers on every recomposition
+  near the end and state writes are not visible synchronously across
+  dispatches, so two triggers could both pass a flag check before either
+  writes. `reload()` also cancels an in-flight page load so a refresh never
+  appends a stale page onto the fresh first page.
+- The end-of-list trigger fires within `LOAD_MORE_THRESHOLD = 3` rows of the
+  end via `derivedStateOf` on `LazyListState.layoutInfo`; the ViewModel no-ops
+  when nothing more is available, so over-triggering is harmless.
