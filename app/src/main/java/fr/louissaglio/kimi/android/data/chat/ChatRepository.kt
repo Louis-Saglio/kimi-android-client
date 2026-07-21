@@ -132,7 +132,7 @@ class ChatRepository @Inject constructor(
      */
     suspend fun sendPrompt(settings: ServerSettings, sessionId: String, text: String): Result<Unit> =
         withContext(Dispatchers.IO) {
-            postPrompt(settings, sessionId, text).map { }
+            postPrompt(settings, sessionId, text, defaultModel(settings)).map { }
         }
 
     /**
@@ -143,13 +143,69 @@ class ChatRepository @Inject constructor(
      */
     suspend fun steer(settings: ServerSettings, sessionId: String, text: String): Result<Unit> =
         withContext(Dispatchers.IO) {
-            val promptId = postPrompt(settings, sessionId, text)
+            val promptId = postPrompt(settings, sessionId, text, defaultModel(settings))
                 .getOrElse { return@withContext Result.failure(it) }
             postSteer(settings, sessionId, promptId)
         }
 
+    /**
+     * The model to send with prompts: 0.28.0+ no longer falls back to the server's
+     * `default_model` for sessions with an empty `agent_config.model` (the turn fails
+     * with `model.not_configured`), so the app passes the server default explicitly
+     * (`GET /api/v1/config`). Resolved values — including "server has no default" — are
+     * cached per server URL (a settings change refetches); fetch failures are not
+     * cached and degrade to the pre-0.28 behavior: the prompt goes out without a model.
+     */
+    @Volatile
+    private var cachedDefaultModel: Pair<String, String?>? = null
+
+    private fun defaultModel(settings: ServerSettings): String? {
+        val baseUrl = settings.serverUrl.trim().trimEnd('/')
+        cachedDefaultModel?.let { if (it.first == baseUrl) return it.second }
+        val result = fetchDefaultModel(settings)
+        result.onSuccess { cachedDefaultModel = baseUrl to it }
+        return result.getOrNull()
+    }
+
+    /** GET /api/v1/config → `data.default_model` (null when the server has none). */
+    private fun fetchDefaultModel(settings: ServerSettings): Result<String?> {
+        val request = try {
+            Request.Builder()
+                .url(settings.serverUrl.trim().trimEnd('/') + "/api/v1/config")
+                .build()
+        } catch (e: IllegalArgumentException) {
+            return Result.failure(DataError.InvalidUrl)
+        }
+        return try {
+            client.newCall(request).execute().use { response ->
+                when {
+                    response.code == 401 -> Result.failure(DataError.Auth)
+                    !response.isSuccessful -> Result.failure(DataError.Http(response.code))
+                    else -> try {
+                        val envelope = json.decodeFromString<Envelope<ConfigData>>(
+                            response.body?.string().orEmpty(),
+                        )
+                        when {
+                            envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
+                            else -> Result.success(envelope.data?.defaultModel?.takeIf { it.isNotBlank() })
+                        }
+                    } catch (e: SerializationException) {
+                        Result.failure(DataError.MalformedResponse(e))
+                    }
+                }
+            }
+        } catch (e: IOException) {
+            Result.failure(DataError.Network(e))
+        }
+    }
+
     /** POSTs the prompt and returns its id (queued while busy, running otherwise). */
-    private fun postPrompt(settings: ServerSettings, sessionId: String, text: String): Result<String> {
+    private fun postPrompt(
+        settings: ServerSettings,
+        sessionId: String,
+        text: String,
+        model: String?,
+    ): Result<String> {
         val body = buildJsonObject {
             putJsonArray("content") {
                 addJsonObject {
@@ -157,6 +213,7 @@ class ChatRepository @Inject constructor(
                     put("text", text)
                 }
             }
+            if (model != null) put("model", model)
         }.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
         val request = try {
             Request.Builder()

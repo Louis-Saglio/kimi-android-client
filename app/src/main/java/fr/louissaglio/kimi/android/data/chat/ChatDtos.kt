@@ -37,6 +37,12 @@ data class SessionStatusData(
     val busy: Boolean = false,
 )
 
+/** `data` of `GET /api/v1/config`; only the server-wide default model is consumed. */
+@Serializable
+data class ConfigData(
+    @SerialName("default_model") val defaultModel: String? = null,
+)
+
 /** `data` of the POST /prompts ack; on 0.27.0 `prompt_id` == `user_message_id`. */
 @Serializable
 data class PromptData(

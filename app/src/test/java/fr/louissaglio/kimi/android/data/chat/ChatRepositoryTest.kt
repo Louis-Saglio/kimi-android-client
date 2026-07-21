@@ -35,6 +35,14 @@ class ChatRepositoryTest {
 
     private fun settings() = ServerSettings(serverUrl = server.url("/").toString())
 
+    /** A `/api/v1/config` response without a default model (pre-0.28 server shape):
+     * prompts then go out without a `model` field. */
+    private fun enqueueConfigWithoutDefaultModel() = server.enqueue(
+        MockResponse().setBody(
+            """{"code":0,"msg":"success","data":{"default_permission_mode":"yolo"},"request_id":"01KX"}""",
+        ),
+    )
+
     @Test
     fun `history envelope maps to domain messages oldest-first`() = runBlocking {
         server.enqueue(
@@ -106,6 +114,7 @@ class ChatRepositoryTest {
 
     @Test
     fun `sendPrompt posts text content parts to the prompts endpoint`() = runBlocking {
+        enqueueConfigWithoutDefaultModel()
         server.enqueue(
             MockResponse().setBody(
                 """
@@ -120,6 +129,7 @@ class ChatRepositoryTest {
         val result = repository.sendPrompt(settings(), "session_1", "Reply with exactly: ok")
 
         assertTrue(result.isSuccess)
+        assertEquals("/api/v1/config", server.takeRequest().path)
         val request = server.takeRequest()
         assertEquals("POST", request.method)
         assertEquals("/api/v1/sessions/session_1/prompts", request.path)
@@ -131,6 +141,7 @@ class ChatRepositoryTest {
 
     @Test
     fun `sendPrompt maps non-zero envelope code to Api error`() = runBlocking {
+        enqueueConfigWithoutDefaultModel()
         server.enqueue(
             MockResponse().setBody("""{"code":40401,"msg":"session session_1 does not exist","data":null,"request_id":"01KX"}"""),
         )
@@ -144,6 +155,7 @@ class ChatRepositoryTest {
     fun `steer posts the prompt then steers the returned prompt id into the turn`() = runBlocking {
         // docs/server-api.md, Steer: while busy the prompts POST queues the prompt, then
         // prompts:steer injects the queued id into the running turn.
+        enqueueConfigWithoutDefaultModel()
         server.enqueue(
             MockResponse().setBody(
                 """
@@ -163,6 +175,7 @@ class ChatRepositoryTest {
         val result = repository.steer(settings(), "session_1", "Stop counting")
 
         assertTrue(result.isSuccess)
+        assertEquals("/api/v1/config", server.takeRequest().path)
         val prompt = server.takeRequest()
         assertEquals("POST", prompt.method)
         assertEquals("/api/v1/sessions/session_1/prompts", prompt.path)
@@ -175,6 +188,7 @@ class ChatRepositoryTest {
 
     @Test
     fun `steer maps a non-zero steer envelope code to Api error`() = runBlocking {
+        enqueueConfigWithoutDefaultModel()
         server.enqueue(
             MockResponse().setBody(
                 """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
@@ -192,6 +206,7 @@ class ChatRepositoryTest {
 
     @Test
     fun `steer does not call the steer endpoint when the prompt post fails`() = runBlocking {
+        enqueueConfigWithoutDefaultModel()
         server.enqueue(
             MockResponse().setBody("""{"code":40401,"msg":"session session_1 does not exist","data":null,"request_id":"01KX"}"""),
         )
@@ -199,8 +214,134 @@ class ChatRepositoryTest {
         val result = repository.steer(settings(), "session_1", "hello")
 
         assertTrue(result.exceptionOrNull() is DataError.Api)
+        assertEquals("/api/v1/config", server.takeRequest().path)
         assertEquals("/api/v1/sessions/session_1/prompts", server.takeRequest().path)
         assertNull(server.takeRequest(200, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun `sendPrompt sends the server default model in the prompt body`() = runBlocking {
+        server.enqueue(
+            MockResponse().setBody(
+                """{"code":0,"msg":"success","data":{"default_model":"kimi-code/k3"},"request_id":"01KX"}""",
+            ),
+        )
+        server.enqueue(
+            MockResponse().setBody(
+                """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
+                    """"status":"running","created_at":"2026-07-21T00:00:00.000Z"},"request_id":"01KX"}""",
+            ),
+        )
+
+        val result = repository.sendPrompt(settings(), "session_1", "hello")
+
+        assertTrue(result.isSuccess)
+        assertEquals("/api/v1/config", server.takeRequest().path)
+        val prompt = server.takeRequest()
+        assertEquals(
+            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/k3"}""",
+            prompt.body.readUtf8(),
+        )
+    }
+
+    @Test
+    fun `steer sends the server default model in the prompt body`() = runBlocking {
+        server.enqueue(
+            MockResponse().setBody(
+                """{"code":0,"msg":"success","data":{"default_model":"kimi-code/k3"},"request_id":"01KX"}""",
+            ),
+        )
+        server.enqueue(
+            MockResponse().setBody(
+                """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
+                    """"status":"queued","created_at":"2026-07-21T00:00:00.000Z"},"request_id":"01KX"}""",
+            ),
+        )
+        server.enqueue(
+            MockResponse().setBody(
+                """{"code":0,"msg":"success","data":{"steered":true,"prompt_ids":["msg_1"]},"request_id":"01KX"}""",
+            ),
+        )
+
+        val result = repository.steer(settings(), "session_1", "Stop counting")
+
+        assertTrue(result.isSuccess)
+        assertEquals("/api/v1/config", server.takeRequest().path)
+        val prompt = server.takeRequest()
+        assertEquals(
+            """{"content":[{"type":"text","text":"Stop counting"}],"model":"kimi-code/k3"}""",
+            prompt.body.readUtf8(),
+        )
+    }
+
+    @Test
+    fun `default model is fetched once per server URL`() = runBlocking {
+        val promptAck = MockResponse().setBody(
+            """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
+                """"status":"running","created_at":"2026-07-21T00:00:00.000Z"},"request_id":"01KX"}""",
+        )
+        server.enqueue(
+            MockResponse().setBody(
+                """{"code":0,"msg":"success","data":{"default_model":"kimi-code/k3"},"request_id":"01KX"}""",
+            ),
+        )
+        server.enqueue(promptAck)
+        server.enqueue(promptAck)
+
+        repository.sendPrompt(settings(), "session_1", "one")
+        repository.sendPrompt(settings(), "session_1", "two")
+
+        // One config fetch, two prompts: the second send hits the cache.
+        assertEquals("/api/v1/config", server.takeRequest().path)
+        assertEquals("/api/v1/sessions/session_1/prompts", server.takeRequest().path)
+        assertEquals("/api/v1/sessions/session_1/prompts", server.takeRequest().path)
+        assertNull(server.takeRequest(200, TimeUnit.MILLISECONDS))
+
+        // A different server URL refetches the config.
+        val other = MockWebServer()
+        other.start()
+        try {
+            other.enqueue(
+                MockResponse().setBody(
+                    """{"code":0,"msg":"success","data":{"default_model":"kimi-code/other"},"request_id":"01KX"}""",
+                ),
+            )
+            other.enqueue(promptAck)
+
+            repository.sendPrompt(ServerSettings(serverUrl = other.url("/").toString()), "session_1", "three")
+
+            assertEquals("/api/v1/config", other.takeRequest().path)
+            val prompt = other.takeRequest()
+            assertTrue(prompt.body.readUtf8().contains(""""model":"kimi-code/other""""))
+        } finally {
+            other.shutdown()
+        }
+    }
+
+    @Test
+    fun `prompt goes out without a model when the config fetch fails and config is retried next send`() = runBlocking {
+        val promptAck = MockResponse().setBody(
+            """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
+                """"status":"running","created_at":"2026-07-21T00:00:00.000Z"},"request_id":"01KX"}""",
+        )
+        server.enqueue(MockResponse().setResponseCode(500))
+        server.enqueue(promptAck)
+        server.enqueue(MockResponse().setResponseCode(500))
+        server.enqueue(promptAck)
+
+        val first = repository.sendPrompt(settings(), "session_1", "one")
+        val second = repository.sendPrompt(settings(), "session_1", "two")
+
+        assertTrue(first.isSuccess)
+        assertTrue(second.isSuccess)
+        assertEquals("/api/v1/config", server.takeRequest().path)
+        assertEquals(
+            """{"content":[{"type":"text","text":"one"}]}""",
+            server.takeRequest().body.readUtf8(),
+        )
+        // Failures are not cached: the next send retries the config fetch.
+        assertEquals("/api/v1/config", server.takeRequest().path)
+        assertEquals("/api/v1/sessions/session_1/prompts", server.takeRequest().path)
     }
 
     @Test
