@@ -12,7 +12,7 @@ import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 
-class BasicAuthInterceptorTest {
+class BearerTokenInterceptorTest {
 
     private val server = MockWebServer()
 
@@ -24,26 +24,26 @@ class BasicAuthInterceptorTest {
 
     private fun callWith(settings: ServerSettings, request: Request = Request.Builder().url(server.url("/")).build()) {
         val client = OkHttpClient.Builder()
-            .addInterceptor(BasicAuthInterceptor { settings })
+            .addInterceptor(BearerTokenInterceptor { settings })
             .build()
         client.newCall(request).execute().close()
     }
 
     @Test
-    fun `adds Basic Authorization header built from stored settings`() {
+    fun `adds Bearer Authorization header built from stored settings`() {
         server.enqueue(MockResponse().setBody("{}"))
 
-        callWith(ServerSettings(serverUrl = "", username = "louis", password = "s3cret-p4ss"))
+        callWith(ServerSettings(serverUrl = "", token = "tok-abc-123"))
 
         val recorded = server.takeRequest(1, TimeUnit.SECONDS)!!
-        assertEquals("Basic bG91aXM6czNjcmV0LXA0c3M=", recorded.getHeader("Authorization"))
+        assertEquals("Bearer tok-abc-123", recorded.getHeader("Authorization"))
     }
 
     @Test
-    fun `adds no header when credentials are blank`() {
+    fun `adds no header when token is blank`() {
         server.enqueue(MockResponse().setBody("{}"))
 
-        callWith(ServerSettings(serverUrl = "", username = "", password = ""))
+        callWith(ServerSettings(serverUrl = "", token = ""))
 
         val recorded = server.takeRequest(1, TimeUnit.SECONDS)!!
         assertNull(recorded.getHeader("Authorization"))
@@ -53,12 +53,12 @@ class BasicAuthInterceptorTest {
     fun `does not overwrite an Authorization header already set on the request`() {
         server.enqueue(MockResponse().setBody("{}"))
         val request = Request.Builder().url(server.url("/"))
-            .header("Authorization", "Bearer token")
+            .header("Authorization", "Bearer other-token")
             .build()
 
-        callWith(ServerSettings(serverUrl = "", username = "louis", password = "s3cret-p4ss"), request)
+        callWith(ServerSettings(serverUrl = "", token = "tok-abc-123"), request)
 
         val recorded = server.takeRequest(1, TimeUnit.SECONDS)!!
-        assertEquals("Bearer token", recorded.getHeader("Authorization"))
+        assertEquals("Bearer other-token", recorded.getHeader("Authorization"))
     }
 }

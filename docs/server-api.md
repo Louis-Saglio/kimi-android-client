@@ -10,7 +10,7 @@ steer, questions, abort, permissions, WebSocket events. Explicitly skipped:
 `fs:*`, terminals, cron, goals, workspaces, providers, skills.
 
 Every endpoint below was executed against the live server; the exact commands
-used are shown with each section. Secrets are redacted (`<password>`).
+used are shown with each section. Secrets are redacted (`<token>`).
 
 **Protocol history:** this document previously described server `0.23.3`
 (verified 2026-07-17). The 0.27.0 server ships a reworked backend (`v2`) that
@@ -22,29 +22,35 @@ Server updates are installed by the `kimi-nightly-update` systemd timer (see
 
 | Path | Base URL | Auth |
 |---|---|---|
-| Local (this VPS) | `http://127.0.0.1:58627` | none — server runs with `--dangerous-bypass-auth` |
-| Remote (Tailscale) | `http://100.64.0.1` | HTTP Basic, enforced by Caddy (`user: louis`) |
+| Local (this VPS) | `http://127.0.0.1:58627` | Bearer token (server-native) |
+| Remote (Tailscale) | `http://100.64.0.1` | Bearer token, via Caddy |
+| Remote (public HTTPS) | `https://agent.example.com:8443` | Bearer token, via Caddy |
 
 - REST API root is `<base>/api/v1`.
-- Remote auth is plain HTTP Basic: `Authorization: Basic base64(louis:<password>)`,
-  i.e. `curl -u louis:<password> http://100.64.0.1/api/v1/...`. The same
-  header must be present on the WebSocket handshake (Caddy terminates auth
-  before proxying).
-- **Credential check endpoint: `GET /api/v1/healthz`**. `200` ⇒ credentials
-  valid, `401` ⇒ invalid.
+- Auth is the server's native bearer-token auth (`--dangerous-bypass-auth` is NOT
+  used): `Authorization: Bearer <token>` on every request, i.e.
+  `curl -H "Authorization: Bearer <token>" http://100.64.0.1/api/v1/...`.
+  The token lives in `/home/ubuntu/.kimi-code/server.token` (mode 600); rotate
+  with `kimi web rotate-token`. Caddy proxies the header through untouched. The
+  same header must be present on the WebSocket handshake.
+- **`GET /api/v1/healthz` is public** — it answers `200` with no token at all,
+  so it cannot validate credentials. Use **`GET /api/v1/meta`** as the
+  credential check endpoint: `200` ⇒ token valid, `401` ⇒ missing or invalid.
 
-Verified:
+Verified (server 0.28.1, 2026-07-21):
 
 ```bash
-# Remote, no credentials -> rejected by Caddy
-curl -i http://100.64.0.1/api/v1/healthz
-# HTTP/1.1 401 Unauthorized
-# Server: Caddy
-# Www-Authenticate: Basic realm="restricted"
+# No token -> rejected on authenticated routes
+curl -s -o /dev/null -w '%{http_code}' http://100.64.0.1/api/v1/meta
+# 401
 
-# Local, no credentials -> allowed (dangerous_bypass_auth)
-curl -s http://127.0.0.1:58627/api/v1/healthz
-# {"code":0,"msg":"success","data":{"ok":true},"request_id":"01KXX2YH4KDAQ3WDNQFXRG9P04"}
+# Wrong token -> rejected
+curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer wrong" http://100.64.0.1/api/v1/meta
+# 401
+
+# Valid token -> allowed
+curl -s -H "Authorization: Bearer <token>" http://100.64.0.1/api/v1/healthz
+# {"code":0,"msg":"success","data":{"ok":true},"request_id":"01KY261D..."}
 ```
 
 ### Response envelope
@@ -63,25 +69,25 @@ Every REST response is JSON wrapped in an envelope:
 
 ## Meta
 
-`GET /api/v1/meta` — server identity and capabilities.
+`GET /api/v1/meta` — server identity and capabilities. Requires the token.
 
 ```bash
-curl -s http://127.0.0.1:58627/api/v1/meta
+curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
 ```
 
 ```json
 {
   "code": 0, "msg": "success",
   "data": {
-    "server_version": "0.27.0",
+    "server_version": "0.28.1",
     "capabilities": {"websocket": true, "file_upload": true, "fs_query": true, "mcp": true, "tasks": true, "terminal": true},
-    "server_id": "01KXX0GJRGXTS9B2Y0NH9BPFJN",
-    "started_at": "2026-07-19T10:59:51.697Z",
+    "server_id": "01KY261C834HWWWT83D0QTM0FC",
+    "started_at": "2026-07-21T11:12:37.123Z",
     "open_in_apps": [],
-    "dangerous_bypass_auth": true,
+    "dangerous_bypass_auth": false,
     "backend": "v2"
   },
-  "request_id": "01KXX30NKY2ZBE906Z2NNJEQJ5"
+  "request_id": "01KY261DPAS6GMVV4X3ZFW3RAF"
 }
 ```
 
@@ -406,7 +412,7 @@ ws://127.0.0.1:58627/api/v1/ws?client_id=<unique client id>
 ```
 
 (`wss://` when the base is https; remotely, the handshake goes through Caddy
-and needs the same Basic auth header as REST.)
+and needs the same Bearer token header as REST.)
 
 websocat (installed at `~/tools/websocat-bin/websocat`):
 
@@ -698,9 +704,12 @@ single-select question:
 
 - REST probes: `curl` against `http://127.0.0.1:58627/api/v1/...` (commands
   inline above), server `0.27.0` (`backend: v2`).
-- Remote auth: `curl -i http://100.64.0.1/api/v1/healthz` → `401` from
-  Caddy (no credentials); local bypass confirmed by
-  `"dangerous_bypass_auth": true` in `/meta`.
+- Remote auth (re-verified 2026-07-21 on 0.28.1): `/api/v1/meta` and
+  `/api/v1/sessions` → `401` without a token or with a wrong one, `200` with
+  `Authorization: Bearer <token>`; `/api/v1/healthz` is public (always `200`).
+  The unauthenticated WebSocket handshake is rejected with `401`. Auth is
+  server-native (bearer token), enforced on all authenticated REST and
+  WebSocket routes; `"dangerous_bypass_auth": false` in `/meta`.
 - WS captures: websocat 1.14.0 (`~/tools/websocat-bin/websocat`) against
   `ws://127.0.0.1:58627/api/v1/ws?client_id=...`, subscribing to throwaway
   sessions created for the captures. 2026-07-19 round-trips recorded on

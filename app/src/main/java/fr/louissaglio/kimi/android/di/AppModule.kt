@@ -10,7 +10,7 @@ import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
-import fr.louissaglio.kimi.android.data.network.BasicAuthInterceptor
+import fr.louissaglio.kimi.android.data.network.BearerTokenInterceptor
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import java.util.concurrent.TimeUnit
 import javax.inject.Qualifier
@@ -51,7 +51,7 @@ object AppModule {
     fun provideOkHttpClient(settingsRepository: SettingsRepository): OkHttpClient =
         OkHttpClient.Builder()
             // Read per request so saved-settings changes apply without rebuilding the client.
-            .addInterceptor(BasicAuthInterceptor { settingsRepository.settings.value })
+            .addInterceptor(BearerTokenInterceptor { settingsRepository.settings.value })
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .build()

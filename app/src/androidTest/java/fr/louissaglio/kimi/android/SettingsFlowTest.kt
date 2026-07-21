@@ -42,26 +42,26 @@ class SettingsFlowTest {
     fun tearDown() = server.shutdown()
 
     @Test
-    fun validCredentialsReportConnectionSuccess() {
+    fun validTokenReportsConnectionSuccess() {
         server.enqueue(MockResponse().setBody("""{"code":0,"msg":"success","data":{"ok":true}}"""))
-        openSettingsAndType(serverBaseUrl(), username = "louis", password = "pw123")
+        openSettingsAndType(serverBaseUrl(), token = "tok-abc-123")
 
         clickTestConnection()
 
         waitForText("Connection successful")
         val recorded = server.takeRequest(5, TimeUnit.SECONDS)!!
-        assertEquals("/api/v1/healthz", recorded.path)
-        assertEquals("Basic bG91aXM6cHcxMjM=", recorded.getHeader("Authorization"))
+        assertEquals("/api/v1/meta", recorded.path)
+        assertEquals("Bearer tok-abc-123", recorded.getHeader("Authorization"))
     }
 
     @Test
-    fun wrongPasswordReportsAuthenticationFailure() {
+    fun wrongTokenReportsAuthenticationFailure() {
         server.enqueue(MockResponse().setResponseCode(401))
-        openSettingsAndType(serverBaseUrl(), username = "louis", password = "wrong")
+        openSettingsAndType(serverBaseUrl(), token = "wrong-token")
 
         clickTestConnection()
 
-        waitForText("Authentication failed: wrong username or password")
+        waitForText("Authentication failed: wrong token")
     }
 
     @Test
@@ -70,7 +70,7 @@ class SettingsFlowTest {
         deadServer.start()
         val deadUrl = deadServer.url("/").toString().trimEnd('/')
         deadServer.shutdown()
-        openSettingsAndType(deadUrl, username = "louis", password = "pw123")
+        openSettingsAndType(deadUrl, token = "tok-abc-123")
 
         clickTestConnection()
 
@@ -80,8 +80,8 @@ class SettingsFlowTest {
     @Test
     fun savedSettingsAreRestoredAfterActivityRecreation() {
         val baseUrl = serverBaseUrl()
-        val password = "pw123"
-        openSettingsAndType(baseUrl, username = "louis", password = password)
+        val token = "tok-abc-123"
+        openSettingsAndType(baseUrl, token = token)
 
         hideKeyboard()
         composeTestRule.onNodeWithText("Save").performClick()
@@ -89,22 +89,21 @@ class SettingsFlowTest {
 
         composeTestRule.activityRule.scenario.recreate()
 
+        // Token semantics expose only the masked value by design; its length proves the restore.
+        val masked = "•".repeat(token.length)
         composeTestRule.waitUntil(10_000) {
-            composeTestRule.onAllNodes(hasTestTag("usernameField") and hasText("louis"))
+            composeTestRule.onAllNodes(hasTestTag("tokenField") and hasText(masked))
                 .fetchSemanticsNodes().isNotEmpty()
         }
         composeTestRule.onNodeWithTag("serverUrlField").assert(hasText(baseUrl))
-        // Password semantics expose only the masked value by design; its length proves the restore.
-        composeTestRule.onNodeWithTag("passwordField").assert(hasText("•".repeat(password.length)))
     }
 
     private fun serverBaseUrl() = server.url("/").toString().trimEnd('/')
 
-    private fun openSettingsAndType(baseUrl: String, username: String, password: String) {
+    private fun openSettingsAndType(baseUrl: String, token: String) {
         composeTestRule.onNodeWithContentDescription("Settings").performClick()
         composeTestRule.onNodeWithTag("serverUrlField").performTextReplacement(baseUrl)
-        composeTestRule.onNodeWithTag("usernameField").performTextReplacement(username)
-        composeTestRule.onNodeWithTag("passwordField").performTextReplacement(password)
+        composeTestRule.onNodeWithTag("tokenField").performTextReplacement(token)
     }
 
     private fun clickTestConnection() {

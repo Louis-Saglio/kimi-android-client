@@ -57,8 +57,7 @@ fun SettingsScreen(
         snackbarHostState = snackbarHostState,
         onNavigateBack = onNavigateBack,
         onServerUrlChange = viewModel::onServerUrlChange,
-        onUsernameChange = viewModel::onUsernameChange,
-        onPasswordChange = viewModel::onPasswordChange,
+        onTokenChange = viewModel::onTokenChange,
         onSave = viewModel::onSave,
         onTestConnection = viewModel::onTestConnection,
     )
@@ -71,8 +70,7 @@ private fun SettingsContent(
     snackbarHostState: SnackbarHostState,
     onNavigateBack: () -> Unit,
     onServerUrlChange: (String) -> Unit,
-    onUsernameChange: (String) -> Unit,
-    onPasswordChange: (String) -> Unit,
+    onTokenChange: (String) -> Unit,
     onSave: () -> Unit,
     onTestConnection: () -> Unit,
 ) {
@@ -105,20 +103,13 @@ private fun SettingsContent(
                 modifier = Modifier.fillMaxWidth().testTag("serverUrlField"),
             )
             OutlinedTextField(
-                value = uiState.username,
-                onValueChange = onUsernameChange,
-                label = { Text("Username") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth().testTag("usernameField"),
-            )
-            OutlinedTextField(
-                value = uiState.password,
-                onValueChange = onPasswordChange,
-                label = { Text("Password") },
+                value = uiState.token,
+                onValueChange = onTokenChange,
+                label = { Text("Token") },
                 singleLine = true,
                 visualTransformation = PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                modifier = Modifier.fillMaxWidth().testTag("passwordField"),
+                modifier = Modifier.fillMaxWidth().testTag("tokenField"),
             )
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(onClick = onSave) {
@@ -157,12 +148,11 @@ private fun SettingsContent(
 private fun SettingsContentPreview() {
     KimiTheme {
         SettingsContent(
-            uiState = SettingsViewModel.UiState(username = "louis"),
+            uiState = SettingsViewModel.UiState(token = "tok123"),
             snackbarHostState = remember { SnackbarHostState() },
             onNavigateBack = {},
             onServerUrlChange = {},
-            onUsernameChange = {},
-            onPasswordChange = {},
+            onTokenChange = {},
             onSave = {},
             onTestConnection = {},
         )

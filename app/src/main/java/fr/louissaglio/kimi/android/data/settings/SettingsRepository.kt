@@ -24,17 +24,15 @@ class SettingsRepository @Inject constructor(
 ) {
     private object Keys {
         val SERVER_URL = stringPreferencesKey("server_url")
-        val USERNAME = stringPreferencesKey("username")
-        val PASSWORD = stringPreferencesKey("password")
+        val TOKEN = stringPreferencesKey("token")
     }
 
     private val settingsFlow = dataStore.data
         .catch { e -> if (e is IOException) emit(emptyPreferences()) else throw e }
         .map { prefs ->
             ServerSettings(
-                serverUrl = prefs[Keys.SERVER_URL] ?: ServerSettings.DEFAULT_SERVER_URL,
-                username = prefs[Keys.USERNAME] ?: "",
-                password = prefs[Keys.PASSWORD] ?: "",
+                serverUrl = (prefs[Keys.SERVER_URL] ?: ServerSettings.DEFAULT_SERVER_URL).trim(),
+                token = (prefs[Keys.TOKEN] ?: "").trim(),
             )
         }
 
@@ -47,9 +45,8 @@ class SettingsRepository @Inject constructor(
 
     suspend fun save(settings: ServerSettings) {
         dataStore.edit { prefs ->
-            prefs[Keys.SERVER_URL] = settings.serverUrl
-            prefs[Keys.USERNAME] = settings.username
-            prefs[Keys.PASSWORD] = settings.password
+            prefs[Keys.SERVER_URL] = settings.serverUrl.trim()
+            prefs[Keys.TOKEN] = settings.token.trim()
         }
     }
 }

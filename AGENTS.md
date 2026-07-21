@@ -6,7 +6,9 @@ A native Android clone of the Kimi Code web client. It lets Louis drive the Kimi
 Code agent from his phone with a native UX instead of the browser. The app talks
 to the same backend as the web client — the HTTP + WebSocket server embedded in
 the `kimi` binary — reached via Caddy at `http://100.64.0.1:80` over
-Tailscale with HTTP basic auth.
+Tailscale (or `https://agent.example.com:8443` over the public internet),
+authenticated with the server's bearer token (`Authorization: Bearer <token>`,
+stored in the app settings).
 
 ## Tech stack
 
@@ -27,7 +29,7 @@ sudo chown fileserver:fileserver /home/fileserver/files/app-debug.apk
 ```
 
 It then appears in the listing at `https://agent.example.com` (basic auth,
-same `louis` credentials as the web UI).
+user `louis` — only the file server still uses basic auth, not the Kimi API).
 
 ## Server drift automation
 

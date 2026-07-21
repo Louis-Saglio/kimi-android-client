@@ -51,19 +51,33 @@ Replace Basic auth with bearer-token auth throughout the app:
 
 ## Acceptance criteria
 
-- [ ] `./gradlew :app:testDebugUnitTest` passes, with a unit test asserting
+- [x] `./gradlew :app:testDebugUnitTest` passes, with a unit test asserting
   the interceptor emits `Authorization: Bearer <token>` and no test
   references Basic auth anymore.
-- [ ] The settings screen shows a single token field (no username field) and
+- [x] The settings screen shows a single token field (no username field) and
   persists it across app restarts.
-- [ ] With the token from `/home/ubuntu/.kimi-code/server.token` entered, the
+- [x] With the token from `/home/ubuntu/.kimi-code/server.token` entered, the
   connection test succeeds against `https://agent.example.com:8443` and
   `http://100.64.0.1`; with a wrong token it reports an authentication
   failure.
-- [ ] Session list and chat (REST + WebSocket live streaming) work end to
+- [x] Session list and chat (REST + WebSocket live streaming) work end to
   end against the live server with the token configured.
-- [ ] `grep -ri "basic" docs/server-api.md AGENTS.md` shows no remaining
+- [x] `grep -ri "basic" docs/server-api.md AGENTS.md` shows no remaining
   claim that the Kimi server API uses Basic auth.
+
+## Completion notes (2026-07-21)
+
+- The server-side switchover had silently failed (flag removed from
+  `kimi-web.service` at 10:28 but never restarted; the 10:34 systemd-run
+  attempt referenced a missing script). Completed via
+  `/home/ubuntu/kimi-web-bearer-switchover.sh`; the restart also brought the
+  server to 0.28.1. Verified: `/meta` + `/sessions` → 401 no/wrong token,
+  200 with token on loopback/Tailscale/public HTTPS; WS handshake 401/101.
+- **`GET /api/v1/healthz` is public** (always 200), so the connection test
+  probes `GET /api/v1/meta` instead — otherwise a wrong token would never be
+  detected. `docs/server-api.md` corrected to match.
+- Firebase Test Lab: 7/7 instrumented tests passed (MediumPhone.arm, API 34),
+  including the token-field restore-after-recreation test.
 
 ## Out of scope
 

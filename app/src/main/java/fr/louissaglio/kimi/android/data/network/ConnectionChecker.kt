@@ -7,7 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import okhttp3.Credentials
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
@@ -24,6 +24,7 @@ class ConnectionChecker @Inject constructor(
     sealed interface Result {
         data object Success : Result
         data object InvalidUrl : Result
+        data object InvalidToken : Result
         data object AuthFailed : Result
         data class HttpError(val code: Int) : Result
         data class ApiError(val code: Int, val msg: String) : Result
@@ -31,15 +32,17 @@ class ConnectionChecker @Inject constructor(
     }
 
     suspend fun check(settings: ServerSettings): Result = withContext(Dispatchers.IO) {
-        val url = settings.serverUrl.trim().trimEnd('/') + "/api/v1/healthz"
+        val url = (settings.serverUrl.trim().trimEnd('/') + "/api/v1/meta").toHttpUrlOrNull()
+            ?: return@withContext Result.InvalidUrl
         val request = try {
             Request.Builder().url(url).apply {
                 if (settings.hasCredentials) {
-                    header("Authorization", Credentials.basic(settings.username, settings.password))
+                    header("Authorization", "Bearer ${settings.token.trim()}")
                 }
             }.build()
         } catch (e: IllegalArgumentException) {
-            return@withContext Result.InvalidUrl
+            // OkHttp rejects control/non-latin-1 characters in header values.
+            return@withContext Result.InvalidToken
         }
         try {
             client.newCall(request).execute().use { response ->

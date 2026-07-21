@@ -23,8 +23,7 @@ class SettingsViewModel @Inject constructor(
 
     data class UiState(
         val serverUrl: String = ServerSettings.DEFAULT_SERVER_URL,
-        val username: String = "",
-        val password: String = "",
+        val token: String = "",
         val isTestingConnection: Boolean = false,
         val testResult: TestResult? = null,
     )
@@ -50,8 +49,7 @@ class SettingsViewModel @Inject constructor(
             _uiState.update {
                 it.copy(
                     serverUrl = stored.serverUrl,
-                    username = stored.username,
-                    password = stored.password,
+                    token = stored.token,
                 )
             }
         }
@@ -60,11 +58,8 @@ class SettingsViewModel @Inject constructor(
     fun onServerUrlChange(value: String) =
         _uiState.update { it.copy(serverUrl = value, testResult = null) }
 
-    fun onUsernameChange(value: String) =
-        _uiState.update { it.copy(username = value, testResult = null) }
-
-    fun onPasswordChange(value: String) =
-        _uiState.update { it.copy(password = value, testResult = null) }
+    fun onTokenChange(value: String) =
+        _uiState.update { it.copy(token = value, testResult = null) }
 
     fun onSave() {
         viewModelScope.launch {
@@ -82,7 +77,7 @@ class SettingsViewModel @Inject constructor(
     }
 
     private fun fieldSettings(): ServerSettings = _uiState.value.let {
-        ServerSettings(serverUrl = it.serverUrl, username = it.username, password = it.password)
+        ServerSettings(serverUrl = it.serverUrl.trim(), token = it.token.trim())
     }
 
     private fun ConnectionChecker.Result.toTestResult(): TestResult = when (this) {
@@ -90,8 +85,10 @@ class SettingsViewModel @Inject constructor(
             TestResult.Success("Connection successful")
         ConnectionChecker.Result.InvalidUrl ->
             TestResult.Failure("Invalid server URL")
+        ConnectionChecker.Result.InvalidToken ->
+            TestResult.Failure("Invalid token: it contains forbidden characters")
         ConnectionChecker.Result.AuthFailed ->
-            TestResult.Failure("Authentication failed: wrong username or password")
+            TestResult.Failure("Authentication failed: wrong token")
         is ConnectionChecker.Result.HttpError ->
             TestResult.Failure("Unexpected server response (HTTP $code)")
         is ConnectionChecker.Result.ApiError ->
