@@ -26,13 +26,14 @@ BROKEN_FILE=$STATE_DIR/broken_version
 KIMI=/home/ubuntu/.kimi-code/bin/kimi
 META_URL=http://127.0.0.1:58627/api/v1/meta
 LATEST_URL=https://code.kimi.com/kimi-code/latest
+TOKEN_FILE=/home/ubuntu/.kimi-code/server.token
 
 mkdir -p "$STATE_DIR"
 exec 9>"$STATE_DIR/lock"
 flock -n 9 || exit 0
 
 server_version() {
-    curl -sf --max-time 10 "$META_URL" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["server_version"])'
+    curl -sf --max-time 10 -H "Authorization: Bearer $(cat "$TOKEN_FILE")" "$META_URL" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["server_version"])'
 }
 
 health_ok() {

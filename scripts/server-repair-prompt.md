@@ -9,14 +9,15 @@ Context:
 - Service: `kimi-web.service`, unit file `/etc/systemd/system/kimi-web.service`,
   runs as user `ubuntu`. You have passwordless sudo (`sudo -n`).
 - Expected behavior: an HTTP server on `127.0.0.1:58627`, reverse-proxied by
-  Caddy (Caddy handles TLS and basic auth — do NOT touch Caddy).
-- The service must keep serving on port 58627, keep
-  `--dangerous-bypass-auth`, and keep allowing hosts `100.64.0.1` and
-  `agent.example.com` (Caddy vhosts; the server enforces a Host allowlist).
+  Caddy (Caddy handles TLS — do NOT touch Caddy).
+- The service must keep serving on port 58627, keep bearer-token auth
+  enabled (do NOT add `--dangerous-bypass-auth`), and keep allowing hosts
+  `100.64.0.1` and `agent.example.com` (Caddy vhosts; the server
+  enforces a Host allowlist).
 - Health check (both must hold):
   - `systemctl is-active --quiet kimi-web.service`
-  - `curl -sf http://127.0.0.1:58627/api/v1/meta` returns JSON containing
-    `data.server_version`
+  - `curl -sf -H "Authorization: Bearer $(cat /home/ubuntu/.kimi-code/server.token)" http://127.0.0.1:58627/api/v1/meta`
+    returns JSON containing `data.server_version`
 
 Procedure:
 
