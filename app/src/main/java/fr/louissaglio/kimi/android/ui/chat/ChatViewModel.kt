@@ -94,21 +94,27 @@ class ChatViewModel @Inject constructor(
         _uiState.update { it.copy(inputText = value) }
     }
 
-    /** POSTs the current input. No-ops on blank text, while a send is in flight, or mid-turn
-     * (the send button is disabled then anyway — this is the non-UI guard). On failure the
-     * text stays in the field and [Effect.SendFailed] drives a snackbar with Retry. */
+    /** POSTs the current input: a new prompt while the session is idle, a steer into the
+     * running turn while it is busy (docs/server-api.md, Steer). No-ops on blank text or
+     * while a send is in flight. On failure the text stays in the field and
+     * [Effect.SendFailed] drives a snackbar with Retry. */
     fun onSend() {
         val state = _uiState.value
         val text = state.inputText.trim()
-        if (text.isEmpty() || state.isSending || state.isWorking) return
+        if (text.isEmpty() || state.isSending) return
         _uiState.update { it.copy(isSending = true) }
         viewModelScope.launch {
-            chatRepository.sendPrompt(settingsRepository.current(), sessionId, text)
+            val settings = settingsRepository.current()
+            val result = if (state.isWorking) {
+                chatRepository.steer(settings, sessionId, text)
+            } else {
+                chatRepository.sendPrompt(settings, sessionId, text)
+            }
+            result
                 .onSuccess {
                     // No local echo: the user message arrives inline in the socket's
                     // context.spliced frame (0.27.0; prompt.submitted on older servers),
-                    // the reply via the streaming events. The prompt is
-                    // already running server-side, so gate the button until turn.ended.
+                    // the reply via the streaming events.
                     _uiState.update { it.copy(inputText = "", isSending = false, isWorking = true) }
                 }
                 .onFailure { error ->

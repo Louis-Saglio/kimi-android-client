@@ -83,6 +83,13 @@ class ChatViewModelTest {
                     path == "/api/v1/sessions/session_1/status" -> MockResponse().setBody(
                         """{"code":0,"msg":"success","data":{"busy":false},"request_id":"r"}""",
                     )
+                    path == "/api/v1/sessions/session_1/prompts" -> MockResponse().setBody(
+                        """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
+                            """"status":"running","created_at":"2026-07-20T00:00:00.000Z"},"request_id":"r"}""",
+                    )
+                    path == "/api/v1/sessions/session_1/prompts:steer" -> MockResponse().setBody(
+                        """{"code":0,"msg":"success","data":{"steered":true,"prompt_ids":["msg_1"]},"request_id":"r"}""",
+                    )
                     path == "/api/v1/sessions/session_1:abort" ->
                         if (abortsSucceed) {
                             MockResponse().setBody(
@@ -342,6 +349,71 @@ class ChatViewModelTest {
         )
     }
 
+    @Test
+    fun `sending while busy steers the queued prompt into the running turn`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(turnStartedFrame())
+        awaitState { it.isWorking }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        viewModel.onInputChange("Stop counting")
+        viewModel.onSend()
+
+        // docs/server-api.md, Steer: queue the prompt as usual, then steer its id in.
+        val prompt = awaitRequest("/prompts")
+        assertEquals("POST", prompt.method)
+        assertEquals("/api/v1/sessions/session_1/prompts", prompt.path)
+        assertEquals("""{"content":[{"type":"text","text":"Stop counting"}]}""", prompt.body.readUtf8())
+        val steer = awaitRequest("prompts:steer")
+        assertEquals("POST", steer.method)
+        assertEquals("/api/v1/sessions/session_1/prompts:steer", steer.path)
+        assertEquals("""{"prompt_ids":["msg_1"]}""", steer.body.readUtf8())
+
+        awaitState { it.inputText.isEmpty() && !it.isSending }
+        // The turn keeps running: the working state and Stop action stay up.
+        assertTrue(viewModel.uiState.value.isWorking)
+    }
+
+    @Test
+    fun `sending while idle posts a plain prompt, not a steer`() = runBlocking {
+        viewModel.onScreenStarted()
+        awaitServerSocket()
+        awaitState { !it.isLoading }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        viewModel.onInputChange("hello")
+        viewModel.onSend()
+
+        val request = awaitRequest("/prompts")
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/sessions/session_1/prompts", request.path)
+        assertEquals("""{"content":[{"type":"text","text":"hello"}]}""", request.body.readUtf8())
+        // A plain prompt marks the session busy; no steer call follows.
+        awaitState { it.isWorking }
+        assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun `steered message echo appears from the socket while the turn continues`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(turnStartedFrame())
+        awaitState { it.isWorking }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        socket.send(steerEchoSplicedFrame(text = "Stop counting"))
+
+        awaitState { it.items.isNotEmpty() }
+        val items = viewModel.uiState.value.items
+        assertEquals(1, items.size)
+        assertEquals("Stop counting", (items.single() as ChatItem.UserMessage).text)
+        // The turn is still running and the echo needed no history refetch.
+        assertTrue(viewModel.uiState.value.isWorking)
+        delay(200)
+        assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
+    }
+
     private suspend fun awaitServerSocket(): WebSocket = withTimeout(5_000) {
         while (serverSocket == null) delay(10)
         serverSocket!!
@@ -375,6 +447,13 @@ class ChatViewModelTest {
             """"timestamp":"2026-07-19T00:00:00.500Z","payload":{"type":"context.spliced","start":0,""" +
             """"deleteCount":0,"messages":[{"role":"user","content":[{"type":"text","text":"$text"}],""" +
             """"toolCalls":[],"origin":{"kind":"user"},"id":"$id"}],"agentId":"main","sessionId":"session_1"}}"""
+
+    /** Steer echo shape: the spliced steered message carries no id (docs/server-api.md). */
+    private fun steerEchoSplicedFrame(text: String): String =
+        """{"type":"context.spliced","seq":12,"epoch":"ep_1","session_id":"session_1",""" +
+            """"timestamp":"2026-07-20T00:00:01.000Z","payload":{"type":"context.spliced","start":1,""" +
+            """"deleteCount":0,"messages":[{"role":"user","content":[{"type":"text","text":"$text"}],""" +
+            """"toolCalls":[],"origin":{"kind":"user"}}],"agentId":"main","sessionId":"session_1"}}"""
 
     private fun approvalRequestedFrame(id: String, tool: String, action: String, command: String): String =
         """{"type":"event.approval.requested","seq":7,"epoch":"ep_1","session_id":"session_1",""" +

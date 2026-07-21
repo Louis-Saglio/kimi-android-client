@@ -3,6 +3,7 @@ package fr.louissaglio.kimi.android.data.chat
 import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -16,6 +17,7 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -139,6 +141,69 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun `steer posts the prompt then steers the returned prompt id into the turn`() = runBlocking {
+        // docs/server-api.md, Steer: while busy the prompts POST queues the prompt, then
+        // prompts:steer injects the queued id into the running turn.
+        server.enqueue(
+            MockResponse().setBody(
+                """
+                {"code":0,"msg":"success","data":{"prompt_id":"msg_1",
+                  "user_message_id":"msg_1","status":"queued",
+                  "content":[{"type":"text","text":"Stop counting"}],
+                  "created_at":"2026-07-20T00:00:00.000Z"},"request_id":"01KX"}
+                """.trimIndent(),
+            ),
+        )
+        server.enqueue(
+            MockResponse().setBody(
+                """{"code":0,"msg":"success","data":{"steered":true,"prompt_ids":["msg_1"]},"request_id":"01KX"}""",
+            ),
+        )
+
+        val result = repository.steer(settings(), "session_1", "Stop counting")
+
+        assertTrue(result.isSuccess)
+        val prompt = server.takeRequest()
+        assertEquals("POST", prompt.method)
+        assertEquals("/api/v1/sessions/session_1/prompts", prompt.path)
+        assertEquals("""{"content":[{"type":"text","text":"Stop counting"}]}""", prompt.body.readUtf8())
+        val steer = server.takeRequest()
+        assertEquals("POST", steer.method)
+        assertEquals("/api/v1/sessions/session_1/prompts:steer", steer.path)
+        assertEquals("""{"prompt_ids":["msg_1"]}""", steer.body.readUtf8())
+    }
+
+    @Test
+    fun `steer maps a non-zero steer envelope code to Api error`() = runBlocking {
+        server.enqueue(
+            MockResponse().setBody(
+                """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
+                    """"status":"queued","created_at":"2026-07-20T00:00:00.000Z"},"request_id":"01KX"}""",
+            ),
+        )
+        server.enqueue(
+            MockResponse().setBody("""{"code":40402,"msg":"no active prompt to steer into","data":null,"request_id":"01KX"}"""),
+        )
+
+        val result = repository.steer(settings(), "session_1", "too late")
+
+        assertTrue(result.exceptionOrNull() is DataError.Api)
+    }
+
+    @Test
+    fun `steer does not call the steer endpoint when the prompt post fails`() = runBlocking {
+        server.enqueue(
+            MockResponse().setBody("""{"code":40401,"msg":"session session_1 does not exist","data":null,"request_id":"01KX"}"""),
+        )
+
+        val result = repository.steer(settings(), "session_1", "hello")
+
+        assertTrue(result.exceptionOrNull() is DataError.Api)
+        assertEquals("/api/v1/sessions/session_1/prompts", server.takeRequest().path)
+        assertNull(server.takeRequest(200, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
     fun `abortPrompt posts an empty body to the abort endpoint`() = runBlocking {
         server.enqueue(
             MockResponse().setBody("""{"code":0,"msg":"success","data":{"aborted":true},"request_id":"01KX"}"""),
@@ -253,6 +318,50 @@ class ChatRepositoryTest {
                             "msg_1",
                             ChatMessage.Role.User,
                             listOf(ChatMessage.Part.Text("hello from the phone")),
+                        ),
+                    ),
+                ),
+            ),
+            emitted.first { it is SocketEvent.Event },
+        )
+    }
+
+    @Test
+    fun `context spliced frame without a message id emits the steered user message`() = runBlocking {
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: Response) {
+                        // Steer echo shape (docs/server-api.md, steer round-trip): the
+                        // spliced steered message carries no id.
+                        webSocket.send(
+                            """{"type":"context.spliced","seq":12,"epoch":"ep_1","session_id":"session_1",""" +
+                                """"timestamp":"2026-07-20T00:00:01.000Z","payload":{"type":"context.spliced",""" +
+                                """"start":1,"deleteCount":0,"messages":[{"role":"user",""" +
+                                """"content":[{"type":"text","text":"Stop counting. Reply with exactly: steered-ok"}],""" +
+                                """"toolCalls":[],"origin":{"kind":"user"}}],"agentId":"main","sessionId":"session_1"}}""",
+                        )
+                    }
+                },
+            ),
+        )
+
+        val emitted = CopyOnWriteArrayList<SocketEvent>()
+        val job = launch { repository.observeSession(settings(), "session_1").collect { emitted += it } }
+        try {
+            withTimeout(5_000) { while (emitted.none { it is SocketEvent.Event }) delay(10) }
+        } finally {
+            job.cancel()
+        }
+
+        assertEquals(
+            SocketEvent.Event(
+                SessionEvent.ContextSpliced(
+                    listOf(
+                        ChatMessage(
+                            "",
+                            ChatMessage.Role.User,
+                            listOf(ChatMessage.Part.Text("Stop counting. Reply with exactly: steered-ok")),
                         ),
                     ),
                 ),

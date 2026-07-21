@@ -202,4 +202,54 @@ class ChatTimelineTest {
 
         assertEquals(emptyList<ChatItem>(), timeline.items())
     }
+
+    @Test
+    fun `id-less spliced steer echo commits once, deduped on the text`() {
+        val timeline = ChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted)
+        // The steer echo splices the steered message without an id (docs/server-api.md).
+        val steered = ChatMessage("", ChatMessage.Role.User, listOf(ChatMessage.Part.Text("stop counting")))
+
+        timeline.apply(SessionEvent.ContextSpliced(listOf(steered)))
+        // A replay of the same splice must not double the bubble.
+        timeline.apply(SessionEvent.ContextSpliced(listOf(steered)))
+
+        assertEquals(1, timeline.items().size)
+        assertEquals("stop counting", (timeline.items().single() as ChatItem.UserMessage).text)
+    }
+
+    @Test
+    fun `id-less splices get distinct synthetic keys`() {
+        val timeline = ChatTimeline()
+
+        timeline.apply(
+            SessionEvent.ContextSpliced(
+                listOf(ChatMessage("", ChatMessage.Role.User, listOf(ChatMessage.Part.Text("first")))),
+            ),
+        )
+        timeline.apply(
+            SessionEvent.ContextSpliced(
+                listOf(ChatMessage("", ChatMessage.Role.User, listOf(ChatMessage.Part.Text("second")))),
+            ),
+        )
+
+        val items = timeline.items()
+        // Two id-less messages must not collide as LazyColumn keys.
+        assertEquals(2, items.size)
+        assertEquals(2, items.map { it.id }.distinct().size)
+    }
+
+    @Test
+    fun `id-less splice already committed by a racing refetch is dropped`() {
+        val timeline = ChatTimeline()
+        timeline.replaceHistory(listOf(userMessage("msg_9", "stop counting")), keepLive = true)
+
+        timeline.apply(
+            SessionEvent.ContextSpliced(
+                listOf(ChatMessage("", ChatMessage.Role.User, listOf(ChatMessage.Part.Text("stop counting")))),
+            ),
+        )
+
+        assertEquals(listOf(ChatItem.UserMessage("msg_9", "stop counting")), timeline.items())
+    }
 }

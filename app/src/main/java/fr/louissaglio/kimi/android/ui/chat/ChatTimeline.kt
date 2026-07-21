@@ -16,6 +16,7 @@ class ChatTimeline {
     private val committed = mutableListOf<ChatItem>()
     private val live = mutableListOf<ChatItem>()
     private var liveBubbleCount = 0
+    private var syntheticSpliceCount = 0
 
     fun items(): List<ChatItem> = committed + live
 
@@ -66,11 +67,23 @@ class ChatTimeline {
      * prompt.submitted): commit it immediately so the chat does not look dead for the
      * whole turn. Deduped by message id — a reconnect replay or a racing refetch must
      * not add a second bubble; the turn.ended refetch then replaces committed rows
-     * wholesale. Assistant/tool splices are ignored: deltas and history cover them. */
+     * wholesale. Assistant/tool splices are ignored: deltas and history cover them.
+     *
+     * The steer echo (docs/server-api.md, steer round-trip) splices the steered message
+     * without an id: those dedup on the text instead — a racing mid-turn refetch commits
+     * the same message with its real id — and get a synthetic key, since two id-less
+     * bubbles would otherwise collide as LazyColumn keys. */
     private fun appendSpliced(message: ChatMessage) {
         if (message.role != ChatMessage.Role.User) return
-        if (committed.any { it.id == message.id }) return
-        flatten(message)
+        if (message.id.isNotBlank()) {
+            if (committed.any { it.id == message.id }) return
+            flatten(message)
+            return
+        }
+        val text = message.parts.filterIsInstance<ChatMessage.Part.Text>().joinToString("\n") { it.text }
+        if (text.isBlank()) return
+        if (committed.filterIsInstance<ChatItem.UserMessage>().any { it.text == text }) return
+        committed += ChatItem.UserMessage("spliced_${syntheticSpliceCount++}", text)
     }
 
     /** Deltas extend the last live bubble; after a tool row a new bubble starts, so a

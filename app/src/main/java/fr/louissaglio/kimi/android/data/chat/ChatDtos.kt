@@ -15,7 +15,8 @@ data class MessageListData(
 
 @Serializable
 data class MessageDto(
-    val id: String,
+    // The steer echo splices the steered user message without an id (docs/server-api.md).
+    val id: String = "",
     val role: String = "",
     val content: List<ContentPartDto> = emptyList(),
 )
@@ -34,6 +35,12 @@ data class ContentPartDto(
 @Serializable
 data class SessionStatusData(
     val busy: Boolean = false,
+)
+
+/** `data` of the POST /prompts ack; on 0.27.0 `prompt_id` == `user_message_id`. */
+@Serializable
+data class PromptData(
+    @SerialName("prompt_id") val promptId: String = "",
 )
 
 /** Envelope of one WebSocket frame; [payload] is decoded per [type] by the repository. */

@@ -122,34 +122,77 @@ class ChatRepository @Inject constructor(
      */
     suspend fun sendPrompt(settings: ServerSettings, sessionId: String, text: String): Result<Unit> =
         withContext(Dispatchers.IO) {
-            val body = buildJsonObject {
-                putJsonArray("content") {
-                    addJsonObject {
-                        put("type", "text")
-                        put("text", text)
-                    }
-                }
-            }.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
-            val request = try {
-                Request.Builder()
-                    .url(settings.serverUrl.trim().trimEnd('/') + "/api/v1/sessions/$sessionId/prompts")
-                    .post(body)
-                    .build()
-            } catch (e: IllegalArgumentException) {
-                return@withContext Result.failure(DataError.InvalidUrl)
-            }
-            try {
-                client.newCall(request).execute().use { response ->
-                    when {
-                        response.code == 401 -> Result.failure(DataError.Auth)
-                        !response.isSuccessful -> Result.failure(DataError.Http(response.code))
-                        else -> parseAck(response.body?.string().orEmpty())
-                    }
-                }
-            } catch (e: IOException) {
-                Result.failure(DataError.Network(e))
-            }
+            postPrompt(settings, sessionId, text).map { }
         }
+
+    /**
+     * Steers a message into the running turn (docs/server-api.md, Steer): the prompt is
+     * posted as usual — while busy the server queues it — then `prompts:steer` injects the
+     * queued prompt into the active turn. The steered user message echoes over the
+     * WebSocket (context.spliced) like a regular one, so success carries no payload.
+     */
+    suspend fun steer(settings: ServerSettings, sessionId: String, text: String): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            val promptId = postPrompt(settings, sessionId, text)
+                .getOrElse { return@withContext Result.failure(it) }
+            postSteer(settings, sessionId, promptId)
+        }
+
+    /** POSTs the prompt and returns its id (queued while busy, running otherwise). */
+    private fun postPrompt(settings: ServerSettings, sessionId: String, text: String): Result<String> {
+        val body = buildJsonObject {
+            putJsonArray("content") {
+                addJsonObject {
+                    put("type", "text")
+                    put("text", text)
+                }
+            }
+        }.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+        val request = try {
+            Request.Builder()
+                .url(settings.serverUrl.trim().trimEnd('/') + "/api/v1/sessions/$sessionId/prompts")
+                .post(body)
+                .build()
+        } catch (e: IllegalArgumentException) {
+            return Result.failure(DataError.InvalidUrl)
+        }
+        return try {
+            client.newCall(request).execute().use { response ->
+                when {
+                    response.code == 401 -> Result.failure(DataError.Auth)
+                    !response.isSuccessful -> Result.failure(DataError.Http(response.code))
+                    else -> parsePromptAck(response.body?.string().orEmpty())
+                }
+            }
+        } catch (e: IOException) {
+            Result.failure(DataError.Network(e))
+        }
+    }
+
+    private fun postSteer(settings: ServerSettings, sessionId: String, promptId: String): Result<Unit> {
+        val body = buildJsonObject {
+            putJsonArray("prompt_ids") { add(promptId) }
+        }.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+        val request = try {
+            Request.Builder()
+                .url(settings.serverUrl.trim().trimEnd('/') + "/api/v1/sessions/$sessionId/prompts:steer")
+                .post(body)
+                .build()
+        } catch (e: IllegalArgumentException) {
+            return Result.failure(DataError.InvalidUrl)
+        }
+        return try {
+            client.newCall(request).execute().use { response ->
+                when {
+                    response.code == 401 -> Result.failure(DataError.Auth)
+                    !response.isSuccessful -> Result.failure(DataError.Http(response.code))
+                    else -> parseAck(response.body?.string().orEmpty())
+                }
+            }
+        } catch (e: IOException) {
+            Result.failure(DataError.Network(e))
+        }
+    }
 
     /**
      * Aborts the running turn (`POST /api/v1/sessions/{id}:abort`, docs/server-api.md).
@@ -430,6 +473,17 @@ class ChatRepository @Inject constructor(
         when {
             envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
             else -> Result.success(Unit)
+        }
+    } catch (e: SerializationException) {
+        Result.failure(DataError.MalformedResponse(e))
+    }
+
+    private fun parsePromptAck(body: String): Result<String> = try {
+        val envelope = json.decodeFromString<Envelope<PromptData>>(body)
+        when {
+            envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
+            envelope.data == null -> Result.failure(DataError.Api(envelope.code, "missing data"))
+            else -> Result.success(envelope.data.promptId)
         }
     } catch (e: SerializationException) {
         Result.failure(DataError.MalformedResponse(e))

@@ -31,14 +31,32 @@ and correcting it in one sentence. Wire protocol is documented by ticket 013
 
 ## Acceptance criteria
 
-- [ ] With a turn running, sending text from the composer issues
+- [x] With a turn running, sending text from the composer issues
   `prompts:steer` (unit-tested: repository records a POST to the steer path
   with the 013 body shape).
-- [ ] With the session idle, the composer still posts to `/prompts`
+  *(`ChatRepositoryTest.steer posts the prompt then steers the returned prompt
+  id into the turn`: POST `/prompts` with the text parts, then POST
+  `/prompts:steer` with `{"prompt_ids":["msg_1"]}` from the queued ack.
+  ViewModel level: `sending while busy steers the queued prompt into the
+  running turn` asserts both recorded requests end-to-end.)*
+- [x] With the session idle, the composer still posts to `/prompts`
   (unit-tested).
-- [ ] The steered message shows in the timeline within ~1 s while the turn
+  *(`ChatViewModelTest.sending while idle posts a plain prompt, not a steer`:
+  exactly one POST, to `/prompts`, no steer call; existing
+  `ChatRepositoryTest.sendPrompt …` cases unchanged and green.)*
+- [x] The steered message shows in the timeline within ~1 s while the turn
   continues (unit-tested at ViewModel level, as in 012).
-- [ ] `./gradlew :app:assembleDebug` succeeds with all unit tests green.
+  *(`ChatViewModelTest.steered message echo appears from the socket while the
+  turn continues`: id-less `context.spliced` frame → bubble in `items`, still
+  `isWorking`, no HTTP refetch. Parsing locked by
+  `ChatRepositoryTest.context spliced frame without a message id emits the
+  steered user message`; dedup/synthetic-key cases in `ChatTimelineTest`
+  (`id-less spliced steer echo commits once, deduped on the text`,
+  `id-less splices get distinct synthetic keys`,
+  `id-less splice already committed by a racing refetch is dropped`).)*
+- [x] `./gradlew :app:assembleDebug` succeeds with all unit tests green.
+  *(2026-07-20: 61 unit tests green — 10 new; assembleDebug successful; APK
+  on the file server.)*
 
 ## Out of scope
 

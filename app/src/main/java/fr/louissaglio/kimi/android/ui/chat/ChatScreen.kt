@@ -280,9 +280,10 @@ private fun ChatInputBar(
     onTextChange: (String) -> Unit,
     onSend: () -> Unit,
 ) {
-    // Sending is gated on an active turn (turn.started/turn.ended drive isWorking) and on
-    // blank input; the field itself stays editable so a message can be drafted mid-turn.
-    val canSend = text.isNotBlank() && !isSending && !isWorking
+    // The composer stays live mid-turn: while the agent works, the send action steers the
+    // message into the running turn instead of starting a new prompt (docs/server-api.md,
+    // Steer) — the button swaps to a Steer label so the user knows which one will fire.
+    val canSend = text.isNotBlank() && !isSending
     // imePadding docks the bar above the keyboard (the manifest sets adjustResize).
     Surface(modifier = Modifier.imePadding()) {
         Row(
@@ -298,18 +299,24 @@ private fun ChatInputBar(
                 modifier = Modifier
                     .weight(1f)
                     .semantics { contentDescription = "Message input" },
-                placeholder = { Text("Message Kimi…") },
+                placeholder = { Text(if (isWorking) "Steer the running turn…" else "Message Kimi…") },
                 // Grows with content up to 5 lines, then scrolls internally.
                 maxLines = 5,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                 keyboardActions = KeyboardActions(onSend = { if (canSend) onSend() }),
             )
-            FilledIconButton(
-                onClick = onSend,
-                enabled = canSend,
-                modifier = Modifier.semantics { contentDescription = "Send" },
-            ) {
-                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null)
+            if (isWorking) {
+                Button(onClick = onSend, enabled = canSend) {
+                    Text("Steer")
+                }
+            } else {
+                FilledIconButton(
+                    onClick = onSend,
+                    enabled = canSend,
+                    modifier = Modifier.semantics { contentDescription = "Send" },
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null)
+                }
             }
         }
     }
