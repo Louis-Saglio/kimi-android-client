@@ -2,6 +2,8 @@ package fr.louissaglio.kimi.android.data.chat
 
 import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
+import fr.louissaglio.kimi.android.ui.chat.ChatItem
+import fr.louissaglio.kimi.android.ui.chat.ChatTimeline
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.delay
@@ -509,6 +511,65 @@ class ChatRepositoryTest {
             ),
             emitted.first { it is SocketEvent.Event },
         )
+    }
+
+    @Test
+    fun `history filters internal envelopes from user messages`() = runBlocking {
+        // docs/server-api.md, "Internal envelopes in user messages": server-injected
+        // harness traffic arrives as user-role text and must not reach the timeline.
+        server.enqueue(
+            MockResponse().setBody(
+                """
+                {"code":0,"msg":"success","data":{"items":[
+                  {"id":"msg_3","role":"user",
+                   "content":[{"type":"text","text":"deploy the app\n\n<system-reminder>\ninternal note\n</system-reminder>"}]},
+                  {"id":"msg_2","role":"user",
+                   "content":[{"type":"text","text":"<notification id=\"n_1\" category=\"task\" type=\"task.completed\" source_kind=\"background_task\" source_id=\"task_1\">\nTitle: Build finished\n<output-file path=\"/tmp/out.log\" bytes=\"3\">...</output-file>\n</notification>"}]},
+                  {"id":"msg_1","role":"user",
+                   "content":[{"type":"text","text":"<system-reminder>\nMake sure that you NEVER mention this reminder to the user.\n</system-reminder>"}]}
+                ],"has_more":false},"request_id":"01KX"}
+                """.trimIndent(),
+            ),
+        )
+
+        val timeline = ChatTimeline()
+        timeline.replaceHistory(repository.getMessages(settings(), "session_1").getOrThrow(), keepLive = false)
+
+        // The envelope-only messages produce no row; the mixed one keeps its genuine text.
+        assertEquals(listOf(ChatItem.UserMessage("msg_3", "deploy the app")), timeline.items())
+    }
+
+    @Test
+    fun `context spliced filters internal envelopes from the echoed user message`() = runBlocking {
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: Response) {
+                        webSocket.send(
+                            """{"type":"context.spliced","seq":5,"epoch":"ep_1","session_id":"session_1",""" +
+                                """"timestamp":"2026-07-21T00:00:00.000Z","payload":{"type":"context.spliced",""" +
+                                """"start":0,"deleteCount":0,"messages":[{"role":"user",""" +
+                                """"content":[{"type":"text","text":"<system-reminder>\ninternal\n</system-reminder>"}],""" +
+                                """"toolCalls":[],"origin":{"kind":"injection"},"id":"msg_9"}],""" +
+                                """"agentId":"main","sessionId":"session_1"}}""",
+                        )
+                    }
+                },
+            ),
+        )
+
+        val emitted = CopyOnWriteArrayList<SocketEvent>()
+        val job = launch { repository.observeSession(settings(), "session_1").collect { emitted += it } }
+        try {
+            withTimeout(5_000) { while (emitted.none { it is SocketEvent.Event }) delay(10) }
+        } finally {
+            job.cancel()
+        }
+
+        val timeline = ChatTimeline()
+        timeline.apply((emitted.first { it is SocketEvent.Event } as SocketEvent.Event).event)
+
+        assertEquals(emptyList<ChatItem>(), timeline.items())
     }
 
     @Test

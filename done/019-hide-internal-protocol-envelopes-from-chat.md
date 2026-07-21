@@ -39,16 +39,16 @@ if he ever misses the information.
 
 ## Acceptance criteria
 
-- [ ] Unit test: a user message whose text is entirely a `<system-reminder>`
+- [x] Unit test: a user message whose text is entirely a `<system-reminder>`
   block produces no `ChatItem.UserMessage` row.
-- [ ] Unit test: a user message wrapping a `<notification …>` background-task
+- [x] Unit test: a user message wrapping a `<notification …>` background-task
   completion (payload shape as seen on-device) produces no row.
-- [ ] Unit test: a user message mixing genuine text with an envelope renders
+- [x] Unit test: a user message mixing genuine text with an envelope renders
   only the genuine text.
-- [ ] Unit test: the same filtering applies on the `context.spliced` path.
-- [ ] Manually verified against the live server: the session that showed the
+- [x] Unit test: the same filtering applies on the `context.spliced` path.
+- [x] Manually verified against the live server: the session that showed the
   leaked reminders no longer shows any envelope content.
-- [ ] `./gradlew :app:assembleDebug` succeeds, unit tests green.
+- [x] `./gradlew :app:assembleDebug` succeeds, unit tests green.
 
 ## Out of scope
 
@@ -67,3 +67,30 @@ client does.
 - `docs/server-api.md` does not document these envelopes yet; add a short
   paragraph there while touching this area (the nightly doc agent will keep
   it aligned).
+
+## Completion notes (2026-07-21)
+
+- The web client hides these messages by `metadata.origin` (whole-message
+  hiding); its only text-level strip is the image-compression caption.
+  Implemented as text-based stripping per the ticket: new pure
+  `InternalEnvelopes.strip()` in `data/chat`, invoked once in
+  `MessageDto.toDomain()` (`ChatRepository.kt`) so history, `context.spliced`
+  echoes, and any future path through that mapping are covered. Blank parts
+  are dropped at the boundary; `ChatTimeline`'s existing `isBlank` guards do
+  the rest — no timeline changes needed.
+- Tag set (from agent-core producers): `system-reminder`, `notification`,
+  `local-command-stdout`, `bash-input`, `bash-stdout`, `bash-stderr`,
+  `kimi-skill-loaded`, `cron-fire`, plus the inline
+  `<system>Image compressed…</system>` caption. The two fixed skill lead-in
+  sentences ("User activated the skill …", "Skill tool loaded instructions…")
+  are stripped with the block — found via live payloads, they would otherwise
+  survive as orphan bubbles.
+- Live verification: ran the filter over the newest-100 user messages of 5
+  real sessions (including the product-owner session from the screenshots) —
+  every envelope-only message strips to blank, genuine text untouched, zero
+  envelope residue.
+- Tests: 9 `InternalEnvelopesTest` + 2 new wire-level `ChatRepositoryTest`
+  (history + `context.spliced`, asserting on the resulting `ChatItem` rows).
+  47 unit tests green; APK published to the file server.
+- `docs/server-api.md` gained an "Internal envelopes in user messages"
+  section under Messages.

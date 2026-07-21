@@ -731,19 +731,28 @@ class ChatRepository @Inject constructor(
         },
     )
 
-    private fun MessageDto.toDomain(): ChatMessage = ChatMessage(
-        id = id,
-        role = when (role) {
+    private fun MessageDto.toDomain(): ChatMessage {
+        val domainRole = when (role) {
             "user" -> ChatMessage.Role.User
             "assistant" -> ChatMessage.Role.Assistant
             "tool" -> ChatMessage.Role.Tool
             else -> ChatMessage.Role.Other
-        },
-        parts = content.mapNotNull { it.toDomain() },
-    )
+        }
+        return ChatMessage(
+            id = id,
+            role = domainRole,
+            parts = content.mapNotNull { it.toDomain(stripEnvelopes = domainRole == ChatMessage.Role.User) },
+        )
+    }
 
-    private fun ContentPartDto.toDomain(): ChatMessage.Part? = when (type) {
-        "text" -> text?.let { ChatMessage.Part.Text(it) }
+    private fun ContentPartDto.toDomain(stripEnvelopes: Boolean): ChatMessage.Part? = when (type) {
+        // Internal envelopes are stripped here — the single domain boundary every
+        // ingestion path (history, context.spliced echoes) flows through. A part
+        // left blank is dropped so ChatTimeline never sees an empty bubble's text.
+        "text" -> text
+            ?.let { if (stripEnvelopes) InternalEnvelopes.strip(it) else it }
+            ?.takeIf { it.isNotBlank() }
+            ?.let { ChatMessage.Part.Text(it) }
         "thinking" -> thinking?.let { ChatMessage.Part.Thinking(it) }
         "tool_use" -> toolCallId?.let { ChatMessage.Part.ToolUse(it, toolName.orEmpty()) }
         "tool_result" -> toolCallId?.let { ChatMessage.Part.ToolResult(it, isError ?: false) }

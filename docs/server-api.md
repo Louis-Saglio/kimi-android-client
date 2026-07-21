@@ -221,6 +221,31 @@ types observed:
 An aborted turn commits an assistant message with **empty `content`** when the
 abort landed before any assistant text was produced.
 
+### Internal envelopes in user messages
+
+The server injects harness traffic into the transcript as **user-role text
+messages** wrapped in generated XML envelopes (agent-core `ContextMemory` /
+`renderNotificationXml` / `renderCronFireXml`). The web client hides them (by
+`metadata.origin` for whole messages); the app strips the envelope blocks from
+user text instead and drops the bubble when nothing remains (`InternalEnvelopes`).
+
+Observed tags, all paired with attributes allowed on the opening tag:
+
+- `<system-reminder>…</system-reminder>` — system reminders, hook outputs,
+  image-compression captions (older transcripts inline the caption as
+  `<system>Image compressed to fit model limits:…</system>` inside user text).
+- `<notification id="…" category="…" type="…" source_kind="…" source_id="…">…</notification>` —
+  background-task completions/failures; the body can nest `<output-file>` /
+  `<output-preview>` blocks.
+- `<local-command-stdout>…</local-command-stdout>`, `<bash-input>…</bash-input>`,
+  `<bash-stdout>…</bash-stdout><bash-stderr>…</bash-stderr>` — TUI shell
+  passthrough.
+- `<kimi-skill-loaded name="…" trigger="…">…</kimi-skill-loaded>` — skill
+  activation bodies (the web client surfaces only the invocation args).
+- `<cron-fire …><prompt>…</prompt></cron-fire>` — cron injections (the web
+  client renders the inner prompt as a dedicated cron turn; the app hides the
+  envelope entirely for now).
+
 ## Prompts
 
 ### Send — `POST /api/v1/sessions/{id}/prompts`
