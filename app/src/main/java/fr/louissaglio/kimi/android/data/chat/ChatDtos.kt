@@ -99,3 +99,43 @@ data class ToolInputDisplayDto(
 data class ApprovalResolvedPayload(
     @SerialName("approval_id") val approvalId: String = "",
 )
+
+/**
+ * `event.question.requested` payload (docs/server-api.md, Questions); the same
+ * shape comes back as items of `GET .../questions?status=pending`. `question_id`
+ * == `tool_call_id`; there is no v2 camelCase duplicate of this event family.
+ */
+@Serializable
+data class QuestionRequestedPayload(
+    @SerialName("question_id") val questionId: String = "",
+    val questions: List<QuestionItemDto> = emptyList(),
+)
+
+@Serializable
+data class QuestionItemDto(
+    val id: String = "",
+    val question: String = "",
+    val header: String = "",
+    val options: List<QuestionOptionDto> = emptyList(),
+    @SerialName("allow_other") val allowOther: Boolean = false,
+)
+
+@Serializable
+data class QuestionOptionDto(
+    val id: String = "",
+    val label: String = "",
+    // Omitted when the option has none.
+    val description: String? = null,
+)
+
+/** Shared shape of `event.question.answered` and `event.question.dismissed`: only the id is consumed. */
+@Serializable
+data class QuestionResolvedPayload(
+    @SerialName("question_id") val questionId: String = "",
+)
+
+/** `data` of `GET .../questions?status=pending`. */
+@Serializable
+data class QuestionListData(
+    val items: List<QuestionRequestedPayload> = emptyList(),
+)

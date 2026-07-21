@@ -23,8 +23,10 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
@@ -59,6 +61,14 @@ sealed interface SessionEvent {
 
     /** The request was decided — by this client or another one (event.approval.resolved). */
     data class ApprovalResolved(val approvalId: String) : SessionEvent
+
+    /** The agent asks the user a structured question (event.question.requested); the
+     * payload carries the full question inline — there is no detail endpoint to fetch. */
+    data class QuestionRequested(val question: PendingQuestion) : SessionEvent
+
+    /** The question was answered or dismissed — by this client or another one
+     * (event.question.answered / event.question.dismissed share the consumed shape). */
+    data class QuestionResolved(val questionId: String) : SessionEvent
 }
 
 /** What the socket reports to the collector: connection lifecycle + session events. */
@@ -259,6 +269,125 @@ class ChatRepository @Inject constructor(
         }
     }
 
+    /**
+     * Polls the pending questions of the session
+     * (`GET /api/v1/sessions/{id}/questions?status=pending`, docs/server-api.md) — the
+     * source of truth used to re-derive the pending question after a reconnect or a
+     * history refetch, since `GET .../questions/{qid}` does not exist.
+     */
+    suspend fun getPendingQuestions(settings: ServerSettings, sessionId: String): Result<List<PendingQuestion>> =
+        withContext(Dispatchers.IO) {
+            val request = try {
+                Request.Builder()
+                    .url(
+                        settings.serverUrl.trim().trimEnd('/') +
+                            "/api/v1/sessions/$sessionId/questions?status=pending",
+                    )
+                    .build()
+            } catch (e: IllegalArgumentException) {
+                return@withContext Result.failure(DataError.InvalidUrl)
+            }
+            try {
+                client.newCall(request).execute().use { response ->
+                    when {
+                        response.code == 401 -> Result.failure(DataError.Auth)
+                        !response.isSuccessful -> Result.failure(DataError.Http(response.code))
+                        else -> parsePendingQuestions(response.body?.string().orEmpty())
+                    }
+                }
+            } catch (e: IOException) {
+                Result.failure(DataError.Network(e))
+            }
+        }
+
+    /**
+     * Posts the user's answers for one question
+     * (`POST /api/v1/sessions/{id}/questions/{questionId}`, docs/server-api.md): keys are
+     * the per-question item ids, values carry `kind` plus `option_id` or `text`. The ack
+     * only confirms the answers were registered; the pending UI clears when the
+     * `event.question.answered` frame arrives over the WebSocket.
+     */
+    suspend fun answerQuestion(
+        settings: ServerSettings,
+        sessionId: String,
+        questionId: String,
+        answers: List<QuestionAnswer>,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        val body = buildJsonObject {
+            putJsonObject("answers") {
+                for (answer in answers) {
+                    putJsonObject(answer.itemId) {
+                        when (answer) {
+                            is QuestionAnswer.OptionPick -> {
+                                put("kind", "single")
+                                put("option_id", answer.optionId)
+                            }
+                            is QuestionAnswer.Other -> {
+                                put("kind", "other")
+                                put("text", answer.text)
+                            }
+                        }
+                    }
+                }
+            }
+        }.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+        val request = try {
+            Request.Builder()
+                .url(settings.serverUrl.trim().trimEnd('/') + "/api/v1/sessions/$sessionId/questions/$questionId")
+                .post(body)
+                .build()
+        } catch (e: IllegalArgumentException) {
+            return@withContext Result.failure(DataError.InvalidUrl)
+        }
+        try {
+            client.newCall(request).execute().use { response ->
+                when {
+                    response.code == 401 -> Result.failure(DataError.Auth)
+                    !response.isSuccessful -> Result.failure(DataError.Http(response.code))
+                    else -> parseAck(response.body?.string().orEmpty())
+                }
+            }
+        } catch (e: IOException) {
+            Result.failure(DataError.Network(e))
+        }
+    }
+
+    /**
+     * Dismisses one pending question (`POST /api/v1/sessions/{id}/questions/{questionId}:dismiss`,
+     * docs/server-api.md). Beware: a successful dismiss comes back with the non-zero
+     * envelope code 40909 — success is `data.dismissed`, not `code == 0`. The pending UI
+     * clears when the `event.question.dismissed` frame arrives over the WebSocket.
+     */
+    suspend fun dismissQuestion(
+        settings: ServerSettings,
+        sessionId: String,
+        questionId: String,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        val body = "{}".toRequestBody("application/json; charset=utf-8".toMediaType())
+        val request = try {
+            Request.Builder()
+                .url(
+                    settings.serverUrl.trim().trimEnd('/') +
+                        "/api/v1/sessions/$sessionId/questions/$questionId:dismiss",
+                )
+                .post(body)
+                .build()
+        } catch (e: IllegalArgumentException) {
+            return@withContext Result.failure(DataError.InvalidUrl)
+        }
+        try {
+            client.newCall(request).execute().use { response ->
+                when {
+                    response.code == 401 -> Result.failure(DataError.Auth)
+                    !response.isSuccessful -> Result.failure(DataError.Http(response.code))
+                    else -> parseDismissAck(response.body?.string().orEmpty())
+                }
+            }
+        } catch (e: IOException) {
+            Result.failure(DataError.Network(e))
+        }
+    }
+
     /** Lightweight live status (`GET /api/v1/sessions/{id}/status`): true when the session is mid-turn. */
     suspend fun isSessionRunning(settings: ServerSettings, sessionId: String): Result<Boolean> =
         withContext(Dispatchers.IO) {
@@ -428,6 +557,11 @@ class ChatRepository @Inject constructor(
                 ?.let { onEvent(SessionEvent.ApprovalRequested(it.approvalId, it.toolName, it.summary())) }
             "event.approval.resolved" -> frame.decodePayload<ApprovalResolvedPayload>()
                 ?.let { onEvent(SessionEvent.ApprovalResolved(it.approvalId)) }
+            "event.question.requested" -> frame.decodePayload<QuestionRequestedPayload>()
+                ?.let { onEvent(SessionEvent.QuestionRequested(it.toDomain())) }
+            "event.question.answered", "event.question.dismissed" ->
+                frame.decodePayload<QuestionResolvedPayload>()
+                    ?.let { onEvent(SessionEvent.QuestionResolved(it.questionId)) }
             "turn.started" -> onEvent(SessionEvent.TurnStarted)
             "turn.ended" -> onEvent(SessionEvent.TurnEnded(frame.decodePayload<TurnEndedPayload>()?.reason.orEmpty()))
             "prompt.submitted" -> onEvent(SessionEvent.PromptSubmitted)
@@ -478,6 +612,29 @@ class ChatRepository @Inject constructor(
         Result.failure(DataError.MalformedResponse(e))
     }
 
+    /** Dismiss acks succeed with envelope code 40909 (docs/server-api.md): gate on `data.dismissed`. */
+    private fun parseDismissAck(body: String): Result<Unit> = try {
+        val envelope = json.decodeFromString<Envelope<JsonObject>>(body)
+        val dismissed = envelope.data?.get("dismissed")?.jsonPrimitive?.booleanOrNull == true
+        when {
+            envelope.code == 0 || dismissed -> Result.success(Unit)
+            else -> Result.failure(DataError.Api(envelope.code, envelope.msg))
+        }
+    } catch (e: SerializationException) {
+        Result.failure(DataError.MalformedResponse(e))
+    }
+
+    private fun parsePendingQuestions(body: String): Result<List<PendingQuestion>> = try {
+        val envelope = json.decodeFromString<Envelope<QuestionListData>>(body)
+        when {
+            envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
+            envelope.data == null -> Result.failure(DataError.Api(envelope.code, "missing data"))
+            else -> Result.success(envelope.data.items.map { it.toDomain() })
+        }
+    } catch (e: SerializationException) {
+        Result.failure(DataError.MalformedResponse(e))
+    }
+
     private fun parsePromptAck(body: String): Result<String> = try {
         val envelope = json.decodeFromString<Envelope<PromptData>>(body)
         when {
@@ -503,6 +660,19 @@ class ChatRepository @Inject constructor(
 
     private fun ApprovalRequestedPayload.summary(): String =
         toolInputDisplay?.command?.takeIf { it.isNotBlank() } ?: action
+
+    private fun QuestionRequestedPayload.toDomain(): PendingQuestion = PendingQuestion(
+        questionId = questionId,
+        items = questions.map { item ->
+            PendingQuestion.Item(
+                id = item.id,
+                header = item.header,
+                text = item.question,
+                options = item.options.map { PendingQuestion.Option(it.id, it.label, it.description) },
+                allowOther = item.allowOther,
+            )
+        },
+    )
 
     private fun MessageDto.toDomain(): ChatMessage = ChatMessage(
         id = id,

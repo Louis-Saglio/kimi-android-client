@@ -369,4 +369,186 @@ class ChatRepositoryTest {
             emitted.first { it is SocketEvent.Event },
         )
     }
+
+    @Test
+    fun `question frames emit the requested question then the resolved id`() = runBlocking {
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: Response) {
+                        // Verbatim 0.27.0 shapes (docs/server-api.md, "Core event payloads").
+                        webSocket.send(
+                            """{"type":"event.question.requested","seq":9,"epoch":"ep_1","session_id":"session_1",""" +
+                                """"timestamp":"2026-07-20T06:06:49.808Z","payload":{"type":"event.question.requested",""" +
+                                """"question_id":"tool_mU6ITagcpKjwSyiUKLHPZYWw","session_id":"session_1","turn_id":0,""" +
+                                """"tool_call_id":"tool_mU6ITagcpKjwSyiUKLHPZYWw",""" +
+                                """"questions":[{"id":"q_0","question":"Red or blue?","header":"Color",""" +
+                                """"options":[{"id":"opt_0_0","label":"red","description":"warm color"},""" +
+                                """{"id":"opt_0_1","label":"blue","description":"cool color"}],"allow_other":true}],""" +
+                                """"created_at":"2026-07-20T06:06:49.808Z","agentId":"main","sessionId":"session_1"}}""",
+                        )
+                        webSocket.send(
+                            """{"type":"event.question.answered","seq":11,"epoch":"ep_1","session_id":"session_1",""" +
+                                """"timestamp":"2026-07-20T06:08:12.548Z","payload":{"type":"event.question.answered",""" +
+                                """"question_id":"tool_mU6ITagcpKjwSyiUKLHPZYWw","answers":{"Red or blue?":"blue"},""" +
+                                """"resolved_at":"2026-07-20T06:08:12.548Z","agentId":"main","sessionId":"session_1"}}""",
+                        )
+                        webSocket.send(
+                            """{"type":"event.question.dismissed","seq":28,"epoch":"ep_1","session_id":"session_1",""" +
+                                """"timestamp":"2026-07-20T06:12:37.844Z","payload":{"type":"event.question.dismissed",""" +
+                                """"question_id":"tool_TThzzORvQB8tHTKyLhIL5bQt","dismissed_at":"2026-07-20T06:12:37.844Z",""" +
+                                """"agentId":"main","sessionId":"session_1"}}""",
+                        )
+                    }
+                },
+            ),
+        )
+
+        val emitted = CopyOnWriteArrayList<SocketEvent>()
+        val job = launch { repository.observeSession(settings(), "session_1").collect { emitted += it } }
+        try {
+            withTimeout(5_000) { while (emitted.count { it is SocketEvent.Event } < 3) delay(10) }
+        } finally {
+            job.cancel()
+        }
+
+        val events = emitted.filterIsInstance<SocketEvent.Event>().map { it.event }
+        assertEquals(
+            SessionEvent.QuestionRequested(
+                PendingQuestion(
+                    questionId = "tool_mU6ITagcpKjwSyiUKLHPZYWw",
+                    items = listOf(
+                        PendingQuestion.Item(
+                            id = "q_0",
+                            header = "Color",
+                            text = "Red or blue?",
+                            options = listOf(
+                                PendingQuestion.Option("opt_0_0", "red", "warm color"),
+                                PendingQuestion.Option("opt_0_1", "blue", "cool color"),
+                            ),
+                            allowOther = true,
+                        ),
+                    ),
+                ),
+            ),
+            events[0],
+        )
+        assertEquals(SessionEvent.QuestionResolved("tool_mU6ITagcpKjwSyiUKLHPZYWw"), events[1])
+        assertEquals(SessionEvent.QuestionResolved("tool_TThzzORvQB8tHTKyLhIL5bQt"), events[2])
+    }
+
+    @Test
+    fun `getPendingQuestions parses the poll list`() = runBlocking {
+        server.enqueue(
+            MockResponse().setBody(
+                """
+                {"code":0,"msg":"success","data":{"items":[
+                  {"type":"event.question.requested","question_id":"tool_q1","session_id":"session_1",
+                   "turn_id":0,"tool_call_id":"tool_q1",
+                   "questions":[{"id":"q_0","question":"Red or blue?","header":"Color",
+                                 "options":[{"id":"opt_0_0","label":"red"},
+                                            {"id":"opt_0_1","label":"blue","description":"cool color"}],
+                                 "allow_other":true}],
+                   "created_at":"2026-07-20T06:06:49.808Z","agentId":"main","sessionId":"session_1"}
+                ]},"request_id":"01KX"}
+                """.trimIndent(),
+            ),
+        )
+
+        val result = repository.getPendingQuestions(settings(), "session_1")
+
+        assertEquals("/api/v1/sessions/session_1/questions?status=pending", server.takeRequest().path)
+        assertEquals(
+            listOf(
+                PendingQuestion(
+                    questionId = "tool_q1",
+                    items = listOf(
+                        PendingQuestion.Item(
+                            id = "q_0",
+                            header = "Color",
+                            text = "Red or blue?",
+                            options = listOf(
+                                PendingQuestion.Option("opt_0_0", "red", null),
+                                PendingQuestion.Option("opt_0_1", "blue", "cool color"),
+                            ),
+                            allowOther = true,
+                        ),
+                    ),
+                ),
+            ),
+            result.getOrThrow(),
+        )
+    }
+
+    @Test
+    fun `answerQuestion posts the per-item answers keyed by item id`() = runBlocking {
+        server.enqueue(
+            MockResponse().setBody(
+                """{"code":0,"msg":"success","data":{"resolved":true,"resolved_at":"2026-07-20T06:08:12.548Z"},"request_id":"01KX"}""",
+            ),
+        )
+
+        val result = repository.answerQuestion(
+            settings(),
+            "session_1",
+            "tool_q1",
+            listOf(
+                QuestionAnswer.OptionPick("q_0", "opt_0_1"),
+                QuestionAnswer.Other("q_1", "ramen"),
+            ),
+        )
+
+        assertTrue(result.isSuccess)
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/sessions/session_1/questions/tool_q1", request.path)
+        assertEquals(
+            """{"answers":{"q_0":{"kind":"single","option_id":"opt_0_1"},"q_1":{"kind":"other","text":"ramen"}}}""",
+            request.body.readUtf8(),
+        )
+    }
+
+    @Test
+    fun `answerQuestion maps an already-resolved question to Api error`() = runBlocking {
+        server.enqueue(
+            MockResponse().setBody("""{"code":40405,"msg":"question tool_q1 not found","data":null,"request_id":"01KX"}"""),
+        )
+
+        val result = repository.answerQuestion(
+            settings(), "session_1", "tool_q1", listOf(QuestionAnswer.OptionPick("q_0", "opt_0_1")),
+        )
+
+        assertTrue(result.exceptionOrNull() is DataError.Api)
+    }
+
+    @Test
+    fun `dismissQuestion treats the 40909 envelope as success`() = runBlocking {
+        // docs/server-api.md: a successful dismiss is HTTP 200 with the non-zero code
+        // 40909 — success is data.dismissed, not code == 0.
+        server.enqueue(
+            MockResponse().setBody(
+                """{"code":40909,"msg":"question tool_q1 dismissed",""" +
+                    """"data":{"dismissed":true,"dismissed_at":"2026-07-20T06:17:24.711Z"},"request_id":"01KX"}""",
+            ),
+        )
+
+        val result = repository.dismissQuestion(settings(), "session_1", "tool_q1")
+
+        assertTrue(result.isSuccess)
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/sessions/session_1/questions/tool_q1:dismiss", request.path)
+        assertEquals("{}", request.body.readUtf8())
+    }
+
+    @Test
+    fun `dismissQuestion maps an already-resolved question to Api error`() = runBlocking {
+        server.enqueue(
+            MockResponse().setBody("""{"code":40405,"msg":"question tool_q1 not found","data":null,"request_id":"01KX"}"""),
+        )
+
+        val result = repository.dismissQuestion(settings(), "session_1", "tool_q1")
+
+        assertTrue(result.exceptionOrNull() is DataError.Api)
+    }
 }

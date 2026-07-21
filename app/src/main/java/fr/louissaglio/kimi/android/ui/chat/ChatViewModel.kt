@@ -6,6 +6,8 @@ import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
+import fr.louissaglio.kimi.android.data.chat.PendingQuestion
+import fr.louissaglio.kimi.android.data.chat.QuestionAnswer
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.SocketEvent
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
@@ -47,7 +49,19 @@ class ChatViewModel @Inject constructor(
         val isSending: Boolean = false,
         /** Approval queue in arrival order; the card shows the head and the size. */
         val pendingApprovals: List<PendingApproval> = emptyList(),
-    )
+        /** Question queue in arrival order; the card shows the head and the size. */
+        val pendingQuestions: List<PendingQuestion> = emptyList(),
+        /** Draft answers for the head question: item id → picked option id. */
+        val questionSelections: Map<String, String> = emptyMap(),
+        /** Draft free-text answers for the head question: item id → typed text. */
+        val questionOtherTexts: Map<String, String> = emptyMap(),
+    ) {
+        /** True when every item of the head question has an answer (option picked or other text). */
+        val isQuestionSubmittable: Boolean
+            get() = pendingQuestions.firstOrNull()?.items?.all { item ->
+                questionOtherTexts[item.id]?.isNotBlank() == true || questionSelections.containsKey(item.id)
+            } == true
+    }
 
     sealed interface Effect {
         data class RefreshFailed(val message: String) : Effect
@@ -60,6 +74,9 @@ class ChatViewModel @Inject constructor(
 
         /** The card stays up: with no resolved event coming, the request is still pending. */
         data class ApprovalFailed(val message: String) : Effect
+
+        /** Same contract as approvals: no resolved event, the question card stays up. */
+        data class QuestionFailed(val message: String) : Effect
     }
 
     private val _uiState = MutableStateFlow(UiState())
@@ -76,6 +93,7 @@ class ChatViewModel @Inject constructor(
      * app returns to the foreground, which is the re-sync path after an OS-level drop. */
     fun onScreenStarted() {
         refreshHistory(clearLive = false)
+        refreshPendingQuestions()
         seedWorkingState()
         startSocket()
     }
@@ -151,6 +169,47 @@ class ChatViewModel @Inject constructor(
         }
     }
 
+    /** Picks (or re-picks) the option answering one item of the head question. */
+    fun onQuestionOptionPicked(itemId: String, optionId: String) {
+        _uiState.update { it.copy(questionSelections = it.questionSelections + (itemId to optionId)) }
+    }
+
+    /** Free-text answer for one item (only rendered when the item allows it). A non-blank
+     * text wins over a picked option for that item. */
+    fun onQuestionOtherTextChange(itemId: String, text: String) {
+        _uiState.update { it.copy(questionOtherTexts = it.questionOtherTexts + (itemId to text)) }
+    }
+
+    /** POSTs the drafted answers for the head question. No-ops while an item is
+     * unanswered. The card clears on the server's question.answered event — for our own
+     * answers too — so a failed POST leaves the card up and only reports the error. */
+    fun onSubmitQuestion() {
+        val state = _uiState.value
+        val question = state.pendingQuestions.firstOrNull() ?: return
+        if (!state.isQuestionSubmittable) return
+        val answers = question.items.map { item ->
+            state.questionOtherTexts[item.id]?.takeIf { it.isNotBlank() }
+                ?.let { QuestionAnswer.Other(item.id, it.trim()) }
+                ?: QuestionAnswer.OptionPick(item.id, state.questionSelections.getValue(item.id))
+        }
+        viewModelScope.launch {
+            chatRepository.answerQuestion(
+                settingsRepository.current(), sessionId, question.questionId, answers,
+            ).onFailure { error -> _effects.send(Effect.QuestionFailed(error.toUserMessage())) }
+        }
+    }
+
+    /** POSTs `:dismiss` for the head question; the card clears on the server's
+     * question.dismissed event, so a failed POST leaves the card up. */
+    fun onDismissQuestion() {
+        val question = _uiState.value.pendingQuestions.firstOrNull() ?: return
+        viewModelScope.launch {
+            chatRepository.dismissQuestion(
+                settingsRepository.current(), sessionId, question.questionId,
+            ).onFailure { error -> _effects.send(Effect.QuestionFailed(error.toUserMessage())) }
+        }
+    }
+
     private fun startSocket() {
         socketJob?.cancel()
         socketJob = viewModelScope.launch {
@@ -165,6 +224,7 @@ class ChatViewModel @Inject constructor(
                                 // The cursor resume replays missed events; the refetch
                                 // heals anything beyond the server's replay buffer.
                                 refreshHistory(clearLive = false)
+                                refreshPendingQuestions()
                             }
                             SocketEvent.Disconnected ->
                                 _uiState.update { it.copy(isReconnecting = true) }
@@ -186,10 +246,13 @@ class ChatViewModel @Inject constructor(
                 _uiState.update { it.copy(isWorking = true, items = timeline.items()) }
             }
             is SessionEvent.TurnEnded -> {
-                // A turn that ends takes its pending approvals with it (e.g. abort).
+                // A turn that ends takes its pending approvals with it (e.g. abort) — but
+                // not its questions: a pending question survives turn.ended and is
+                // re-derived from the questions endpoint instead of being cleared here.
                 _uiState.update { it.copy(isWorking = false, pendingApprovals = emptyList()) }
                 // Replace live rows with the canonical committed turn.
                 refreshHistory(clearLive = true)
+                refreshPendingQuestions()
             }
             SessionEvent.PromptSubmitted ->
                 // Pick up the new user message (the event carries no text).
@@ -206,6 +269,21 @@ class ChatViewModel @Inject constructor(
             is SessionEvent.ApprovalResolved ->
                 _uiState.update {
                     it.copy(pendingApprovals = it.pendingApprovals.filterNot { a -> a.approvalId == event.approvalId })
+                }
+            is SessionEvent.QuestionRequested ->
+                _uiState.update {
+                    // Deduped: a reconnect replay must not queue the same request twice.
+                    it.copy(
+                        pendingQuestions = it.pendingQuestions
+                            .filterNot { q -> q.questionId == event.question.questionId } +
+                            event.question,
+                    ).prunedQuestionDrafts()
+                }
+            is SessionEvent.QuestionResolved ->
+                _uiState.update {
+                    it.copy(
+                        pendingQuestions = it.pendingQuestions.filterNot { q -> q.questionId == event.questionId },
+                    ).prunedQuestionDrafts()
                 }
             else -> {
                 timeline.apply(event)
@@ -231,6 +309,30 @@ class ChatViewModel @Inject constructor(
                     }
                 }
         }
+    }
+
+    /**
+     * Re-derives the pending questions from the questions endpoint (the documented
+     * source of truth, docs/server-api.md): runs on screen start, reconnect, and
+     * turn.ended so the card survives history refetches and heals after an abort.
+     * A failure leaves the current state untouched.
+     */
+    private fun refreshPendingQuestions() {
+        viewModelScope.launch {
+            chatRepository.getPendingQuestions(settingsRepository.current(), sessionId)
+                .onSuccess { questions ->
+                    _uiState.update { it.copy(pendingQuestions = questions).prunedQuestionDrafts() }
+                }
+        }
+    }
+
+    /** Drops draft answers whose item id belongs to no pending question anymore. */
+    private fun UiState.prunedQuestionDrafts(): UiState {
+        val itemIds = pendingQuestions.flatMap { q -> q.items.map { item -> item.id } }.toSet()
+        return copy(
+            questionSelections = questionSelections.filterKeys { it in itemIds },
+            questionOtherTexts = questionOtherTexts.filterKeys { it in itemIds },
+        )
     }
 
     /** Seeds the working indicator when opening a session that is already mid-turn

@@ -1,6 +1,7 @@
 package fr.louissaglio.kimi.android.ui.chat
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,6 +34,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
@@ -59,6 +61,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 
 @Composable
@@ -85,6 +88,8 @@ fun ChatScreen(
                 }
                 is ChatViewModel.Effect.ApprovalFailed ->
                     snackbarHostState.showSnackbar(effect.message)
+                is ChatViewModel.Effect.QuestionFailed ->
+                    snackbarHostState.showSnackbar(effect.message)
                 is ChatViewModel.Effect.AbortFailed ->
                     snackbarHostState.showSnackbar(effect.message)
             }
@@ -104,6 +109,10 @@ fun ChatScreen(
         onStop = viewModel::onStop,
         onAllow = viewModel::onAllow,
         onDeny = viewModel::onDeny,
+        onQuestionOptionPicked = viewModel::onQuestionOptionPicked,
+        onQuestionOtherTextChange = viewModel::onQuestionOtherTextChange,
+        onSubmitQuestion = viewModel::onSubmitQuestion,
+        onDismissQuestion = viewModel::onDismissQuestion,
     )
 }
 
@@ -120,6 +129,10 @@ private fun ChatContent(
     onStop: () -> Unit,
     onAllow: () -> Unit,
     onDeny: () -> Unit,
+    onQuestionOptionPicked: (itemId: String, optionId: String) -> Unit,
+    onQuestionOtherTextChange: (itemId: String, text: String) -> Unit,
+    onSubmitQuestion: () -> Unit,
+    onDismissQuestion: () -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -166,6 +179,21 @@ private fun ChatContent(
                         queueSize = uiState.pendingApprovals.size,
                         onAllow = onAllow,
                         onDeny = onDeny,
+                    )
+                }
+                // Questions are input, not a yes/no guard: the card collects the
+                // answers and stays until the matching question.answered/dismissed event.
+                uiState.pendingQuestions.firstOrNull()?.let { question ->
+                    QuestionCard(
+                        question = question,
+                        queueSize = uiState.pendingQuestions.size,
+                        selections = uiState.questionSelections,
+                        otherTexts = uiState.questionOtherTexts,
+                        isSubmittable = uiState.isQuestionSubmittable,
+                        onOptionPicked = onQuestionOptionPicked,
+                        onOtherTextChange = onQuestionOtherTextChange,
+                        onSubmit = onSubmitQuestion,
+                        onDismiss = onDismissQuestion,
                     )
                 }
                 ChatInputBar(
@@ -267,6 +295,86 @@ private fun ApprovalCard(
             ) {
                 OutlinedButton(onClick = onDeny) { Text("Deny") }
                 Button(onClick = onAllow) { Text("Allow") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun QuestionCard(
+    question: PendingQuestion,
+    queueSize: Int,
+    selections: Map<String, String>,
+    otherTexts: Map<String, String>,
+    isSubmittable: Boolean,
+    onOptionPicked: (itemId: String, optionId: String) -> Unit,
+    onOtherTextChange: (itemId: String, text: String) -> Unit,
+    onSubmit: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = buildString {
+                    append("Question from Kimi")
+                    if (queueSize > 1) append(" — 1 of $queueSize")
+                },
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+            )
+            question.items.forEach { item ->
+                if (item.header.isNotBlank()) {
+                    Text(text = item.header, style = MaterialTheme.typography.labelMedium)
+                }
+                Text(text = item.text, style = MaterialTheme.typography.titleSmall)
+                item.options.forEach { option ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { onOptionPicked(item.id, option.id) },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(
+                            selected = selections[item.id] == option.id,
+                            onClick = { onOptionPicked(item.id, option.id) },
+                        )
+                        Column {
+                            Text(text = option.label, style = MaterialTheme.typography.bodyMedium)
+                            option.description?.takeIf { it.isNotBlank() }?.let {
+                                Text(
+                                    text = it,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+                if (item.allowOther) {
+                    OutlinedTextField(
+                        value = otherTexts[item.id].orEmpty(),
+                        onValueChange = { onOtherTextChange(item.id, it) },
+                        modifier = Modifier.fillMaxWidth(),
+                        placeholder = { Text("Other answer…") },
+                        singleLine = true,
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+            ) {
+                OutlinedButton(onClick = onDismiss) { Text("Dismiss") }
+                Button(onClick = onSubmit, enabled = isSubmittable) { Text("Submit") }
             }
         }
     }
@@ -430,6 +538,24 @@ private fun ChatContentPreview() {
                     ChatViewModel.PendingApproval("ap_1", "Bash", "echo hello-from-spike"),
                     ChatViewModel.PendingApproval("ap_2", "Write", "Writing /tmp/spike/notes.txt"),
                 ),
+                pendingQuestions = listOf(
+                    PendingQuestion(
+                        questionId = "tool_q1",
+                        items = listOf(
+                            PendingQuestion.Item(
+                                id = "q_0",
+                                header = "Color",
+                                text = "Red or blue?",
+                                options = listOf(
+                                    PendingQuestion.Option("opt_0_0", "red", "warm color"),
+                                    PendingQuestion.Option("opt_0_1", "blue", "cool color"),
+                                ),
+                                allowOther = true,
+                            ),
+                        ),
+                    ),
+                ),
+                questionSelections = mapOf("q_0" to "opt_0_1"),
             ),
             sessionId = "session_86df049a-e22b-480e-842e-488b77c5469b",
             snackbarHostState = remember { SnackbarHostState() },
@@ -440,6 +566,10 @@ private fun ChatContentPreview() {
             onStop = {},
             onAllow = {},
             onDeny = {},
+            onQuestionOptionPicked = { _, _ -> },
+            onQuestionOtherTextChange = { _, _ -> },
+            onSubmitQuestion = {},
+            onDismissQuestion = {},
         )
     }
 }
