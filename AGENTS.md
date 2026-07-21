@@ -39,3 +39,10 @@ agent re-verifies the wire protocol, rewrites `docs/server-api.md`, files
 `docs/server-api.md` is the protocol reference — keep it accurate when
 touching the data layer, and keep `scripts/protocol-update-prompt.md` aligned
 with the doc's structure.
+
+## Web client source reference
+
+The Kimi Code web client source is available at
+<https://github.com/MoonshotAI/kimi-code> in the `apps/kimi-web` folder. It can
+be useful for understanding the HTTP + WebSocket API or for checking what
+changed between two server versions.
