@@ -63,6 +63,7 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.hilt.navigation.compose)
+    implementation(libs.mikepenz.markdown.renderer.m3)
 
     testImplementation(libs.junit)
     testImplementation(libs.mockwebserver)

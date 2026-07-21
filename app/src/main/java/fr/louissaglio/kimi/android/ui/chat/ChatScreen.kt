@@ -31,6 +31,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -61,6 +62,9 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.mikepenz.markdown.m3.Markdown
+import com.mikepenz.markdown.m3.markdownColor
+import com.mikepenz.markdown.m3.markdownTypography
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 
@@ -430,25 +434,45 @@ private fun ChatInputBar(
     }
 }
 
+/**
+ * Message-body markdown (ticket 020). One library, naive: it re-parses on every
+ * recomposition, which is what streaming bubbles cost — memoization is ticket 021.
+ * Body style and color track the bubble so text keeps the pre-markdown look.
+ */
 @Composable
-private fun UserBubble(message: ChatItem.UserMessage) {
+private fun MarkdownBody(text: String, modifier: Modifier = Modifier) {
+    Markdown(
+        content = text,
+        modifier = modifier,
+        colors = markdownColor(text = LocalContentColor.current),
+        typography = markdownTypography(
+            text = MaterialTheme.typography.bodyMedium,
+            paragraph = MaterialTheme.typography.bodyMedium,
+            ordered = MaterialTheme.typography.bodyMedium,
+            bullet = MaterialTheme.typography.bodyMedium,
+            list = MaterialTheme.typography.bodyMedium,
+        ),
+    )
+}
+
+@Composable
+internal fun UserBubble(message: ChatItem.UserMessage) {
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
         Surface(
             modifier = Modifier.widthIn(max = 320.dp),
             color = MaterialTheme.colorScheme.primaryContainer,
             shape = RoundedCornerShape(12.dp),
         ) {
-            Text(
+            MarkdownBody(
                 text = message.text,
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                style = MaterialTheme.typography.bodyMedium,
             )
         }
     }
 }
 
 @Composable
-private fun AssistantBubble(message: ChatItem.AssistantMessage) {
+internal fun AssistantBubble(message: ChatItem.AssistantMessage) {
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
         Surface(
             modifier = Modifier.widthIn(max = 320.dp),
@@ -466,7 +490,7 @@ private fun AssistantBubble(message: ChatItem.AssistantMessage) {
                     if (message.text.isNotBlank()) Spacer(Modifier.size(6.dp))
                 }
                 if (message.text.isNotBlank()) {
-                    Text(text = message.text, style = MaterialTheme.typography.bodyMedium)
+                    MarkdownBody(text = message.text)
                 }
             }
         }
@@ -525,8 +549,16 @@ private fun ChatContentPreview() {
             uiState = ChatViewModel.UiState(
                 isLoading = false,
                 items = listOf(
-                    ChatItem.UserMessage("msg_1", "Reply with exactly: ok"),
-                    ChatItem.AssistantMessage("msg_2", "ok", thinking = "Short reply requested."),
+                    ChatItem.UserMessage("msg_1", "Why did the build fail? Reply **briefly**."),
+                    ChatItem.AssistantMessage(
+                        "msg_2",
+                        "### Root cause\n\nMissing `Content-Type` header in `PostRequest`.\n\n" +
+                            "- Add the header\n- Retry the call\n\n" +
+                            "1. First check logs\n2. Then retry\n\n" +
+                            "See [the docs](https://example.com/docs) for details.\n\n" +
+                            "```\ncurl -X POST /retry\n```",
+                        thinking = "Let me look at the failure output.",
+                    ),
                     ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done),
                     ChatItem.AssistantMessage("live_0", "Streaming reply…", thinking = ""),
                     ChatItem.ToolActivity("tool_2", "Read", ToolStatus.Running),

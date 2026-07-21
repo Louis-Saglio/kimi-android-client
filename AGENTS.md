@@ -14,6 +14,9 @@ stored in the app settings).
 
 - Kotlin + Jetpack Compose (Material 3), single `app` module.
 - Hilt + KSP for DI, coroutines/Flow, `kotlinx.serialization`, OkHttp, DataStore.
+- Chat markdown: `com.mikepenz:multiplatform-markdown-renderer-m3` (pinned to
+  0.26.0, the newest release built against Compose 1.6.8 / Kotlin 2.0.x — do
+  not upgrade past it without also bumping the Compose BOM / Kotlin).
 - MVVM: one immutable `UiState` per screen as `StateFlow`, one-shot effects via
   `Channel`.
 - minSdk 31, targetSdk 35.

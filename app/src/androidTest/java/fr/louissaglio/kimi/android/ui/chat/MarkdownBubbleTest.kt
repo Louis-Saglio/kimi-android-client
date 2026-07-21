@@ -1,0 +1,120 @@
+package fr.louissaglio.kimi.android.ui.chat
+
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.UriHandler
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.click
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performTouchInput
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import fr.louissaglio.kimi.android.ui.theme.KimiTheme
+import org.junit.Assert.assertEquals
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+
+/** Semantics tests for markdown rendering in message bubbles (ticket 020). */
+@RunWith(AndroidJUnit4::class)
+class MarkdownBubbleTest {
+
+    @get:Rule
+    val composeTestRule = createComposeRule()
+
+    private fun assistantBubble(markdown: String) {
+        composeTestRule.setContent {
+            KimiTheme {
+                AssistantBubble(ChatItem.AssistantMessage("msg_1", markdown, thinking = ""))
+            }
+        }
+    }
+
+    @Test
+    fun fullMarkdownSubsetRendersFormatted() {
+        assistantBubble(
+            """
+            ## Heading two
+
+            Some **bold words** and *italic words* plus `inline code` here.
+
+            - bullet one
+            - bullet two
+
+            1. numbered one
+            2. numbered two
+
+            ```
+            fenced code block
+            ```
+            """.trimIndent(),
+        )
+
+        composeTestRule.onNodeWithText("Heading two", substring = true).assertIsDisplayed()
+        composeTestRule.onNodeWithText("bold words", substring = true).assertIsDisplayed()
+        composeTestRule.onNodeWithText("italic words", substring = true).assertIsDisplayed()
+        composeTestRule.onNodeWithText("inline code", substring = true).assertIsDisplayed()
+        composeTestRule.onNodeWithText("bullet one", substring = true).assertIsDisplayed()
+        composeTestRule.onNodeWithText("numbered one", substring = true).assertIsDisplayed()
+        composeTestRule.onNodeWithText("fenced code block", substring = true).assertIsDisplayed()
+        // Raw markdown syntax must not survive rendering.
+        composeTestRule.onNodeWithText("**", substring = true).assertDoesNotExist()
+        composeTestRule.onNodeWithText("##", substring = true).assertDoesNotExist()
+    }
+
+    @Test
+    fun tappingLinkOpensUriInBrowser() {
+        val openedUris = mutableListOf<String>()
+        composeTestRule.setContent {
+            KimiTheme {
+                // On device this is the platform handler firing ACTION_VIEW; the fake
+                // stands in for "the device's default browser".
+                CompositionLocalProvider(
+                    LocalUriHandler provides object : UriHandler {
+                        override fun openUri(uri: String) {
+                            openedUris += uri
+                        }
+                    },
+                ) {
+                    AssistantBubble(
+                        ChatItem.AssistantMessage("msg_1", "[Open example](https://example.com)", thinking = ""),
+                    )
+                }
+            }
+        }
+
+        // The library detects link taps with raw pointer input, not a semantics click
+        // action, so inject a real touch at the node center instead of performClick().
+        composeTestRule.onNodeWithText("Open example").performTouchInput { click() }
+
+        assertEquals(listOf("https://example.com"), openedUris)
+    }
+
+    @Test
+    fun streamingDeltaEndsWithFormattedText() {
+        val streamed = mutableStateOf("Fix the `NPE` in **MyFi")
+        composeTestRule.setContent {
+            KimiTheme {
+                AssistantBubble(ChatItem.AssistantMessage("msg_1", streamed.value, thinking = ""))
+            }
+        }
+
+        composeTestRule.runOnIdle { streamed.value = "Fix the `NPE` in **MyFile.kt** now" }
+
+        composeTestRule.onNodeWithText("MyFile.kt", substring = true).assertIsDisplayed()
+        composeTestRule.onNodeWithText("**", substring = true).assertDoesNotExist()
+    }
+
+    @Test
+    fun userBubbleRendersMarkdownToo() {
+        composeTestRule.setContent {
+            KimiTheme {
+                UserBubble(ChatItem.UserMessage("u1", "Deploy with **force** please"))
+            }
+        }
+
+        composeTestRule.onNodeWithText("force", substring = true).assertIsDisplayed()
+        composeTestRule.onNodeWithText("**", substring = true).assertDoesNotExist()
+    }
+}
