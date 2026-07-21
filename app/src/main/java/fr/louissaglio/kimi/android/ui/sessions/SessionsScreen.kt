@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Badge
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -271,7 +272,7 @@ private fun LoadMoreFooter(error: String?, onRetry: () -> Unit) {
 }
 
 @Composable
-private fun SessionRow(session: Session, onClick: () -> Unit) {
+internal fun SessionRow(session: Session, onClick: () -> Unit) {
     ListItem(
         headlineContent = {
             Text(
@@ -282,8 +283,11 @@ private fun SessionRow(session: Session, onClick: () -> Unit) {
         },
         supportingContent = { Text(formatTimestamp(session.updatedAt)) },
         trailingContent = {
-            if (session.isRunning) {
-                Box(
+            when {
+                // Approval-pending reads as "needs me" and wins over "working": a session
+                // blocked on an approval is not making progress.
+                session.isAwaitingApproval -> ApprovalBadge()
+                session.isRunning -> Box(
                     Modifier
                         .size(10.dp)
                         .clip(CircleShape)
@@ -294,6 +298,13 @@ private fun SessionRow(session: Session, onClick: () -> Unit) {
         },
         modifier = Modifier.clickable(onClick = onClick),
     )
+}
+
+@Composable
+private fun ApprovalBadge() {
+    Badge(modifier = Modifier.semantics { contentDescription = "Approval needed" }) {
+        Text("!")
+    }
 }
 
 @Composable
@@ -335,8 +346,8 @@ private fun SessionsContentPreview() {
         SessionsContent(
             uiState = SessionListViewModel.UiState(
                 sessions = listOf(
-                    Session("session_1", "Build an Android clone", "/home/ubuntu/kimi-android-client", Instant.now(), isRunning = true),
-                    Session("session_2", null, "/tmp/spike", Instant.now(), isRunning = false),
+                    Session("session_1", "Build an Android clone", "/home/ubuntu/kimi-android-client", Instant.now(), isRunning = true, isAwaitingApproval = true),
+                    Session("session_2", null, "/tmp/spike", Instant.now(), isRunning = false, isAwaitingApproval = false),
                 ),
             ),
             snackbarHostState = remember { SnackbarHostState() },

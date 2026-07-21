@@ -18,6 +18,8 @@ data class SessionDto(
     val title: String? = null,
     @SerialName("updated_at") val updatedAt: String = "",
     val busy: Boolean = false,
+    /** Server runtime state: "none" | "approval" | "question" (docs/server-api.md). */
+    @SerialName("pending_interaction") val pendingInteraction: String = "none",
     val metadata: SessionMetadataDto? = null,
 )
 

@@ -36,7 +36,8 @@ class SessionsRepositoryTest {
                 """
                 {"code":0,"msg":"success","data":{"items":[
                   {"id":"session_1","title":"Build an Android clone","created_at":"2026-07-17T03:34:49.193Z",
-                   "updated_at":"2026-07-17T03:48:31.606Z","busy":true,"archived":false,
+                   "updated_at":"2026-07-17T03:48:31.606Z","busy":true,"pending_interaction":"approval",
+                   "archived":false,
                    "metadata":{"cwd":"/home/ubuntu/kimi-android-client"},
                    "usage":{"input_tokens":0},"permission_rules":[],"message_count":0,"last_seq":0},
                   {"id":"session_2","title":"","updated_at":"2026-07-16T10:00:00.000Z",
@@ -61,12 +62,15 @@ class SessionsRepositoryTest {
                 cwd = "/home/ubuntu/kimi-android-client",
                 updatedAt = Instant.parse("2026-07-17T03:48:31.606Z"),
                 isRunning = true,
+                isAwaitingApproval = true,
             ),
             sessions[0],
         )
         // Blank title maps to null so the UI falls back to the cwd; busy maps to isRunning.
         assertNull(sessions[1].title)
         assertEquals(false, sessions[1].isRunning)
+        // No pending_interaction in the payload defaults to "none" — no approval flag.
+        assertFalse(sessions[1].isAwaitingApproval)
     }
 
     @Test
@@ -148,6 +152,7 @@ class SessionsRepositoryTest {
                 cwd = "/tmp/spike-008",
                 updatedAt = Instant.parse("2026-07-19T05:29:30.815Z"),
                 isRunning = false,
+                isAwaitingApproval = false,
             ),
             result.getOrThrow(),
         )

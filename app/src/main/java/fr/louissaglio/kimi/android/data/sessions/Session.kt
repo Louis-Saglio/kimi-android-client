@@ -10,6 +10,8 @@ data class Session(
     val cwd: String?,
     val updatedAt: Instant,
     val isRunning: Boolean,
+    /** True while the session is blocked on a permission approval (`pending_interaction == "approval"`). */
+    val isAwaitingApproval: Boolean,
 )
 
 /** One page of the session list; [hasMore] mirrors the envelope's `has_more` flag. */

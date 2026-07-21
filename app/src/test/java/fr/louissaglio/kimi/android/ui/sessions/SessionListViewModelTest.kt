@@ -257,6 +257,33 @@ class SessionListViewModelTest {
         assertEquals("/api/v1/sessions", paths[2])
     }
 
+    @Test
+    fun `approval flag comes from the latest fetched payload only`() = runBlocking {
+        server.enqueue(
+            MockResponse().setBody(
+                """{"code":0,"msg":"success","data":{"items":[
+                  {"id":"session_1","title":"Blocked","updated_at":"2026-07-17T03:48:31.606Z",
+                   "busy":true,"pending_interaction":"approval","metadata":{"cwd":"/tmp/a"}},
+                  {"id":"session_2","title":"Idle","updated_at":"2026-07-17T03:48:31.606Z",
+                   "busy":false,"pending_interaction":"none","metadata":{"cwd":"/tmp/b"}}
+                ],"has_more":false},"request_id":"r"}""",
+            ),
+        )
+        viewModel.onScreenStarted()
+
+        awaitState { it.sessions != null }
+        assertTrue(viewModel.uiState.value.sessions!![0].isAwaitingApproval)
+        assertFalse(viewModel.uiState.value.sessions!![1].isAwaitingApproval)
+
+        // After the approval is resolved, the next refresh must clear the badge — the
+        // state carries the server value only, nothing is latched locally.
+        server.enqueue(MockResponse().setBody(pageBody(hasMore = false, "session_1", "session_2")))
+        viewModel.onPullToRefresh()
+
+        awaitState { it.sessions?.none { s -> s.isAwaitingApproval } == true }
+        assertFalse(viewModel.uiState.value.sessions!![0].isAwaitingApproval)
+    }
+
     private fun pageBody(hasMore: Boolean, vararg ids: String): String {
         val items = ids.joinToString(",") { id ->
             """{"id":"$id","title":"Title $id","updated_at":"2026-07-17T03:48:31.606Z",""" +

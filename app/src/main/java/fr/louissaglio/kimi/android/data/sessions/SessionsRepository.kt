@@ -121,5 +121,6 @@ class SessionsRepository @Inject constructor(
         cwd = metadata?.cwd,
         updatedAt = runCatching { Instant.parse(updatedAt) }.getOrDefault(Instant.EPOCH),
         isRunning = busy,
+        isAwaitingApproval = pendingInteraction == "approval",
     )
 }
