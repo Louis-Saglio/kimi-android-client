@@ -34,6 +34,11 @@ sudo chown fileserver:fileserver /home/fileserver/files/app-debug.apk
 It then appears in the listing at `https://agent.example.com` (basic auth,
 user `louis` — only the file server still uses basic auth, not the Kimi API).
 
+For slow networks there is also a minified release build (R8 + resource
+shrinking, ~4.5 MB vs ~28 MB debug, signed with the debug key so it installs
+over the debug build): `./gradlew :app:assembleRelease`, then copy
+`app/build/outputs/apk/release/app-release.apk` the same way.
+
 ## Server drift automation
 
 `scripts/` holds the `kimi-nightly-update` machinery (systemd timer on the

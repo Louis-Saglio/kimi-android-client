@@ -28,6 +28,9 @@ android {
         release {
             // No release keystore yet: sign with the debug config so the APK is installable.
             signingConfig = signingConfigs.getByName("debug")
+            // Small APK for slow-network installs; smoke-tested via Firebase robo.
+            isMinifyEnabled = true
+            isShrinkResources = true
         }
     }
 
