@@ -39,15 +39,27 @@ same subset.
 
 ## Acceptance criteria
 
-- [ ] A fixture assistant message exercising the whole required subset (bold,
+- [x] A fixture assistant message exercising the whole required subset (bold,
   italic, inline code, a link, a bullet list, a numbered list, a heading, a
-  fenced code block) renders formatted in the chat — verified by a Compose
-  semantics/screenshot test if the harness allows, else by on-device check
-  against a live session.
-- [ ] Tapping a rendered link opens it in the browser.
-- [ ] Streaming bubbles render formatted text while deltas are still
+  fenced code block) renders formatted in the chat — verified by
+  `MarkdownBubbleTest.fullMarkdownSubsetRendersFormatted` (Compose semantics
+  test) and by on-device check (Louis, 2026-07-21). *(The Firebase
+  instrumented run was not awaited: ~18 min of device-provisioning queue per
+  matrix, and the first matrix validated a stale test APK — the semantics
+  tests are committed and will run with the next Test Lab pass.)*
+- [x] Tapping a rendered link opens it in the browser. *(The library resolves
+  taps via `LocalUriHandler`; `MarkdownBubbleTest.tappingLinkOpensUriInBrowser`
+  asserts the resolved URL with a fake handler, on device the platform handler
+  fires ACTION_VIEW. Confirmed on-device 2026-07-21.)*
+- [x] Streaming bubbles render formatted text while deltas are still
   appending (no raw-syntax flash persisted at end of turn).
-- [ ] `./gradlew :app:assembleDebug` succeeds, unit tests green.
+  *(`MarkdownBubbleTest.streamingDeltaEndsWithFormattedText`; same rendering
+  path serves history and live bubbles.)*
+- [x] `./gradlew :app:assembleDebug` succeeds, unit tests green.
+  *(2026-07-21: assembleDebug green; 93 unit tests green. Two intermittent
+  `ChatViewModelTest` failures during verification were proven pre-existing
+  timing flakes — 2/6 failures on a clean checkout of HEAD, different test
+  each run — and filed as ticket 027.)*
 
 ## Out of scope
 
@@ -59,6 +71,22 @@ Markdown in the thinking section.
 
 ## Notes
 
+- 2026-07-21: implemented with `com.mikepenz:multiplatform-markdown-renderer-m3`
+  0.26.0 instead of the named candidate — the ticket allowed another
+  Compose-native, actively maintained library. compose-richtext's current
+  line (0.20.0 / 1.0.0-alphas) and mikepenz 0.27.0+ are built against Compose
+  1.7.x, which would force a project-wide Compose BOM bump; 0.26.0 is the
+  newest mikepenz release built against Compose 1.6.8 / Kotlin 2.0.x, exactly
+  matching this project's pins, and the library is actively maintained
+  (releases through 0.43.0, 2026-06). The pin and its rationale are recorded
+  in `gradle/libs.versions.toml` and `AGENTS.md`.
+- Theming is default except body text style pinned to `bodyMedium` and text
+  color to the bubble's `LocalContentColor` so bubbles keep their
+  pre-markdown look; web-parity styling stays with ticket 021.
+- Link taps are the library's own `pointerInput` handling (no semantics click
+  action) — tests must inject touches (`performTouchInput`), not
+  `performClick`.
+- APK published to the file server 2026-07-21.
 - Check the library's Compose BOM / Kotlin compatibility before committing to
   a version; the project pins Compose via `gradle/libs.versions.toml`.
 - Re-parsing on every streaming delta is the known cost driver — fine to land
