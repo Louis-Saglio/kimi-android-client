@@ -23,7 +23,10 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -42,7 +45,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -57,6 +62,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import fr.louissaglio.kimi.android.data.sessions.Session
+import fr.louissaglio.kimi.android.data.sessions.Workspace
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 import java.time.Instant
 import java.time.ZoneId
@@ -175,6 +181,7 @@ private fun SessionsContent(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun CreateSessionDialog(
     uiState: SessionListViewModel.UiState,
@@ -188,14 +195,44 @@ private fun CreateSessionDialog(
         title = { Text("New session") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = uiState.newSessionCwd,
-                    onValueChange = onCwdChange,
-                    label = { Text("Working directory") },
-                    isError = uiState.newSessionCwdError != null,
-                    supportingText = { uiState.newSessionCwdError?.let { Text(it) } },
-                    singleLine = true,
-                )
+                val workspaces = uiState.workspaces
+                if (workspaces == null) {
+                    OutlinedTextField(
+                        value = uiState.newSessionCwd,
+                        onValueChange = onCwdChange,
+                        label = { Text("Working directory") },
+                        isError = uiState.newSessionCwdError != null,
+                        supportingText = { uiState.newSessionCwdError?.let { Text(it) } },
+                        singleLine = true,
+                    )
+                } else {
+                    // The field stays freely editable; the dropdown only offers the
+                    // known workspaces as shortcuts.
+                    var expanded by remember { mutableStateOf(false) }
+                    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
+                        OutlinedTextField(
+                            value = uiState.newSessionCwd,
+                            onValueChange = onCwdChange,
+                            modifier = Modifier.menuAnchor(),
+                            label = { Text("Working directory") },
+                            isError = uiState.newSessionCwdError != null,
+                            supportingText = { uiState.newSessionCwdError?.let { Text(it) } },
+                            singleLine = true,
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                        )
+                        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                            workspaces.forEach { workspace ->
+                                DropdownMenuItem(
+                                    text = { WorkspaceMenuItem(workspace) },
+                                    onClick = {
+                                        onCwdChange(workspace.root)
+                                        expanded = false
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
                 OutlinedTextField(
                     value = uiState.newSessionTitle,
                     onValueChange = onTitleChange,
@@ -219,6 +256,25 @@ private fun CreateSessionDialog(
             }
         },
     )
+}
+
+@Composable
+private fun WorkspaceMenuItem(workspace: Workspace) {
+    Column {
+        // Empty names fall back to the root for the label (observed live: root "/").
+        Text(
+            text = workspace.name.ifBlank { workspace.root },
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = workspace.root,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }
 
 @Composable

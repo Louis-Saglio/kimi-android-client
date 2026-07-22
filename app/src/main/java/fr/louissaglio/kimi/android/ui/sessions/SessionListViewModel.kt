@@ -6,6 +6,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.sessions.Session
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
+import fr.louissaglio.kimi.android.data.sessions.Workspace
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import javax.inject.Inject
 import kotlinx.coroutines.Job
@@ -38,6 +39,8 @@ class SessionListViewModel @Inject constructor(
         val newSessionTitle: String = "",
         val newSessionCwdError: String? = null,
         val isCreating: Boolean = false,
+        /** Null while unknown/failed/empty — the dialog then falls back to a plain text field. */
+        val workspaces: List<Workspace>? = null,
     )
 
     sealed interface Effect {
@@ -98,7 +101,29 @@ class SessionListViewModel @Inject constructor(
                 newSessionCwd = DEFAULT_NEW_SESSION_CWD,
                 newSessionTitle = "",
                 newSessionCwdError = null,
+                workspaces = null,
             )
+        }
+        // Best-effort: on failure or an empty list the dialog keeps the plain text
+        // field with the default cwd; no error is surfaced.
+        viewModelScope.launch {
+            sessionsRepository.listWorkspaces(settingsRepository.current())
+                .onSuccess { workspaces ->
+                    if (workspaces.isEmpty()) return@onSuccess
+                    _uiState.update {
+                        if (!it.showCreateDialog) return@update it
+                        it.copy(
+                            workspaces = workspaces,
+                            // Don't clobber a path the user already typed.
+                            newSessionCwd =
+                                if (it.newSessionCwd == DEFAULT_NEW_SESSION_CWD) {
+                                    workspaces.first().root
+                                } else {
+                                    it.newSessionCwd
+                                },
+                        )
+                    }
+                }
         }
     }
 

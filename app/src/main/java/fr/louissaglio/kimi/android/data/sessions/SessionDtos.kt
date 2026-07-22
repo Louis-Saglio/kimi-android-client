@@ -27,3 +27,18 @@ data class SessionDto(
 data class SessionMetadataDto(
     val cwd: String? = null,
 )
+
+// DTOs for GET /api/v1/workspaces (docs/server-api.md); same conventions as above.
+
+@Serializable
+data class WorkspaceListData(
+    val items: List<WorkspaceDto> = emptyList(),
+)
+
+@Serializable
+data class WorkspaceDto(
+    val id: String,
+    val root: String,
+    val name: String = "",
+    @SerialName("last_opened_at") val lastOpenedAt: String = "",
+)

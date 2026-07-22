@@ -88,6 +88,33 @@ class SessionsRepository @Inject constructor(
             }
         }
 
+    /**
+     * Fetches the known workspaces via `GET /api/v1/workspaces` (docs/server-api.md),
+     * sorted by `last_opened_at` descending — the server order is not relied upon.
+     * Same error-boundary contract as [listSessions].
+     */
+    suspend fun listWorkspaces(settings: ServerSettings): Result<List<Workspace>> =
+        withContext(Dispatchers.IO) {
+            val request = try {
+                Request.Builder()
+                    .url(settings.serverUrl.trim().trimEnd('/') + "/api/v1/workspaces")
+                    .build()
+            } catch (e: IllegalArgumentException) {
+                return@withContext Result.failure(DataError.InvalidUrl)
+            }
+            try {
+                client.newCall(request).execute().use { response ->
+                    when {
+                        response.code == 401 -> Result.failure(DataError.Auth)
+                        !response.isSuccessful -> Result.failure(DataError.Http(response.code))
+                        else -> parseWorkspaces(response.body?.string().orEmpty())
+                    }
+                }
+            } catch (e: IOException) {
+                Result.failure(DataError.Network(e))
+            }
+        }
+
     private fun parseCreated(body: String): Result<Session> = try {
         val envelope = json.decodeFromString<Envelope<SessionDto>>(body)
         when {
@@ -115,6 +142,17 @@ class SessionsRepository @Inject constructor(
         Result.failure(DataError.MalformedResponse(e))
     }
 
+    private fun parseWorkspaces(body: String): Result<List<Workspace>> = try {
+        val envelope = json.decodeFromString<Envelope<WorkspaceListData>>(body)
+        when {
+            envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
+            envelope.data == null -> Result.failure(DataError.Api(envelope.code, "missing data"))
+            else -> Result.success(envelope.data.items.map { it.toDomain() }.sortedByDescending(Workspace::lastOpenedAt))
+        }
+    } catch (e: SerializationException) {
+        Result.failure(DataError.MalformedResponse(e))
+    }
+
     private fun SessionDto.toDomain(): Session = Session(
         id = id,
         title = title?.takeIf { it.isNotBlank() },
@@ -122,5 +160,12 @@ class SessionsRepository @Inject constructor(
         updatedAt = runCatching { Instant.parse(updatedAt) }.getOrDefault(Instant.EPOCH),
         isRunning = busy,
         isAwaitingApproval = pendingInteraction == "approval",
+    )
+
+    private fun WorkspaceDto.toDomain(): Workspace = Workspace(
+        id = id,
+        root = root,
+        name = name,
+        lastOpenedAt = runCatching { Instant.parse(lastOpenedAt) }.getOrDefault(Instant.EPOCH),
     )
 }

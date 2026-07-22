@@ -21,23 +21,24 @@ stored in the app settings).
   `Channel`.
 - minSdk 31, targetSdk 35.
 
-## Distribution: put the APK on the file server
+## Distribution: put the release APK on the file server
 
-After every build Louis is meant to try, the APK **must** be copied to the file
-server so he can download and install it on his phone:
+After every build Louis is meant to try, the **release** APK **must** be copied
+to the file server so he can download and install it on his phone:
 
 ```bash
-sudo cp app/build/outputs/apk/debug/app-debug.apk /home/fileserver/files/
-sudo chown fileserver:fileserver /home/fileserver/files/app-debug.apk
+./gradlew :app:assembleRelease
+sudo cp app/build/outputs/apk/release/app-release.apk /home/fileserver/files/
+sudo chown fileserver:fileserver /home/fileserver/files/app-release.apk
 ```
 
 It then appears in the listing at `https://agent.example.com` (basic auth,
 user `louis` — only the file server still uses basic auth, not the Kimi API).
 
-For slow networks there is also a minified release build (R8 + resource
-shrinking, ~4.5 MB vs ~28 MB debug, signed with the debug key so it installs
-over the debug build): `./gradlew :app:assembleRelease`, then copy
-`app/build/outputs/apk/release/app-release.apk` the same way.
+The release build is the distribution default (decided 2026-07-22): R8 +
+resource shrinking makes it ~4.5 MB vs ~28 MB debug, and it is signed with the
+debug key so it installs over a debug build. Do not publish the debug APK
+unless Louis explicitly asks for it.
 
 ## Server drift automation
 

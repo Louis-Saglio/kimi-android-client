@@ -89,7 +89,7 @@ class SessionListViewModelTest {
     }
 
     @Test
-    fun `confirm with empty path shows inline error and sends no request`() {
+    fun `confirm with empty path shows inline error and sends no request`() = runBlocking {
         viewModel.onNewSessionClick()
         viewModel.onNewSessionCwdChange("   ")
 
@@ -99,18 +99,21 @@ class SessionListViewModelTest {
         assertEquals("Enter a working directory", state.newSessionCwdError)
         assertTrue(state.showCreateDialog)
         assertFalse(state.isCreating)
-        assertEquals(0, server.requestCount)
+        // The only request is the best-effort workspaces fetch from opening the dialog.
+        assertEquals("/api/v1/workspaces", server.takeRequest(5, TimeUnit.SECONDS)!!.path)
+        assertEquals(1, server.requestCount)
     }
 
     @Test
-    fun `confirm with relative path shows inline error and sends no request`() {
+    fun `confirm with relative path shows inline error and sends no request`() = runBlocking {
         viewModel.onNewSessionClick()
         viewModel.onNewSessionCwdChange("tmp/spike")
 
         viewModel.onCreateSessionConfirm()
 
         assertEquals("Path must be absolute", viewModel.uiState.value.newSessionCwdError)
-        assertEquals(0, server.requestCount)
+        assertEquals("/api/v1/workspaces", server.takeRequest(5, TimeUnit.SECONDS)!!.path)
+        assertEquals(1, server.requestCount)
     }
 
     @Test
@@ -126,6 +129,8 @@ class SessionListViewModelTest {
 
     @Test
     fun `successful confirm posts creation, dismisses dialog and emits SessionCreated`() = runBlocking {
+        // The workspaces fetch fails so the dialog stays on the fallback field.
+        server.enqueue(MockResponse().setResponseCode(500))
         server.enqueue(
             MockResponse().setBody(
                 """{"code":0,"msg":"success","data":{"id":"session_new","title":"My session",""" +
@@ -140,6 +145,10 @@ class SessionListViewModelTest {
             viewModel.onNewSessionCwdChange(" /tmp/spike-008 ")
             viewModel.onNewSessionTitleChange("My session")
 
+            // Wait for the workspaces fetch so MockWebServer hands the 500 to the
+            // GET and the create body to the POST (responses are assigned in
+            // request-arrival order).
+            assertEquals("/api/v1/workspaces", server.takeRequest(5, TimeUnit.SECONDS)!!.path)
             viewModel.onCreateSessionConfirm()
 
             val request = server.takeRequest(5, TimeUnit.SECONDS)!!
@@ -158,6 +167,7 @@ class SessionListViewModelTest {
 
     @Test
     fun `server failure keeps the dialog open with input intact and emits CreateFailed`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(500))
         server.enqueue(
             MockResponse().setBody(
                 """{"code":40409,"msg":"workspace root /tmp/nope does not exist","data":null,"request_id":"r"}""",
@@ -169,6 +179,8 @@ class SessionListViewModelTest {
             viewModel.onNewSessionClick()
             viewModel.onNewSessionCwdChange("/tmp/nope")
 
+            // Same ordering reason as above: the workspaces GET must take the 500.
+            server.takeRequest(5, TimeUnit.SECONDS)
             viewModel.onCreateSessionConfirm()
 
             withTimeout(5_000) { while (effects.isEmpty()) delay(10) }
@@ -183,6 +195,84 @@ class SessionListViewModelTest {
         } finally {
             effectJob.cancel()
         }
+    }
+
+    @Test
+    fun `opening the dialog prefills the most recently used workspace root`() = runBlocking {
+        server.enqueue(MockResponse().setBody(WORKSPACES_BODY))
+
+        viewModel.onNewSessionClick()
+
+        awaitState { it.workspaces != null }
+        val state = viewModel.uiState.value
+        assertEquals("/api/v1/workspaces", server.takeRequest(5, TimeUnit.SECONDS)!!.path)
+        // Sorted client-side by last_opened_at desc; the newest root becomes the default.
+        assertEquals(listOf("wd_new", "wd_old"), state.workspaces!!.map { it.id })
+        assertEquals("/home/ubuntu/kimi-android-client", state.newSessionCwd)
+    }
+
+    @Test
+    fun `failed workspaces fetch keeps the plain field with the default cwd`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(500))
+
+        viewModel.onNewSessionClick()
+
+        assertEquals("/api/v1/workspaces", server.takeRequest(5, TimeUnit.SECONDS)!!.path)
+        // Let the failed fetch land; no error is surfaced and nothing changes.
+        delay(200)
+        val state = viewModel.uiState.value
+        assertTrue(state.showCreateDialog)
+        assertNull(state.workspaces)
+        assertEquals("/home/ubuntu", state.newSessionCwd)
+    }
+
+    @Test
+    fun `empty workspace list keeps the plain field with the default cwd`() = runBlocking {
+        server.enqueue(
+            MockResponse().setBody("""{"code":0,"msg":"success","data":{"items":[]},"request_id":"r"}"""),
+        )
+
+        viewModel.onNewSessionClick()
+
+        server.takeRequest(5, TimeUnit.SECONDS)
+        delay(200)
+        val state = viewModel.uiState.value
+        assertNull(state.workspaces)
+        assertEquals("/home/ubuntu", state.newSessionCwd)
+    }
+
+    @Test
+    fun `a custom path typed before the workspaces land is preserved`() = runBlocking {
+        server.enqueue(MockResponse().setBody(WORKSPACES_BODY).setBodyDelay(300, TimeUnit.MILLISECONDS))
+
+        viewModel.onNewSessionClick()
+        viewModel.onNewSessionCwdChange("/tmp/custom")
+
+        awaitState { it.workspaces != null }
+        assertEquals("/tmp/custom", viewModel.uiState.value.newSessionCwd)
+    }
+
+    @Test
+    fun `selecting a workspace then confirming posts its root as cwd`() = runBlocking {
+        server.enqueue(MockResponse().setBody(WORKSPACES_BODY))
+        server.enqueue(
+            MockResponse().setBody(
+                """{"code":0,"msg":"success","data":{"id":"session_new","title":"",""" +
+                    """"updated_at":"2026-07-19T05:29:30.815Z","busy":false,""" +
+                    """"metadata":{"cwd":"/tmp/old"}},"request_id":"r"}""",
+            ),
+        )
+        viewModel.onNewSessionClick()
+        awaitState { it.workspaces != null }
+
+        // Selecting the second workspace from the dropdown sets its root.
+        viewModel.onNewSessionCwdChange(viewModel.uiState.value.workspaces!![1].root)
+        viewModel.onCreateSessionConfirm()
+
+        server.takeRequest(5, TimeUnit.SECONDS) // workspaces fetch
+        val request = server.takeRequest(5, TimeUnit.SECONDS)!!
+        assertEquals("POST", request.method)
+        assertEquals("""{"metadata":{"cwd":"/tmp/old"}}""", request.body.readUtf8())
     }
 
     @Test
@@ -290,6 +380,17 @@ class SessionListViewModelTest {
                 """"busy":false,"metadata":{"cwd":"/tmp/$id"}}"""
         }
         return """{"code":0,"msg":"success","data":{"items":[$items],"has_more":$hasMore},"request_id":"r"}"""
+    }
+
+    private companion object {
+        const val WORKSPACES_BODY = """
+            {"code":0,"msg":"success","data":{"items":[
+              {"id":"wd_old","root":"/tmp/old","name":"old",
+               "last_opened_at":"2026-07-10T10:00:00.000Z","session_count":2},
+              {"id":"wd_new","root":"/home/ubuntu/kimi-android-client","name":"kimi-android-client",
+               "last_opened_at":"2026-07-22T03:30:42.000Z","session_count":81}
+            ]},"request_id":"r"}
+        """
     }
 
     private suspend fun awaitState(predicate: (SessionListViewModel.UiState) -> Boolean) =

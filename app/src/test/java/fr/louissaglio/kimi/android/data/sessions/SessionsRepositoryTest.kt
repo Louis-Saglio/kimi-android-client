@@ -182,6 +182,37 @@ class SessionsRepositoryTest {
         assertEquals("workspace root /tmp/nope does not exist", (error as DataError.Api).serverMessage)
     }
 
+    @Test
+    fun `workspaces are sorted by last_opened_at descending`() = runBlocking {
+        server.enqueue(
+            MockResponse().setBody(
+                """
+                {"code":0,"msg":"success","data":{"items":[
+                  {"id":"wd_old","root":"/tmp/old","name":"old",
+                   "created_at":"2026-07-01T00:00:00.000Z",
+                   "last_opened_at":"2026-07-10T10:00:00.000Z","session_count":2},
+                  {"id":"wd_new","root":"/home/ubuntu","name":"ubuntu",
+                   "created_at":"2026-07-01T00:00:00.000Z",
+                   "last_opened_at":"2026-07-22T03:30:42.000Z","session_count":81},
+                  {"id":"wd_root","root":"/","name":"",
+                   "created_at":"2026-07-01T00:00:00.000Z",
+                   "last_opened_at":"2026-07-15T00:00:00.000Z","session_count":1}
+                ]},"request_id":"01KX"}
+                """.trimIndent(),
+            ),
+        )
+
+        val result = repository.listWorkspaces(settings())
+
+        val workspaces = result.getOrThrow()
+        assertEquals("/api/v1/workspaces", server.takeRequest().path)
+        // Server order is not relied upon: client-side sort by last_opened_at desc.
+        assertEquals(listOf("wd_new", "wd_root", "wd_old"), workspaces.map { it.id })
+        assertEquals(Instant.parse("2026-07-22T03:30:42.000Z"), workspaces[0].lastOpenedAt)
+        // Empty name is kept as-is; the UI falls back to the root for the label.
+        assertEquals("", workspaces[1].name)
+    }
+
     private companion object {
         const val CREATED_SESSION_BODY = """
             {"code":0,"msg":"success","data":{"id":"session_new","workspace_id":"wd_spike-008_1",

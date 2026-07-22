@@ -5,8 +5,9 @@ by Kimi Code Web. Documented and verified against the live server on 2026-07-22
 (server version `0.28.1`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
-steer, questions, abort, permissions, WebSocket events. Explicitly skipped:
-`fs:*`, terminals, cron, goals, workspaces, providers, skills.
+steer, questions, abort, permissions, WebSocket events, plus the workspace list
+used by the mobile create-session flow. Explicitly skipped:
+`fs:*`, terminals, cron, goals, providers, skills.
 
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
@@ -197,6 +198,41 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/session
 `busy: true` ⇔ the session is mid-turn. `model` is omitted entirely when the
 session has no model configured. `thinking_level` and `permission` reflect the
 session's current config (`"off"`/`"yolo"` observed on a fresh session).
+
+## Workspaces
+
+### List — `GET /api/v1/workspaces`
+
+Returns every workspace the server knows about (verified live 2026-07-22,
+server `0.28.1`). Requires the token.
+
+```bash
+curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/workspaces
+```
+
+```json
+{
+  "code": 0, "msg": "success",
+  "data": {
+    "items": [
+      {
+        "id": "wd_home_ubuntu",
+        "root": "/home/ubuntu",
+        "name": "ubuntu",
+        "created_at": "2026-07-15T08:12:03.000Z",
+        "last_opened_at": "2026-07-22T03:30:42.000Z",
+        "session_count": 81
+      }
+    ]
+  },
+  "request_id": "01KY3YKPEMA1H1ZBNBGVBER64Q"
+}
+```
+
+- Items come back roughly recency-ordered but **clients must not rely on the
+  server order** — sort by `last_opened_at` descending client-side.
+- `name` may be empty (observed: a workspace with root `/`); clients should
+  fall back to `root` for display.
 
 ## Messages
 

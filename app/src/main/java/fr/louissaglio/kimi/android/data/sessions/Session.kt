@@ -19,3 +19,12 @@ data class SessionPage(
     val items: List<Session>,
     val hasMore: Boolean,
 )
+
+/** Domain model for a workspace, as exposed by [SessionsRepository] to ViewModels. */
+data class Workspace(
+    val id: String,
+    val root: String,
+    /** May be empty server-side; the UI falls back to [root] for the label. */
+    val name: String,
+    val lastOpenedAt: Instant,
+)
