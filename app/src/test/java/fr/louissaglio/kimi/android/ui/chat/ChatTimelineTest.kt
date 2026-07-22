@@ -130,6 +130,29 @@ class ChatTimelineTest {
     }
 
     @Test
+    fun `a live tool result fills the output of its running row`() {
+        val timeline = ChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "./gradlew test", input = "{\n    \"command\": \"./gradlew test\"\n}"))
+
+        timeline.apply(SessionEvent.ToolCallResult("tool_1", true, "FAIL 3 tests\n"))
+
+        assertEquals(
+            listOf(
+                ChatItem.ToolActivity(
+                    "tool_1",
+                    "Bash",
+                    ToolStatus.Error,
+                    "./gradlew test",
+                    input = "{\n    \"command\": \"./gradlew test\"\n}",
+                    output = "FAIL 3 tests\n",
+                ),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
     fun `deltas build the live bubble and tool rows update in place`() {
         val timeline = ChatTimeline()
 

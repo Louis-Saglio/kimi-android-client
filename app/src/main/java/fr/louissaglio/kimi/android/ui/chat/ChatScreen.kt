@@ -1,5 +1,6 @@
 package fr.louissaglio.kimi.android.ui.chat
 
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -17,13 +19,16 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -48,10 +53,14 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -502,67 +511,132 @@ internal fun AssistantBubble(message: ChatItem.AssistantMessage) {
 
 /** Web-style compact tool row (ticket 022): leading tool icon, name, one-line
  * monospace preview of the input with end-ellipsis, and the status as a glyph —
- * spinner while running, green check on success, red cross on error. */
+ * spinner while running, green check on success, red cross on error.
+ *
+ * Tapping a row that has details expands it (ticket 023, chevron rotates per web):
+ * the full call input as pretty-printed JSON, then the result output — monospace,
+ * preformatted, in a capped-height region that scrolls internally so a huge test
+ * log does not tunnel the timeline. Error output sits on an error-tinted surface. */
 @Composable
 internal fun ToolRow(activity: ChatItem.ToolActivity) {
     val detailColor = MaterialTheme.colorScheme.onSurfaceVariant
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        // Terminal glyph for shell calls (material-icons-core has no terminal icon),
-        // a generic tool icon otherwise.
-        if (activity.name == "Bash") {
+    val expandable = activity.input.isNotBlank() || activity.output.isNotBlank()
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                // M3: the whole row is the tap target, at least 48dp tall.
+                .heightIn(min = 48.dp)
+                .clickable(enabled = expandable) { expanded = !expanded },
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            // Terminal glyph for shell calls (material-icons-core has no terminal icon),
+            // a generic tool icon otherwise.
+            if (activity.name == "Bash") {
+                Text(
+                    text = ">_",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontFamily = FontFamily.Monospace,
+                    color = detailColor,
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Filled.Build,
+                    contentDescription = null,
+                    modifier = Modifier.size(14.dp),
+                    tint = detailColor,
+                )
+            }
             Text(
-                text = ">_",
+                text = activity.name.ifBlank { "tool" },
                 style = MaterialTheme.typography.labelMedium,
-                fontFamily = FontFamily.Monospace,
                 color = detailColor,
             )
-        } else {
-            Icon(
-                imageVector = Icons.Filled.Build,
-                contentDescription = null,
-                modifier = Modifier.size(14.dp),
-                tint = detailColor,
-            )
+            if (activity.preview.isNotBlank()) {
+                Text(
+                    text = activity.preview,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontFamily = FontFamily.Monospace,
+                    color = detailColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            } else {
+                Spacer(Modifier.weight(1f))
+            }
+            when (activity.status) {
+                ToolStatus.Running -> CircularProgressIndicator(
+                    modifier = Modifier
+                        .size(12.dp)
+                        .semantics { contentDescription = "Tool running" },
+                    strokeWidth = 1.5.dp,
+                )
+                // No success slot in the M3 scheme: a literal green, readable on both themes.
+                ToolStatus.Done -> Text(
+                    text = "✓",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = SuccessGreen,
+                )
+                ToolStatus.Error -> Text(
+                    text = "✗",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+            if (expandable) {
+                val chevronRotation by animateFloatAsState(if (expanded) 180f else 0f, label = "chevron")
+                Icon(
+                    imageVector = Icons.Filled.KeyboardArrowDown,
+                    contentDescription = if (expanded) "Collapse tool details" else "Expand tool details",
+                    modifier = Modifier
+                        .size(16.dp)
+                        .rotate(chevronRotation),
+                    tint = detailColor,
+                )
+            }
         }
-        Text(
-            text = activity.name.ifBlank { "tool" },
-            style = MaterialTheme.typography.labelMedium,
-            color = detailColor,
-        )
-        if (activity.preview.isNotBlank()) {
+        if (expanded && expandable) {
+            Column(
+                modifier = Modifier.padding(bottom = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                if (activity.input.isNotBlank()) {
+                    ToolDetailBlock(text = activity.input, color = MaterialTheme.colorScheme.surfaceVariant)
+                }
+                if (activity.output.isNotBlank()) {
+                    ToolDetailBlock(
+                        text = activity.output,
+                        color = if (activity.status == ToolStatus.Error) {
+                            MaterialTheme.colorScheme.errorContainer
+                        } else {
+                            MaterialTheme.colorScheme.secondaryContainer
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** One preformatted monospace block of the expanded tool row. The height is capped
+ * and scrolls internally, so a very long output never stretches the timeline. */
+@Composable
+private fun ToolDetailBlock(text: String, color: Color) {
+    Surface(color = color, shape = RoundedCornerShape(8.dp)) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(max = 240.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+        ) {
             Text(
-                text = activity.preview,
-                modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.labelMedium,
+                text = text,
+                style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
-                color = detailColor,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        } else {
-            Spacer(Modifier.weight(1f))
-        }
-        when (activity.status) {
-            ToolStatus.Running -> CircularProgressIndicator(
-                modifier = Modifier
-                    .size(12.dp)
-                    .semantics { contentDescription = "Tool running" },
-                strokeWidth = 1.5.dp,
-            )
-            // No success slot in the M3 scheme: a literal green, readable on both themes.
-            ToolStatus.Done -> Text(
-                text = "✓",
-                style = MaterialTheme.typography.labelMedium,
-                color = SuccessGreen,
-            )
-            ToolStatus.Error -> Text(
-                text = "✗",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.error,
             )
         }
     }

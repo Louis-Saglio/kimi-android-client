@@ -16,11 +16,15 @@ sealed interface ChatItem {
     ) : ChatItem
 
     /** One row per tool call. [preview] is the one-line summary of the call's input
-     * (e.g. the shell command for Bash); blank when the server sent none. */
+     * (e.g. the shell command for Bash); blank when the server sent none. [input] and
+     * [output] are the full call input (pretty JSON) and result text, revealed by the
+     * expanded row (ticket 023); either may be blank while the call is still running. */
     data class ToolActivity(
         override val id: String,
         val name: String,
         val status: ToolStatus,
         val preview: String = "",
+        val input: String = "",
+        val output: String = "",
     ) : ChatItem
 }

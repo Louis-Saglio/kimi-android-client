@@ -2,6 +2,7 @@ package fr.louissaglio.kimi.android.data.chat
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
 // DTOs for GET /api/v1/sessions/{id}/messages and the /api/v1/ws frames
@@ -32,6 +33,9 @@ data class ContentPartDto(
     // Raw tool arguments on tool_use parts ({"command": "..."} for Bash); the
     // one-line row preview is derived from it (ToolPreview).
     val input: JsonObject? = null,
+    // tool_result parts: the full output text (may be a JSON value for structured
+    // tools like AskUserQuestion); rendered by the expanded tool row (ticket 023).
+    val output: JsonElement? = null,
     @SerialName("is_error") val isError: Boolean? = null,
 )
 
@@ -80,6 +84,8 @@ data class ToolCallPayload(
 @Serializable
 data class ToolResultPayload(
     @SerialName("toolCallId") val toolCallId: String = "",
+    // String for shell-style tools, a JSON value for structured ones (docs/server-api.md).
+    val output: JsonElement? = null,
     @SerialName("is_error") val isError: Boolean = false,
 )
 

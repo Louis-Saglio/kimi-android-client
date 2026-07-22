@@ -20,7 +20,10 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.booleanOrNull
@@ -49,9 +52,17 @@ sealed interface SessionEvent {
     data class ToolCallDelta(val toolCallId: String, val name: String) : SessionEvent
 
     /** [preview] is derived from the started payload's display/args (ToolPreview), so the
-     * live row shows what the call is doing from the start, not only after a refetch. */
-    data class ToolCallStarted(val toolCallId: String, val name: String, val preview: String = "") : SessionEvent
-    data class ToolCallResult(val toolCallId: String, val isError: Boolean) : SessionEvent
+     * live row shows what the call is doing from the start, not only after a refetch.
+     * [input] is the full arguments as pretty-printed JSON, for the expanded row. */
+    data class ToolCallStarted(
+        val toolCallId: String,
+        val name: String,
+        val preview: String = "",
+        val input: String = "",
+    ) : SessionEvent
+
+    /** [output] is the full result text, shown by the expanded row (ticket 023). */
+    data class ToolCallResult(val toolCallId: String, val isError: Boolean, val output: String = "") : SessionEvent
     data object PromptSubmitted : SessionEvent
 
     /** Messages spliced into the context inline (0.27.0): carries the just-sent user
@@ -610,9 +621,9 @@ class ChatRepository @Inject constructor(
             "tool.call.delta" -> frame.decodePayload<ToolCallPayload>()
                 ?.let { onEvent(SessionEvent.ToolCallDelta(it.toolCallId, it.name)) }
             "tool.call.started" -> frame.decodePayload<ToolCallPayload>()
-                ?.let { onEvent(SessionEvent.ToolCallStarted(it.toolCallId, it.name, it.preview())) }
+                ?.let { onEvent(SessionEvent.ToolCallStarted(it.toolCallId, it.name, it.preview(), formatDetail(it.args))) }
             "tool.result" -> frame.decodePayload<ToolResultPayload>()
-                ?.let { onEvent(SessionEvent.ToolCallResult(it.toolCallId, it.isError)) }
+                ?.let { onEvent(SessionEvent.ToolCallResult(it.toolCallId, it.isError, formatDetail(it.output))) }
             "event.approval.requested" -> frame.decodePayload<ApprovalRequestedPayload>()
                 ?.let { onEvent(SessionEvent.ApprovalRequested(it.approvalId, it.toolName, it.summary())) }
             "event.approval.resolved" -> frame.decodePayload<ApprovalResolvedPayload>()
@@ -726,6 +737,18 @@ class ChatRepository @Inject constructor(
     private fun ToolCallPayload.preview(): String =
         display?.command?.takeIf { it.isNotBlank() } ?: ToolPreview.of(args)
 
+    // Pretty-printing for the expanded tool row (ticket 023): strings render as-is,
+    // JSON values (tool inputs, structured outputs) render indented.
+    private val prettyJson = Json(json) { prettyPrint = true }
+
+    /** Renders a wire JSON value for the expanded tool row: a plain string comes out as
+     * its raw text (shell output stays untouched), anything else as pretty-printed JSON. */
+    private fun formatDetail(element: JsonElement?): String = when {
+        element == null || element is JsonNull -> ""
+        element is JsonPrimitive && element.isString -> element.content
+        else -> prettyJson.encodeToString(JsonElement.serializer(), element)
+    }
+
     private fun QuestionRequestedPayload.toDomain(): PendingQuestion = PendingQuestion(
         questionId = questionId,
         items = questions.map { item ->
@@ -762,8 +785,10 @@ class ChatRepository @Inject constructor(
             ?.takeIf { it.isNotBlank() }
             ?.let { ChatMessage.Part.Text(it) }
         "thinking" -> thinking?.let { ChatMessage.Part.Thinking(it) }
-        "tool_use" -> toolCallId?.let { ChatMessage.Part.ToolUse(it, toolName.orEmpty(), ToolPreview.of(input)) }
-        "tool_result" -> toolCallId?.let { ChatMessage.Part.ToolResult(it, isError ?: false) }
+        "tool_use" -> toolCallId?.let {
+            ChatMessage.Part.ToolUse(it, toolName.orEmpty(), ToolPreview.of(input), formatDetail(input))
+        }
+        "tool_result" -> toolCallId?.let { ChatMessage.Part.ToolResult(it, isError ?: false, formatDetail(output)) }
         else -> null
     }
 

@@ -86,14 +86,55 @@ class ChatRepositoryTest {
                 listOf(
                     ChatMessage.Part.Thinking("hmm"),
                     ChatMessage.Part.Text("let me run that"),
-                    ChatMessage.Part.ToolUse("tool_1", "Bash", "echo doc-verify"),
+                    ChatMessage.Part.ToolUse(
+                        "tool_1",
+                        "Bash",
+                        "echo doc-verify",
+                        input = "{\n    \"command\": \"echo doc-verify\"\n}",
+                    ),
                 ),
             ),
             messages[1],
         )
         assertEquals(
-            ChatMessage("msg_3", ChatMessage.Role.Tool, listOf(ChatMessage.Part.ToolResult("tool_1", true))),
+            ChatMessage("msg_3", ChatMessage.Role.Tool, listOf(ChatMessage.Part.ToolResult("tool_1", true, "hi\n"))),
             messages[2],
+        )
+    }
+
+    @Test
+    fun `history tool result output and error flag reach the activity row`() = runBlocking {
+        // Fixture per docs/server-api.md (ticket 023): the expanded row reads the full
+        // call input and the result output, plus the error tint from is_error.
+        server.enqueue(
+            MockResponse().setBody(
+                """
+                {"code":0,"msg":"success","data":{"items":[
+                  {"id":"msg_2","role":"tool",
+                   "content":[{"type":"tool_result","tool_call_id":"tool_1","output":"FAIL 3 tests\n","is_error":true}]},
+                  {"id":"msg_1","role":"assistant",
+                   "content":[{"type":"tool_use","tool_call_id":"tool_1","tool_name":"Bash",
+                               "input":{"command":"./gradlew test"}}]}
+                ],"has_more":false},"request_id":"01KX"}
+                """.trimIndent(),
+            ),
+        )
+
+        val timeline = ChatTimeline()
+        timeline.replaceHistory(repository.getMessages(settings(), "session_1").getOrThrow(), keepLive = false)
+
+        assertEquals(
+            listOf(
+                ChatItem.ToolActivity(
+                    "tool_1",
+                    "Bash",
+                    ToolStatus.Error,
+                    "./gradlew test",
+                    input = "{\n    \"command\": \"./gradlew test\"\n}",
+                    output = "FAIL 3 tests\n",
+                ),
+            ),
+            timeline.items(),
         )
     }
 
@@ -120,7 +161,13 @@ class ChatRepositoryTest {
         assertEquals(
             listOf(
                 ChatItem.UserMessage("msg_1", "run echo doc-verify"),
-                ChatItem.ToolActivity("tool_er2XKV7KXHB4A3U2AXGxZfrY", "Bash", ToolStatus.Running, "echo doc-verify"),
+                ChatItem.ToolActivity(
+                    "tool_er2XKV7KXHB4A3U2AXGxZfrY",
+                    "Bash",
+                    ToolStatus.Running,
+                    "echo doc-verify",
+                    input = "{\n    \"command\": \"echo doc-verify\"\n}",
+                ),
             ),
             timeline.items(),
         )
@@ -495,10 +542,59 @@ class ChatRepositoryTest {
 
         val events = emitted.filterIsInstance<SocketEvent.Event>().map { it.event }
         assertEquals(
-            SessionEvent.ToolCallStarted("tool_3oZjtQUGzDwUwQwfkXioAtne", "Bash", "echo hello-from-spike"),
+            SessionEvent.ToolCallStarted(
+                "tool_3oZjtQUGzDwUwQwfkXioAtne",
+                "Bash",
+                "echo hello-from-spike",
+                input = "{\n    \"command\": \"echo hello-from-spike\"\n}",
+            ),
             events[0],
         )
-        assertEquals(SessionEvent.ToolCallStarted("tool_2", "Read", "/tmp/spike/a.txt"), events[1])
+        assertEquals(
+            SessionEvent.ToolCallStarted("tool_2", "Read", "/tmp/spike/a.txt", input = "{\n    \"path\": \"/tmp/spike/a.txt\"\n}"),
+            events[1],
+        )
+    }
+
+    @Test
+    fun `tool result frame emits the full output and the error flag`() = runBlocking {
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: Response) {
+                        // tool.result shape (docs/server-api.md): toolCallId + output; the
+                        // output is a plain string for shell tools (ticket 023).
+                        webSocket.send(
+                            """{"type":"tool.result","seq":14,"epoch":"ep_1","session_id":"session_1",""" +
+                                """"timestamp":"2026-07-19T15:07:50.000Z","payload":{"type":"tool.result",""" +
+                                """"turnId":0,"toolCallId":"tool_1","output":"ok\n","agentId":"main","sessionId":"session_1"}}""",
+                        )
+                        // Structured tools (AskUserQuestion) carry a JSON object output.
+                        webSocket.send(
+                            """{"type":"tool.result","seq":15,"epoch":"ep_1","session_id":"session_1",""" +
+                                """"timestamp":"2026-07-19T15:07:51.000Z","payload":{"type":"tool.result",""" +
+                                """"turnId":0,"toolCallId":"tool_2","is_error":true,""" +
+                                """"output":{"answers":{"Color?":"blue"}},"agentId":"main","sessionId":"session_1"}}""",
+                        )
+                    }
+                },
+            ),
+        )
+
+        val emitted = CopyOnWriteArrayList<SocketEvent>()
+        val job = launch { repository.observeSession(settings(), "session_1").collect { emitted += it } }
+        try {
+            withTimeout(5_000) { while (emitted.count { it is SocketEvent.Event } < 2) delay(10) }
+        } finally {
+            job.cancel()
+        }
+
+        val events = emitted.filterIsInstance<SocketEvent.Event>().map { it.event }
+        assertEquals(SessionEvent.ToolCallResult("tool_1", false, "ok\n"), events[0])
+        assertEquals(
+            SessionEvent.ToolCallResult("tool_2", true, "{\n    \"answers\": {\n        \"Color?\": \"blue\"\n    }\n}"),
+            events[1],
+        )
     }
 
     @Test

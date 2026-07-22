@@ -16,8 +16,16 @@ data class ChatMessage(
         data class Text(val text: String) : Part
         data class Thinking(val text: String) : Part
 
-        /** [preview] is the one-line summary of the call's input (ToolPreview), shown on the row. */
-        data class ToolUse(val toolCallId: String, val toolName: String, val preview: String = "") : Part
-        data class ToolResult(val toolCallId: String, val isError: Boolean) : Part
+        /** [preview] is the one-line summary of the call's input (ToolPreview), shown on the row;
+         * [input] is the full input as pretty-printed JSON, shown by the expanded row (ticket 023). */
+        data class ToolUse(
+            val toolCallId: String,
+            val toolName: String,
+            val preview: String = "",
+            val input: String = "",
+        ) : Part
+
+        /** [output] is the full result text, shown by the expanded row (ticket 023). */
+        data class ToolResult(val toolCallId: String, val isError: Boolean, val output: String = "") : Part
     }
 }

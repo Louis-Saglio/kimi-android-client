@@ -4,6 +4,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 import org.junit.Rule
@@ -56,5 +57,37 @@ class ToolRowTest {
         composeTestRule.onNodeWithContentDescription("Tool running").assertIsDisplayed()
         composeTestRule.onNodeWithText("✓").assertDoesNotExist()
         composeTestRule.onNodeWithText("✗").assertDoesNotExist()
+    }
+
+    @Test
+    fun tappingRowExpandsInputAndOutputThenCollapses() {
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "Bash",
+                ToolStatus.Done,
+                preview = "echo hi",
+                input = "{\n    \"command\": \"echo hi\"\n}",
+                output = "hi\n",
+            ),
+        )
+
+        // Collapsed: details hidden, the chevron offers to expand.
+        composeTestRule.onNodeWithText("hi\n").assertDoesNotExist()
+        composeTestRule.onNodeWithContentDescription("Expand tool details").assertIsDisplayed()
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+        composeTestRule.onNodeWithText("{\n    \"command\": \"echo hi\"\n}").assertIsDisplayed()
+        composeTestRule.onNodeWithText("hi\n").assertIsDisplayed()
+
+        composeTestRule.onNodeWithContentDescription("Collapse tool details").performClick()
+        composeTestRule.onNodeWithText("hi\n").assertDoesNotExist()
+    }
+
+    @Test
+    fun rowWithoutDetailsHasNoChevron() {
+        toolRow(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Running, preview = "sleep 10"))
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").assertDoesNotExist()
     }
 }

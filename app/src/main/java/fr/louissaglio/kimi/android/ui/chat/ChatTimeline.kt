@@ -54,9 +54,14 @@ class ChatTimeline {
             is SessionEvent.ToolCallDelta ->
                 upsertTool(event.toolCallId, event.name, ToolStatus.Running)
             is SessionEvent.ToolCallStarted ->
-                upsertTool(event.toolCallId, event.name, ToolStatus.Running, event.preview)
+                upsertTool(event.toolCallId, event.name, ToolStatus.Running, event.preview, input = event.input)
             is SessionEvent.ToolCallResult ->
-                upsertTool(event.toolCallId, "", if (event.isError) ToolStatus.Error else ToolStatus.Done)
+                upsertTool(
+                    event.toolCallId,
+                    "",
+                    if (event.isError) ToolStatus.Error else ToolStatus.Done,
+                    output = event.output,
+                )
             is SessionEvent.ContextSpliced -> event.messages.forEach(::appendSpliced)
             // TurnEnded / PromptSubmitted: the ViewModel refetches history instead.
             else -> Unit
@@ -102,17 +107,26 @@ class ChatTimeline {
         }
     }
 
-    private fun upsertTool(toolCallId: String, name: String, status: ToolStatus, preview: String = "") {
+    private fun upsertTool(
+        toolCallId: String,
+        name: String,
+        status: ToolStatus,
+        preview: String = "",
+        input: String = "",
+        output: String = "",
+    ) {
         val index = live.indexOfFirst { it is ChatItem.ToolActivity && it.id == toolCallId }
         if (index >= 0) {
             val existing = live[index] as ChatItem.ToolActivity
             live[index] = existing.copy(
                 name = existing.name.ifBlank { name },
                 preview = existing.preview.ifBlank { preview },
+                input = existing.input.ifBlank { input },
+                output = existing.output.ifBlank { output },
                 status = status,
             )
         } else {
-            live += ChatItem.ToolActivity(toolCallId, name, status, preview)
+            live += ChatItem.ToolActivity(toolCallId, name, status, preview, input, output)
         }
     }
 
@@ -129,7 +143,8 @@ class ChatTimeline {
                     committed += ChatItem.AssistantMessage(message.id, text, thinking)
                 }
                 message.parts.filterIsInstance<ChatMessage.Part.ToolUse>().forEach {
-                    committed += ChatItem.ToolActivity(it.toolCallId, it.toolName, ToolStatus.Running, it.preview)
+                    committed +=
+                        ChatItem.ToolActivity(it.toolCallId, it.toolName, ToolStatus.Running, it.preview, it.input)
                 }
             }
             ChatMessage.Role.Tool ->
@@ -137,10 +152,14 @@ class ChatTimeline {
                     val index = committed.indexOfLast { it is ChatItem.ToolActivity && it.id == result.toolCallId }
                     val status = if (result.isError) ToolStatus.Error else ToolStatus.Done
                     if (index >= 0) {
-                        committed[index] = (committed[index] as ChatItem.ToolActivity).copy(status = status)
+                        val existing = committed[index] as ChatItem.ToolActivity
+                        committed[index] = existing.copy(
+                            status = status,
+                            output = existing.output.ifBlank { result.output },
+                        )
                     } else {
                         // Result without a matching call (e.g. page boundary): show it anyway.
-                        committed += ChatItem.ToolActivity(result.toolCallId, "", status)
+                        committed += ChatItem.ToolActivity(result.toolCallId, "", status, output = result.output)
                     }
                 }
             ChatMessage.Role.Other -> Unit
