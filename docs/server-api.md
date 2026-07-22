@@ -147,8 +147,9 @@ Body: `{"metadata": {"cwd": "<working directory>"}}`, optional top-level
 cwds. A non-existent `cwd` is refused with envelope code `40409` over HTTP 200.
 **Note for this VPS:** the `kimi-web.service` unit runs with `PrivateTmp=yes`,
 so the server's `/tmp` is a private namespace — a host-side `/tmp/spike` is
-invisible to it; create it inside the service namespace
-(`sudo nsenter -t $(systemctl show kimi-web -p MainPID --value) -m mkdir -p /tmp/spike`)
+invisible to it; create it inside the service namespace, owned by the service user
+(`sudo nsenter -t $(systemctl show kimi-web -p MainPID --value) -m mkdir -p /tmp/spike &&
+sudo nsenter -t $(systemctl show kimi-web -p MainPID --value) -m chown ubuntu:ubuntu /tmp/spike`)
 or use a path outside `/tmp`.
 
 ```bash
