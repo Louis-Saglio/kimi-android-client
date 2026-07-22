@@ -38,16 +38,31 @@ reading tool names with no idea what they did.
 
 ## Acceptance criteria
 
-- [ ] Unit test: a history `tool_use` part with `input.command` yields a
+- [x] Unit test: a history `tool_use` part with `input.command` yields a
   `ToolActivity` whose preview is that command (fixture per
   `docs/server-api.md`).
-- [ ] Unit test: `tool.call.started` with args fills the preview of the
+  *(`ChatRepositoryTest.history tool use input surfaces as the activity row
+  preview` — the doc's `echo doc-verify` fixture through `getMessages` →
+  `ChatTimeline`; plus `ChatTimelineTest.history tool use threads its preview
+  into the row` at the reducer level.)*
+- [x] Unit test: `tool.call.started` with args fills the preview of the
   running row live (timeline-level test).
-- [ ] Unit test: preview derivation falls back sanely for a tool with no
+  *(`ChatTimelineTest.tool call started fills the running row preview live`
+  and `a row created by argument deltas picks up the started preview and keeps
+  it on result`; frame parsing — verbatim started shape incl. `display`, and
+  the args-only fallback — in
+  `ChatRepositoryTest.tool call started frame emits the command preview`.)*
+- [x] Unit test: preview derivation falls back sanely for a tool with no
   obvious identifying argument.
-- [ ] Rows show icon + preview + status glyph (spinner/check/✗); verified by
+  *(`ToolPreviewTest`: 5 tests — command, path, compact-JSON fallback, empty
+  input, multi-line collapse.)*
+- [x] Rows show icon + preview + status glyph (spinner/check/✗); verified by
   a semantics test if the harness allows, else on-device against a live turn.
-- [ ] `./gradlew :app:assembleDebug` succeeds, unit tests green.
+  *(`ToolRowTest` (androidTest, 4 semantics tests) — Firebase Test Lab run
+  2026-07-22: 15/15 instrumented tests passed on MediumPhone.arm-34.)*
+- [x] `./gradlew :app:assembleDebug` succeeds, unit tests green.
+  *(2026-07-22: assembleDebug + assembleDebugAndroidTest green; 104 unit
+  tests green; APK published to the file server.)*
 
 ## Out of scope
 
@@ -61,3 +76,17 @@ Edit/Write inputs. Per-tool custom icons beyond the Bash/default pair.
   re-reverse-engineer the web bundle.
 - Result-without-call already renders a row (`ChatTimeline.flatten`); make
   sure it survives this change with an empty preview.
+  *(Covered by `ChatTimelineTest.tool result without a matching call renders
+  a row with an empty preview`.)*
+- 2026-07-22: implemented as `ToolPreview` (data/chat) — a two-key priority
+  list (`command`, `path`) then the compact input JSON, whitespace-collapsed
+  to one line; no per-tool framework, per the ticket. The live row prefers the
+  server's own `display.command` (same shape as the approval
+  `tool_input_display`, DTO reused) and falls back to the derived `args`
+  preview.
+- 2026-07-22: the leading icon is a `>_` text glyph for Bash
+  (material-icons-core has no terminal icon — verified in the 1.6.8 jar) and
+  `Icons.Filled.Build` otherwise; the success check is a literal green
+  (`0xFF4CAF50`) since the stock M3 scheme has no success slot.
+- 2026-07-22: `ToolRow` is now `internal` (was `private`) so the semantics
+  tests can set it as content, same pattern as `AssistantBubble`/`UserBubble`.

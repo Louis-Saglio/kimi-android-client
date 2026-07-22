@@ -64,6 +64,72 @@ class ChatTimelineTest {
     }
 
     @Test
+    fun `history tool use threads its preview into the row`() {
+        val timeline = ChatTimeline()
+
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage(
+                    "msg_1",
+                    ChatMessage.Role.Assistant,
+                    listOf(ChatMessage.Part.ToolUse("tool_1", "Bash", "echo doc-verify")),
+                ),
+                ChatMessage("msg_2", ChatMessage.Role.Tool, listOf(ChatMessage.Part.ToolResult("tool_1", false))),
+            ),
+            keepLive = false,
+        )
+
+        assertEquals(
+            listOf(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, "echo doc-verify")),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `tool result without a matching call renders a row with an empty preview`() {
+        val timeline = ChatTimeline()
+
+        timeline.replaceHistory(
+            listOf(ChatMessage("msg_1", ChatMessage.Role.Tool, listOf(ChatMessage.Part.ToolResult("tool_9", false)))),
+            keepLive = false,
+        )
+
+        assertEquals(
+            listOf(ChatItem.ToolActivity("tool_9", "", ToolStatus.Done, "")),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `tool call started fills the running row preview live`() {
+        val timeline = ChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted)
+
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "echo doc-verify"))
+
+        assertEquals(
+            listOf(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Running, "echo doc-verify")),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `a row created by argument deltas picks up the started preview and keeps it on result`() {
+        val timeline = ChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted)
+        // tool.call.delta arrives first (argument streaming), then the started frame.
+        timeline.apply(SessionEvent.ToolCallDelta("tool_1", "Bash"))
+
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "echo hi"))
+        timeline.apply(SessionEvent.ToolCallResult("tool_1", false))
+
+        assertEquals(
+            listOf(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, "echo hi")),
+            timeline.items(),
+        )
+    }
+
+    @Test
     fun `deltas build the live bubble and tool rows update in place`() {
         val timeline = ChatTimeline()
 

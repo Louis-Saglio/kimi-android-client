@@ -54,7 +54,7 @@ class ChatTimeline {
             is SessionEvent.ToolCallDelta ->
                 upsertTool(event.toolCallId, event.name, ToolStatus.Running)
             is SessionEvent.ToolCallStarted ->
-                upsertTool(event.toolCallId, event.name, ToolStatus.Running)
+                upsertTool(event.toolCallId, event.name, ToolStatus.Running, event.preview)
             is SessionEvent.ToolCallResult ->
                 upsertTool(event.toolCallId, "", if (event.isError) ToolStatus.Error else ToolStatus.Done)
             is SessionEvent.ContextSpliced -> event.messages.forEach(::appendSpliced)
@@ -102,13 +102,17 @@ class ChatTimeline {
         }
     }
 
-    private fun upsertTool(toolCallId: String, name: String, status: ToolStatus) {
+    private fun upsertTool(toolCallId: String, name: String, status: ToolStatus, preview: String = "") {
         val index = live.indexOfFirst { it is ChatItem.ToolActivity && it.id == toolCallId }
         if (index >= 0) {
             val existing = live[index] as ChatItem.ToolActivity
-            live[index] = existing.copy(name = existing.name.ifBlank { name }, status = status)
+            live[index] = existing.copy(
+                name = existing.name.ifBlank { name },
+                preview = existing.preview.ifBlank { preview },
+                status = status,
+            )
         } else {
-            live += ChatItem.ToolActivity(toolCallId, name, status)
+            live += ChatItem.ToolActivity(toolCallId, name, status, preview)
         }
     }
 
@@ -125,7 +129,7 @@ class ChatTimeline {
                     committed += ChatItem.AssistantMessage(message.id, text, thinking)
                 }
                 message.parts.filterIsInstance<ChatMessage.Part.ToolUse>().forEach {
-                    committed += ChatItem.ToolActivity(it.toolCallId, it.toolName, ToolStatus.Running)
+                    committed += ChatItem.ToolActivity(it.toolCallId, it.toolName, ToolStatus.Running, it.preview)
                 }
             }
             ChatMessage.Role.Tool ->

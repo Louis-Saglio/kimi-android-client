@@ -15,9 +15,12 @@ sealed interface ChatItem {
         val thinking: String,
     ) : ChatItem
 
+    /** One row per tool call. [preview] is the one-line summary of the call's input
+     * (e.g. the shell command for Bash); blank when the server sent none. */
     data class ToolActivity(
         override val id: String,
         val name: String,
         val status: ToolStatus,
+        val preview: String = "",
     ) : ChatItem
 }

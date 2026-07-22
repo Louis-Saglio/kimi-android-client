@@ -29,6 +29,9 @@ data class ContentPartDto(
     val thinking: String? = null,
     @SerialName("tool_call_id") val toolCallId: String? = null,
     @SerialName("tool_name") val toolName: String? = null,
+    // Raw tool arguments on tool_use parts ({"command": "..."} for Bash); the
+    // one-line row preview is derived from it (ToolPreview).
+    val input: JsonObject? = null,
     @SerialName("is_error") val isError: Boolean? = null,
 )
 
@@ -68,6 +71,10 @@ data class DeltaPayload(val delta: String = "")
 data class ToolCallPayload(
     @SerialName("toolCallId") val toolCallId: String = "",
     val name: String = "",
+    // tool.call.started only (docs/server-api.md): the full arguments, plus the
+    // server's display rendering — both feed the live row preview.
+    val args: JsonObject? = null,
+    val display: ToolInputDisplayDto? = null,
 )
 
 @Serializable

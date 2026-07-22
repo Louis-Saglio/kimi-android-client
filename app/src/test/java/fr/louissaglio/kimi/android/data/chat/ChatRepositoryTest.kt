@@ -4,6 +4,7 @@ import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import fr.louissaglio.kimi.android.ui.chat.ChatItem
 import fr.louissaglio.kimi.android.ui.chat.ChatTimeline
+import fr.louissaglio.kimi.android.ui.chat.ToolStatus
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.delay
@@ -58,7 +59,7 @@ class ChatRepositoryTest {
                    "content":[{"type":"thinking","thinking":"hmm"},
                               {"type":"text","text":"let me run that"},
                               {"type":"tool_use","tool_call_id":"tool_1","tool_name":"Bash",
-                               "input":{"command":"echo hi"}}],
+                               "input":{"command":"echo doc-verify"}}],
                    "created_at":"2026-07-17T04:12:10.500Z"},
                   {"id":"msg_1","session_id":"session_1","role":"user",
                    "content":[{"type":"text","text":"run echo hi"}],
@@ -85,7 +86,7 @@ class ChatRepositoryTest {
                 listOf(
                     ChatMessage.Part.Thinking("hmm"),
                     ChatMessage.Part.Text("let me run that"),
-                    ChatMessage.Part.ToolUse("tool_1", "Bash"),
+                    ChatMessage.Part.ToolUse("tool_1", "Bash", "echo doc-verify"),
                 ),
             ),
             messages[1],
@@ -93,6 +94,35 @@ class ChatRepositoryTest {
         assertEquals(
             ChatMessage("msg_3", ChatMessage.Role.Tool, listOf(ChatMessage.Part.ToolResult("tool_1", true))),
             messages[2],
+        )
+    }
+
+    @Test
+    fun `history tool use input surfaces as the activity row preview`() = runBlocking {
+        // docs/server-api.md: {"type":"tool_use","tool_call_id":"...","tool_name":"Bash",
+        //  "input":{"command":"echo doc-verify"}} (ticket 022).
+        server.enqueue(
+            MockResponse().setBody(
+                """
+                {"code":0,"msg":"success","data":{"items":[
+                  {"id":"msg_2","role":"assistant",
+                   "content":[{"type":"tool_use","tool_call_id":"tool_er2XKV7KXHB4A3U2AXGxZfrY","tool_name":"Bash",
+                               "input":{"command":"echo doc-verify"}}]},
+                  {"id":"msg_1","role":"user","content":[{"type":"text","text":"run echo doc-verify"}]}
+                ],"has_more":false},"request_id":"01KX"}
+                """.trimIndent(),
+            ),
+        )
+
+        val timeline = ChatTimeline()
+        timeline.replaceHistory(repository.getMessages(settings(), "session_1").getOrThrow(), keepLive = false)
+
+        assertEquals(
+            listOf(
+                ChatItem.UserMessage("msg_1", "run echo doc-verify"),
+                ChatItem.ToolActivity("tool_er2XKV7KXHB4A3U2AXGxZfrY", "Bash", ToolStatus.Running, "echo doc-verify"),
+            ),
+            timeline.items(),
         )
     }
 
@@ -424,6 +454,51 @@ class ChatRepositoryTest {
         val pong = clientFrames.first { "\"pong\"" in it }
         assertTrue(pong.contains("n1"))
         Unit
+    }
+
+    @Test
+    fun `tool call started frame emits the command preview`() = runBlocking {
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: Response) {
+                        // Verbatim tool.call.started shape (docs/server-api.md: args and
+                        // display on start, unchanged from 0.23.3).
+                        webSocket.send(
+                            """{"type":"tool.call.started","seq":9,"epoch":"ep_1","session_id":"session_1",""" +
+                                """"timestamp":"2026-07-19T15:07:43.000Z","payload":{"type":"tool.call.started",""" +
+                                """"turnId":0,"toolCallId":"tool_3oZjtQUGzDwUwQwfkXioAtne","name":"Bash",""" +
+                                """"args":{"command":"echo hello-from-spike"},""" +
+                                """"description":"Running: echo hello-from-spike",""" +
+                                """"display":{"kind":"command","command":"echo hello-from-spike",""" +
+                                """"cwd":"/tmp/spike","language":"bash"},"agentId":"main","sessionId":"session_1"}}""",
+                        )
+                        // No display object: the preview is derived from args instead.
+                        webSocket.send(
+                            """{"type":"tool.call.started","seq":10,"epoch":"ep_1","session_id":"session_1",""" +
+                                """"timestamp":"2026-07-19T15:07:44.000Z","payload":{"type":"tool.call.started",""" +
+                                """"turnId":0,"toolCallId":"tool_2","name":"Read",""" +
+                                """"args":{"path":"/tmp/spike/a.txt"},"agentId":"main","sessionId":"session_1"}}""",
+                        )
+                    }
+                },
+            ),
+        )
+
+        val emitted = CopyOnWriteArrayList<SocketEvent>()
+        val job = launch { repository.observeSession(settings(), "session_1").collect { emitted += it } }
+        try {
+            withTimeout(5_000) { while (emitted.count { it is SocketEvent.Event } < 2) delay(10) }
+        } finally {
+            job.cancel()
+        }
+
+        val events = emitted.filterIsInstance<SocketEvent.Event>().map { it.event }
+        assertEquals(
+            SessionEvent.ToolCallStarted("tool_3oZjtQUGzDwUwQwfkXioAtne", "Bash", "echo hello-from-spike"),
+            events[0],
+        )
+        assertEquals(SessionEvent.ToolCallStarted("tool_2", "Read", "/tmp/spike/a.txt"), events[1])
     }
 
     @Test

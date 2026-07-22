@@ -23,6 +23,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -51,8 +52,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -497,35 +500,75 @@ internal fun AssistantBubble(message: ChatItem.AssistantMessage) {
     }
 }
 
+/** Web-style compact tool row (ticket 022): leading tool icon, name, one-line
+ * monospace preview of the input with end-ellipsis, and the status as a glyph —
+ * spinner while running, green check on success, red cross on error. */
 @Composable
-private fun ToolRow(activity: ChatItem.ToolActivity) {
+internal fun ToolRow(activity: ChatItem.ToolActivity) {
+    val detailColor = MaterialTheme.colorScheme.onSurfaceVariant
     Row(
+        modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        if (activity.status == ToolStatus.Running) {
-            CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp)
+        // Terminal glyph for shell calls (material-icons-core has no terminal icon),
+        // a generic tool icon otherwise.
+        if (activity.name == "Bash") {
+            Text(
+                text = ">_",
+                style = MaterialTheme.typography.labelMedium,
+                fontFamily = FontFamily.Monospace,
+                color = detailColor,
+            )
+        } else {
+            Icon(
+                imageVector = Icons.Filled.Build,
+                contentDescription = null,
+                modifier = Modifier.size(14.dp),
+                tint = detailColor,
+            )
         }
         Text(
-            text = buildString {
-                append(activity.name.ifBlank { "tool" })
-                append(
-                    when (activity.status) {
-                        ToolStatus.Running -> " · running"
-                        ToolStatus.Done -> " · done"
-                        ToolStatus.Error -> " · error"
-                    },
-                )
-            },
+            text = activity.name.ifBlank { "tool" },
             style = MaterialTheme.typography.labelMedium,
-            color = if (activity.status == ToolStatus.Error) {
-                MaterialTheme.colorScheme.error
-            } else {
-                MaterialTheme.colorScheme.onSurfaceVariant
-            },
+            color = detailColor,
         )
+        if (activity.preview.isNotBlank()) {
+            Text(
+                text = activity.preview,
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.labelMedium,
+                fontFamily = FontFamily.Monospace,
+                color = detailColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        } else {
+            Spacer(Modifier.weight(1f))
+        }
+        when (activity.status) {
+            ToolStatus.Running -> CircularProgressIndicator(
+                modifier = Modifier
+                    .size(12.dp)
+                    .semantics { contentDescription = "Tool running" },
+                strokeWidth = 1.5.dp,
+            )
+            // No success slot in the M3 scheme: a literal green, readable on both themes.
+            ToolStatus.Done -> Text(
+                text = "✓",
+                style = MaterialTheme.typography.labelMedium,
+                color = SuccessGreen,
+            )
+            ToolStatus.Error -> Text(
+                text = "✗",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
     }
 }
+
+private val SuccessGreen = Color(0xFF4CAF50)
 
 @Composable
 private fun ErrorState(message: String, onRetry: () -> Unit, enabled: Boolean) {
@@ -559,9 +602,9 @@ private fun ChatContentPreview() {
                             "```\ncurl -X POST /retry\n```",
                         thinking = "Let me look at the failure output.",
                     ),
-                    ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done),
+                    ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, preview = "curl -X POST /retry"),
                     ChatItem.AssistantMessage("live_0", "Streaming reply…", thinking = ""),
-                    ChatItem.ToolActivity("tool_2", "Read", ToolStatus.Running),
+                    ChatItem.ToolActivity("tool_2", "Read", ToolStatus.Running, preview = "app/build.gradle.kts"),
                 ),
                 isWorking = true,
                 isReconnecting = true,

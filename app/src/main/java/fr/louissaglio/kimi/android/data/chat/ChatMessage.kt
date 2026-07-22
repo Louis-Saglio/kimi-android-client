@@ -15,7 +15,9 @@ data class ChatMessage(
     sealed interface Part {
         data class Text(val text: String) : Part
         data class Thinking(val text: String) : Part
-        data class ToolUse(val toolCallId: String, val toolName: String) : Part
+
+        /** [preview] is the one-line summary of the call's input (ToolPreview), shown on the row. */
+        data class ToolUse(val toolCallId: String, val toolName: String, val preview: String = "") : Part
         data class ToolResult(val toolCallId: String, val isError: Boolean) : Part
     }
 }

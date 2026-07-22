@@ -47,7 +47,10 @@ sealed interface SessionEvent {
     data class AssistantDelta(val delta: String) : SessionEvent
     data class ThinkingDelta(val delta: String) : SessionEvent
     data class ToolCallDelta(val toolCallId: String, val name: String) : SessionEvent
-    data class ToolCallStarted(val toolCallId: String, val name: String) : SessionEvent
+
+    /** [preview] is derived from the started payload's display/args (ToolPreview), so the
+     * live row shows what the call is doing from the start, not only after a refetch. */
+    data class ToolCallStarted(val toolCallId: String, val name: String, val preview: String = "") : SessionEvent
     data class ToolCallResult(val toolCallId: String, val isError: Boolean) : SessionEvent
     data object PromptSubmitted : SessionEvent
 
@@ -607,7 +610,7 @@ class ChatRepository @Inject constructor(
             "tool.call.delta" -> frame.decodePayload<ToolCallPayload>()
                 ?.let { onEvent(SessionEvent.ToolCallDelta(it.toolCallId, it.name)) }
             "tool.call.started" -> frame.decodePayload<ToolCallPayload>()
-                ?.let { onEvent(SessionEvent.ToolCallStarted(it.toolCallId, it.name)) }
+                ?.let { onEvent(SessionEvent.ToolCallStarted(it.toolCallId, it.name, it.preview())) }
             "tool.result" -> frame.decodePayload<ToolResultPayload>()
                 ?.let { onEvent(SessionEvent.ToolCallResult(it.toolCallId, it.isError)) }
             "event.approval.requested" -> frame.decodePayload<ApprovalRequestedPayload>()
@@ -718,6 +721,11 @@ class ChatRepository @Inject constructor(
     private fun ApprovalRequestedPayload.summary(): String =
         toolInputDisplay?.command?.takeIf { it.isNotBlank() } ?: action
 
+    /** The row preview for a started call: the server's display command when it sent
+     * one, else derived from the arguments (ToolPreview). */
+    private fun ToolCallPayload.preview(): String =
+        display?.command?.takeIf { it.isNotBlank() } ?: ToolPreview.of(args)
+
     private fun QuestionRequestedPayload.toDomain(): PendingQuestion = PendingQuestion(
         questionId = questionId,
         items = questions.map { item ->
@@ -754,7 +762,7 @@ class ChatRepository @Inject constructor(
             ?.takeIf { it.isNotBlank() }
             ?.let { ChatMessage.Part.Text(it) }
         "thinking" -> thinking?.let { ChatMessage.Part.Thinking(it) }
-        "tool_use" -> toolCallId?.let { ChatMessage.Part.ToolUse(it, toolName.orEmpty()) }
+        "tool_use" -> toolCallId?.let { ChatMessage.Part.ToolUse(it, toolName.orEmpty(), ToolPreview.of(input)) }
         "tool_result" -> toolCallId?.let { ChatMessage.Part.ToolResult(it, isError ?: false) }
         else -> null
     }
