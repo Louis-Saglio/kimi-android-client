@@ -61,7 +61,10 @@ class ChatTimeline {
                     "",
                     if (event.isError) ToolStatus.Error else ToolStatus.Done,
                     output = event.output,
+                    // The definitive result replaces any accumulated progress wholesale.
+                    replaceOutput = true,
                 )
+            is SessionEvent.ToolCallProgress -> appendToolProgress(event.toolCallId, event.chunk)
             is SessionEvent.ContextSpliced -> event.messages.forEach(::appendSpliced)
             // TurnEnded / PromptSubmitted: the ViewModel refetches history instead.
             else -> Unit
@@ -107,6 +110,18 @@ class ChatTimeline {
         }
     }
 
+    /** Live output streaming (ticket 025): chunks append to the matching *running* row
+     * only. Progress is volatile — it never creates a row (unknown ids are dropped),
+     * a finished call keeps its definitive result, and a history refetch replaces the
+     * rows wholesale, clearing whatever accumulated. */
+    private fun appendToolProgress(toolCallId: String, chunk: String) {
+        val index = live.indexOfFirst { it is ChatItem.ToolActivity && it.id == toolCallId }
+        if (index < 0) return
+        val existing = live[index] as ChatItem.ToolActivity
+        if (existing.status != ToolStatus.Running) return
+        live[index] = existing.copy(output = existing.output + chunk)
+    }
+
     private fun upsertTool(
         toolCallId: String,
         name: String,
@@ -114,6 +129,7 @@ class ChatTimeline {
         preview: String = "",
         input: String = "",
         output: String = "",
+        replaceOutput: Boolean = false,
     ) {
         val index = live.indexOfFirst { it is ChatItem.ToolActivity && it.id == toolCallId }
         if (index >= 0) {
@@ -122,7 +138,7 @@ class ChatTimeline {
                 name = existing.name.ifBlank { name },
                 preview = existing.preview.ifBlank { preview },
                 input = existing.input.ifBlank { input },
-                output = existing.output.ifBlank { output },
+                output = if (replaceOutput) output else existing.output.ifBlank { output },
                 status = status,
             )
         } else {

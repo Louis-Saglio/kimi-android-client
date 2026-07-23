@@ -89,6 +89,20 @@ data class ToolResultPayload(
     @SerialName("is_error") val isError: Boolean = false,
 )
 
+/** `tool.progress` payload (docs/server-api.md, volatile live tool output):
+ * `update` carries one output chunk (`kind` "stdout", possibly others later). */
+@Serializable
+data class ToolProgressPayload(
+    @SerialName("toolCallId") val toolCallId: String = "",
+    val update: ToolProgressUpdateDto? = null,
+)
+
+@Serializable
+data class ToolProgressUpdateDto(
+    val kind: String = "",
+    val text: String = "",
+)
+
 @Serializable
 data class TurnEndedPayload(val reason: String = "")
 

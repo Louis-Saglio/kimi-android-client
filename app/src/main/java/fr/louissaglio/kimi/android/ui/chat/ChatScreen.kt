@@ -725,6 +725,8 @@ internal fun ToolRow(activity: ChatItem.ToolActivity) {
                         } else {
                             MaterialTheme.colorScheme.secondaryContainer
                         },
+                        // Live tool.progress chunks (ticket 025): keep the tail in view.
+                        pinnedToBottom = activity.status == ToolStatus.Running,
                     )
                 }
             }
@@ -733,15 +735,21 @@ internal fun ToolRow(activity: ChatItem.ToolActivity) {
 }
 
 /** One preformatted monospace block of the expanded tool row. The height is capped
- * and scrolls internally, so a very long output never stretches the timeline. */
+ * and scrolls internally, so a very long output never stretches the timeline.
+ * [pinnedToBottom] (a running tool's live output, ticket 025) re-scrolls to the tail
+ * every time the text grows. */
 @Composable
-private fun ToolDetailBlock(text: String, color: Color) {
+private fun ToolDetailBlock(text: String, color: Color, pinnedToBottom: Boolean = false) {
+    val scrollState = rememberScrollState()
+    if (pinnedToBottom) {
+        LaunchedEffect(text) { scrollState.scrollTo(scrollState.maxValue) }
+    }
     Surface(color = color, shape = RoundedCornerShape(8.dp)) {
         Box(
             Modifier
                 .fillMaxWidth()
                 .heightIn(max = 240.dp)
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(scrollState)
                 .padding(horizontal = 10.dp, vertical = 8.dp),
         ) {
             Text(

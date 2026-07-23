@@ -598,6 +598,42 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun `tool progress frame emits the output chunk`() = runBlocking {
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: Response) {
+                        // Verbatim tool.progress shape (docs/server-api.md, 0.29.0): a
+                        // volatile frame whose update carries one live output chunk.
+                        webSocket.send(
+                            """{"type":"tool.progress","seq":14,"epoch":"ep_1","volatile":true,""" +
+                                """"session_id":"session_1","timestamp":"2026-07-23T03:28:40.000Z",""" +
+                                """"payload":{"type":"tool.progress","turnId":0,""" +
+                                """"toolCallId":"tool_RMgBIy1asIorg1eV8P3ZhHiL",""" +
+                                """"update":{"kind":"stdout","text":"doc-verify-0290\n"},""" +
+                                """"agentId":"main","sessionId":"session_1"}}""",
+                        )
+                    }
+                },
+            ),
+        )
+
+        val emitted = CopyOnWriteArrayList<SocketEvent>()
+        val job = launch { repository.observeSession(settings(), "session_1").collect { emitted += it } }
+        try {
+            withTimeout(5_000) { while (emitted.none { it is SocketEvent.Event }) delay(10) }
+        } finally {
+            job.cancel()
+        }
+
+        val events = emitted.filterIsInstance<SocketEvent.Event>().map { it.event }
+        assertEquals(
+            SessionEvent.ToolCallProgress("tool_RMgBIy1asIorg1eV8P3ZhHiL", "doc-verify-0290\n"),
+            events.first(),
+        )
+    }
+
+    @Test
     fun `context spliced frame emits the spliced user message`() = runBlocking {
         server.enqueue(
             MockResponse().withWebSocketUpgrade(

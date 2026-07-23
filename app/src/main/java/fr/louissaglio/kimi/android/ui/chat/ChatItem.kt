@@ -18,7 +18,9 @@ sealed interface ChatItem {
     /** One row per tool call. [preview] is the one-line summary of the call's input
      * (e.g. the shell command for Bash); blank when the server sent none. [input] and
      * [output] are the full call input (pretty JSON) and result text, revealed by the
-     * expanded row (ticket 023); either may be blank while the call is still running. */
+     * expanded row (ticket 023); either may be blank while the call is still running.
+     * While running, [output] accumulates the volatile tool.progress chunks (ticket 025)
+     * — the definitive tool.result output replaces them wholesale. */
     data class ToolActivity(
         override val id: String,
         val name: String,

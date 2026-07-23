@@ -63,6 +63,11 @@ sealed interface SessionEvent {
 
     /** [output] is the full result text, shown by the expanded row (ticket 023). */
     data class ToolCallResult(val toolCallId: String, val isError: Boolean, val output: String = "") : SessionEvent
+
+    /** One live output chunk of a running tool (tool.progress, volatile — ticket 025).
+     * Never creates a timeline row on its own; the definitive tool.result output
+     * replaces the accumulated chunks wholesale. */
+    data class ToolCallProgress(val toolCallId: String, val chunk: String) : SessionEvent
     data object PromptSubmitted : SessionEvent
 
     /** Messages spliced into the context inline (0.27.0): carries the just-sent user
@@ -624,6 +629,10 @@ class ChatRepository @Inject constructor(
                 ?.let { onEvent(SessionEvent.ToolCallStarted(it.toolCallId, it.name, it.preview(), formatDetail(it.args))) }
             "tool.result" -> frame.decodePayload<ToolResultPayload>()
                 ?.let { onEvent(SessionEvent.ToolCallResult(it.toolCallId, it.isError, formatDetail(it.output))) }
+            // Volatile live stdout streaming (docs/server-api.md); the update kind is
+            // passed through as-is — only its text is consumed.
+            "tool.progress" -> frame.decodePayload<ToolProgressPayload>()
+                ?.let { onEvent(SessionEvent.ToolCallProgress(it.toolCallId, it.update?.text.orEmpty())) }
             "event.approval.requested" -> frame.decodePayload<ApprovalRequestedPayload>()
                 ?.let { onEvent(SessionEvent.ApprovalRequested(it.approvalId, it.toolName, it.summary())) }
             "event.approval.resolved" -> frame.decodePayload<ApprovalResolvedPayload>()

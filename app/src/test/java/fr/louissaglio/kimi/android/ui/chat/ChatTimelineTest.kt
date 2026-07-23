@@ -153,6 +153,91 @@ class ChatTimelineTest {
     }
 
     @Test
+    fun `progress chunks append to the matching running row only`() {
+        val timeline = ChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "build"))
+        timeline.apply(SessionEvent.ToolCallStarted("tool_2", "Bash", "test"))
+
+        timeline.apply(SessionEvent.ToolCallProgress("tool_2", "compiling...\n"))
+        timeline.apply(SessionEvent.ToolCallProgress("tool_1", "> Task :app:assemble\n"))
+        timeline.apply(SessionEvent.ToolCallProgress("tool_2", "running tests\n"))
+
+        assertEquals(
+            listOf(
+                ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Running, "build", output = "> Task :app:assemble\n"),
+                ChatItem.ToolActivity("tool_2", "Bash", ToolStatus.Running, "test", output = "compiling...\nrunning tests\n"),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `progress for unknown or finished calls is ignored`() {
+        val timeline = ChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash"))
+        timeline.apply(SessionEvent.ToolCallResult("tool_1", false, "final\n"))
+
+        // Unknown id: volatile frames must never create a row on their own.
+        timeline.apply(SessionEvent.ToolCallProgress("tool_9", "stray\n"))
+        // Finished call: the definitive result stands.
+        timeline.apply(SessionEvent.ToolCallProgress("tool_1", "late chunk\n"))
+
+        assertEquals(
+            listOf(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, output = "final\n")),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `tool result replaces the accumulated progress wholesale`() {
+        val timeline = ChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "echo hi"))
+        timeline.apply(SessionEvent.ToolCallProgress("tool_1", "h"))
+        timeline.apply(SessionEvent.ToolCallProgress("tool_1", "i\n"))
+
+        timeline.apply(SessionEvent.ToolCallResult("tool_1", false, "hi\n"))
+
+        assertEquals(
+            listOf(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, "echo hi", output = "hi\n")),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `mid-turn refetch clears the volatile progress of committed rows`() {
+        val timeline = ChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "build"))
+        timeline.apply(SessionEvent.ToolCallProgress("tool_1", "partial log\n"))
+
+        // The server has since committed the finished call: the refetched history is
+        // canonical and the progress-accumulating live row is dropped.
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage(
+                    "msg_1",
+                    ChatMessage.Role.Assistant,
+                    listOf(ChatMessage.Part.ToolUse("tool_1", "Bash", "build")),
+                ),
+                ChatMessage(
+                    "msg_2",
+                    ChatMessage.Role.Tool,
+                    listOf(ChatMessage.Part.ToolResult("tool_1", false, "BUILD OK\n")),
+                ),
+            ),
+            keepLive = true,
+        )
+
+        assertEquals(
+            listOf(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, "build", output = "BUILD OK\n")),
+            timeline.items(),
+        )
+    }
+
+    @Test
     fun `deltas build the live bubble and tool rows update in place`() {
         val timeline = ChatTimeline()
 
