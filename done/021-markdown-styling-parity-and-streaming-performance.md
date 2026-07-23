@@ -33,19 +33,21 @@ jank while a long reply streams.
 
 ## Acceptance criteria
 
-- [ ] Side-by-side on-device check against the web client for the same
+- [x] Side-by-side on-device check against the web client for the same
   session: inline code, a fenced code block, a heading, and a list each read
-  as the same kind of element (screenshots attached to the ticket when moved
-  to `done/`). *(Implementation done 2026-07-22; on-device check is Louis's —
-  release APK published to the file server.)*
+  as the same kind of element. *(Louis, 2026-07-23, on the release APK: chips
+  and surfaces read correctly after the two fixes below — "I tested and it's
+  fixed". His screenshots of the broken first iteration are in the session
+  thread, not attached here.)*
 - [x] A code block with lines longer than the screen width scrolls
   horizontally instead of wrapping. *(Built into the library's `MarkdownCode`
   — `horizontalScroll` on the code text, verified in the 0.26.0 source;
   covered by `MarkdownBubbleTest.longCodeLineScrollsHorizontally` asserting
   the horizontal axis-range semantics.)*
-- [ ] Streaming a long markdown reply on-device shows no visible stutter and
-  the composer stays responsive (manual check; note the device used).
-  *(Manual check is Louis's; see perf note below.)*
+- [x] Streaming a long markdown reply on-device shows no visible stutter and
+  the composer stays responsive. *(Louis, 2026-07-23, on his phone with the
+  release APK — confirmed together with the styling check; see perf note
+  below.)*
 - [x] `./gradlew :app:assembleDebug` succeeds, unit tests green.
   *(2026-07-22: assembleDebug green; 113 unit tests green.)*
 
@@ -91,9 +93,8 @@ beyond what 020 already does.
   (`longCodeLineScrollsHorizontally`, `headingFontSizeIsCapped`). Full
   instrumented suite green on Firebase Test Lab 2026-07-22
   (MediumPhone.arm, API 34 — 19/19 passed).
-- Release APK published to the file server 2026-07-22.
-- Still manual (Louis): the side-by-side web-parity check and the streaming
-  smoothness check on a real device.
+- Release APK published to the file server 2026-07-22 (re-published 2026-07-23
+  with the chip fixes). On-device verification by Louis 2026-07-23: fixed.
 
 ## Notes
 
