@@ -32,10 +32,24 @@ user impact is a question card that vanishes right after appearing.
 
 ## Acceptance criteria
 
-- [ ] The race above cannot clear `pendingQuestions` (unit-tested).
-- [ ] `./gradlew :app:testDebugUnitTest` green.
+- [x] The race above cannot clear `pendingQuestions` (unit-tested). *(2026-07-23:
+  `questions poll in flight does not clear a question that just arrived` — RED
+  before the fix, GREEN after.)*
+- [x] `./gradlew :app:testDebugUnitTest` green. *(2026-07-23: full suite green,
+  then 6 consecutive `--rerun-tasks` runs green.)*
 
 ## Out of scope
 
 - Rethinking which source (poll vs events) owns the question queue; the poll
   stays the source of truth on reconnect/turn.ended (docs/server-api.md).
+
+## Notes
+
+- 2026-07-23: went with the first option — `questionEventCount` bumps on
+  question.requested/question.resolved, and only the screen-start fire (now
+  `seedPendingQuestions()`) captures and checks it. The reconnect and turn.ended
+  polls keep their unconditional poll-wins semantics: their snapshots are taken
+  at the trigger point, and on reconnect a replayed event bumping the counter
+  must not cancel the heal that covers gaps beyond the server's replay buffer.
+  The regression test uses a `questionsResponseGate` mirroring the 028
+  `statusResponseGate`.

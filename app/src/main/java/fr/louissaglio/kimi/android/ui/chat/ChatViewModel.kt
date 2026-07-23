@@ -115,11 +115,15 @@ class ChatViewModel @Inject constructor(
      * response that a newer turn event has already overtaken. Only touched on Main. */
     private var turnEventCount = 0
 
+    /** Bumped on every question.requested/question.resolved event, so [seedPendingQuestions]
+     * can drop a response that a newer question event has already overtaken. */
+    private var questionEventCount = 0
+
     /** Wired to ON_START: (re)loads history and opens the socket. Also fires when the
      * app returns to the foreground, which is the re-sync path after an OS-level drop. */
     fun onScreenStarted() {
         refreshHistory(clearLive = false)
-        refreshPendingQuestions()
+        seedPendingQuestions()
         refreshSessionInfo()
         seedWorkingState()
         startSocket()
@@ -299,7 +303,8 @@ class ChatViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(pendingApprovals = it.pendingApprovals.filterNot { a -> a.approvalId == event.approvalId })
                 }
-            is SessionEvent.QuestionRequested ->
+            is SessionEvent.QuestionRequested -> {
+                questionEventCount++
                 _uiState.update {
                     // Deduped: a reconnect replay must not queue the same request twice.
                     it.copy(
@@ -308,12 +313,15 @@ class ChatViewModel @Inject constructor(
                             event.question,
                     ).prunedQuestionDrafts()
                 }
-            is SessionEvent.QuestionResolved ->
+            }
+            is SessionEvent.QuestionResolved -> {
+                questionEventCount++
                 _uiState.update {
                     it.copy(
                         pendingQuestions = it.pendingQuestions.filterNot { q -> q.questionId == event.questionId },
                     ).prunedQuestionDrafts()
                 }
+            }
             else -> {
                 timeline.apply(event)
                 _uiState.update { it.copy(items = timeline.items()) }
@@ -342,15 +350,34 @@ class ChatViewModel @Inject constructor(
 
     /**
      * Re-derives the pending questions from the questions endpoint (the documented
-     * source of truth, docs/server-api.md): runs on screen start, reconnect, and
-     * turn.ended so the card survives history refetches and heals after an abort.
-     * A failure leaves the current state untouched.
+     * source of truth, docs/server-api.md): runs on reconnect and turn.ended so the
+     * card survives history refetches and heals after an abort. A failure leaves the
+     * current state untouched.
      */
     private fun refreshPendingQuestions() {
         viewModelScope.launch {
             chatRepository.getPendingQuestions(settingsRepository.current(), sessionId)
                 .onSuccess { questions ->
                     _uiState.update { it.copy(pendingQuestions = questions).prunedQuestionDrafts() }
+                }
+        }
+    }
+
+    /**
+     * Screen-start variant of [refreshPendingQuestions]: the socket streams live events
+     * from connect on, so a question.requested/question.resolved landing while this poll
+     * is in flight is newer than its snapshot — the late response is dropped instead of
+     * clearing (or resurrecting) a card. The reconnect and turn.ended polls stay
+     * unconditional: their snapshots are fresh and re-derivation is the point there.
+     */
+    private fun seedPendingQuestions() {
+        val eventsAtSeed = questionEventCount
+        viewModelScope.launch {
+            chatRepository.getPendingQuestions(settingsRepository.current(), sessionId)
+                .onSuccess { questions ->
+                    if (questionEventCount == eventsAtSeed) {
+                        _uiState.update { it.copy(pendingQuestions = questions).prunedQuestionDrafts() }
+                    }
                 }
         }
     }

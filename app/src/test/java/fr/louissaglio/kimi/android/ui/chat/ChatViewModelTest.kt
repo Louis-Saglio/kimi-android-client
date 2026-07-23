@@ -94,6 +94,10 @@ class ChatViewModelTest {
     @Volatile
     private var statusResponseGate: CountDownLatch? = null
 
+    /** Same as [statusResponseGate], for the /questions poll. */
+    @Volatile
+    private var questionsResponseGate: CountDownLatch? = null
+
     private class FakePreferencesDataStore(prefs: Preferences) : DataStore<Preferences> {
         private val state = MutableStateFlow(prefs)
         override val data: Flow<Preferences> = state
@@ -172,7 +176,13 @@ class ChatViewModelTest {
                                     """{"code":40405,"msg":"question tool_q1 not found","data":null,"request_id":"r"}""",
                                 )
                             }
-                        else -> MockResponse().setBody(questionsBody).also { servedStartupGets.countDown() }
+                        else -> {
+                            // Counted at arrival: the response itself may be parked
+                            // behind the test's gate, like the /status one.
+                            servedStartupGets.countDown()
+                            questionsResponseGate?.await(5, TimeUnit.SECONDS)
+                            MockResponse().setBody(questionsBody)
+                        }
                     }
                     path.startsWith("/api/v1/ws") -> {
                         servedStartupGets.await(5, TimeUnit.SECONDS)
@@ -530,6 +540,23 @@ class ChatViewModelTest {
         // Answered from another client: the card clears without local action.
         socket.send(questionAnsweredFrame("tool_q1"))
         awaitState { it.pendingQuestions.isEmpty() }
+    }
+
+    @Test
+    fun `questions poll in flight does not clear a question that just arrived`() = runBlocking {
+        val gate = CountDownLatch(1)
+        questionsResponseGate = gate
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+
+        // The /questions response is parked server-side: the event lands first.
+        socket.send(questionRequestedFrame(id = "tool_q1"))
+        awaitState { it.pendingQuestions.isNotEmpty() }
+
+        // The stale empty snapshot arrives after the event and must be dropped.
+        gate.countDown()
+        delay(200)
+        assertEquals(listOf("tool_q1"), viewModel.uiState.value.pendingQuestions.map { it.questionId })
     }
 
     @Test
