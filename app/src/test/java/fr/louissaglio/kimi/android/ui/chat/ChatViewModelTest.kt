@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.lifecycle.SavedStateHandle
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
+import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
@@ -51,6 +52,7 @@ class ChatViewModelTest {
     private val server = MockWebServer()
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
     private lateinit var viewModel: ChatViewModel
+    private lateinit var settingsRepository: SettingsRepository
 
     @Volatile
     private var approvalsSucceed = true
@@ -70,6 +72,12 @@ class ChatViewModelTest {
         """{"code":0,"msg":"success","data":{"items":[],"has_more":false},"request_id":"r"}"""
 
     @Volatile
+    private var sessionBody =
+        """{"code":0,"msg":"success","data":{"id":"session_1","title":"Fix the bug",""" +
+            """"updated_at":"2026-07-20T00:00:00.000Z","busy":false,""" +
+            """"metadata":{"cwd":"/home/ubuntu/kimi-android-client"}},"request_id":"r"}"""
+
+    @Volatile
     private var serverSocket: WebSocket? = null
 
     private class FakePreferencesDataStore(prefs: Preferences) : DataStore<Preferences> {
@@ -87,6 +95,8 @@ class ChatViewModelTest {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 val path = request.path.orEmpty()
                 return when {
+                    path == "/api/v1/sessions/session_1" && request.method == "GET" ->
+                        MockResponse().setBody(sessionBody)
                     path.startsWith("/api/v1/sessions/session_1/messages") -> MockResponse().setBody(messagesBody)
                     path == "/api/v1/sessions/session_1/status" -> MockResponse().setBody(
                         """{"code":0,"msg":"success","data":{"busy":false},"request_id":"r"}""",
@@ -155,7 +165,7 @@ class ChatViewModelTest {
             }
         }
         Dispatchers.setMain(UnconfinedTestDispatcher())
-        val settingsRepository = SettingsRepository(
+        settingsRepository = SettingsRepository(
             FakePreferencesDataStore(
                 preferencesOf(stringPreferencesKey("server_url") to server.url("/").toString()),
             ),
@@ -163,6 +173,7 @@ class ChatViewModelTest {
         )
         viewModel = ChatViewModel(
             ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
+            SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
             settingsRepository,
             SavedStateHandle(mapOf("sessionId" to "session_1")),
         )
@@ -606,6 +617,76 @@ class ChatViewModelTest {
         awaitRequest("/questions")
         delay(300)
         assertEquals(listOf("tool_q1"), viewModel.uiState.value.pendingQuestions.map { it.questionId })
+    }
+
+    @Test
+    fun `nav arguments seed the top bar before the session fetch lands`() {
+        val seeded = ChatViewModel(
+            ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
+            SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
+            settingsRepository,
+            SavedStateHandle(
+                mapOf(
+                    "sessionId" to "session_1",
+                    "title" to "Fix the bug",
+                    "cwd" to "/home/ubuntu/kimi-android-client",
+                ),
+            ),
+        )
+
+        assertEquals("Fix the bug", seeded.uiState.value.sessionTitle)
+        assertEquals("/home/ubuntu/kimi-android-client", seeded.uiState.value.sessionCwd)
+    }
+
+    @Test
+    fun `nav arguments with only a cwd seed the basename`() {
+        val seeded = ChatViewModel(
+            ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
+            SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
+            settingsRepository,
+            SavedStateHandle(
+                mapOf("sessionId" to "session_1", "cwd" to "/home/ubuntu/kimi-android-client"),
+            ),
+        )
+
+        assertEquals("kimi-android-client", seeded.uiState.value.sessionTitle)
+    }
+
+    @Test
+    fun `session title and cwd load into the top bar state`() = runBlocking {
+        viewModel.onScreenStarted()
+
+        awaitState { it.sessionTitle != null }
+        assertEquals("Fix the bug", viewModel.uiState.value.sessionTitle)
+        assertEquals("/home/ubuntu/kimi-android-client", viewModel.uiState.value.sessionCwd)
+    }
+
+    @Test
+    fun `titleless session falls back to the cwd basename in the top bar`() = runBlocking {
+        sessionBody =
+            """{"code":0,"msg":"success","data":{"id":"session_1","title":"",""" +
+                """"updated_at":"2026-07-20T00:00:00.000Z","busy":false,""" +
+                """"metadata":{"cwd":"/home/ubuntu/kimi-android-client"}},"request_id":"r"}"""
+        viewModel.onScreenStarted()
+
+        awaitState { it.sessionTitle != null }
+        assertEquals("kimi-android-client", viewModel.uiState.value.sessionTitle)
+    }
+
+    @Test
+    fun `failed session lookup leaves the top bar on the session id fallback`() = runBlocking {
+        sessionBody = """{"code":40404,"msg":"session not found","data":null,"request_id":"r"}"""
+        viewModel.onScreenStarted()
+
+        // Wait until the failed lookup was served before asserting the fallback held.
+        val deadline = System.currentTimeMillis() + 5_000
+        while (System.currentTimeMillis() < deadline) {
+            val request = server.takeRequest(100, TimeUnit.MILLISECONDS) ?: continue
+            if (request.path == "/api/v1/sessions/session_1") break
+        }
+        delay(200)
+        assertNull(viewModel.uiState.value.sessionTitle)
+        assertNull(viewModel.uiState.value.sessionCwd)
     }
 
     private suspend fun awaitServerSocket(): WebSocket = withTimeout(5_000) {

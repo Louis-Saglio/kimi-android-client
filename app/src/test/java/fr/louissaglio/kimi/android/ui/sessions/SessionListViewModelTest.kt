@@ -159,7 +159,10 @@ class SessionListViewModelTest {
 
             awaitState { !it.showCreateDialog && !it.isCreating }
             withTimeout(5_000) { while (effects.isEmpty()) delay(10) }
-            assertEquals(SessionListViewModel.Effect.SessionCreated("session_new"), effects.single())
+            val created = effects.single() as SessionListViewModel.Effect.SessionCreated
+            assertEquals("session_new", created.session.id)
+            assertEquals("My session", created.session.title)
+            assertEquals("/tmp/spike-008", created.session.cwd)
         } finally {
             effectJob.cancel()
         }

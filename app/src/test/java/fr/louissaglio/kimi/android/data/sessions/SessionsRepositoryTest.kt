@@ -213,6 +213,30 @@ class SessionsRepositoryTest {
         assertEquals("", workspaces[1].name)
     }
 
+    @Test
+    fun `get fetches one session by id`() = runBlocking {
+        server.enqueue(MockResponse().setBody(CREATED_SESSION_BODY))
+
+        val result = repository.getSession(settings(), "session_new")
+
+        val request = server.takeRequest()
+        assertEquals("GET", request.method)
+        assertEquals("/api/v1/sessions/session_new", request.path)
+        assertEquals("session_new", result.getOrThrow().id)
+        assertEquals("My session", result.getOrThrow().title)
+    }
+
+    @Test
+    fun `get surfaces a non-zero envelope code as Api error`() = runBlocking {
+        server.enqueue(
+            MockResponse().setBody(
+                """{"code":40404,"msg":"session not found","data":null,"request_id":"01KX"}""",
+            ),
+        )
+
+        assertTrue(repository.getSession(settings(), "session_nope").exceptionOrNull() is DataError.Api)
+    }
+
     private companion object {
         const val CREATED_SESSION_BODY = """
             {"code":0,"msg":"success","data":{"id":"session_new","workspace_id":"wd_spike-008_1",

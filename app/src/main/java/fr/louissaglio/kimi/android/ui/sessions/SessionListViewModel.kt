@@ -46,7 +46,7 @@ class SessionListViewModel @Inject constructor(
     sealed interface Effect {
         data class RefreshFailed(val message: String) : Effect
         data class CreateFailed(val message: String) : Effect
-        data class SessionCreated(val sessionId: String) : Effect
+        data class SessionCreated(val session: Session) : Effect
     }
 
     private val _uiState = MutableStateFlow(UiState())
@@ -154,7 +154,7 @@ class SessionListViewModel @Inject constructor(
                 title = _uiState.value.newSessionTitle.trim().ifBlank { null },
             ).onSuccess { session ->
                 _uiState.update { it.copy(isCreating = false, showCreateDialog = false) }
-                _effects.send(Effect.SessionCreated(session.id))
+                _effects.send(Effect.SessionCreated(session))
             }.onFailure { error ->
                 // Inputs are kept so the user can fix and retry after the snackbar.
                 _uiState.update { it.copy(isCreating = false) }

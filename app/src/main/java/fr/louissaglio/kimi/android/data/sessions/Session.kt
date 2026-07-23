@@ -14,6 +14,17 @@ data class Session(
     val isAwaitingApproval: Boolean,
 )
 
+/**
+ * Label for one session: title → cwd basename → id, shared by the session list row
+ * and the chat top bar. A cwd of "/" (basename "") still falls back to the id.
+ */
+val Session.displayName: String
+    get() = displayNameFor(id, title, cwd)
+
+/** [Session.displayName] for callers holding the raw fields (e.g. navigation arguments). */
+fun displayNameFor(id: String, title: String?, cwd: String?): String =
+    title?.takeIf { it.isNotBlank() } ?: cwd?.trimEnd('/')?.substringAfterLast('/')?.takeIf { it.isNotBlank() } ?: id
+
 /** One page of the session list; [hasMore] mirrors the envelope's `has_more` flag. */
 data class SessionPage(
     val items: List<Session>,

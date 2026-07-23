@@ -10,6 +10,9 @@ import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.data.chat.QuestionAnswer
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.SocketEvent
+import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
+import fr.louissaglio.kimi.android.data.sessions.displayName
+import fr.louissaglio.kimi.android.data.sessions.displayNameFor
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
@@ -25,11 +28,17 @@ import kotlinx.coroutines.launch
 @HiltViewModel
 class ChatViewModel @Inject constructor(
     private val chatRepository: ChatRepository,
+    private val sessionsRepository: SessionsRepository,
     private val settingsRepository: SettingsRepository,
     savedStateHandle: SavedStateHandle,
 ) : ViewModel() {
 
     private val sessionId: String = checkNotNull(savedStateHandle["sessionId"])
+
+    // Optional navigation arguments from the session list: they let the top bar show
+    // the right label immediately, before [refreshSessionInfo] confirms it.
+    private val seedTitle: String? = savedStateHandle["title"]
+    private val seedCwd: String? = savedStateHandle["cwd"]
 
     /** One pending permission request, surfaced as the approval card above the input row. */
     data class PendingApproval(
@@ -43,6 +52,10 @@ class ChatViewModel @Inject constructor(
         val isLoading: Boolean = true,
         val items: List<ChatItem> = emptyList(),
         val error: String? = null,
+        /** Top-bar label (title → cwd basename); null until loaded, the UI falls back to the id. */
+        val sessionTitle: String? = null,
+        /** Top-bar subtitle; null when the server sent no cwd. */
+        val sessionCwd: String? = null,
         val isWorking: Boolean = false,
         val isReconnecting: Boolean = false,
         val inputText: String = "",
@@ -79,7 +92,16 @@ class ChatViewModel @Inject constructor(
         data class QuestionFailed(val message: String) : Effect
     }
 
-    private val _uiState = MutableStateFlow(UiState())
+    private val _uiState = MutableStateFlow(
+        UiState(
+            sessionTitle = if (seedTitle != null || seedCwd != null) {
+                displayNameFor(sessionId, seedTitle, seedCwd)
+            } else {
+                null
+            },
+            sessionCwd = seedCwd,
+        ),
+    )
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
     private val _effects = Channel<Effect>(Channel.BUFFERED)
@@ -94,6 +116,7 @@ class ChatViewModel @Inject constructor(
     fun onScreenStarted() {
         refreshHistory(clearLive = false)
         refreshPendingQuestions()
+        refreshSessionInfo()
         seedWorkingState()
         startSocket()
     }
@@ -333,6 +356,19 @@ class ChatViewModel @Inject constructor(
             questionSelections = questionSelections.filterKeys { it in itemIds },
             questionOtherTexts = questionOtherTexts.filterKeys { it in itemIds },
         )
+    }
+
+    /**
+     * Loads the session's title/cwd for the top bar. A failure (or a missing session)
+     * just leaves the fields null: the UI keeps falling back to the raw session id.
+     */
+    private fun refreshSessionInfo() {
+        viewModelScope.launch {
+            sessionsRepository.getSession(settingsRepository.current(), sessionId)
+                .onSuccess { session ->
+                    _uiState.update { it.copy(sessionTitle = session.displayName, sessionCwd = session.cwd) }
+                }
+        }
     }
 
     /** Seeds the working indicator when opening a session that is already mid-turn

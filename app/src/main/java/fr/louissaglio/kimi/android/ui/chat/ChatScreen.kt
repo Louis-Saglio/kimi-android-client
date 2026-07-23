@@ -165,7 +165,24 @@ private fun ChatContent(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(sessionId, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                title = {
+                    Column {
+                        Text(
+                            text = uiState.sessionTitle ?: sessionId,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        uiState.sessionCwd?.let { cwd ->
+                            Text(
+                                text = cwd,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")

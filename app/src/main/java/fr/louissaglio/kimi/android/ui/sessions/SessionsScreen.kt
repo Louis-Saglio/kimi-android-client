@@ -63,6 +63,7 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import fr.louissaglio.kimi.android.data.sessions.Session
 import fr.louissaglio.kimi.android.data.sessions.Workspace
+import fr.louissaglio.kimi.android.data.sessions.displayName
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 import java.time.Instant
 import java.time.ZoneId
@@ -71,7 +72,7 @@ import java.time.format.DateTimeFormatter
 @Composable
 fun SessionsScreen(
     onNavigateToSettings: () -> Unit = {},
-    onNavigateToChat: (String) -> Unit = {},
+    onNavigateToChat: (Session) -> Unit = {},
     viewModel: SessionListViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -84,7 +85,7 @@ fun SessionsScreen(
                 is SessionListViewModel.Effect.CreateFailed ->
                     snackbarHostState.showSnackbar(effect.message)
                 is SessionListViewModel.Effect.SessionCreated ->
-                    onNavigateToChat(effect.sessionId)
+                    onNavigateToChat(effect.session)
             }
         }
     }
@@ -113,7 +114,7 @@ private fun SessionsContent(
     uiState: SessionListViewModel.UiState,
     snackbarHostState: SnackbarHostState,
     onNavigateToSettings: () -> Unit,
-    onSessionClick: (String) -> Unit,
+    onSessionClick: (Session) -> Unit,
     onRetry: () -> Unit,
     onPullToRefresh: () -> Unit,
     onEndReached: () -> Unit,
@@ -280,7 +281,7 @@ private fun WorkspaceMenuItem(workspace: Workspace) {
 @Composable
 private fun SessionList(
     uiState: SessionListViewModel.UiState,
-    onSessionClick: (String) -> Unit,
+    onSessionClick: (Session) -> Unit,
     onEndReached: () -> Unit,
 ) {
     val sessions = uiState.sessions.orEmpty()
@@ -297,7 +298,7 @@ private fun SessionList(
     LaunchedEffect(endReached) { if (endReached) onEndReached() }
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
         items(sessions, key = Session::id) { session ->
-            SessionRow(session, onClick = { onSessionClick(session.id) })
+            SessionRow(session, onClick = { onSessionClick(session) })
         }
         if (uiState.isLoadingMore || uiState.loadMoreError != null) {
             item(key = "load_more_footer") {
@@ -332,7 +333,7 @@ internal fun SessionRow(session: Session, onClick: () -> Unit) {
     ListItem(
         headlineContent = {
             Text(
-                text = session.title ?: session.cwd ?: session.id,
+                text = session.displayName,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )

@@ -56,6 +56,33 @@ class SessionsRepository @Inject constructor(
         }
 
     /**
+     * Fetches one session via `GET /api/v1/sessions/{id}` (docs/server-api.md) — same
+     * payload shape as the list items. Used by the chat screen for its top-bar title.
+     * Same error-boundary contract as [listSessions].
+     */
+    suspend fun getSession(settings: ServerSettings, sessionId: String): Result<Session> =
+        withContext(Dispatchers.IO) {
+            val request = try {
+                Request.Builder()
+                    .url(settings.serverUrl.trim().trimEnd('/') + "/api/v1/sessions/" + sessionId)
+                    .build()
+            } catch (e: IllegalArgumentException) {
+                return@withContext Result.failure(DataError.InvalidUrl)
+            }
+            try {
+                client.newCall(request).execute().use { response ->
+                    when {
+                        response.code == 401 -> Result.failure(DataError.Auth)
+                        !response.isSuccessful -> Result.failure(DataError.Http(response.code))
+                        else -> parseSession(response.body?.string().orEmpty())
+                    }
+                }
+            } catch (e: IOException) {
+                Result.failure(DataError.Network(e))
+            }
+        }
+
+    /**
      * Creates a session via `POST /api/v1/sessions` (docs/server-api.md). The server
      * derives a workspace from [cwd] and fails (non-zero envelope code) when the
      * directory does not exist. [title] is omitted when null so the server's default
@@ -80,7 +107,7 @@ class SessionsRepository @Inject constructor(
                     when {
                         response.code == 401 -> Result.failure(DataError.Auth)
                         !response.isSuccessful -> Result.failure(DataError.Http(response.code))
-                        else -> parseCreated(response.body?.string().orEmpty())
+                        else -> parseSession(response.body?.string().orEmpty())
                     }
                 }
             } catch (e: IOException) {
@@ -115,7 +142,7 @@ class SessionsRepository @Inject constructor(
             }
         }
 
-    private fun parseCreated(body: String): Result<Session> = try {
+    private fun parseSession(body: String): Result<Session> = try {
         val envelope = json.decodeFromString<Envelope<SessionDto>>(body)
         when {
             envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))

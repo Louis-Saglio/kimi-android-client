@@ -27,11 +27,33 @@ shows the working directory and the session title. The app already has both:
 
 ## Acceptance criteria
 
-- [ ] A session with a title shows it in the chat top bar; a titleless
+- [x] A session with a title shows it in the chat top bar; a titleless
   session falls back per the same rule as the list row (unit-tested at
   ViewModel/mapping level).
-- [ ] The cwd appears as a subtitle when available (visual check).
-- [ ] `./gradlew :app:assembleDebug` succeeds, unit tests green.
+  *(`SessionTest` covers title → cwd basename → id, incl. trailing-slash and
+  root-cwd edge cases; `ChatViewModelTest` covers the title and titleless
+  cases end-to-end against MockWebServer.)*
+- [x] The cwd appears as a subtitle when available (visual check).
+  *(Subtitle line under the top-bar title, rendered when `sessionCwd` is
+  non-null; verified by build + `ChatViewModelTest` asserting the state, not
+  on-device.)*
+- [x] `./gradlew :app:assembleDebug` succeeds, unit tests green.
+  *(`testDebugUnitTest` + `assembleDebug` green on 2026-07-23.)*
+
+## Implementation notes
+
+- Fallback lives in `Session.displayName` (`data/sessions/Session.kt`),
+  shared by the list row and the chat top bar. Side effect: the list row now
+  shows the cwd **basename** instead of the full path for titleless sessions.
+- `SessionsRepository.getSession` uses the existing
+  `GET /api/v1/sessions/{id}` — no new endpoint.
+- A failed lookup leaves `sessionTitle`/`sessionCwd` null and the top bar
+  falls back to the raw session id.
+- Follow-up (2026-07-23): title/cwd also ride along as optional navigation
+  query args (`chat/{sessionId}?title=…&cwd=…`), seeded into the initial
+  `UiState` via `displayNameFor`, so the top bar shows the right label from
+  the first frame — the session fetch then confirms it. `SessionCreated`
+  carries the full `Session` so the create flow gets the same seeding.
 
 ## Out of scope
 
