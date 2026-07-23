@@ -36,12 +36,18 @@ jank while a long reply streams.
 - [ ] Side-by-side on-device check against the web client for the same
   session: inline code, a fenced code block, a heading, and a list each read
   as the same kind of element (screenshots attached to the ticket when moved
-  to `done/`).
-- [ ] A code block with lines longer than the screen width scrolls
-  horizontally instead of wrapping.
+  to `done/`). *(Implementation done 2026-07-22; on-device check is Louis's —
+  release APK published to the file server.)*
+- [x] A code block with lines longer than the screen width scrolls
+  horizontally instead of wrapping. *(Built into the library's `MarkdownCode`
+  — `horizontalScroll` on the code text, verified in the 0.26.0 source;
+  covered by `MarkdownBubbleTest.longCodeLineScrollsHorizontally` asserting
+  the horizontal axis-range semantics.)*
 - [ ] Streaming a long markdown reply on-device shows no visible stutter and
   the composer stays responsive (manual check; note the device used).
-- [ ] `./gradlew :app:assembleDebug` succeeds, unit tests green.
+  *(Manual check is Louis's; see perf note below.)*
+- [x] `./gradlew :app:assembleDebug` succeeds, unit tests green.
+  *(2026-07-22: assembleDebug green; 113 unit tests green.)*
 
 ## Out of scope
 
@@ -49,6 +55,45 @@ Syntax highlighting inside code blocks (raise a follow-up ticket if missed).
 Per-code-block copy button (same — cheap and useful, but its own ticket).
 Tables. Light-theme fine-tuning beyond "not broken". Markdown in user bubbles
 beyond what 020 already does.
+
+## Implementation notes (2026-07-22)
+
+- All theming lives in `MarkdownBody` (`ChatScreen.kt`) — no component
+  overrides were needed; the stock colors/typography/padding/extended-spans
+  hooks cover the whole spec.
+- Inline-code chip: `markdownColor(inlineCodeBackground = …)` plus the
+  library's `ExtendedSpans(RoundedCornerSpanPainter())`. The factory must
+  create a **fresh instance per text node** (as the library intends) —
+  `ExtendedSpans` holds per-node draw state, and a single shared instance
+  scrambled chip positions across paragraphs (caught on-device 2026-07-22).
+- Chip/code surface color: `Color.Black.copy(alpha = 0.3f)` — reads as a
+  subtle darkening of any bubble; the first pick (`surfaceContainerLowest`,
+  near-black) was a hard blob on the grey bubble (same on-device check).
+- Code blocks: alpha-black inset surface (see above), corner radius from
+  library dimens (8dp). Horizontal scroll is the library default — no wrap,
+  long lines scroll.
+- Headings capped: h1 = `headlineSmall` (24sp, vs the library default
+  `displayLarge` 57sp), h2 = `titleLarge`, h3 = `titleMedium`, h4–h6 =
+  `titleSmall`. Covered by `MarkdownBubbleTest.headingFontSizeIsCapped`.
+- Lists: `markdownPadding(indentList = 16.dp)` for clearer marker
+  indentation; item spacing stays at library defaults (comfortable enough).
+- Links: `linkText = colorScheme.primary`; underline is the library default.
+- Perf verification (ticket asked to verify, not assume): in 0.26.0 the
+  `Markdown` composable calls `MarkdownParser.buildMarkdownTreeFromString`
+  unconditionally in composition — there is no internal memoization, and its
+  interface-typed params make the scope non-skippable. Mitigation:
+  `MarkdownBody` itself takes only stable params (`String`, `Modifier`), so
+  it is skippable and the parse is bounded to one per text snapshot (i.e.
+  per delta) — recompositions from composer typing, scroll, timers, etc. no
+  longer re-parse. Per-delta cost of the live bubble is inherent to any
+  whole-text reparse and stays as-is.
+- Tests: two new semantics tests in `MarkdownBubbleTest`
+  (`longCodeLineScrollsHorizontally`, `headingFontSizeIsCapped`). Full
+  instrumented suite green on Firebase Test Lab 2026-07-22
+  (MediumPhone.arm, API 34 — 19/19 passed).
+- Release APK published to the file server 2026-07-22.
+- Still manual (Louis): the side-by-side web-parity check and the streaming
+  smoothness check on a real device.
 
 ## Notes
 

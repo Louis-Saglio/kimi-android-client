@@ -4,14 +4,18 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.UriHandler
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.click
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.unit.TextUnit
+import androidx.compose.ui.unit.sp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -116,5 +120,32 @@ class MarkdownBubbleTest {
 
         composeTestRule.onNodeWithText("force", substring = true).assertIsDisplayed()
         composeTestRule.onNodeWithText("**", substring = true).assertDoesNotExist()
+    }
+
+    // Ticket 021: a code block line longer than the screen must scroll
+    // horizontally (the library's horizontalScroll exposes axis-range semantics)
+    // instead of wrapping.
+    @Test
+    fun longCodeLineScrollsHorizontally() {
+        val longLine = "val result = someFunction(" + "argument, ".repeat(30) + ")"
+        assistantBubble("```kotlin\n$longLine\n```")
+
+        val node = composeTestRule.onNodeWithText("argument,", substring = true).fetchSemanticsNode()
+        assertTrue(node.config.contains(SemanticsProperties.HorizontalScrollAxisRange))
+    }
+
+    // Ticket 021: heading scale is capped — a `#` must not render at the library
+    // default (M3 displayLarge, 57sp).
+    @Test
+    fun headingFontSizeIsCapped() {
+        assistantBubble("# Big heading")
+
+        val text = composeTestRule.onNodeWithText("Big heading")
+            .fetchSemanticsNode()
+            .config[SemanticsProperties.Text]
+            .first()
+        val sizes = text.spanStyles.map { it.item.fontSize }.filter { it != TextUnit.Unspecified }
+        assertTrue("expected a sized span on the heading", sizes.isNotEmpty())
+        assertTrue("heading too large: $sizes", sizes.all { it <= 26.sp })
     }
 }
