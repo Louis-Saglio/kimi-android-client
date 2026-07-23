@@ -1,5 +1,7 @@
 package fr.louissaglio.kimi.android.ui.chat
 
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.LocalUriHandler
@@ -8,10 +10,13 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.click
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.sp
+import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 import org.junit.Assert.assertEquals
@@ -120,6 +125,20 @@ class MarkdownBubbleTest {
 
         composeTestRule.onNodeWithText("force", substring = true).assertIsDisplayed()
         composeTestRule.onNodeWithText("**", substring = true).assertDoesNotExist()
+    }
+
+    // Ticket 024: the copy action under an assistant message must place the raw
+    // markdown source — not the rendered text — on the device clipboard.
+    @Test
+    fun copyActionPutsRawMarkdownOnClipboard() {
+        val markdown = "Fix it **now** with `sudo make`"
+        assistantBubble(markdown)
+
+        composeTestRule.onNodeWithContentDescription("Copy message").performClick()
+
+        val clipboard = ApplicationProvider.getApplicationContext<Context>()
+            .getSystemService(ClipboardManager::class.java)
+        assertEquals(markdown, clipboard.primaryClip?.getItemAt(0)?.text?.toString())
     }
 
     // Ticket 021: a code block line longer than the screen must scroll

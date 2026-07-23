@@ -30,14 +30,14 @@ blocks and lists need.
 
 ## Acceptance criteria
 
-- [ ] Assistant text spans the full content width; no bubble background is
+- [x] Assistant text spans the full content width; no bubble background is
   drawn (on-device visual check against the web client for the same session).
-- [ ] The copy action places the exact raw markdown text on the clipboard
+- [x] The copy action places the exact raw markdown text on the clipboard
   (instrumented test via `ClipboardManager`, or manual check pasting into a
   notes app).
-- [ ] Thinking, when present, still renders dimmed above the reply.
-- [ ] Streaming bubbles render full-width while deltas append.
-- [ ] `./gradlew :app:assembleDebug` succeeds, unit tests green.
+- [x] Thinking, when present, still renders dimmed above the reply.
+- [x] Streaming bubbles render full-width while deltas append.
+- [x] `./gradlew :app:assembleDebug` succeeds, unit tests green.
 
 ## Out of scope
 

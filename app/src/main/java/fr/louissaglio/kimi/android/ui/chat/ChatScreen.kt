@@ -1,6 +1,7 @@
 package fr.louissaglio.kimi.android.ui.chat
 
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -61,9 +62,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.input.ImeAction
@@ -83,6 +90,7 @@ import com.mikepenz.markdown.model.markdownExtendedSpans
 import com.mikepenz.markdown.model.markdownPadding
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
+import kotlinx.coroutines.delay
 
 @Composable
 fun ChatScreen(
@@ -516,29 +524,99 @@ internal fun UserBubble(message: ChatItem.UserMessage) {
     }
 }
 
+/** Web-parity assistant row (ticket 024): full-width plain markdown on the chat
+ * background — no bubble — with a small copy action underneath that puts the raw
+ * markdown source on the clipboard. Live and final messages share this path, so
+ * streaming deltas get the same layout. Thinking stays above the reply, dimmed. */
 @Composable
 internal fun AssistantBubble(message: ChatItem.AssistantMessage) {
-    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
-        Surface(
-            modifier = Modifier.widthIn(max = 320.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant,
-            shape = RoundedCornerShape(12.dp),
-        ) {
-            Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-                if (message.thinking.isNotBlank()) {
-                    Text(
-                        text = message.thinking,
-                        style = MaterialTheme.typography.bodySmall,
-                        fontStyle = FontStyle.Italic,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    if (message.text.isNotBlank()) Spacer(Modifier.size(6.dp))
-                }
-                if (message.text.isNotBlank()) {
-                    MarkdownBody(text = message.text)
-                }
-            }
+    Column(Modifier.fillMaxWidth()) {
+        if (message.thinking.isNotBlank()) {
+            Text(
+                text = message.thinking,
+                style = MaterialTheme.typography.bodySmall,
+                fontStyle = FontStyle.Italic,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (message.text.isNotBlank()) Spacer(Modifier.size(6.dp))
         }
+        if (message.text.isNotBlank()) {
+            MarkdownBody(text = message.text)
+            CopyMessageAction(rawMarkdown = message.text)
+        }
+    }
+}
+
+/** Subtle copy affordance under each assistant message (ticket 024): a small
+ * outlined-sheet glyph that swaps to a green check for a moment on tap. */
+@Composable
+private fun CopyMessageAction(rawMarkdown: String) {
+    val clipboard = LocalClipboardManager.current
+    var copied by remember { mutableStateOf(false) }
+    LaunchedEffect(copied) {
+        if (copied) {
+            delay(1_500)
+            copied = false
+        }
+    }
+    Box(
+        modifier = Modifier
+            .padding(top = 4.dp)
+            .size(28.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .clickable {
+                clipboard.setText(AnnotatedString(rawMarkdown))
+                copied = true
+            }
+            .semantics { contentDescription = "Copy message" },
+        contentAlignment = Alignment.Center,
+    ) {
+        if (copied) {
+            Text(
+                text = "✓",
+                style = MaterialTheme.typography.labelMedium,
+                color = SuccessGreen,
+            )
+        } else {
+            CopyGlyph(
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                background = MaterialTheme.colorScheme.background,
+                modifier = Modifier.size(14.dp),
+            )
+        }
+    }
+}
+
+/** material-icons-core has no copy icon: two overlapping outlined sheets, the
+ * front one filled with the chat background so the strokes do not cross. */
+@Composable
+private fun CopyGlyph(tint: Color, background: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val stroke = Stroke(width = 1.2.dp.toPx())
+        val radius = CornerRadius(2.dp.toPx())
+        val sheet = Size(size.width * 0.62f, size.height * 0.62f)
+        // Back sheet, top-right.
+        drawRoundRect(
+            color = tint,
+            topLeft = Offset(size.width - sheet.width, 0f),
+            size = sheet,
+            cornerRadius = radius,
+            style = stroke,
+        )
+        // Front sheet, bottom-left, filled to punch out the back sheet's stroke.
+        drawRoundRect(
+            color = background,
+            topLeft = Offset(0f, size.height - sheet.height),
+            size = sheet,
+            cornerRadius = radius,
+        )
+        drawRoundRect(
+            color = tint,
+            topLeft = Offset(0f, size.height - sheet.height),
+            size = sheet,
+            cornerRadius = radius,
+            style = stroke,
+        )
     }
 }
 
