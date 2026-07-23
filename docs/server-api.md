@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-07-22
-(server version `0.28.1`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-07-23
+(server version `0.29.0`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, plus the workspace list
@@ -12,13 +12,15 @@ used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `0.27.0`
-(verified 2026-07-19/20; see git history) and `0.23.3` before that. The drift
-from 0.27.0 to 0.28.1 is small and **additive**: new fields on a few WS events,
-a new id format for server-generated messages, and a new envelope code for
-already-resolved questions — no removed or renamed shapes. Details inline.
-Server updates are installed by the `kimi-nightly-update` systemd timer (see
-`scripts/`), which re-verifies this protocol after every update.
+**Protocol history:** this document previously described server `0.28.1`
+(verified 2026-07-22; see git history), `0.27.0` before that, and `0.23.3`
+before that. The drift from 0.28.1 to 0.29.0 is small and almost entirely
+**additive**: a new `thinkingEffort` field and a new `since` timestamp on
+`agent.status.updated`, a new `tool_call` phase kind, and one field removal —
+the steered user message in `context.spliced` no longer carries an `id` (treat
+spliced-message ids as optional). Details inline. Server updates are installed
+by the `kimi-nightly-update` systemd timer (see `scripts/`), which re-verifies
+this protocol after every update.
 
 ## Base URL & auth
 
@@ -39,7 +41,7 @@ Server updates are installed by the `kimi-nightly-update` systemd timer (see
   so it cannot validate credentials. Use **`GET /api/v1/meta`** as the
   credential check endpoint: `200` ⇒ token valid, `401` ⇒ missing or invalid.
 
-Verified (server 0.28.1, 2026-07-22):
+Verified (server 0.29.0, 2026-07-23):
 
 ```bash
 # No token -> rejected on authenticated routes
@@ -52,7 +54,7 @@ curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer wrong" http://1
 
 # Valid token -> allowed
 curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/healthz
-# {"code":0,"msg":"success","data":{"ok":true},"request_id":"01KY3XQ1..."}
+# {"code":0,"msg":"success","data":{"ok":true},"request_id":"01KY6G4GA..."}
 ```
 
 ### Response envelope
@@ -60,15 +62,15 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/healthz
 Every REST response is JSON wrapped in an envelope:
 
 ```json
-{"code": 0, "msg": "success", "data": { ... }, "request_id": "01KY3XQ1BSC5S5047TD0B2SQCP"}
+{"code": 0, "msg": "success", "data": { ... }, "request_id": "01KY6G4GABMJ083QVRBW0TQNH9"}
 ```
 
 - `code: 0` = success; the payload is in `data`.
 - **Errors come back as HTTP 200 with a non-zero `code`** — check `code`, not
   the HTTP status. Example: a non-existent `cwd` on session create returns
-  `{"code":40409,"msg":"workspace root /tmp/spike does not exist","data":null,...}`
+  `{"code":40409,"msg":"workspace root /tmp/definitely-not-here-xyz does not exist","data":null,...}`
   over HTTP 200. Error envelopes may also carry `details` (validation errors)
-  and a server-side `stack` string (0.28.1; ignore it).
+  and a server-side `stack` string (still present on 0.29.0; ignore it).
 
 ## Meta
 
@@ -82,15 +84,15 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
 {
   "code": 0, "msg": "success",
   "data": {
-    "server_version": "0.28.1",
+    "server_version": "0.29.0",
     "capabilities": {"websocket": true, "file_upload": true, "fs_query": true, "mcp": true, "tasks": true, "terminal": true},
-    "server_id": "01KY288682HCN4K16PDK1GJDD2",
-    "started_at": "2026-07-21T11:51:17.506Z",
+    "server_id": "01KY6G09444HX8HSQVQN0HTB6R",
+    "started_at": "2026-07-23T03:23:44.644Z",
     "open_in_apps": [],
     "dangerous_bypass_auth": false,
     "backend": "v2"
   },
-  "request_id": "01KY3XQ1BSC5S5047TD0B2SQCP"
+  "request_id": "01KY6G2SVTVTF380XEWC88EC67"
 }
 ```
 
@@ -99,28 +101,29 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
 ### List — `GET /api/v1/sessions`
 
 Query params (all optional): `page_size` (default 20), `before_id`, `after_id`
-(pagination cursors — `before_id` paging re-verified 2026-07-22), `status`,
-`include_archive`, `archived_only`, `exclude_empty`, `workspace_id`.
+(pagination cursors — `before_id` paging verified 2026-07-22, list shape
+re-verified 2026-07-23), `status`, `include_archive`, `archived_only`,
+`exclude_empty`, `workspace_id`.
 
 ```bash
 curl -s -H "Authorization: Bearer <token>" 'http://127.0.0.1:58627/api/v1/sessions?page_size=2'
 ```
 
-Session object shape (0.28.1, fields truncated for brevity):
+Session object shape (0.29.0, fields truncated for brevity):
 
 ```json
 {
-  "id": "session_81fd0b05-3e9c-4b75-a677-d2892719538b",
+  "id": "session_b6be6715-e7f3-450c-a103-a53463686d45",
   "workspace_id": "wd_spike_3e0ac6a88795",
-  "title": "Run exactly this one command, then reply done: echo doc-verify-0281",
-  "created_at": "2026-07-22T03:27:18.314Z",
-  "updated_at": "2026-07-22T03:30:42.776Z",
+  "title": "Run exactly this one command, then reply done: echo doc-verify-0290",
+  "created_at": "2026-07-23T03:26:27.612Z",
+  "updated_at": "2026-07-23T03:28:34.668Z",
   "busy": false,
   "main_turn_active": false,
   "pending_interaction": "none",
   "last_turn_reason": "completed",
   "archived": false,
-  "last_prompt": "Run exactly this one command, then reply done: echo doc-verify-0281",
+  "last_prompt": "Run exactly this one command, then reply done: echo doc-verify-0290",
   "metadata": {"cwd": "/tmp/spike"},
   "agent_config": {"model": ""},
   "usage": {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0,
@@ -135,9 +138,10 @@ Session object shape (0.28.1, fields truncated for brevity):
 - Runtime state fields: `busy` (bool), `main_turn_active` (bool),
   `pending_interaction` (`"none"` | `"approval"` | `"question"`),
   `last_turn_reason` (`"completed"` | `"cancelled"`). **`last_turn_reason` is
-  absent entirely on sessions that have not run a turn yet** (0.28.1).
-- `message_count` and `last_seq` are still present but observed stuck at `0` —
-  do not rely on them.
+  absent entirely on sessions that have not run a turn yet** (re-verified
+  2026-07-23).
+- `message_count` and `last_seq` are still present but observed stuck at `0`
+  (re-verified 2026-07-23 after several turns) — do not rely on them.
 - The list envelope carries `has_more` for pagination (verified with
   `page_size=2&before_id=<last id of page>`).
 
@@ -163,7 +167,7 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions \
 Returns the session object above. Fresh sessions created without a `title`
 come back with `"title": ""` — clients should fall back to their own
 placeholder. There is no delete endpoint: `DELETE /api/v1/sessions/{id}`
-answers plain HTTP 404 (verified 2026-07-22).
+answers plain HTTP 404 (re-verified 2026-07-23).
 
 ### Get one — `GET /api/v1/sessions/{id}`
 
@@ -174,7 +178,7 @@ Returns the same session object as the list.
 Lightweight runtime state:
 
 ```bash
-curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/sessions/session_81fd0b05.../status
+curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../status
 ```
 
 ```json
@@ -183,15 +187,15 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/session
   "data": {
     "busy": false,
     "model": "kimi-code/k3",
-    "thinking_level": "low",
+    "thinking_level": "high",
     "permission": "manual",
     "plan_mode": false,
     "swarm_mode": false,
-    "context_tokens": 25060,
+    "context_tokens": 25050,
     "max_context_tokens": 1048576,
-    "context_usage": 0.023899078369140625
+    "context_usage": 0.023889541625976562
   },
-  "request_id": "01KY3YKPEMA1H1ZBNBGVBER64Q"
+  "request_id": "01KY6GB8PGD0PV9FGE5XPX55Z3"
 }
 ```
 
@@ -203,8 +207,8 @@ session's current config (`"off"`/`"yolo"` observed on a fresh session).
 
 ### List — `GET /api/v1/workspaces`
 
-Returns every workspace the server knows about (verified live 2026-07-22,
-server `0.28.1`). Requires the token.
+Returns every workspace the server knows about (verified live 2026-07-23,
+server `0.29.0`). Requires the token.
 
 ```bash
 curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/workspaces
@@ -216,16 +220,16 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/workspa
   "data": {
     "items": [
       {
-        "id": "wd_home_ubuntu",
+        "id": "wd_ubuntu_ce4fda485303",
         "root": "/home/ubuntu",
         "name": "ubuntu",
-        "created_at": "2026-07-15T08:12:03.000Z",
-        "last_opened_at": "2026-07-22T03:30:42.000Z",
-        "session_count": 81
+        "created_at": "2026-07-08T05:03:06.127Z",
+        "last_opened_at": "2026-07-23T03:24:59.583Z",
+        "session_count": 83
       }
     ]
   },
-  "request_id": "01KY3YKPEMA1H1ZBNBGVBER64Q"
+  "request_id": "01KY6G58BMA06WSJC5C8YKTPA6"
 }
 ```
 
@@ -242,49 +246,49 @@ Query params (all optional): `page_size`, `before_id`, `after_id`, `role`.
 **Items are returned newest-first**; page backwards with `before_id`.
 
 ```bash
-curl -s -H "Authorization: Bearer <token>" 'http://127.0.0.1:58627/api/v1/sessions/session_81fd0b05.../messages?page_size=10'
+curl -s -H "Authorization: Bearer <token>" 'http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../messages?page_size=10'
 ```
 
-Message shapes (0.28.1, verbatim from one turn — user prompt, assistant tool
+Message shapes (0.29.0, verbatim from one turn — user prompt, assistant tool
 call, tool result, assistant text):
 
 ```json
-{"id":"msg_01KY3Y0AEWYPN791ESGMZE5658","session_id":"session_81fd0b05-...","role":"user",
- "content":[{"type":"text","text":"Run exactly this one command, then reply done: echo doc-verify-0281"}],
- "created_at":"2026-07-22T03:30:42.782Z","metadata":{"origin":{"kind":"user"}}}
+{"id":"msg_01KY6G6B4A1EM8X8XRA02KJ3ZR","session_id":"session_b6be6715-...","role":"user",
+ "content":[{"type":"text","text":"Run exactly this one command, then reply done: echo doc-verify-0290"}],
+ "created_at":"2026-07-23T03:27:03.317Z","metadata":{"origin":{"kind":"user"}}}
 
-{"id":"msg_session_81fd0b05-3e9c-4b75-a677-d2892719538b_000001","session_id":"session_81fd0b05-...","role":"assistant",
- "content":[{"type":"thinking","thinking":""},
-            {"type":"tool_use","tool_call_id":"tool_FsSfXhnM8ZJK1WfTxntUlEQM","tool_name":"Bash",
-             "input":{"command":"echo doc-verify-0281"}}],
- "created_at":"2026-07-22T03:30:42.784Z"}
+{"id":"msg_session_b6be6715-e7f3-450c-a103-a53463686d45_000001","session_id":"session_b6be6715-...","role":"assistant",
+ "content":[{"type":"thinking","thinking":"Simple."},
+            {"type":"tool_use","tool_call_id":"tool_RMgBIy1asIorg1eV8P3ZhHiL","tool_name":"Bash",
+             "input":{"command":"echo doc-verify-0290"}}],
+ "created_at":"2026-07-23T03:27:03.329Z"}
 
-{"id":"msg_session_81fd0b05-3e9c-4b75-a677-d2892719538b_000002","session_id":"session_81fd0b05-...","role":"tool",
- "content":[{"type":"tool_result","tool_call_id":"tool_FsSfXhnM8ZJK1WfTxntUlEQM","output":"doc-verify-0281\n"}],
- "created_at":"2026-07-22T03:31:23.681Z"}
+{"id":"msg_session_b6be6715-e7f3-450c-a103-a53463686d45_000002","session_id":"session_b6be6715-...","role":"tool",
+ "content":[{"type":"tool_result","tool_call_id":"tool_RMgBIy1asIorg1eV8P3ZhHiL","output":"doc-verify-0290\n"}],
+ "created_at":"2026-07-23T03:28:28.486Z"}
 
-{"id":"msg_session_81fd0b05-3e9c-4b75-a677-d2892719538b_000003","session_id":"session_81fd0b05-...","role":"assistant",
+{"id":"msg_session_b6be6715-e7f3-450c-a103-a53463686d45_000003","session_id":"session_b6be6715-...","role":"assistant",
  "content":[{"type":"thinking","thinking":""},{"type":"text","text":"done"}],
- "created_at":"2026-07-22T03:31:23.683Z"}
+ "created_at":"2026-07-23T03:28:28.493Z"}
 ```
 
 Roles observed: `user`, `assistant`, `tool`. Content is a list of parts; part
 types observed:
 
 - `{"type": "text", "text": "..."}` — user or assistant text.
-- `{"type": "thinking", "thinking": "..."}` — assistant reasoning.
+- `{"type": "thinking", "thinking": "..."}` — assistant reasoning (may be empty).
 - `{"type": "tool_use", "tool_call_id": "tool_...", "tool_name": "Bash", "input": {...}}` — assistant tool call.
 - `{"type": "tool_result", "tool_call_id": "tool_...", "output": "..."}` — in a
   `role: "tool"` message; may also carry `"is_error": true`.
 
-**Message id format changed in 0.28.1:** user messages keep the ULID form
-(`msg_01KY...`), but server-generated messages (`assistant`, `tool`) now get
+**Message id format (since 0.28.1):** user messages keep the ULID form
+(`msg_01KY...`), but server-generated messages (`assistant`, `tool`) get
 sequential per-session ids `msg_<session_id>_<NNNNNN>` (zero-padded counter).
 Treat ids as opaque strings — do not parse them. `metadata` is only present on
 user messages (carries `origin`).
 
 An aborted turn commits an assistant message with **empty `content`** when the
-abort landed before any assistant text was produced (re-verified 2026-07-22).
+abort landed before any assistant text was produced (verified 2026-07-22).
 
 ### Internal envelopes in user messages
 
@@ -316,10 +320,10 @@ Observed tags, all paired with attributes allowed on the opening tag:
 ### Send — `POST /api/v1/sessions/{id}/prompts`
 
 ```bash
-curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_81fd0b05.../prompts \
+curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../prompts \
   -H "Authorization: Bearer <token>" \
   -H 'Content-Type: application/json; charset=utf-8' \
-  -d '{"content":[{"type":"text","text":"Run exactly this one command, then reply done: echo doc-verify-0281"}],
+  -d '{"content":[{"type":"text","text":"Run exactly this one command, then reply done: echo doc-verify-0290"}],
        "model":"kimi-code/k3","permission_mode":"manual"}'
 ```
 
@@ -327,13 +331,13 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_81fd0b05.../promp
 {
   "code": 0, "msg": "success",
   "data": {
-    "prompt_id": "msg_01KY3Y0AEWYPN791ESGMZE5658",
-    "user_message_id": "msg_01KY3Y0AEWYPN791ESGMZE5658",
+    "prompt_id": "msg_01KY6G6B4A1EM8X8XRA02KJ3ZR",
+    "user_message_id": "msg_01KY6G6B4A1EM8X8XRA02KJ3ZR",
     "status": "running",
-    "content": [{"type": "text", "text": "Run exactly this one command, then reply done: echo doc-verify-0281"}],
-    "created_at": "2026-07-22T03:30:42.780Z"
+    "content": [{"type": "text", "text": "Run exactly this one command, then reply done: echo doc-verify-0290"}],
+    "created_at": "2026-07-23T03:27:03.306Z"
   },
-  "request_id": "01KY3Y0ADZ9WC62F2YW2539HAW"
+  "request_id": "01KY6G6B2FE6494T12W5FR7Q2E"
 }
 ```
 
@@ -348,13 +352,13 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_81fd0b05.../promp
   results arrive over the WebSocket.
 - While the session is busy, a posted prompt is accepted but queued: the
   response comes back with `"status": "queued"` instead of `"running"`
-  (re-verified 2026-07-22). A queued prompt can be steered into the running
+  (re-verified 2026-07-23). A queued prompt can be steered into the running
   turn — see the next section.
 
 ## Steer
 
 Steering injects a queued prompt into the currently running turn. The client
-flow (re-verified 2026-07-22 on 0.28.1): while the session is busy, POST the
+flow (re-verified 2026-07-23 on 0.29.0): while the session is busy, POST the
 new prompt as usual (response `"status": "queued"`), then steer the returned
 `prompt_id` into the active turn.
 
@@ -363,22 +367,24 @@ new prompt as usual (response `"status": "queued"`), then steer the returned
 Body: `{"prompt_ids": ["<prompt id>", ...]}` — at least one id.
 
 ```bash
-curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_160acae4.../prompts:steer \
+curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../prompts:steer \
   -H "Authorization: Bearer <token>" \
   -H 'Content-Type: application/json; charset=utf-8' \
-  -d '{"prompt_ids":["msg_01KY3Y53G46J8F237D6K05XFN8"]}'
+  -d '{"prompt_ids":["msg_01KY6GCAQF1655KB27NSFBGWZ2"]}'
 ```
 
 ```json
 {"code":0,"msg":"success",
- "data":{"steered":true,"prompt_ids":["msg_01KY3Y53G46J8F237D6K05XFN8"]},
- "request_id":"01KY3Y5RKKZ5JR1ZG7FCN9SQS9"}
+ "data":{"steered":true,"prompt_ids":["msg_01KY6GCAQF1655KB27NSFBGWZ2"]},
+ "request_id":"01KY6GCAT25KYEJKXA3XMM50H6"}
 ```
 
 - **Idle session** (nothing to steer into): HTTP 200 with
-  `{"code":40402,"msg":"no active prompt to steer into","data":null,...}`.
+  `{"code":40402,"msg":"no active prompt to steer into","data":null,...}`
+  (re-verified 2026-07-23).
 - Empty `prompt_ids`:
-  `{"code":40001,"msg":"prompt_ids: Too small: expected array to have >=1 items",...}`.
+  `{"code":40001,"msg":"prompt_ids: Too small: expected array to have >=1 items",...}`
+  (re-verified 2026-07-23).
 - WS sequence when the steer lands mid-turn (verbatim capture in the WS
   section): `prompt.steered` → the current step runs to `turn.step.completed`
   → the steered user message arrives via `context.spliced` → a new
@@ -394,15 +400,16 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_160acae4.../promp
 Body: `{}`. Aborts the currently running prompt/turn of the session.
 
 ```bash
-curl -s -X POST 'http://127.0.0.1:58627/api/v1/sessions/session_39795f5f...:abort' \
+curl -s -X POST 'http://127.0.0.1:58627/api/v1/sessions/session_b6be6715...:abort' \
   -H "Authorization: Bearer <token>" \
   -H 'Content-Type: application/json; charset=utf-8' -d '{}'
-# {"code":0,"msg":"success","data":{"aborted":true},"request_id":"01KY3Y7Q1T2XJS5PJ4PMWWXN29"}
+# {"code":0,"msg":"success","data":{"aborted":true},"request_id":"01KY6GFG4S5FPPXCFMP60X0FVH"}
 ```
 
-Verified mid-run on 0.28.1: the WS then emits `turn.step.interrupted`
-(`reason: "aborted"`) → `turn.ended` (`reason: "cancelled"`) →
-`event.session.work_changed` (idle) → `prompt.aborted`.
+Verified mid-run on 0.29.0 (2026-07-23): the WS then emits
+`turn.step.interrupted` (`reason: "aborted"`) → `turn.ended`
+(`reason: "cancelled"`) → `event.session.work_changed` (idle) →
+`prompt.aborted`.
 
 ## Permissions
 
@@ -418,11 +425,11 @@ endpoint. The decision is posted back via REST.
 2. Post the decision (either id form works — they are the same id):
 
 ```bash
-curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_81fd0b05.../approvals/tool_FsSfXhnM8ZJK1WfTxntUlEQM \
+curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../approvals/tool_RMgBIy1asIorg1eV8P3ZhHiL \
   -H "Authorization: Bearer <token>" \
   -H 'Content-Type: application/json; charset=utf-8' \
   -d '{"decision":"approved"}'
-# {"code":0,"msg":"success","data":{"resolved":true,"resolved_at":"2026-07-22T03:31:23.662Z"},"request_id":"01KY3Y1JCCA17ZENC7QWXBF3PQ"}
+# {"code":0,"msg":"success","data":{"resolved":true,"resolved_at":"2026-07-23T03:28:28.438Z"},"request_id":"01KY6G8Y8F6EJC7XH8KYZ4F2E5"}
 ```
 
 Body fields: `decision` (`"approved"` | `"rejected"`), optional `scope`,
@@ -434,7 +441,7 @@ runs.
 
 The agent's user-question tool (`AskUserQuestion`) surfaces as **WebSocket
 events**; the answer or dismissal is posted back via REST. Re-verified
-2026-07-22 on 0.28.1 by prompting a session to call the tool — the question
+2026-07-23 on 0.29.0 by prompting a session to call the tool — the question
 surfaced directly, with no approval gate, under the session's default
 permission mode.
 
@@ -452,20 +459,21 @@ permission mode.
    The `status` query param is mandatory and only accepts `"pending"`; without
    it: `{"code":40001,"msg":"status: Invalid input: expected \"pending\"",...}`.
    **`GET /api/v1/sessions/{id}/questions/{qid}` does not exist** (plain HTTP
-   404, `{"statusCode":404,"error":"Not Found",...}`) — the single-question
-   shape only exists inside the list item / WS event payload.
+   404, `{"statusCode":404,"error":"Not Found",...}` — re-verified 2026-07-23)
+   — the single-question shape only exists inside the list item / WS event
+   payload.
 4. Answer — `POST /api/v1/sessions/{id}/questions/{qid}`. `answers` keys are
    the per-question item ids from the request payload (`q_0`); values carry
    `kind` plus `option_id` (selected option) or `text` (free text):
 
 ```bash
-# selected option
-curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_54f9fec7.../questions/tool_C07XSGo6P3vzrsWh9QYgTSsP \
+# selected option (re-verified 2026-07-23)
+curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../questions/tool_Isj4WDPaDkLQejGM4gDzWgQ3 \
   -H "Authorization: Bearer <token>" \
   -H 'Content-Type: application/json; charset=utf-8' \
   -d '{"answers":{"q_0":{"kind":"single","option_id":"opt_0_1"}}}'
-# free text (the question had "allow_other": true)
-curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_54f9fec7.../questions/tool_ZYSesxoz91XhJh69FKcJiGGz \
+# free text (the question had "allow_other": true; re-verified 2026-07-23)
+curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../questions/tool_J7bZIaNmzApVJZvKP0aQh9I5 \
   -H "Authorization: Bearer <token>" \
   -H 'Content-Type: application/json; charset=utf-8' \
   -d '{"answers":{"q_0":{"kind":"other","text":"ramen"}}}'
@@ -476,22 +484,22 @@ Both returned HTTP 200
 On the wire: `event.session.work_changed` (`pending_interaction` back to
 `"none"`) → `event.question.answered` → `tool.result` whose output is
 `{"answers":{"<question text>":"<option label or free text>"}}` → the turn
-continues. **Changed in 0.28.1:** answering an already-resolved question now
-returns `{"code":40902,"msg":"question <qid> already resolved","data":null,...}`
-(0.27.0 returned `40405` "not found").
+continues. Answering an already-resolved question returns
+`{"code":40902,"msg":"question <qid> already resolved","data":{"resolved":false},...}`
+(re-verified 2026-07-23; 0.27.0 returned `40405` "not found").
 
 5. Dismiss — `POST /api/v1/sessions/{id}/questions/{qid}:dismiss`, body `{}`:
 
 ```json
-{"code":40909,"msg":"question tool_Cem7SmwFnnFNjuhLaX1yJ2sw dismissed",
- "data":{"dismissed":true,"dismissed_at":"2026-07-22T03:36:48.173Z"},
- "request_id":"01KY3YBF9C11E18YPWMG29PX7M"}
+{"code":40909,"msg":"question tool_nZX3S4ZZ6klG3ppFyIUKvUNa dismissed",
+ "data":{"dismissed":true,"dismissed_at":"2026-07-23T03:37:06.177Z"},
+ "request_id":"01KY6GRQW0TPCSD8GNAQ47VN7T"}
 ```
 
 **Beware: a successful dismiss comes back over HTTP 200 with the non-zero
 envelope code `40909`** — do not gate success on `code == 0` here; check
-`data.dismissed`. Re-dismissing a resolved question now also returns
-`code:40902` ("already resolved"; 0.27.0: `40405`). On the wire:
+`data.dismissed`. Re-dismissing a resolved question also returns
+`code:40902` ("already resolved"; re-verified 2026-07-23). On the wire:
 `event.session.work_changed` (`"none"`) → `event.question.dismissed` →
 `tool.result` with output
 `{"answers":{},"note":"User dismissed the question without answering."}` → the
@@ -518,14 +526,14 @@ or put it last):
 
 ```bash
 ~/tools/websocat-bin/websocat -H="Authorization: Bearer <token>" \
-  'ws://127.0.0.1:58627/api/v1/ws?client_id=doc_verify'
+  'ws://127.0.0.1:58627/api/v1/ws?client_id=doc_verify_0290'
 ```
 
 First server frame is `server_hello` (unchanged):
 
 ```json
-{"type":"server_hello","timestamp":"2026-07-22T03:30:26.525Z",
- "payload":{"ws_connection_id":"conn_01KY3XZTJXAV7NXM3TJ1VN09HT","protocol_version":2,
+{"type":"server_hello","timestamp":"2026-07-23T03:26:48.774Z",
+ "payload":{"ws_connection_id":"conn_01KY6G5WY5EKAC0EQGZRN8XKD9","protocol_version":2,
             "max_event_buffer_size":1000,
             "capabilities":{"event_batching":false,"compression":false}}}
 ```
@@ -534,8 +542,8 @@ First server frame is `server_hello` (unchanged):
 
 0.23.3 sent app-level `ping` frames every ~30 s and closed connections that did
 not answer with a matching `pong`. **v2 sends no pings** (zero observed across
-all 2026-07-22 captures; the connections stayed open). Answering pings remains
-harmless if an older server sends them.
+all 2026-07-22 and 2026-07-23 captures; the connections stayed open).
+Answering pings remains harmless if an older server sends them.
 
 ### Subscribe to a session
 
@@ -544,22 +552,24 @@ message. Client frames carry a client-chosen `id` that the server mirrors in
 its `ack`.
 
 ```json
-++ client: {"type":"subscribe","id":"c_1","payload":{"session_ids":["session_81fd0b05..."]}}
+++ client: {"type":"subscribe","id":"c_1","payload":{"session_ids":["session_b6be6715..."]}}
 -- server: {"type":"ack","id":"c_1","code":0,"msg":"success",
-            "payload":{"accepted":["session_81fd0b05..."],
+            "payload":{"accepted":["session_b6be6715..."],
                        "not_found":[],"resync_required":[],
-                       "cursors":{"session_81fd0b05...":{"seq":1,"epoch":"ep_01KY3XT2SX1EFJVP1P3GVY4Q6D"}}}}
+                       "cursors":{"session_b6be6715...":{"seq":2,"epoch":"ep_01KY6G589H3J9XHG6RF1RYAE59"}}}}
 ```
 
-**Resume after disconnect** (re-verified on 0.28.1: subscribing from `seq 18`
-replayed seqs 19–20 in order):
+**Resume after disconnect** (re-verified on 0.29.0: subscribing from `seq 70`
+replayed seqs 71–78 in order, from `seq 78` replayed the later question
+events):
 
 ```json
-{"type":"subscribe","id":"c_1","payload":{"session_ids":["session_..."],
- "cursors":{"session_...":{"seq":18,"epoch":"ep_01KY3XT2SX1EFJVP1P3GVY4Q6D"}}}}
+{"type":"subscribe","id":"r_1","payload":{"session_ids":["session_..."],
+ "cursors":{"session_...":{"seq":70,"epoch":"ep_01KY6G589H3J9XHG6RF1RYAE59"}}}}
 ```
 
-`unsubscribe` works the same way and gets its own `ack` (re-verified).
+`unsubscribe` works the same way and gets its own `ack` (re-verified
+2026-07-23: `{"type":"ack","id":"u_1","code":0,...,"payload":{"accepted":[],...}}`).
 
 ### Event envelope
 
@@ -569,98 +579,113 @@ Every event frame:
 {
   "type": "<event type>",        // mirrored inside payload.type
   "seq": 21,                     // per-session monotonically increasing
-  "epoch": "ep_01KY3XT2SX1EFJVP1P3GVY4Q6D",
+  "epoch": "ep_01KY6G589H3J9XHG6RF1RYAE59",
   "session_id": "session_...",
-  "timestamp": "2026-07-22T03:31:28.957Z",
+  "timestamp": "2026-07-23T03:28:34.668Z",
   "volatile": true,              // only on high-frequency deltas; absent otherwise
   "offset": 0,                   // byte offset of the delta in the accumulated text
   "payload": { "type": "<event type>", "...": "..." }
 }
 ```
 
-### Captured round-trips (0.28.1)
+### Captured round-trips (0.29.0)
 
-Full prompt with a manual-permission tool call, recorded 2026-07-22 (command:
+Full prompt with a manual-permission tool call, recorded 2026-07-23 (command:
 `POST .../prompts` with `permission_mode: "manual"`, approval via REST as
-above). Identical skeleton to 0.27.0:
+above). Same skeleton as 0.28.1:
 
 ```
-seq 3   event.session.work_changed   busy=true, main_turn_active=true
-seq 4   turn.started                 {"turnId": 0, "origin": {"kind": "user"}, "prompt": "<text>"}
-seq 5   context.spliced              the new user message, inline
-seq 6   turn.step.started            step 1; thinking.delta, tool.call.delta x9
-seq 7   permission.approval.requested  v2 shape (approval id = toolCallId)
-seq 8   event.session.work_changed   pending_interaction "approval"
-seq 9   event.approval.requested     legacy shape (approval_id, expires_at +24 h)
-seq 10  event.session.work_changed   pending_interaction back to "none" (decision posted)
-seq 11  event.approval.resolved      after the REST decision
-seq 12  permission.approval.resolved v2 duplicate
-seq 13  tool.call.started + tool.progress (volatile stdout streaming)
-seq 14  tool.result
-seq 15  turn.step.completed          usage + finishReason "tool_use" + latency stats
-seq 16  turn.step.started            step 2; thinking.delta, assistant.delta ("done")
-seq 17  turn.step.completed
-seq 18  turn.ended                   {"reason": "completed", "durationMs": ...}
-seq 19  event.session.work_changed   busy=false, last_turn_reason "completed"
-seq 20  prompt.completed             {"promptId": "msg_...", "reason": "completed"}
+seq 2   agent.status.updated       model/usage variant (now with thinkingEffort)
+seq 3   session.meta.updated       title patch
+seq 4   event.session.work_changed busy=true, main_turn_active=true
+seq 5   turn.started               {"turnId": 0, "origin": {"kind": "user"}, "prompt": "<text>"}
+seq 6   context.spliced            the new user message, inline
+seq 7   turn.step.started          step 1; thinking.delta, tool.call.delta xN
+seq 8   permission.approval.requested  v2 shape (approval id = toolCallId)
+seq 9   event.session.work_changed pending_interaction "approval"
+seq 10  event.approval.requested   legacy shape (approval_id, expires_at +24 h)
+seq 11  event.session.work_changed pending_interaction back to "none" (decision posted)
+seq 12  event.approval.resolved    after the REST decision
+seq 13  permission.approval.resolved v2 duplicate
+seq 14  tool.call.started + tool.progress (volatile stdout streaming)
+seq 15  tool.result
+seq 16  turn.step.completed        usage + finishReason "tool_use" + latency stats
+seq 17  turn.step.started          step 2; thinking.delta, assistant.delta ("done")
+seq 18  turn.step.completed
+seq 19  turn.ended                 {"reason": "completed", "durationMs": ...}
+seq 20  event.session.work_changed busy=false, last_turn_reason "completed"
+seq 21  prompt.completed           {"promptId": "msg_...", "reason": "completed"}
 ```
 
 Plain text prompt: same skeleton without the approval/tool events.
 **`prompt.submitted` does not exist** — the user message arrives inline in
-`context.spliced`. `agent.status.updated` (volatile; model, context, usage,
-plus a `phase` object — new in 0.28.1, see payloads) and `session.meta.updated`
-(title/lastPrompt patch) fire interleaved throughout, sharing the same `seq` as
-the event they piggyback on.
+`context.spliced`. `agent.status.updated` (volatile; model, context, usage —
+plus a `phase` object, see payloads) and `session.meta.updated`
+(title/lastPrompt patch) fire interleaved throughout, sharing the same `seq`
+as the event they piggyback on.
 
-Abort sequence (`POST :abort` mid-run, 2026-07-22):
-
-```
-seq 7   turn.step.interrupted        {"reason": "aborted"}
-seq 8   turn.ended                   {"reason": "cancelled", "durationMs": 3034}
-seq 9   event.session.work_changed   busy=false, last_turn_reason "cancelled"
-seq 10  prompt.aborted               {"promptId": "msg_...", "abortedAt": "..."}
-```
-
-Steer round-trip (2026-07-22): prompt A ("count to 100000") running, prompt B
-posted while busy (`"status": "queued"`), then `POST prompts:steer` with B's id:
+Abort sequence (`POST :abort` mid-run, 2026-07-23):
 
 ```
-seq 16  prompt.steered               activePromptId=A, promptIds=[B], B's content inline
-seq 19  turn.step.completed          the current step finishes normally
-seq 20  context.spliced              the steered user message (carries an id)
-seq 21  turn.step.started            next step — SAME turn, no new turn.started
-seq 23  turn.ended                   reason "completed"
-seq 25  prompt.completed             promptId = A (the original active prompt)
+seq 41  turn.step.interrupted      {"reason": "aborted"}
+seq 42  turn.ended                 {"reason": "cancelled", "durationMs": 8085}
+seq 43  event.session.work_changed busy=false, last_turn_reason "cancelled"
+seq 44  prompt.aborted             {"promptId": "msg_...", "abortedAt": "..."}
 ```
 
-Question round-trip (2026-07-22; the prompt asked the agent to use its
+Steer round-trip (2026-07-23): prompt A ("list 60 facts about the Moon")
+running, prompt B posted while busy (`"status": "queued"`), then
+`POST prompts:steer` with B's id:
+
+```
+seq 28  prompt.steered             activePromptId=A, promptIds=[B], B's content inline
+seq 29  turn.step.completed        the current step finishes normally
+seq 30  context.spliced            the steered user message — NO id (0.29.0, see below)
+seq 31  turn.step.started          next step — SAME turn, no new turn.started
+seq 33  turn.ended                 reason "completed"
+seq 35  prompt.completed           promptId = A (the original active prompt)
+```
+
+Question round-trip (2026-07-23; the prompt asked the agent to use its
 `AskUserQuestion` tool):
 
 ```
-seq 7   tool.call.started            name "AskUserQuestion"
-seq 8   event.session.work_changed   pending_interaction "question"
-seq 9   event.question.requested     question_id = toolCallId, questions inline
+seq 50  tool.call.started          name "AskUserQuestion"
+seq 51  event.session.work_changed pending_interaction "question"
+seq 52  event.question.requested   question_id = toolCallId, questions inline
 -- answer posted via REST --
-seq 10  event.session.work_changed   pending_interaction "none"
-seq 11  event.question.answered      answers {"<question text>": "<label or free text>"}
-seq 12  tool.result                  output {"answers":{...}}; the turn continues
+seq 53  event.session.work_changed pending_interaction "none"
+seq 54  event.question.answered    answers {"<question text>": "<label or free text>"}
+seq 55  tool.result                output {"answers":{...}}; the turn continues
 ```
 
-Dismiss path instead of the answer: `event.session.work_changed` (`"none"`) →
-`event.question.dismissed` → `tool.result` with output
+Dismiss path instead of the answer (2026-07-23): `event.session.work_changed`
+(`"none"`) → `event.question.dismissed` → `tool.result` with output
 `{"answers":{},"note":"User dismissed the question without answering."}`.
 
-### Core event payloads (verbatim captures, 0.28.1)
+### Core event payloads (verbatim captures, 0.29.0)
 
 **New user message** (`context.spliced`; `messages` carries full message
 objects — `start`/`deleteCount` are splice coordinates into the context).
-Unchanged from 0.27.0:
+Unchanged:
 
 ```json
-{"type":"context.spliced","seq":5,"epoch":"ep_...","session_id":"session_...","timestamp":"...",
+{"type":"context.spliced","seq":6,"epoch":"ep_...","session_id":"session_...","timestamp":"...",
  "payload":{"type":"context.spliced","start":0,"deleteCount":0,
-  "messages":[{"role":"user","content":[{"type":"text","text":"Run exactly this one command, then reply done: echo doc-verify-0281"}],
-               "toolCalls":[],"origin":{"kind":"user"},"id":"msg_01KY3Y0AEWYPN791ESGMZE5658"}],
+  "messages":[{"role":"user","content":[{"type":"text","text":"Run exactly this one command, then reply done: echo doc-verify-0290"}],
+               "toolCalls":[],"origin":{"kind":"user"},"id":"msg_01KY6G6B4A1EM8X8XRA02KJ3ZR"}],
+  "agentId":"main","sessionId":"session_..."}}
+```
+
+**Steered user message** (`context.spliced` after `prompt.steered`) —
+**changed in 0.29.0: the spliced steered message no longer carries an `id`**
+(0.28.1 carried one). Treat spliced-message ids as optional:
+
+```json
+{"type":"context.spliced","seq":30,"epoch":"ep_...","session_id":"session_...","timestamp":"...",
+ "payload":{"type":"context.spliced","start":6,"deleteCount":0,
+  "messages":[{"role":"user","content":[{"type":"text","text":"Stop. Reply with exactly: steered-ok-0290"}],
+               "toolCalls":[],"origin":{"kind":"user"}}],
   "agentId":"main","sessionId":"session_..."}}
 ```
 
@@ -669,7 +694,7 @@ Unchanged from 0.27.0:
 Unchanged:
 
 ```json
-{"type":"event.session.work_changed","seq":8,
+{"type":"event.session.work_changed","seq":9,
  "payload":{"type":"event.session.work_changed","busy":true,"main_turn_active":true,
             "pending_interaction":"approval","agentId":"main","sessionId":"session_..."}}
 ```
@@ -678,8 +703,8 @@ Unchanged:
 `"type": "thinking.delta"`). Unchanged:
 
 ```json
-{"type":"assistant.delta","seq":16,"epoch":"ep_...","volatile":true,"offset":0,
- "session_id":"session_...","timestamp":"2026-07-22T03:31:28.957Z",
+{"type":"assistant.delta","seq":17,"epoch":"ep_...","volatile":true,"offset":0,
+ "session_id":"session_...","timestamp":"2026-07-23T03:28:34.657Z",
  "payload":{"type":"assistant.delta","turnId":0,"delta":"done","agentId":"main",
             "sessionId":"session_..."}}
 ```
@@ -687,16 +712,15 @@ Unchanged:
 **Tool call argument streaming** (`tool.call.delta`, volatile; `argumentsPart`
 fragments concatenate into the tool's JSON arguments). Unchanged.
 
-**Tool call start** (`tool.call.started`) — **0.28.1 adds a `description`
-field** (the human-readable action, same text as the approval's `action`);
-`toolCallId`, `name`, `args`, `display` unchanged:
+**Tool call start** (`tool.call.started`; `description` is the human-readable
+action, same text as the approval's `action`). Unchanged:
 
 ```json
-{"type":"tool.call.started","seq":13,
- "payload":{"type":"tool.call.started","turnId":0,"toolCallId":"tool_FsSfXhnM8ZJK1WfTxntUlEQM",
-            "name":"Bash","args":{"command":"echo doc-verify-0281"},
-            "description":"Running: echo doc-verify-0281",
-            "display":{"kind":"command","command":"echo doc-verify-0281","cwd":"/tmp/spike","language":"bash"},
+{"type":"tool.call.started","seq":14,
+ "payload":{"type":"tool.call.started","turnId":0,"toolCallId":"tool_RMgBIy1asIorg1eV8P3ZhHiL",
+            "name":"Bash","args":{"command":"echo doc-verify-0290"},
+            "description":"Running: echo doc-verify-0290",
+            "display":{"kind":"command","command":"echo doc-verify-0290","cwd":"/tmp/spike","language":"bash"},
             "agentId":"main","sessionId":"session_..."}}
 ```
 
@@ -705,56 +729,77 @@ field** (the human-readable action, same text as the approval's `action`);
 **Tool progress** (`tool.progress`, volatile — live tool output). Unchanged:
 
 ```json
-{"type":"tool.progress","seq":13,"volatile":true,
- "payload":{"type":"tool.progress","turnId":0,"toolCallId":"tool_FsSfXhnM8ZJK1WfTxntUlEQM",
-            "update":{"kind":"stdout","text":"doc-verify-0281\n"},"agentId":"main","sessionId":"session_..."}}
+{"type":"tool.progress","seq":14,"volatile":true,
+ "payload":{"type":"tool.progress","turnId":0,"toolCallId":"tool_RMgBIy1asIorg1eV8P3ZhHiL",
+            "update":{"kind":"stdout","text":"doc-verify-0290\n"},"agentId":"main","sessionId":"session_..."}}
 ```
 
-**Step completed** — **0.28.1 adds `llmRequestBuildMs`,
+**Step completed** — unchanged (latency breakdown `llmRequestBuildMs`,
 `llmServerFirstTokenMs`, `llmServerDecodeMs`, `llmClientConsumeMs` and
-`rawFinishReason`** (a duplicate of `providerFinishReason` here):
+`rawFinishReason` all still present):
 
 ```json
-{"type":"turn.step.completed","seq":15,
- "payload":{"type":"turn.step.completed","turnId":0,"step":1,"stepId":"688f2e71-...",
-            "usage":{"inputOther":13689,"output":57,"inputCacheRead":11264,"inputCacheCreation":0},
-            "finishReason":"tool_use","llmFirstTokenLatencyMs":12111,"llmStreamDurationMs":11,
-            "llmRequestBuildMs":3,"llmServerFirstTokenMs":12108,"llmServerDecodeMs":10,
-            "llmClientConsumeMs":1,"providerFinishReason":"tool_calls","rawFinishReason":"tool_calls",
+{"type":"turn.step.completed","seq":16,
+ "payload":{"type":"turn.step.completed","turnId":0,"step":1,"stepId":"7adb2b03-...",
+            "usage":{"inputOther":13677,"output":59,"inputCacheRead":11264,"inputCacheCreation":0},
+            "finishReason":"tool_use","llmFirstTokenLatencyMs":35290,"llmStreamDurationMs":13,
+            "llmRequestBuildMs":11,"llmServerFirstTokenMs":35279,"llmServerDecodeMs":9,
+            "llmClientConsumeMs":4,"providerFinishReason":"tool_calls","rawFinishReason":"tool_calls",
             "agentId":"main","sessionId":"session_..."}}
 ```
 
-**turn.started / turn.ended** — **0.28.1 adds `prompt`** (the prompt text) to
-`turn.started`:
+**turn.started / turn.ended** — unchanged (`turn.started` carries `prompt`,
+the prompt text):
 
 ```json
-{"type":"turn.started","seq":4,
+{"type":"turn.started","seq":5,
  "payload":{"type":"turn.started","turnId":0,"origin":{"kind":"user"},
-            "prompt":"Run exactly this one command, then reply done: echo doc-verify-0281",
+            "prompt":"Run exactly this one command, then reply done: echo doc-verify-0290",
             "agentId":"main","sessionId":"session_..."}}
-{"type":"turn.ended","seq":18,
- "payload":{"type":"turn.ended","turnId":0,"reason":"completed","durationMs":46184,
+{"type":"turn.ended","seq":19,
+ "payload":{"type":"turn.ended","turnId":0,"reason":"completed","durationMs":91351,
             "agentId":"main","sessionId":"session_..."}}
 ```
 
 (`turn.ended.reason` observed: `"completed"`, `"cancelled"` after abort.)
 
-**Agent status** (`agent.status.updated`, volatile) — **0.28.1 adds a `phase`
-object** describing what the agent is doing; observed kinds: `running`,
-`streaming` (with `"stream": "thinking" | "tool_call"`), `awaiting_approval`
-(with the approval inline), `ended`. The older fields (model, contextTokens,
-usage — now nested under `usage.byModel`) still appear on other updates of the
-same event type:
+**Agent status** (`agent.status.updated`, volatile) — two payload variants,
+both still present. **0.29.0 changes, all additive:** the model/usage variant
+can now carry `thinkingEffort`; the `phase` objects now carry `since` (epoch
+ms) on active phases; the `awaiting_approval` inline approval now carries both
+`approvalId` and `toolCallId`; and there is a **new phase kind `tool_call`**
+(emitted while a tool executes). Observed kinds: `running`, `streaming`
+(with `"stream": "thinking" | "tool_call"`), `awaiting_approval`, `tool_call`,
+`ended` (with `at` instead of `since`):
 
 ```json
-{"type":"agent.status.updated","seq":19,"volatile":true,
- "payload":{"type":"agent.status.updated",
-            "phase":{"kind":"ended","turnId":0,"reason":"completed","durationMs":46185,"at":1784691088966},
+{"type":"agent.status.updated","seq":2,"volatile":true,
+ "payload":{"type":"agent.status.updated","model":"kimi-code/k3","thinkingEffort":"high",
+            "maxContextTokens":1048576,"usage":{},"contextTokens":0,
             "agentId":"main","sessionId":"session_..."}}
-{"type":"agent.status.updated","seq":6,"volatile":true,
+{"type":"agent.status.updated","seq":5,"volatile":true,
+ "payload":{"type":"agent.status.updated",
+            "phase":{"kind":"running","turnId":0,"step":0,"stepId":"","since":1784777223312},
+            "agentId":"main","sessionId":"session_..."}}
+{"type":"agent.status.updated","seq":7,"volatile":true,
+ "payload":{"type":"agent.status.updated",
+            "phase":{"kind":"streaming","turnId":0,"step":1,"stepId":"","stream":"thinking","since":1784777223312},
+            "agentId":"main","sessionId":"session_..."}}
+{"type":"agent.status.updated","seq":8,"volatile":true,
  "payload":{"type":"agent.status.updated",
             "phase":{"kind":"awaiting_approval","turnId":0,"step":1,
-                     "approval":{"approvalId":"tool_FsSfXhnM8ZJK1WfTxntUlEQM",...}},
+                     "approval":{"approvalId":"tool_RMgBIy1asIorg1eV8P3ZhHiL",
+                                 "toolCallId":"tool_RMgBIy1asIorg1eV8P3ZhHiL"},
+                     "since":1784777258760},
+            "agentId":"main","sessionId":"session_..."}}
+{"type":"agent.status.updated","seq":14,"volatile":true,
+ "payload":{"type":"agent.status.updated",
+            "phase":{"kind":"tool_call","turnId":0,"step":1,
+                     "toolCallId":"tool_RMgBIy1asIorg1eV8P3ZhHiL","name":"Bash","since":1784777308442},
+            "agentId":"main","sessionId":"session_..."}}
+{"type":"agent.status.updated","seq":20,"volatile":true,
+ "payload":{"type":"agent.status.updated",
+            "phase":{"kind":"ended","turnId":0,"reason":"completed","durationMs":91353,"at":1784777314665},
             "agentId":"main","sessionId":"session_..."}}
 ```
 
@@ -762,10 +807,10 @@ same event type:
 `isCustomTitle`, `lastPrompt`). Unchanged:
 
 ```json
-{"type":"session.meta.updated","seq":2,
- "payload":{"type":"session.meta.updated","title":"Run exactly this one command, then reply done: echo doc-verify-0281",
-            "patch":{"title":"Run exactly this one command, then reply done: echo doc-verify-0281",
-                     "isCustomTitle":false,"lastPrompt":"Run exactly this one command, then reply done: echo doc-verify-0281"},
+{"type":"session.meta.updated","seq":3,
+ "payload":{"type":"session.meta.updated","title":"Run exactly this one command, then reply done: echo doc-verify-0290",
+            "patch":{"title":"Run exactly this one command, then reply done: echo doc-verify-0290",
+                     "isCustomTitle":false,"lastPrompt":"Run exactly this one command, then reply done: echo doc-verify-0290"},
             "agentId":"main","sessionId":"session_..."}}
 ```
 
@@ -774,12 +819,12 @@ camelCase; **no `approval_id`, no `expires_at` — use `toolCallId` as the
 approval id**). Unchanged:
 
 ```json
-{"type":"permission.approval.requested","seq":7,
+{"type":"permission.approval.requested","seq":8,
  "payload":{"type":"permission.approval.requested","sessionId":"session_...","agentId":"main",
-            "turnId":0,"toolCallId":"tool_FsSfXhnM8ZJK1WfTxntUlEQM",
-            "toolName":"Bash","action":"Running: echo doc-verify-0281",
-            "display":{"kind":"command","command":"echo doc-verify-0281","cwd":"/tmp/spike","language":"bash"},
-            "toolInput":{"command":"echo doc-verify-0281"}}}
+            "turnId":0,"toolCallId":"tool_RMgBIy1asIorg1eV8P3ZhHiL",
+            "toolName":"Bash","action":"Running: echo doc-verify-0290",
+            "display":{"kind":"command","command":"echo doc-verify-0290","cwd":"/tmp/spike","language":"bash"},
+            "toolInput":{"command":"echo doc-verify-0290"}}}
 ```
 
 **Permission requested — legacy shape** (`event.approval.requested`, still
@@ -787,14 +832,14 @@ emitted right after the v2 one; `expires_at` is `created_at` + 24 h).
 Unchanged:
 
 ```json
-{"type":"event.approval.requested","seq":9,
+{"type":"event.approval.requested","seq":10,
  "payload":{"type":"event.approval.requested","sessionId":"session_...","agentId":"main",
-            "approval_id":"tool_FsSfXhnM8ZJK1WfTxntUlEQM","session_id":"session_...",
-            "turn_id":0,"tool_call_id":"tool_FsSfXhnM8ZJK1WfTxntUlEQM",
-            "tool_name":"Bash","action":"Running: echo doc-verify-0281",
-            "tool_input_display":{"kind":"command","command":"echo doc-verify-0281",
+            "approval_id":"tool_RMgBIy1asIorg1eV8P3ZhHiL","session_id":"session_...",
+            "turn_id":0,"tool_call_id":"tool_RMgBIy1asIorg1eV8P3ZhHiL",
+            "tool_name":"Bash","action":"Running: echo doc-verify-0290",
+            "tool_input_display":{"kind":"command","command":"echo doc-verify-0290",
                                   "cwd":"/tmp/spike","language":"bash"},
-            "created_at":"2026-07-22T03:30:54.928Z","expires_at":"2026-07-23T03:30:54.928Z"}}
+            "created_at":"2026-07-23T03:27:38.761Z","expires_at":"2026-07-24T03:27:38.761Z"}}
 ```
 
 Both are followed (after the REST decision) by `event.approval.resolved` →
@@ -802,12 +847,12 @@ Both are followed (after the REST decision) by `event.approval.resolved` →
 `permission.approval.resolved` v2 duplicate (adds `"decision"` to the request
 payload).
 
-**Prompt finished:**
+**Prompt finished:** unchanged:
 
 ```json
-{"type":"prompt.completed","seq":20,
- "payload":{"type":"prompt.completed","promptId":"msg_01KY3Y0AEWYPN791ESGMZE5658",
-            "finishedAt":"2026-07-22T03:31:28.966Z","reason":"completed",
+{"type":"prompt.completed","seq":21,
+ "payload":{"type":"prompt.completed","promptId":"msg_01KY6G6B4A1EM8X8XRA02KJ3ZR",
+            "finishedAt":"2026-07-23T03:28:34.667Z","reason":"completed",
             "agentId":"main","sessionId":"session_..."}}
 ```
 
@@ -815,53 +860,59 @@ payload).
 `promptIds` the steered-in queued ones, their content inline). Unchanged:
 
 ```json
-{"type":"prompt.steered","seq":16,
- "payload":{"type":"prompt.steered","activePromptId":"msg_01KY3Y4ZHPHRPE10BH6B4KBAND",
-            "promptIds":["msg_01KY3Y53G46J8F237D6K05XFN8"],
-            "content":[{"type":"text","text":"Stop counting. Reply with exactly: steered-ok-0281"}],
-            "steeredAt":"2026-07-22T03:33:41.109Z","agentId":"main","sessionId":"session_..."}}
+{"type":"prompt.steered","seq":28,
+ "payload":{"type":"prompt.steered","activePromptId":"msg_01KY6GC4TTDXY3WYGGAWQ50ZQ5",
+            "promptIds":["msg_01KY6GCAQF1655KB27NSFBGWZ2"],
+            "content":[{"type":"text","text":"Stop. Reply with exactly: steered-ok-0290"}],
+            "steeredAt":"2026-07-23T03:30:19.589Z","agentId":"main","sessionId":"session_..."}}
 ```
 
 **Question requested** (`event.question.requested`; snake_case;
 **`question_id` == `tool_call_id`** — no v2 duplicate). `options[].description`
-is omitted when the option has none; `header` moves around inside the question
-object (key order is not stable — never rely on it):
+is omitted when the option has none; `header` is optional and was absent
+entirely from the 2026-07-23 captures (key order is not stable either — never
+rely on it):
 
 ```json
-{"type":"event.question.requested","seq":9,
- "payload":{"type":"event.question.requested","question_id":"tool_C07XSGo6P3vzrsWh9QYgTSsP",
-            "session_id":"session_...","turn_id":0,
-            "tool_call_id":"tool_C07XSGo6P3vzrsWh9QYgTSsP",
-            "questions":[{"id":"q_0","question":"Red or blue?","header":"Color",
+{"type":"event.question.requested","seq":52,
+ "payload":{"type":"event.question.requested","question_id":"tool_Isj4WDPaDkLQejGM4gDzWgQ3",
+            "session_id":"session_...","turn_id":3,
+            "tool_call_id":"tool_Isj4WDPaDkLQejGM4gDzWgQ3",
+            "questions":[{"id":"q_0","question":"Red or blue?",
                           "options":[{"id":"opt_0_0","label":"red","description":"warm color"},
                                      {"id":"opt_0_1","label":"blue","description":"cool color"}],
                           "allow_other":true}],
-            "created_at":"2026-07-22T03:35:15.724Z","agentId":"main","sessionId":"session_..."}}
+            "created_at":"2026-07-23T03:33:08.490Z","agentId":"main","sessionId":"session_..."}}
 ```
 
 **Question answered** (`event.question.answered`; `answers` is keyed by
-**question text**, values are option labels or free text). Unchanged:
+**question text**, values are option labels or free text). Unchanged —
+selected option and free text both re-verified 2026-07-23:
 
 ```json
-{"type":"event.question.answered","seq":11,
- "payload":{"type":"event.question.answered","question_id":"tool_C07XSGo6P3vzrsWh9QYgTSsP",
-            "answers":{"Red or blue?":"blue"},"resolved_at":"2026-07-22T03:35:46.625Z",
+{"type":"event.question.answered","seq":54,
+ "payload":{"type":"event.question.answered","question_id":"tool_Isj4WDPaDkLQejGM4gDzWgQ3",
+            "answers":{"Red or blue?":"blue"},"resolved_at":"2026-07-23T03:33:36.757Z",
+            "agentId":"main","sessionId":"session_..."}}
+{"type":"event.question.answered","seq":88,
+ "payload":{"type":"event.question.answered","question_id":"tool_J7bZIaNmzApVJZvKP0aQh9I5",
+            "answers":{"What is your favorite food?":"ramen"},"resolved_at":"2026-07-23T03:38:18.621Z",
             "agentId":"main","sessionId":"session_..."}}
 ```
 
 **Question dismissed:**
 
 ```json
-{"type":"event.question.dismissed","seq":28,
- "payload":{"type":"event.question.dismissed","question_id":"tool_Cem7SmwFnnFNjuhLaX1yJ2sw",
-            "dismissed_at":"2026-07-22T03:36:48.173Z","agentId":"main","sessionId":"session_..."}}
+{"type":"event.question.dismissed","seq":71,
+ "payload":{"type":"event.question.dismissed","question_id":"tool_nZX3S4ZZ6klG3ppFyIUKvUNa",
+            "dismissed_at":"2026-07-23T03:37:06.177Z","agentId":"main","sessionId":"session_..."}}
 ```
 
 ## Verification log
 
 - REST probes: `curl` against `http://127.0.0.1:58627/api/v1/...` (commands
-  inline above), server `0.28.1` (`backend: v2`).
-- Auth (re-verified 2026-07-22): `/api/v1/meta` → `401` without a token or
+  inline above), server `0.29.0` (`backend: v2`).
+- Auth (re-verified 2026-07-23): `/api/v1/meta` → `401` without a token or
   with a wrong one, `200` with `Authorization: Bearer <token>`;
   `/api/v1/healthz` is public (always `200`). Auth is server-native (bearer
   token), enforced on all authenticated REST and WebSocket routes;
@@ -869,20 +920,27 @@ object (key order is not stable — never rely on it):
 - WS captures: websocat 1.14.0 (`~/tools/websocat-bin/websocat`, header passed
   as `-H="Authorization: Bearer <token>"`) against
   `ws://127.0.0.1:58627/api/v1/ws?client_id=...`, subscribing to throwaway
-  sessions created for the captures. 2026-07-22 round-trips recorded on
-  0.28.1: tool call with manual approval (approve path included), plain queued
+  sessions created for the captures. 2026-07-23 round-trips recorded on
+  0.29.0: tool call with manual approval (approve path included), plain queued
   prompt, mid-turn steer of a queued prompt (`prompts:steer`), idle-session
   steer error (`code:40402`), empty `prompt_ids` error (`code:40001`), mid-run
-  abort, cursor-resume replay (seq 18 → 19–20), unsubscribe ack, question
-  surface + answer (selected option and free text), question dismiss (HTTP 200
-  with `code:40909`), `GET questions?status=pending` polling, missing `status`
-  param error (`code:40001`), `GET questions/{qid}` confirmed 404,
-  re-answer/re-dismiss of resolved questions (**now `code:40902` "already
-  resolved"** — 0.27.0 returned `40405`). Questions triggered by prompting the
-  session to call its `AskUserQuestion` tool. No heartbeat frames observed.
+  abort, cursor-resume replay (seq 70 → 71–78, seq 78 → later question
+  events), unsubscribe ack, question surface + answer (selected option and
+  free text), question dismiss (HTTP 200 with `code:40909`), `GET
+  questions?status=pending` polling, missing `status` param error
+  (`code:40001`), `GET questions/{qid}` confirmed 404, re-answer/re-dismiss of
+  resolved questions (`code:40902` "already resolved"). Questions triggered by
+  prompting the session to call its `AskUserQuestion` tool. No heartbeat
+  frames observed.
+- 0.28.1 → 0.29.0 drift found (all in `agent.status.updated` except the last):
+  `thinkingEffort` field on the model/usage variant, `since` on active `phase`
+  objects, `toolCallId` next to `approvalId` in the `awaiting_approval` phase,
+  a new `tool_call` phase kind, and the steered `context.spliced` user message
+  losing its `id`. Nothing removed or renamed elsewhere; every shape the
+  Android app parses is unchanged.
 - Housekeeping notes: the `kimi-web.service` unit has `PrivateTmp=yes`, so
   `/tmp/spike` must exist in the service's mount namespace (see Sessions →
-  Create). There is no session-delete endpoint (`DELETE` → 404); throwaway
-  sessions created for the captures were left in place.
-- 2026-07-19/20 round-trips on 0.27.0 and 2026-07-17 round-trips on 0.23.3
-  (superseded shapes): see git history.
+  Create). There is no session-delete endpoint (`DELETE` → 404, re-verified
+  2026-07-23); throwaway sessions created for the captures were left in place.
+- 2026-07-22 round-trips on 0.28.1, 2026-07-19/20 round-trips on 0.27.0 and
+  2026-07-17 round-trips on 0.23.3 (superseded shapes): see git history.
