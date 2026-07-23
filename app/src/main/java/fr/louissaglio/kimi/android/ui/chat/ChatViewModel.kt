@@ -111,6 +111,10 @@ class ChatViewModel @Inject constructor(
     private var socketJob: Job? = null
     private var historyJob: Job? = null
 
+    /** Bumped on every turn.started/turn.ended event, so [seedWorkingState] can drop a
+     * response that a newer turn event has already overtaken. Only touched on Main. */
+    private var turnEventCount = 0
+
     /** Wired to ON_START: (re)loads history and opens the socket. Also fires when the
      * app returns to the foreground, which is the re-sync path after an OS-level drop. */
     fun onScreenStarted() {
@@ -265,10 +269,12 @@ class ChatViewModel @Inject constructor(
     private fun applySessionEvent(event: SessionEvent) {
         when (event) {
             SessionEvent.TurnStarted -> {
+                turnEventCount++
                 timeline.apply(event)
                 _uiState.update { it.copy(isWorking = true, items = timeline.items()) }
             }
             is SessionEvent.TurnEnded -> {
+                turnEventCount++
                 // A turn that ends takes its pending approvals with it (e.g. abort) — but
                 // not its questions: a pending question survives turn.ended and is
                 // re-derived from the questions endpoint instead of being cleared here.
@@ -372,11 +378,19 @@ class ChatViewModel @Inject constructor(
     }
 
     /** Seeds the working indicator when opening a session that is already mid-turn
-     * (turn events only fire on transitions). Failure just leaves the indicator off. */
+     * (turn events only fire on transitions). Failure just leaves the indicator off.
+     * A turn event landing while the GET is in flight — a turn.started, but also the
+     * turn.ended of a quick abort — is newer than the seed's snapshot, so the late
+     * response is dropped instead of overriding it. */
     private fun seedWorkingState() {
+        val eventsAtSeed = turnEventCount
         viewModelScope.launch {
             chatRepository.isSessionRunning(settingsRepository.current(), sessionId)
-                .onSuccess { running -> _uiState.update { it.copy(isWorking = running) } }
+                .onSuccess { running ->
+                    if (turnEventCount == eventsAtSeed) {
+                        _uiState.update { it.copy(isWorking = running) }
+                    }
+                }
         }
     }
 

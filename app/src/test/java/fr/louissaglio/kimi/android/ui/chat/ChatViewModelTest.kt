@@ -10,6 +10,7 @@ import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -45,6 +46,9 @@ import org.junit.Test
  * ViewModel tests run against the real [ChatRepository] on a [MockWebServer], so the WS
  * frame parsing and the decision POST are covered end-to-end. The socket is real I/O, so
  * waits use real-time timeouts (same pattern as ChatRepositoryTest), not runTest's clock.
+ * Determinism comes from the dispatcher, not from timing margins: the WS upgrade is
+ * gated behind the four startup GETs ([servedStartupGets]), so a poll response can never
+ * land after a socket event the test already sent.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class ChatViewModelTest {
@@ -80,6 +84,16 @@ class ChatViewModelTest {
     @Volatile
     private var serverSocket: WebSocket? = null
 
+    /** The WS upgrade waits behind the four startup GETs (messages/questions/session/
+     * status): when [awaitServerSocket] returns, every startup poll was served, so a
+     * poll response can never reorder after a socket event — the flake this removes. */
+    private val servedStartupGets = CountDownLatch(4)
+
+    /** When set, the /status response is held back server-side until the test releases
+     * it, so a test can make a socket event win over the in-flight seed on purpose. */
+    @Volatile
+    private var statusResponseGate: CountDownLatch? = null
+
     private class FakePreferencesDataStore(prefs: Preferences) : DataStore<Preferences> {
         private val state = MutableStateFlow(prefs)
         override val data: Flow<Preferences> = state
@@ -96,11 +110,18 @@ class ChatViewModelTest {
                 val path = request.path.orEmpty()
                 return when {
                     path == "/api/v1/sessions/session_1" && request.method == "GET" ->
-                        MockResponse().setBody(sessionBody)
-                    path.startsWith("/api/v1/sessions/session_1/messages") -> MockResponse().setBody(messagesBody)
-                    path == "/api/v1/sessions/session_1/status" -> MockResponse().setBody(
-                        """{"code":0,"msg":"success","data":{"busy":false},"request_id":"r"}""",
-                    )
+                        MockResponse().setBody(sessionBody).also { servedStartupGets.countDown() }
+                    path.startsWith("/api/v1/sessions/session_1/messages") ->
+                        MockResponse().setBody(messagesBody).also { servedStartupGets.countDown() }
+                    path == "/api/v1/sessions/session_1/status" -> {
+                        // Counted at arrival: the response itself may be parked behind
+                        // the test's gate, and the socket must not wait for that.
+                        servedStartupGets.countDown()
+                        statusResponseGate?.await(5, TimeUnit.SECONDS)
+                        MockResponse().setBody(
+                            """{"code":0,"msg":"success","data":{"busy":false},"request_id":"r"}""",
+                        )
+                    }
                     path == "/api/v1/sessions/session_1/prompts" -> MockResponse().setBody(
                         """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
                             """"status":"running","created_at":"2026-07-20T00:00:00.000Z"},"request_id":"r"}""",
@@ -151,15 +172,18 @@ class ChatViewModelTest {
                                     """{"code":40405,"msg":"question tool_q1 not found","data":null,"request_id":"r"}""",
                                 )
                             }
-                        else -> MockResponse().setBody(questionsBody)
+                        else -> MockResponse().setBody(questionsBody).also { servedStartupGets.countDown() }
                     }
-                    path.startsWith("/api/v1/ws") -> MockResponse().withWebSocketUpgrade(
-                        object : WebSocketListener() {
-                            override fun onOpen(webSocket: WebSocket, response: Response) {
-                                serverSocket = webSocket
-                            }
-                        },
-                    )
+                    path.startsWith("/api/v1/ws") -> {
+                        servedStartupGets.await(5, TimeUnit.SECONDS)
+                        MockResponse().withWebSocketUpgrade(
+                            object : WebSocketListener() {
+                                override fun onOpen(webSocket: WebSocket, response: Response) {
+                                    serverSocket = webSocket
+                                }
+                            },
+                        )
+                    }
                     else -> MockResponse().setResponseCode(404)
                 }
             }
@@ -343,6 +367,23 @@ class ChatViewModelTest {
         } finally {
             effectJob.cancel()
         }
+    }
+
+    @Test
+    fun `status seed in flight does not clear a turn that just started`() = runBlocking {
+        val gate = CountDownLatch(1)
+        statusResponseGate = gate
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+
+        // The /status response is parked server-side: turn.started lands first.
+        socket.send(turnStartedFrame())
+        awaitState { it.isWorking }
+
+        // The stale busy:false snapshot arrives after the event and must be dropped.
+        gate.countDown()
+        delay(200)
+        assertTrue(viewModel.uiState.value.isWorking)
     }
 
     @Test
