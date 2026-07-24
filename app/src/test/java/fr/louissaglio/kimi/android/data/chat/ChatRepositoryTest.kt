@@ -1,5 +1,8 @@
 package fr.louissaglio.kimi.android.data.chat
 
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.emptyPreferences
 import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import fr.louissaglio.kimi.android.ui.chat.ChatItem
@@ -8,6 +11,8 @@ import fr.louissaglio.kimi.android.ui.chat.ToolStatus
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -27,8 +32,20 @@ import org.junit.Test
 
 class ChatRepositoryTest {
 
+    private class FakePreferencesDataStore(prefs: Preferences) : DataStore<Preferences> {
+        private val state = MutableStateFlow(prefs)
+        override val data: Flow<Preferences> = state
+
+        override suspend fun updateData(transform: suspend (Preferences) -> Preferences): Preferences =
+            transform(state.value).also { state.value = it }
+    }
+
     private val server = MockWebServer()
-    private val repository = ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true })
+    private val repository = ChatRepository(
+        OkHttpClient(),
+        Json { ignoreUnknownKeys = true },
+        FakePreferencesDataStore(emptyPreferences()),
+    )
 
     @Before
     fun setUp() = server.start()
@@ -421,6 +438,133 @@ class ChatRepositoryTest {
         // Failures are not cached: the next send retries the config fetch.
         assertEquals("/api/v1/config", server.takeRequest().path)
         assertEquals("/api/v1/sessions/session_1/prompts", server.takeRequest().path)
+    }
+
+    @Test
+    fun `getModels parses the models envelope`() = runBlocking {
+        // Verified live 0.29.0 shape (docs/server-api.md): support_efforts/default_effort
+        // only on K3.
+        server.enqueue(
+            MockResponse().setBody(
+                """
+                {"code":0,"msg":"success","data":{"items":[
+                  {"provider":"managed:kimi-code","model":"kimi-code/kimi-for-coding",
+                   "display_name":"K2.7 Coding","max_context_size":262144,
+                   "capabilities":["thinking","tool_use"]},
+                  {"provider":"managed:kimi-code","model":"kimi-code/kimi-for-coding-highspeed",
+                   "display_name":"K2.7 Coding Highspeed","max_context_size":262144,
+                   "capabilities":["thinking","tool_use"]},
+                  {"provider":"managed:kimi-code","model":"kimi-code/k3",
+                   "display_name":"K3","max_context_size":1048576,
+                   "capabilities":["thinking","tool_use"],
+                   "support_efforts":["low","high","max"],"default_effort":"high"}
+                ]},"request_id":"01KX"}
+                """.trimIndent(),
+            ),
+        )
+
+        val result = repository.getModels(settings())
+
+        assertEquals("/api/v1/models", server.takeRequest().path)
+        assertEquals(
+            listOf(
+                ServerModel("managed:kimi-code", "kimi-code/kimi-for-coding", "K2.7 Coding", 262_144),
+                ServerModel("managed:kimi-code", "kimi-code/kimi-for-coding-highspeed", "K2.7 Coding Highspeed", 262_144),
+                ServerModel(
+                    "managed:kimi-code",
+                    "kimi-code/k3",
+                    "K3",
+                    1_048_576,
+                    supportEfforts = listOf("low", "high", "max"),
+                    defaultEffort = "high",
+                ),
+            ),
+            result.getOrThrow(),
+        )
+    }
+
+    @Test
+    fun `models are fetched once per server URL`() = runBlocking {
+        val modelsBody = MockResponse().setBody(
+            """{"code":0,"msg":"success","data":{"items":[
+              |{"provider":"managed:kimi-code","model":"kimi-code/k3","display_name":"K3","max_context_size":1048576}
+              |]},"request_id":"01KX"}""".trimMargin(),
+        )
+        server.enqueue(modelsBody)
+
+        repository.getModels(settings())
+        repository.getModels(settings())
+
+        // One fetch, two calls: the second hits the cache.
+        assertEquals("/api/v1/models", server.takeRequest().path)
+        assertNull(server.takeRequest(200, TimeUnit.MILLISECONDS))
+
+        // A different server URL refetches the models.
+        val other = MockWebServer()
+        other.start()
+        try {
+            other.enqueue(modelsBody)
+
+            repository.getModels(ServerSettings(serverUrl = other.url("/").toString()))
+
+            assertEquals("/api/v1/models", other.takeRequest().path)
+        } finally {
+            other.shutdown()
+        }
+    }
+
+    @Test
+    fun `sendPrompt sends the session's chosen model in the prompt body`() = runBlocking {
+        repository.setSessionModel("session_1", "kimi-code/kimi-for-coding-highspeed")
+        server.enqueue(
+            MockResponse().setBody(
+                """{"code":0,"msg":"success","data":{"default_model":"kimi-code/k3"},"request_id":"01KX"}""",
+            ),
+        )
+        server.enqueue(
+            MockResponse().setBody(
+                """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
+                    """"status":"running","created_at":"2026-07-24T00:00:00.000Z"},"request_id":"01KX"}""",
+            ),
+        )
+
+        val result = repository.sendPrompt(settings(), "session_1", "hello")
+
+        assertTrue(result.isSuccess)
+        // The session choice wins over the server default — and the config is never
+        // even fetched: the first request is the prompt itself.
+        val prompt = server.takeRequest()
+        assertEquals("/api/v1/sessions/session_1/prompts", prompt.path)
+        assertEquals(
+            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/kimi-for-coding-highspeed"}""",
+            prompt.body.readUtf8(),
+        )
+    }
+
+    @Test
+    fun `steer sends the session's chosen model in the prompt body`() = runBlocking {
+        repository.setSessionModel("session_1", "kimi-code/kimi-for-coding-highspeed")
+        server.enqueue(
+            MockResponse().setBody(
+                """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
+                    """"status":"queued","created_at":"2026-07-24T00:00:00.000Z"},"request_id":"01KX"}""",
+            ),
+        )
+        server.enqueue(
+            MockResponse().setBody(
+                """{"code":0,"msg":"success","data":{"steered":true,"prompt_ids":["msg_1"]},"request_id":"01KX"}""",
+            ),
+        )
+
+        val result = repository.steer(settings(), "session_1", "Stop counting")
+
+        assertTrue(result.isSuccess)
+        val prompt = server.takeRequest()
+        assertEquals(
+            """{"content":[{"type":"text","text":"Stop counting"}],"model":"kimi-code/kimi-for-coding-highspeed"}""",
+            prompt.body.readUtf8(),
+        )
+        assertEquals("/api/v1/sessions/session_1/prompts:steer", server.takeRequest().path)
     }
 
     @Test

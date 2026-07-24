@@ -50,6 +50,23 @@ data class ConfigData(
     @SerialName("default_model") val defaultModel: String? = null,
 )
 
+/** `data` of `GET /api/v1/models` (docs/server-api.md). */
+@Serializable
+data class ModelListData(
+    val items: List<ModelDto> = emptyList(),
+)
+
+@Serializable
+data class ModelDto(
+    val provider: String = "",
+    val model: String = "",
+    @SerialName("display_name") val displayName: String = "",
+    @SerialName("max_context_size") val maxContextSize: Long = 0,
+    // Only on models with thinking-effort levels (K3 on 0.29.0); absent elsewhere.
+    @SerialName("support_efforts") val supportEfforts: List<String>? = null,
+    @SerialName("default_effort") val defaultEffort: String? = null,
+)
+
 /** `data` of the POST /prompts ack; on 0.27.0 `prompt_id` == `user_message_id`. */
 @Serializable
 data class PromptData(

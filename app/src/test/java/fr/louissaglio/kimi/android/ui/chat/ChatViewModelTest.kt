@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.lifecycle.SavedStateHandle
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
+import fr.louissaglio.kimi.android.data.chat.ServerModel
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import java.util.concurrent.CopyOnWriteArrayList
@@ -47,7 +48,7 @@ import org.junit.Test
  * frame parsing and the decision POST are covered end-to-end. The socket is real I/O, so
  * waits use real-time timeouts (same pattern as ChatRepositoryTest), not runTest's clock.
  * Determinism comes from the dispatcher, not from timing margins: the WS upgrade is
- * gated behind the four startup GETs ([servedStartupGets]), so a poll response can never
+ * gated behind the six startup GETs ([servedStartupGets]), so a poll response can never
  * land after a socket event the test already sent.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -57,6 +58,7 @@ class ChatViewModelTest {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
     private lateinit var viewModel: ChatViewModel
     private lateinit var settingsRepository: SettingsRepository
+    private lateinit var dataStore: FakePreferencesDataStore
 
     @Volatile
     private var approvalsSucceed = true
@@ -81,13 +83,30 @@ class ChatViewModelTest {
             """"updated_at":"2026-07-20T00:00:00.000Z","busy":false,""" +
             """"metadata":{"cwd":"/home/ubuntu/kimi-android-client"}},"request_id":"r"}"""
 
+    /** The live 0.29.0 model list (docs/server-api.md): two 262k models and K3 (1M). */
+    @Volatile
+    private var modelsBody =
+        """{"code":0,"msg":"success","data":{"items":[""" +
+            """{"provider":"managed:kimi-code","model":"kimi-code/kimi-for-coding",""" +
+            """"display_name":"K2.7 Coding","max_context_size":262144},""" +
+            """{"provider":"managed:kimi-code","model":"kimi-code/kimi-for-coding-highspeed",""" +
+            """"display_name":"K2.7 Coding Highspeed","max_context_size":262144},""" +
+            """{"provider":"managed:kimi-code","model":"kimi-code/k3","display_name":"K3",""" +
+            """"max_context_size":1048576,"support_efforts":["low","high","max"],"default_effort":"high"}""" +
+            """]},"request_id":"r"}"""
+
+    @Volatile
+    private var configBody =
+        """{"code":0,"msg":"success","data":{"default_model":"kimi-code/k3"},"request_id":"r"}"""
+
     @Volatile
     private var serverSocket: WebSocket? = null
 
-    /** The WS upgrade waits behind the four startup GETs (messages/questions/session/
-     * status): when [awaitServerSocket] returns, every startup poll was served, so a
-     * poll response can never reorder after a socket event — the flake this removes. */
-    private val servedStartupGets = CountDownLatch(4)
+    /** The WS upgrade waits behind the six startup GETs (messages/questions/session/
+     * status/models/config): when [awaitServerSocket] returns, every startup poll was
+     * served, so a poll response can never reorder after a socket event — the flake
+     * this removes. */
+    private val servedStartupGets = CountDownLatch(6)
 
     /** When set, the /status response is held back server-side until the test releases
      * it, so a test can make a socket event win over the in-flight seed on purpose. */
@@ -184,6 +203,10 @@ class ChatViewModelTest {
                             MockResponse().setBody(questionsBody)
                         }
                     }
+                    path == "/api/v1/models" ->
+                        MockResponse().setBody(modelsBody).also { servedStartupGets.countDown() }
+                    path == "/api/v1/config" ->
+                        MockResponse().setBody(configBody).also { servedStartupGets.countDown() }
                     path.startsWith("/api/v1/ws") -> {
                         servedStartupGets.await(5, TimeUnit.SECONDS)
                         MockResponse().withWebSocketUpgrade(
@@ -199,14 +222,12 @@ class ChatViewModelTest {
             }
         }
         Dispatchers.setMain(UnconfinedTestDispatcher())
-        settingsRepository = SettingsRepository(
-            FakePreferencesDataStore(
-                preferencesOf(stringPreferencesKey("server_url") to server.url("/").toString()),
-            ),
-            appScope,
+        dataStore = FakePreferencesDataStore(
+            preferencesOf(stringPreferencesKey("server_url") to server.url("/").toString()),
         )
+        settingsRepository = SettingsRepository(dataStore, appScope)
         viewModel = ChatViewModel(
-            ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
+            ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }, dataStore),
             SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
             settingsRepository,
             SavedStateHandle(mapOf("sessionId" to "session_1")),
@@ -456,10 +477,11 @@ class ChatViewModelTest {
         viewModel.onSend()
 
         // docs/server-api.md, Steer: queue the prompt as usual, then steer its id in.
+        // The config GET served at screen start makes the server default known (017).
         val prompt = awaitRequest("/prompts")
         assertEquals("POST", prompt.method)
         assertEquals("/api/v1/sessions/session_1/prompts", prompt.path)
-        assertEquals("""{"content":[{"type":"text","text":"Stop counting"}]}""", prompt.body.readUtf8())
+        assertEquals("""{"content":[{"type":"text","text":"Stop counting"}],"model":"kimi-code/k3"}""", prompt.body.readUtf8())
         val steer = awaitRequest("prompts:steer")
         assertEquals("POST", steer.method)
         assertEquals("/api/v1/sessions/session_1/prompts:steer", steer.path)
@@ -483,7 +505,7 @@ class ChatViewModelTest {
         val request = awaitRequest("/prompts")
         assertEquals("POST", request.method)
         assertEquals("/api/v1/sessions/session_1/prompts", request.path)
-        assertEquals("""{"content":[{"type":"text","text":"hello"}]}""", request.body.readUtf8())
+        assertEquals("""{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/k3"}""", request.body.readUtf8())
         // A plain prompt marks the session busy; no steer call follows.
         awaitState { it.isWorking }
         assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
@@ -690,7 +712,7 @@ class ChatViewModelTest {
     @Test
     fun `nav arguments seed the top bar before the session fetch lands`() {
         val seeded = ChatViewModel(
-            ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
+            ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }, dataStore),
             SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
             settingsRepository,
             SavedStateHandle(
@@ -709,7 +731,7 @@ class ChatViewModelTest {
     @Test
     fun `nav arguments with only a cwd seed the basename`() {
         val seeded = ChatViewModel(
-            ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
+            ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }, dataStore),
             SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
             settingsRepository,
             SavedStateHandle(
@@ -755,6 +777,63 @@ class ChatViewModelTest {
         delay(200)
         assertNull(viewModel.uiState.value.sessionTitle)
         assertNull(viewModel.uiState.value.sessionCwd)
+    }
+
+    @Test
+    fun `models load into state and the server default drives the chip label`() = runBlocking {
+        viewModel.onScreenStarted()
+
+        awaitState { it.modelsAvailable }
+        val state = viewModel.uiState.value
+        assertEquals(3, state.availableModels.size)
+        assertEquals("kimi-code/k3", state.serverDefaultModel)
+        assertNull(state.sessionModel)
+        // No session choice yet: the chip shows the server default's display name.
+        assertEquals("K3", state.currentModelLabel)
+    }
+
+    @Test
+    fun `failed models fetch hides the chip`() = runBlocking {
+        modelsBody = """{"code":50000,"msg":"boom","data":null,"request_id":"r"}"""
+        viewModel.onScreenStarted()
+
+        // Wait until the failed fetch was served (the WS is gated on the startup GETs,
+        // and a failed models fetch never triggers the config GET — so the socket is
+        // not the synchronization point here).
+        awaitRequest("/api/v1/models")
+        delay(300)
+
+        // The fetch failed: no models, no chip — and the rest of the screen works.
+        assertEquals(emptyList<ServerModel>(), viewModel.uiState.value.availableModels)
+        assertNull(viewModel.uiState.value.currentModelLabel)
+    }
+
+    @Test
+    fun `selected model persists and survives ViewModel recreation`() = runBlocking {
+        viewModel.onScreenStarted()
+        awaitState { it.modelsAvailable }
+
+        viewModel.onModelSelected("kimi-code/kimi-for-coding-highspeed")
+
+        awaitState { it.sessionModel == "kimi-code/kimi-for-coding-highspeed" }
+        assertEquals("K2.7 Coding Highspeed", viewModel.uiState.value.currentModelLabel)
+
+        // Recreation over the same DataStore: the choice is reloaded, not lost.
+        val recreated = ChatViewModel(
+            ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }, dataStore),
+            SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
+            settingsRepository,
+            SavedStateHandle(mapOf("sessionId" to "session_1")),
+        )
+        recreated.onScreenStarted()
+        val deadline = System.currentTimeMillis() + 5_000
+        while (System.currentTimeMillis() < deadline) {
+            val state = recreated.uiState.value
+            if (state.modelsAvailable && state.sessionModel != null) break
+            delay(10)
+        }
+        assertEquals("kimi-code/kimi-for-coding-highspeed", recreated.uiState.value.sessionModel)
+        assertEquals("K2.7 Coding Highspeed", recreated.uiState.value.currentModelLabel)
     }
 
     private suspend fun awaitServerSocket(): WebSocket = withTimeout(5_000) {

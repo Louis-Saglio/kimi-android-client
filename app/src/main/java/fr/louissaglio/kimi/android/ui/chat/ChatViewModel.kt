@@ -8,6 +8,7 @@ import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.data.chat.QuestionAnswer
+import fr.louissaglio.kimi.android.data.chat.ServerModel
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.SocketEvent
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
@@ -68,12 +69,31 @@ class ChatViewModel @Inject constructor(
         val questionSelections: Map<String, String> = emptyMap(),
         /** Draft free-text answers for the head question: item id → typed text. */
         val questionOtherTexts: Map<String, String> = emptyMap(),
+        /** Models the server offers; empty until the fetch lands (or after it failed). */
+        val availableModels: List<ServerModel> = emptyList(),
+        /** True once the models fetch succeeded — false while loading and after a
+         * failure, which hides the model chip entirely (ticket 031). */
+        val modelsAvailable: Boolean = false,
+        /** The server-wide default model id; null when unknown. */
+        val serverDefaultModel: String? = null,
+        /** The model chosen for this session; null = follow the server default. */
+        val sessionModel: String? = null,
     ) {
         /** True when every item of the head question has an answer (option picked or other text). */
         val isQuestionSubmittable: Boolean
             get() = pendingQuestions.firstOrNull()?.items?.all { item ->
                 questionOtherTexts[item.id]?.isNotBlank() == true || questionSelections.containsKey(item.id)
             } == true
+
+        /** Top-bar chip label: the session choice or the server default, by display name
+         * when the models list knows it, else the raw id. Null hides the chip. */
+        val currentModelLabel: String?
+            get() {
+                if (!modelsAvailable) return null
+                val id = sessionModel ?: serverDefaultModel ?: return null
+                return availableModels.firstOrNull { it.model == id }
+                    ?.displayName?.takeIf { it.isNotBlank() } ?: id
+            }
     }
 
     sealed interface Effect {
@@ -126,6 +146,7 @@ class ChatViewModel @Inject constructor(
         seedPendingQuestions()
         refreshSessionInfo()
         seedWorkingState()
+        loadModels()
         startSocket()
     }
 
@@ -389,6 +410,38 @@ class ChatViewModel @Inject constructor(
             questionSelections = questionSelections.filterKeys { it in itemIds },
             questionOtherTexts = questionOtherTexts.filterKeys { it in itemIds },
         )
+    }
+
+    /**
+     * Loads the model picker's data (ticket 031): the server's model list, its default,
+     * and this session's stored choice. Lazy — first chat-screen open, cached in the
+     * repository afterwards. A failed models fetch hides the chip and changes nothing
+     * else: sending keeps the 017 behavior and is never blocked by this feature.
+     */
+    private fun loadModels() {
+        viewModelScope.launch {
+            val settings = settingsRepository.current()
+            chatRepository.getModels(settings)
+                .onSuccess { models ->
+                    _uiState.update {
+                        it.copy(
+                            availableModels = models,
+                            modelsAvailable = true,
+                            serverDefaultModel = chatRepository.getDefaultModel(settings),
+                            sessionModel = chatRepository.getSessionModel(sessionId),
+                        )
+                    }
+                }
+                .onFailure {
+                    _uiState.update { it.copy(modelsAvailable = false) }
+                }
+        }
+    }
+
+    /** Persists the picked model for this session; subsequent prompts carry it. */
+    fun onModelSelected(model: String) {
+        _uiState.update { it.copy(sessionModel = model) }
+        viewModelScope.launch { chatRepository.setSessionModel(sessionId, model) }
     }
 
     /**

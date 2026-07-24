@@ -96,6 +96,46 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
 }
 ```
 
+## Models
+
+### List — `GET /api/v1/models`
+
+The models the server can run, for model pickers. Requires the token.
+
+```bash
+curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/models
+```
+
+Verified live on 0.29.0 (2026-07-24, `capabilities` arrays trimmed):
+
+```json
+{
+  "code": 0, "msg": "success",
+  "data": {
+    "items": [
+      {"provider": "managed:kimi-code", "model": "kimi-code/kimi-for-coding",
+       "display_name": "K2.7 Coding", "max_context_size": 262144,
+       "capabilities": ["thinking", "..."]},
+      {"provider": "managed:kimi-code", "model": "kimi-code/kimi-for-coding-highspeed",
+       "display_name": "K2.7 Coding Highspeed", "max_context_size": 262144,
+       "capabilities": ["thinking", "..."]},
+      {"provider": "managed:kimi-code", "model": "kimi-code/k3",
+       "display_name": "K3", "max_context_size": 1048576,
+       "capabilities": ["thinking", "..."],
+       "support_efforts": ["low", "high", "max"], "default_effort": "high"}
+    ]
+  },
+  "request_id": "01KY9JECVD33XXVPEXZP3KA758"
+}
+```
+
+- `model` is the id to send as the per-prompt `"model"` field
+  (`POST /api/v1/sessions/{id}/prompts`).
+- `support_efforts` / `default_effort` are present only on models with
+  thinking-effort levels (K3 on 0.29.0); absent elsewhere.
+- The server-wide default model is *not* in this response — it comes from
+  `GET /api/v1/config` (`data.default_model`, `kimi-code/k3` on 0.29.0).
+
 ## Sessions
 
 ### List — `GET /api/v1/sessions`

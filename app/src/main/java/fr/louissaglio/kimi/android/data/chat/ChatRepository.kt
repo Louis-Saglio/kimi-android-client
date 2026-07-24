@@ -1,5 +1,10 @@
 package fr.louissaglio.kimi.android.data.chat
 
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.core.stringPreferencesKey
 import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.network.Envelope
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
@@ -15,6 +20,8 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.FlowCollector
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
@@ -108,6 +115,7 @@ sealed interface SocketEvent {
 class ChatRepository @Inject constructor(
     private val client: OkHttpClient,
     private val json: Json,
+    private val dataStore: DataStore<Preferences>,
 ) {
     // The app-level ping/pong keeps aliveness; disable the read timeout so an idle
     // stream is not cut (the shared client sets 30 s for REST).
@@ -151,7 +159,7 @@ class ChatRepository @Inject constructor(
      */
     suspend fun sendPrompt(settings: ServerSettings, sessionId: String, text: String): Result<Unit> =
         withContext(Dispatchers.IO) {
-            postPrompt(settings, sessionId, text, defaultModel(settings)).map { }
+            postPrompt(settings, sessionId, text, promptModel(settings, sessionId)).map { }
         }
 
     /**
@@ -162,10 +170,103 @@ class ChatRepository @Inject constructor(
      */
     suspend fun steer(settings: ServerSettings, sessionId: String, text: String): Result<Unit> =
         withContext(Dispatchers.IO) {
-            val promptId = postPrompt(settings, sessionId, text, defaultModel(settings))
+            val promptId = postPrompt(settings, sessionId, text, promptModel(settings, sessionId))
                 .getOrElse { return@withContext Result.failure(it) }
             postSteer(settings, sessionId, promptId)
         }
+
+    /**
+     * The model stamped on every prompt (ticket 031): the session's own choice when one
+     * was picked, else the server default from [defaultModel] (the 017 behavior), else
+     * no model field at all. This resolution feeds [postPrompt], the single choke point
+     * both [sendPrompt] and [steer] go through.
+     */
+    private suspend fun promptModel(settings: ServerSettings, sessionId: String): String? =
+        sessionModel(sessionId) ?: defaultModel(settings)
+
+    /**
+     * The model chosen for one session (ticket 031), persisted in DataStore as a plain
+     * `model_for_session_<sessionId>` string preference (SettingsRepository's pattern).
+     * No stored value = follow the server default.
+     */
+    private suspend fun sessionModel(sessionId: String): String? =
+        dataStore.data
+            .catch { e -> if (e is IOException) emit(emptyPreferences()) else throw e }
+            .first()[stringPreferencesKey("model_for_session_$sessionId")]
+            ?.takeIf { it.isNotBlank() }
+
+    /** The session's stored model choice, null when the session follows the server default. */
+    suspend fun getSessionModel(sessionId: String): String? =
+        withContext(Dispatchers.IO) { sessionModel(sessionId) }
+
+    /** Persists the session's model choice; subsequent prompts carry it (see [promptModel]). */
+    suspend fun setSessionModel(sessionId: String, model: String) {
+        dataStore.edit { it[stringPreferencesKey("model_for_session_$sessionId")] = model.trim() }
+    }
+
+    /**
+     * The models the server offers (`GET /api/v1/models`), for the chat screen's model
+     * picker. Cached per server URL exactly like [defaultModel] (a settings change
+     * refetches); fetch failures are not cached, so the next open retries.
+     */
+    @Volatile
+    private var cachedModels: Pair<String, List<ServerModel>>? = null
+
+    suspend fun getModels(settings: ServerSettings): Result<List<ServerModel>> =
+        withContext(Dispatchers.IO) {
+            val baseUrl = settings.serverUrl.trim().trimEnd('/')
+            cachedModels?.let { if (it.first == baseUrl) return@withContext Result.success(it.second) }
+            val result = fetchModels(settings)
+            result.onSuccess { cachedModels = baseUrl to it }
+            result
+        }
+
+    /** GET /api/v1/models → `data.items` (docs/server-api.md). */
+    private fun fetchModels(settings: ServerSettings): Result<List<ServerModel>> {
+        val request = try {
+            Request.Builder()
+                .url(settings.serverUrl.trim().trimEnd('/') + "/api/v1/models")
+                .build()
+        } catch (e: IllegalArgumentException) {
+            return Result.failure(DataError.InvalidUrl)
+        }
+        return try {
+            client.newCall(request).execute().use { response ->
+                when {
+                    response.code == 401 -> Result.failure(DataError.Auth)
+                    !response.isSuccessful -> Result.failure(DataError.Http(response.code))
+                    else -> try {
+                        val envelope = json.decodeFromString<Envelope<ModelListData>>(
+                            response.body?.string().orEmpty(),
+                        )
+                        when {
+                            envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
+                            envelope.data == null -> Result.failure(DataError.Api(envelope.code, "missing data"))
+                            else -> Result.success(envelope.data.items.map { it.toDomain() })
+                        }
+                    } catch (e: SerializationException) {
+                        Result.failure(DataError.MalformedResponse(e))
+                    }
+                }
+            }
+        } catch (e: IOException) {
+            Result.failure(DataError.Network(e))
+        }
+    }
+
+    private fun ModelDto.toDomain(): ServerModel = ServerModel(
+        provider = provider,
+        model = model,
+        displayName = displayName,
+        maxContextSize = maxContextSize,
+        supportEfforts = supportEfforts,
+        defaultEffort = defaultEffort,
+    )
+
+    /** The server-wide default model id ([defaultModel]'s cache); null when unknown —
+     * fetch failures degrade to null instead of blocking the caller. */
+    suspend fun getDefaultModel(settings: ServerSettings): String? =
+        withContext(Dispatchers.IO) { defaultModel(settings) }
 
     /**
      * The model to send with prompts: 0.28.0+ no longer falls back to the server's

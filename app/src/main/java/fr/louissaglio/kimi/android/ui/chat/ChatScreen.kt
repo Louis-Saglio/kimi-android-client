@@ -32,6 +32,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -42,6 +43,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
@@ -93,6 +95,7 @@ import com.mikepenz.markdown.m3.markdownTypography
 import com.mikepenz.markdown.model.markdownExtendedSpans
 import com.mikepenz.markdown.model.markdownPadding
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
+import fr.louissaglio.kimi.android.data.chat.ServerModel
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 import kotlinx.coroutines.delay
 
@@ -145,6 +148,7 @@ fun ChatScreen(
         onQuestionOtherTextChange = viewModel::onQuestionOtherTextChange,
         onSubmitQuestion = viewModel::onSubmitQuestion,
         onDismissQuestion = viewModel::onDismissQuestion,
+        onModelSelected = viewModel::onModelSelected,
     )
 }
 
@@ -165,7 +169,9 @@ private fun ChatContent(
     onQuestionOtherTextChange: (itemId: String, text: String) -> Unit,
     onSubmitQuestion: () -> Unit,
     onDismissQuestion: () -> Unit,
+    onModelSelected: (String) -> Unit,
 ) {
+    var showModelPicker by rememberSaveable { mutableStateOf(false) }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -193,6 +199,16 @@ private fun ChatContent(
                     }
                 },
                 actions = {
+                    // Model picker (ticket 031): hidden while the models list is loading
+                    // or after a failed fetch — sending never depends on it.
+                    uiState.currentModelLabel?.let { label ->
+                        AssistChip(
+                            onClick = { showModelPicker = true },
+                            label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            modifier = Modifier.semantics { contentDescription = "Model: $label" },
+                        )
+                        Spacer(Modifier.width(4.dp))
+                    }
                     if (uiState.isWorking) {
                         CircularProgressIndicator(
                             modifier = Modifier
@@ -282,6 +298,81 @@ private fun ChatContent(
             }
         }
     }
+    if (showModelPicker) {
+        ModelPickerSheet(
+            uiState = uiState,
+            onModelSelected = onModelSelected,
+            onDismiss = { showModelPicker = false },
+        )
+    }
+}
+
+/** Model picker bottom sheet (ticket 031): every server model with its context size,
+ * a "Default" label on the server-wide default, and a check on the effective one
+ * (the session's choice, else the default). A tap persists and dismisses. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ModelPickerSheet(
+    uiState: ChatViewModel.UiState,
+    onModelSelected: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val currentModelId = uiState.sessionModel ?: uiState.serverDefaultModel
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.padding(bottom = 24.dp)) {
+            uiState.availableModels.forEach { model ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .clickable {
+                            onModelSelected(model.model)
+                            onDismiss()
+                        }
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(
+                                text = model.displayName.ifBlank { model.model },
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                            if (model.model == uiState.serverDefaultModel) {
+                                Text(
+                                    text = "Default",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            }
+                        }
+                        Text(
+                            text = formatContextSize(model.maxContextSize),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (model.model == currentModelId) {
+                        Text(
+                            text = "✓",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Context window for the picker rows: "1M context", "262k context". */
+private fun formatContextSize(size: Long): String = when {
+    size >= 1_000_000 -> "${size / 1_000_000}M context"
+    size >= 1_000 -> "${size / 1_000}k context"
+    else -> "$size tokens"
 }
 
 /** Near-bottom slop: a fling that stops a few pixels above the end still counts
@@ -871,6 +962,12 @@ private fun ChatContentPreview() {
                     ),
                 ),
                 questionSelections = mapOf("q_0" to "opt_0_1"),
+                availableModels = listOf(
+                    ServerModel("managed:kimi-code", "kimi-code/kimi-for-coding", "K2.7 Coding", 262_144),
+                    ServerModel("managed:kimi-code", "kimi-code/k3", "K3", 1_048_576),
+                ),
+                modelsAvailable = true,
+                serverDefaultModel = "kimi-code/k3",
             ),
             sessionId = "session_86df049a-e22b-480e-842e-488b77c5469b",
             snackbarHostState = remember { SnackbarHostState() },
@@ -885,6 +982,7 @@ private fun ChatContentPreview() {
             onQuestionOtherTextChange = { _, _ -> },
             onSubmitQuestion = {},
             onDismissQuestion = {},
+            onModelSelected = {},
         )
     }
 }
