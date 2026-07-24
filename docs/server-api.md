@@ -362,10 +362,9 @@ Observed tags, all paired with attributes allowed on the opening tag:
 
 File upload backs message attachments: upload the bytes first, then reference
 the returned `file_id` in a prompt's `content` items (see Prompts below). The
-endpoints below were verified live on 0.29.0 (2026-07-24); the prompt-side
-rewriting behavior is derived from the server source
-(`MoonshotAI/kimi-code`, `packages/kap-server/src/routes/prompts.ts`) and is
-pending live verification by the mobile attachment feature.
+endpoints and the prompt-side rewriting were verified live on 0.29.0
+(2026-07-24, session `attach-spike`); only the video rewrite and the
+unsupported-image-format fallback remain source-derived (see caveats below).
 
 ### Upload — `POST /api/v1/files`
 
@@ -388,6 +387,11 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/files \
 
 - File ids are `f_` + ULID/UUID. Any MIME type is accepted; the per-file limit
   is **50 MiB** (server-enforced, truncated uploads are rejected 413/41301).
+- The returned `media_type` is **sniffed from the bytes**; the `name` field and
+  file extension are ignored. On 0.29.0 the sniffer recognizes images and text
+  but not video: even a valid ffmpeg-generated mp4 and a WebM upload come back
+  as `application/octet-stream` (verified 2026-07-24), which makes the video
+  prompt path unreachable via upload in this version (see Prompts).
 - The server advertises this as `capabilities.file_upload: true` in
   `GET /api/v1/meta`.
 
@@ -429,8 +433,8 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../promp
 - `prompt_id` equals `user_message_id` (the ULID `msg_...` id of the user
   message).
 - `content` is a typed union, not just text. For user prompts the client may
-  send (derived from `packages/protocol/src/message.ts`, pending live
-  verification):
+  send (text/image/file items verified live 2026-07-24; the schema is
+  `packages/protocol/src/message.ts`):
   - `{"type":"text","text":"…"}`
   - `{"type":"image","source":{"kind":"file","file_id":"f_…"}}` — for uploaded
     `image/*` files. (`url` and `base64` source kinds also exist in the
@@ -440,19 +444,39 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../promp
   - `{"type":"file","file_id":"f_…","name":"…","media_type":"…","size":123}` —
     any other uploaded file. The web client picks the kind purely by MIME
     prefix (`image/*` → image, `video/*` → video, else file).
+  - The server **validates the referenced file's sniffed `media_type`** against
+    the part type (verified live): a `video` part whose file was uploaded as
+    `application/octet-stream` is rejected up front with envelope code `40001`
+    (`file f_… is application/octet-stream, not a video`) and the prompt does
+    not run. Since the upload sniffer never returns `video/*` on 0.29.0 (see
+    Files above), the video path is effectively unreachable in this version.
 - The server **rewrites attachment parts** before enqueueing, so history
-  (`GET .../messages`) does not contain the original items
-  (source-derived, pending live verification):
-  - `file` parts become a **text part**:
+  (`GET .../messages`) does not contain the original items (verified live
+  2026-07-24 except where noted):
+  - `file` parts become a **text part**, exact wording verified:
     `Attached file "<name>" (<mime>, <size> bytes): <abs path> — open it with
     the Read tool`. The bytes are materialized under
-    `<sessionDir>/attachments/<fileId>-<sanitized name>` — the agent reads them
+    `<sessionDir>/attachments/<fileId>-<sanitized name>` (sessionDir is
+    `~/.kimi-code/sessions/<workspace_id>/<session_id>`) — the agent reads them
     from disk; the web client parses this notice back into a chip with a regex,
     so its wording is a client contract.
-  - Uploaded images are converted to `{"type":"image","source":{"kind":"base64",…}}`
-    (compressed if large, with a text caption; formats the model rejects
-    degrade to the "Attached file" notice above).
-  - Videos appear as `{type:"video", source:{kind:"file", file_id}}` over REST.
+  - Uploaded images are inlined as base64, but the shape **differs between the
+    prompt ACK and history**: the `POST .../prompts` response echoes
+    `{"type":"image","source":{"kind":"base64","media_type":"…","data":"…"}}`,
+    while `GET .../messages` returns
+    `{"type":"image","source":{"kind":"url","url":"data:<mime>;base64,…"}}`.
+    Clients must accept both.
+  - Large images are compressed before enqueueing (verified: a 14.1 MB
+    2600×1900 png was downscaled to 1000×731; a 3.2 MB one passed through
+    untouched). A compression then prepends a separate **text part** wrapped in
+    `<system>…</system>`: `Image compressed to fit model limits: original
+    <W>x<H> <mime> (<orig>) -> sent <W>x<H> <mime> (<new>). Fine detail may be
+    lost. The uncompressed original is saved at
+    "<sessionDir>/media-originals/<hash>.<ext>"; if you need fine detail (e.g.
+    small text), call ReadMediaFile on that path …`. Formats the model rejects
+    degrade to the "Attached file" notice above (source-derived, not verified).
+  - Videos appear as `{type:"video", source:{kind:"file", file_id}}` over REST
+    (source-derived; unreachable live on 0.29.0, see validation note above).
 - Optional body fields (per-prompt overrides): `permission_mode`
   (`manual`/`auto`/`yolo` — `manual` verified live), `model` (verified: a
   session with empty `agent_config.model` runs when the prompt carries one),
@@ -1071,5 +1095,19 @@ selected option and free text both re-verified 2026-07-23:
   `/tmp/spike` must exist in the service's mount namespace (see Sessions →
   Create). There is no session-delete endpoint (`DELETE` → 404, re-verified
   2026-07-23); throwaway sessions created for the captures were left in place.
+- 2026-07-24 attachment round-trips on 0.29.0 (session `attach-spike`, cwd the
+  repo root): upload/download (incl. `Range` 206 and `content-disposition`
+  inline-vs-attachment)/delete of text and png files; prompt with
+  `image`+`file`+`text` content items — ACK echo and `GET .../messages`
+  history confirmed the `Attached file "…"` notice wording byte-for-byte, the
+  `<sessionDir>/attachments/<fileId>-<name>` materialization (bytes readable on
+  disk), and the image base64-vs-data-url shape difference between ACK and
+  history. A 14.1 MB png was compressed with a `<system>` caption text part
+  (original kept under `<sessionDir>/media-originals/`); a 3.2 MB png was not.
+  Upload `media_type` is content-sniffed: valid mp4/WebM uploads return
+  `application/octet-stream`, and a `video` prompt part referencing such a file
+  is rejected with envelope `40001`, so the video path is unreachable on
+  0.29.0. The uploaded test files were deleted afterwards; the spike session
+  was left in place (no session-delete endpoint).
 - 2026-07-22 round-trips on 0.28.1, 2026-07-19/20 round-trips on 0.27.0 and
   2026-07-17 round-trips on 0.23.3 (superseded shapes): see git history.
