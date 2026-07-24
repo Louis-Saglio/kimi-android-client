@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
+import fr.louissaglio.kimi.android.data.chat.FileMeta
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.data.chat.QuestionAnswer
 import fr.louissaglio.kimi.android.data.chat.ServerModel
@@ -15,6 +16,7 @@ import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
 import fr.louissaglio.kimi.android.data.sessions.displayName
 import fr.louissaglio.kimi.android.data.sessions.displayNameFor
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
+import java.util.UUID
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -48,6 +50,25 @@ class ChatViewModel @Inject constructor(
         val summary: String,
     )
 
+    /**
+     * One attachment staged in the composer (ticket 033). [bytes] are read eagerly at
+     * pick time so the chip can render a thumbnail and the send path uploads them
+     * unchanged. [status] reflects the upload driven by [onSend]: Ready → Uploading →
+     * (Failed keeps the chip and blocks the send; the snackbar's Retry re-sends).
+     */
+    data class PendingAttachment(
+        val localId: String,
+        val name: String,
+        val sizeBytes: Long,
+        val mimeType: String,
+        val bytes: ByteArray,
+        val status: Status = Status.Ready,
+    ) {
+        enum class Status { Ready, Uploading, Failed }
+
+        val isImage: Boolean get() = mimeType.startsWith("image/")
+    }
+
     /** [items] is empty until the first load; [error] is shown only when there is nothing to display. */
     data class UiState(
         val isLoading: Boolean = true,
@@ -61,6 +82,8 @@ class ChatViewModel @Inject constructor(
         val isReconnecting: Boolean = false,
         val inputText: String = "",
         val isSending: Boolean = false,
+        /** Attachments staged above the input, in pick order (ticket 033). */
+        val attachments: List<PendingAttachment> = emptyList(),
         /** Approval queue in arrival order; the card shows the head and the size. */
         val pendingApprovals: List<PendingApproval> = emptyList(),
         /** Question queue in arrival order; the card shows the head and the size. */
@@ -185,28 +208,80 @@ class ChatViewModel @Inject constructor(
         _uiState.update { it.copy(inputText = value) }
     }
 
-    /** POSTs the current input: a new prompt while the session is idle, a steer into the
-     * running turn while it is busy (docs/server-api.md, Steer). No-ops on blank text or
-     * while a send is in flight. On failure the text stays in the field and
-     * [Effect.SendFailed] drives a snackbar with Retry. */
+    /** Stages a picked file as a composer chip (ticket 033). The screen has already
+     * resolved the content Uri into name/size/mime/bytes via the ContentResolver. */
+    fun onAttachmentPicked(name: String, sizeBytes: Long, mimeType: String, bytes: ByteArray) {
+        val attachment = PendingAttachment(
+            localId = UUID.randomUUID().toString(),
+            name = name,
+            sizeBytes = sizeBytes,
+            mimeType = mimeType,
+            bytes = bytes,
+        )
+        _uiState.update { it.copy(attachments = it.attachments + attachment) }
+    }
+
+    /** Removes a staged chip before the send; the removed file is never uploaded. */
+    fun onAttachmentRemoved(localId: String) {
+        _uiState.update { state ->
+            state.copy(attachments = state.attachments.filterNot { it.localId == localId })
+        }
+    }
+
+    private fun markAttachment(localId: String, status: PendingAttachment.Status) {
+        _uiState.update { state ->
+            state.copy(
+                attachments = state.attachments.map {
+                    if (it.localId == localId) it.copy(status = status) else it
+                },
+            )
+        }
+    }
+
+    /**
+     * POSTs the current input: a new prompt while the session is idle, a steer into the
+     * running turn while it is busy (docs/server-api.md, Steer). No-ops when text and
+     * attachments are both empty, or while a send is in flight (which covers the whole
+     * upload phase — a second tap cannot double-send). Staged attachments are uploaded
+     * sequentially first (`POST /api/v1/files`); a failed upload marks its chip, posts
+     * no prompt, and surfaces [Effect.SendFailed]. On failure the text stays in the
+     * field and [Effect.SendFailed] drives a snackbar with Retry.
+     */
     fun onSend() {
         val state = _uiState.value
         val text = state.inputText.trim()
-        if (text.isEmpty() || state.isSending) return
+        if ((text.isEmpty() && state.attachments.isEmpty()) || state.isSending) return
         _uiState.update { it.copy(isSending = true) }
         viewModelScope.launch {
             val settings = settingsRepository.current()
+            val uploaded = mutableListOf<FileMeta>()
+            for (attachment in state.attachments) {
+                markAttachment(attachment.localId, PendingAttachment.Status.Uploading)
+                chatRepository.uploadFile(settings, attachment.name, attachment.mimeType, attachment.bytes)
+                    .onSuccess { meta ->
+                        uploaded += meta
+                        markAttachment(attachment.localId, PendingAttachment.Status.Ready)
+                    }
+                    .onFailure { error ->
+                        markAttachment(attachment.localId, PendingAttachment.Status.Failed)
+                        _uiState.update { it.copy(isSending = false) }
+                        _effects.send(Effect.SendFailed(error.toUserMessage()))
+                        return@launch
+                    }
+            }
             val result = if (state.isWorking) {
-                chatRepository.steer(settings, sessionId, text)
+                chatRepository.steer(settings, sessionId, text, uploaded)
             } else {
-                chatRepository.sendPrompt(settings, sessionId, text)
+                chatRepository.sendPrompt(settings, sessionId, text, uploaded)
             }
             result
                 .onSuccess {
                     // No local echo: the user message arrives inline in the socket's
                     // context.spliced frame (0.27.0; prompt.submitted on older servers),
                     // the reply via the streaming events.
-                    _uiState.update { it.copy(inputText = "", isSending = false, isWorking = true) }
+                    _uiState.update {
+                        it.copy(inputText = "", attachments = emptyList(), isSending = false, isWorking = true)
+                    }
                 }
                 .onFailure { error ->
                     _uiState.update { it.copy(isSending = false) }

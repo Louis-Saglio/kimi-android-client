@@ -43,6 +43,8 @@ import kotlinx.serialization.json.putJsonObject
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -153,14 +155,63 @@ class ChatRepository @Inject constructor(
         }
 
     /**
+     * Uploads one file (`POST /api/v1/files`, multipart, docs/server-api.md, Files) and
+     * returns its server metadata. The returned [FileMeta.mediaType] is sniffed from the
+     * bytes server-side, so it — not the declared [mediaType] — decides the prompt part
+     * kind in [postPrompt]. One file per request; the caller uploads sequentially.
+     */
+    suspend fun uploadFile(
+        settings: ServerSettings,
+        name: String,
+        mediaType: String,
+        bytes: ByteArray,
+    ): Result<FileMeta> = withContext(Dispatchers.IO) {
+        val body = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart(
+                "file",
+                name,
+                bytes.toRequestBody(mediaType.toMediaTypeOrNull()),
+            )
+            .addFormDataPart("name", name)
+            .build()
+        val request = try {
+            Request.Builder()
+                .url(settings.serverUrl.trim().trimEnd('/') + "/api/v1/files")
+                .post(body)
+                .build()
+        } catch (e: IllegalArgumentException) {
+            return@withContext Result.failure(DataError.InvalidUrl)
+        }
+        try {
+            client.newCall(request).execute().use { response ->
+                when {
+                    response.code == 401 -> Result.failure(DataError.Auth)
+                    !response.isSuccessful -> Result.failure(DataError.Http(response.code))
+                    else -> parseUploadAck(response.body?.string().orEmpty())
+                }
+            }
+        } catch (e: IOException) {
+            Result.failure(DataError.Network(e))
+        }
+    }
+
+    /**
      * Sends a user prompt (`POST /api/v1/sessions/{id}/prompts`). The response only
      * acknowledges the prompt: the user message and the agent's reply arrive over the
      * WebSocket (docs/server-api.md), so success carries no payload.
+     * [attachments] (already uploaded, ticket 033) go into the content array before the
+     * text item; [text] may be blank when attachments are present.
      */
-    suspend fun sendPrompt(settings: ServerSettings, sessionId: String, text: String): Result<Unit> =
+    suspend fun sendPrompt(
+        settings: ServerSettings,
+        sessionId: String,
+        text: String,
+        attachments: List<FileMeta> = emptyList(),
+    ): Result<Unit> =
         withContext(Dispatchers.IO) {
             val model = promptModel(settings, sessionId)
-            postPrompt(settings, sessionId, text, model, promptThinking(settings, sessionId, model)).map { }
+            postPrompt(settings, sessionId, text, attachments, model, promptThinking(settings, sessionId, model)).map { }
         }
 
     /**
@@ -169,10 +220,15 @@ class ChatRepository @Inject constructor(
      * queued prompt into the active turn. The steered user message echoes over the
      * WebSocket (context.spliced) like a regular one, so success carries no payload.
      */
-    suspend fun steer(settings: ServerSettings, sessionId: String, text: String): Result<Unit> =
+    suspend fun steer(
+        settings: ServerSettings,
+        sessionId: String,
+        text: String,
+        attachments: List<FileMeta> = emptyList(),
+    ): Result<Unit> =
         withContext(Dispatchers.IO) {
             val model = promptModel(settings, sessionId)
-            val promptId = postPrompt(settings, sessionId, text, model, promptThinking(settings, sessionId, model))
+            val promptId = postPrompt(settings, sessionId, text, attachments, model, promptThinking(settings, sessionId, model))
                 .getOrElse { return@withContext Result.failure(it) }
             postSteer(settings, sessionId, promptId)
         }
@@ -359,19 +415,44 @@ class ChatRepository @Inject constructor(
 
     /** POSTs the prompt and returns its id (queued while busy, running otherwise).
      * [thinking] is the verified per-prompt effort override (a plain string,
-     * docs/server-api.md); null leaves the field out. */
+     * docs/server-api.md); null leaves the field out. [attachments] become content items
+     * before the text item (ticket 033): an `image` part for image MIME types, a `file`
+     * part otherwise (docs/server-api.md, Prompts). A blank [text] adds no text item — the
+     * caller guarantees text and attachments are not both empty. */
     private fun postPrompt(
         settings: ServerSettings,
         sessionId: String,
         text: String,
+        attachments: List<FileMeta>,
         model: String?,
         thinking: String?,
     ): Result<String> {
         val body = buildJsonObject {
             putJsonArray("content") {
-                addJsonObject {
-                    put("type", "text")
-                    put("text", text)
+                for (attachment in attachments) {
+                    if (attachment.isImage) {
+                        addJsonObject {
+                            put("type", "image")
+                            putJsonObject("source") {
+                                put("kind", "file")
+                                put("file_id", attachment.id)
+                            }
+                        }
+                    } else {
+                        addJsonObject {
+                            put("type", "file")
+                            put("file_id", attachment.id)
+                            put("name", attachment.name)
+                            put("media_type", attachment.mediaType)
+                            put("size", attachment.sizeBytes)
+                        }
+                    }
+                }
+                if (text.isNotBlank()) {
+                    addJsonObject {
+                        put("type", "text")
+                        put("text", text)
+                    }
                 }
             }
             if (model != null) put("model", model)
@@ -864,6 +945,19 @@ class ChatRepository @Inject constructor(
             envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
             envelope.data == null -> Result.failure(DataError.Api(envelope.code, "missing data"))
             else -> Result.success(envelope.data.promptId)
+        }
+    } catch (e: SerializationException) {
+        Result.failure(DataError.MalformedResponse(e))
+    }
+
+    private fun parseUploadAck(body: String): Result<FileMeta> = try {
+        val envelope = json.decodeFromString<Envelope<FileUploadData>>(body)
+        when {
+            envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
+            envelope.data == null -> Result.failure(DataError.Api(envelope.code, "missing data"))
+            else -> envelope.data.let { data ->
+                Result.success(FileMeta(id = data.id, name = data.name, mediaType = data.mediaType, sizeBytes = data.size))
+            }
         }
     } catch (e: SerializationException) {
         Result.failure(DataError.MalformedResponse(e))

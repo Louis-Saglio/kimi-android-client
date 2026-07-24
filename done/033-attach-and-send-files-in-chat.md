@@ -50,15 +50,15 @@ Add an attach affordance to the chat composer (`ui/chat/ChatScreen.kt`):
 
 ## Acceptance criteria
 
-- [ ] Unit test: repository maps an uploaded `FileMeta` to the correct prompt
+- [x] Unit test: repository maps an uploaded `FileMeta` to the correct prompt
   content item (`image` for `image/*`, `file` otherwise) and keeps text items.
-- [ ] Unit test: ViewModel blocks send while an upload is in flight and
+- [x] Unit test: ViewModel blocks send while an upload is in flight and
   surfaces an upload failure without posting the prompt.
 - [ ] Manual: attach a photo and a `.txt` file, add text, send — the turn runs
   and the agent can read the attached `.txt` (it lands in
   `<sessionDir>/attachments/`).
 - [ ] Manual: text-only send unchanged; removing a chip before send excludes it.
-- [ ] `./gradlew :app:assembleRelease` passes.
+- [x] `./gradlew :app:assembleRelease` passes.
 
 ## Out of scope
 

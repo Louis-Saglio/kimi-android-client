@@ -73,6 +73,16 @@ data class PromptData(
     @SerialName("prompt_id") val promptId: String = "",
 )
 
+/** `data` of `POST /api/v1/files` (docs/server-api.md, Files). [mediaType] is sniffed
+ * from the bytes server-side — the `name` field and extension are ignored there. */
+@Serializable
+data class FileUploadData(
+    val id: String = "",
+    val name: String = "",
+    @SerialName("media_type") val mediaType: String = "",
+    val size: Long = 0,
+)
+
 /** Envelope of one WebSocket frame; [payload] is decoded per [type] by the repository. */
 @Serializable
 data class WsFrame(

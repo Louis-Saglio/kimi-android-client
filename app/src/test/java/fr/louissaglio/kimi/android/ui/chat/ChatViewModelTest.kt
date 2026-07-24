@@ -71,6 +71,9 @@ class ChatViewModelTest {
     private var answersSucceed = true
 
     @Volatile
+    private var uploadsSucceed = true
+
+    @Volatile
     private var questionsBody =
         """{"code":0,"msg":"success","data":{"items":[]},"request_id":"r"}"""
 
@@ -117,6 +120,11 @@ class ChatViewModelTest {
     /** Same as [statusResponseGate], for the /questions poll. */
     @Volatile
     private var questionsResponseGate: CountDownLatch? = null
+
+    /** Same as [statusResponseGate], for the /api/v1/files upload (ticket 033): parks
+     * the response so a test can observe the send while the upload is in flight. */
+    @Volatile
+    private var filesResponseGate: CountDownLatch? = null
 
     private class FakePreferencesDataStore(prefs: Preferences) : DataStore<Preferences> {
         private val state = MutableStateFlow(prefs)
@@ -202,6 +210,20 @@ class ChatViewModelTest {
                             servedStartupGets.countDown()
                             questionsResponseGate?.await(5, TimeUnit.SECONDS)
                             MockResponse().setBody(questionsBody)
+                        }
+                    }
+                    path == "/api/v1/files" -> {
+                        filesResponseGate?.await(5, TimeUnit.SECONDS)
+                        if (uploadsSucceed) {
+                            MockResponse().setBody(
+                                """{"code":0,"msg":"success","data":{"id":"f_1","name":"a.txt",""" +
+                                    """"media_type":"text/plain","size":5,""" +
+                                    """"created_at":"2026-07-24T00:00:00.000Z"},"request_id":"r"}""",
+                            )
+                        } else {
+                            MockResponse().setBody(
+                                """{"code":41301,"msg":"file exceeds the 50 MiB limit","data":null,"request_id":"r"}""",
+                            )
                         }
                     }
                     path == "/api/v1/models" ->
@@ -885,6 +907,118 @@ class ChatViewModelTest {
         assertEquals(emptyList<String>(), state.supportedEfforts)
         assertNull(state.selectedEffort)
         assertNull(state.defaultEffort)
+    }
+
+    @Test
+    fun `attachment send uploads the file then posts the prompt with its content item`() = runBlocking {
+        viewModel.onScreenStarted()
+        awaitServerSocket()
+        awaitState { !it.isLoading }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        viewModel.onAttachmentPicked("a.txt", 5, "text/plain", "hello".toByteArray())
+        viewModel.onInputChange("see attached")
+        viewModel.onSend()
+
+        val upload = awaitRequest("/api/v1/files")
+        assertEquals("POST", upload.method)
+        val prompt = awaitRequest("/prompts")
+        assertEquals("POST", prompt.method)
+        assertEquals("/api/v1/sessions/session_1/prompts", prompt.path)
+        assertEquals(
+            """{"content":[""" +
+                """{"type":"file","file_id":"f_1","name":"a.txt","media_type":"text/plain","size":5},""" +
+                """{"type":"text","text":"see attached"}],"model":"kimi-code/k3"}""",
+            prompt.body.readUtf8(),
+        )
+        // Chips and text clear on success, like a text-only send.
+        awaitState { it.attachments.isEmpty() && it.inputText.isEmpty() && !it.isSending }
+    }
+
+    @Test
+    fun `send is a no-op while an attachment upload is in flight`() = runBlocking {
+        val gate = CountDownLatch(1)
+        filesResponseGate = gate
+        viewModel.onScreenStarted()
+        awaitServerSocket()
+        awaitState { !it.isLoading }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        viewModel.onAttachmentPicked("a.txt", 5, "text/plain", "hello".toByteArray())
+        viewModel.onSend()
+        awaitState {
+            it.isSending && it.attachments.single().status == ChatViewModel.PendingAttachment.Status.Uploading
+        }
+
+        // A second tap while the upload is parked server-side must not send again.
+        viewModel.onSend()
+        gate.countDown()
+
+        awaitRequest("/api/v1/files")
+        // Attachments alone are sendable: the prompt goes out without a text item.
+        val prompt = awaitRequest("/prompts")
+        assertEquals(
+            """{"content":[{"type":"file","file_id":"f_1","name":"a.txt","media_type":"text/plain","size":5}],""" +
+                """"model":"kimi-code/k3"}""",
+            prompt.body.readUtf8(),
+        )
+        awaitState { it.attachments.isEmpty() && !it.isSending }
+        // Exactly one upload and one prompt: the second tap sent nothing.
+        assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun `failed upload blocks the send and posts no prompt`() = runBlocking {
+        uploadsSucceed = false
+        viewModel.onScreenStarted()
+        awaitServerSocket()
+        awaitState { !it.isLoading }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        val effects = CopyOnWriteArrayList<ChatViewModel.Effect>()
+        val effectJob = launch { viewModel.effects.collect { effects += it } }
+        try {
+            viewModel.onAttachmentPicked("a.txt", 5, "text/plain", "hello".toByteArray())
+            viewModel.onSend()
+            awaitRequest("/api/v1/files")
+            withTimeout(5_000) { while (effects.isEmpty()) delay(10) }
+
+            assertEquals(
+                ChatViewModel.Effect.SendFailed("file exceeds the 50 MiB limit"),
+                effects.single(),
+            )
+            // The failed chip stays staged and marked; no prompt was posted.
+            val attachment = viewModel.uiState.value.attachments.single()
+            assertEquals(ChatViewModel.PendingAttachment.Status.Failed, attachment.status)
+            assertTrue(!viewModel.uiState.value.isSending)
+            assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
+        } finally {
+            effectJob.cancel()
+        }
+    }
+
+    @Test
+    fun `removing a chip excludes the file from the send`() = runBlocking {
+        viewModel.onScreenStarted()
+        awaitServerSocket()
+        awaitState { !it.isLoading }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        viewModel.onAttachmentPicked("a.txt", 5, "text/plain", "hello".toByteArray())
+        val localId = viewModel.uiState.value.attachments.single().localId
+        viewModel.onAttachmentRemoved(localId)
+        assertEquals(emptyList<ChatViewModel.PendingAttachment>(), viewModel.uiState.value.attachments)
+
+        viewModel.onInputChange("just text")
+        viewModel.onSend()
+
+        val prompt = awaitRequest("/prompts")
+        assertEquals(
+            """{"content":[{"type":"text","text":"just text"}],"model":"kimi-code/k3"}""",
+            prompt.body.readUtf8(),
+        )
+        // No upload happened for the removed chip.
+        assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
     }
 
     private suspend fun awaitServerSocket(): WebSocket = withTimeout(5_000) {

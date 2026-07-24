@@ -1206,4 +1206,104 @@ class ChatRepositoryTest {
 
         assertTrue(result.exceptionOrNull() is DataError.Api)
     }
+
+    @Test
+    fun `uploadFile posts one multipart file and maps the response to FileMeta`() = runBlocking {
+        // Live 0.29.0 response shape (docs/server-api.md, Files — ticket 033).
+        server.enqueue(
+            MockResponse().setBody(
+                """{"code":0,"msg":"success","data":{"id":"f_e49777a6","name":"attach-check.txt",""" +
+                    """"media_type":"text/plain","size":27,"created_at":"2026-07-24T11:56:55.720Z"},"request_id":"01KX"}""",
+            ),
+        )
+
+        val result = repository.uploadFile(settings(), "attach-check.txt", "text/plain", "doc-verify-033".toByteArray())
+
+        assertEquals(
+            FileMeta(id = "f_e49777a6", name = "attach-check.txt", mediaType = "text/plain", sizeBytes = 27),
+            result.getOrThrow(),
+        )
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/files", request.path)
+        assertTrue(request.headers["Content-Type"]?.startsWith("multipart/form-data") == true)
+        val body = request.body.readUtf8()
+        // One `file` part with the bytes and one `name` field, per the documented curl.
+        assertTrue(body.contains("""name="file"; filename="attach-check.txt""""))
+        assertTrue(body.contains("doc-verify-033"))
+        assertTrue(body.contains("""name="name""""))
+    }
+
+    @Test
+    fun `uploadFile maps a 413 to an Http error`() = runBlocking {
+        // 50 MiB server limit (docs/server-api.md): surfaced as a plain send failure.
+        server.enqueue(MockResponse().setResponseCode(413))
+
+        val result = repository.uploadFile(settings(), "big.bin", "application/octet-stream", ByteArray(4))
+
+        assertTrue((result.exceptionOrNull() as? DataError.Http)?.code == 413)
+    }
+
+    @Test
+    fun `sendPrompt maps uploaded attachments to image and file content items before the text`() = runBlocking {
+        // docs/server-api.md, Prompts: image/* becomes an image part, anything else a
+        // file part; attachment items precede the text item (ticket 033).
+        enqueueConfigWithoutDefaultModel()
+        enqueuePromptAck()
+
+        val result = repository.sendPrompt(
+            settings(),
+            "session_1",
+            "look at these",
+            attachments = listOf(
+                FileMeta(id = "f_img", name = "photo.png", mediaType = "image/png", sizeBytes = 1_234),
+                FileMeta(id = "f_txt", name = "notes.txt", mediaType = "text/plain", sizeBytes = 27),
+            ),
+        )
+
+        assertTrue(result.isSuccess)
+        assertEquals("/api/v1/config", server.takeRequest().path)
+        assertEquals(
+            """{"content":[""" +
+                """{"type":"image","source":{"kind":"file","file_id":"f_img"}},""" +
+                """{"type":"file","file_id":"f_txt","name":"notes.txt","media_type":"text/plain","size":27},""" +
+                """{"type":"text","text":"look at these"}]}""",
+            server.takeRequest().body.readUtf8(),
+        )
+    }
+
+    @Test
+    fun `sendPrompt with attachments and blank text sends no text item`() = runBlocking {
+        enqueueConfigWithoutDefaultModel()
+        enqueuePromptAck()
+
+        val result = repository.sendPrompt(
+            settings(),
+            "session_1",
+            "",
+            attachments = listOf(FileMeta(id = "f_txt", name = "notes.txt", mediaType = "text/plain", sizeBytes = 27)),
+        )
+
+        assertTrue(result.isSuccess)
+        assertEquals("/api/v1/config", server.takeRequest().path)
+        assertEquals(
+            """{"content":[{"type":"file","file_id":"f_txt","name":"notes.txt","media_type":"text/plain","size":27}]}""",
+            server.takeRequest().body.readUtf8(),
+        )
+    }
+
+    @Test
+    fun `text-only sendPrompt body is unchanged by the attachments support`() = runBlocking {
+        enqueueConfigWithoutDefaultModel()
+        enqueuePromptAck()
+
+        val result = repository.sendPrompt(settings(), "session_1", "hello")
+
+        assertTrue(result.isSuccess)
+        assertEquals("/api/v1/config", server.takeRequest().path)
+        assertEquals(
+            """{"content":[{"type":"text","text":"hello"}]}""",
+            server.takeRequest().body.readUtf8(),
+        )
+    }
 }
