@@ -1,9 +1,13 @@
 package fr.louissaglio.kimi.android.ui.chat
 
+import android.content.ActivityNotFoundException
 import android.content.ContentResolver
+import android.content.Context
+import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.animateFloatAsState
@@ -99,6 +103,9 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
@@ -110,9 +117,11 @@ import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
 import com.mikepenz.markdown.model.markdownExtendedSpans
 import com.mikepenz.markdown.model.markdownPadding
+import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.data.chat.ServerModel
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -168,6 +177,27 @@ fun ChatScreen(
     // The socket is held only while the screen is visible (ON_START/ON_STOP pair).
     LifecycleEventEffect(Lifecycle.Event.ON_START) { viewModel.onScreenStarted() }
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) { viewModel.onScreenStopped() }
+    // History attachments (ticket 034): images resolve their bytes inline (base64) or
+    // via /files; tapping a thumbnail opens the full-screen viewer, tapping a file
+    // chip downloads the bytes and hands them to another app through a FileProvider.
+    var fullScreenImage by remember { mutableStateOf<ChatMessage.Part.Image?>(null) }
+    val loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray? = { image ->
+        resolveImageBytes(image) { fileId -> viewModel.downloadFile(fileId).getOrNull()?.bytes }
+    }
+    val onOpenAttachment: (ChatMessage.Part.Attachment) -> Unit = open@{ attachment ->
+        val fileId = attachment.fileId ?: return@open
+        scope.launch {
+            val download = viewModel.downloadFile(fileId).getOrNull()
+            if (download == null) {
+                snackbarHostState.showSnackbar("Could not download ${attachment.name}")
+                return@launch
+            }
+            val uri = withContext(Dispatchers.IO) { writeToCache(context, attachment.name, download.bytes) }
+            if (uri == null || !openWithOtherApp(context, uri, attachment.mimeType)) {
+                snackbarHostState.showSnackbar("No app can open ${attachment.name}")
+            }
+        }
+    }
     ChatContent(
         uiState = uiState,
         sessionId = sessionId,
@@ -187,7 +217,47 @@ fun ChatScreen(
         onEffortSelected = viewModel::onEffortSelected,
         onAttach = { attachLauncher.launch("*/*") },
         onAttachmentRemoved = viewModel::onAttachmentRemoved,
+        onImageClick = { fullScreenImage = it },
+        onOpenAttachment = onOpenAttachment,
+        loadImageBytes = loadImageBytes,
     )
+    fullScreenImage?.let { image ->
+        FullScreenImageViewer(
+            image = image,
+            loadImageBytes = loadImageBytes,
+            onDismiss = { fullScreenImage = null },
+        )
+    }
+}
+
+/** The bytes of a history image (ticket 034): decoded from the inline base64, or
+ * fetched via `GET /api/v1/files/{id}` for a file-referenced source. */
+private suspend fun resolveImageBytes(
+    image: ChatMessage.Part.Image,
+    downloadFile: suspend (String) -> ByteArray?,
+): ByteArray? =
+    image.base64Data?.let { runCatching { Base64.decode(it, Base64.DEFAULT) }.getOrNull() }
+        ?: image.fileId?.let { downloadFile(it) }
+
+/** Writes downloaded bytes to the cache dir and returns a FileProvider content Uri
+ * other apps may read (ticket 034); null on any failure. */
+private fun writeToCache(context: Context, name: String, bytes: ByteArray): Uri? = runCatching {
+    val dir = File(context.cacheDir, "attachments").apply { mkdirs() }
+    val safeName = name.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "attachment" }
+    val file = File(dir, safeName).apply { writeBytes(bytes) }
+    FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+}.getOrNull()
+
+/** Hands a downloaded attachment to whatever app can view it; false when none can. */
+private fun openWithOtherApp(context: Context, uri: Uri, mimeType: String): Boolean = try {
+    context.startActivity(
+        Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri, mimeType)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+    )
+    true
+} catch (e: ActivityNotFoundException) {
+    false
 }
 
 /** A picked document resolved to upload-ready bytes (ticket 033); null on any read
@@ -241,6 +311,9 @@ private fun ChatContent(
     onEffortSelected: (String) -> Unit,
     onAttach: () -> Unit,
     onAttachmentRemoved: (String) -> Unit,
+    onImageClick: (ChatMessage.Part.Image) -> Unit,
+    onOpenAttachment: (ChatMessage.Part.Attachment) -> Unit,
+    loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray?,
 ) {
     var showModelPicker by rememberSaveable { mutableStateOf(false) }
     Scaffold(
@@ -368,7 +441,13 @@ private fun ChatContent(
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text("No messages yet", style = MaterialTheme.typography.bodyLarge)
                     }
-                else -> MessageList(uiState.items, Modifier.weight(1f))
+                else -> MessageList(
+                    uiState.items,
+                    Modifier.weight(1f),
+                    onImageClick = onImageClick,
+                    onOpenAttachment = onOpenAttachment,
+                    loadImageBytes = loadImageBytes,
+                )
             }
         }
     }
@@ -509,6 +588,9 @@ internal fun MessageList(
     items: List<ChatItem>,
     modifier: Modifier = Modifier,
     listState: LazyListState = rememberLazyListState(),
+    onImageClick: (ChatMessage.Part.Image) -> Unit = {},
+    onOpenAttachment: (ChatMessage.Part.Attachment) -> Unit = {},
+    loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray? = { null },
 ) {
     // reverseLayout alone does NOT pin the viewport to the newest row: with stable
     // keys, LazyList re-anchors the scroll position to the key of the first visible
@@ -538,7 +620,13 @@ internal fun MessageList(
     ) {
         items(items.asReversed(), key = ChatItem::id) { item ->
             when (item) {
-                is ChatItem.UserMessage -> UserBubble(item)
+                is ChatItem.UserMessage ->
+                    UserBubble(
+                        item,
+                        onImageClick = onImageClick,
+                        onOpenAttachment = onOpenAttachment,
+                        loadImageBytes = loadImageBytes,
+                    )
                 is ChatItem.AssistantMessage -> AssistantBubble(item)
                 is ChatItem.ToolActivity -> ToolRow(item)
             }
@@ -909,20 +997,178 @@ private fun MarkdownBody(text: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-internal fun UserBubble(message: ChatItem.UserMessage) {
+internal fun UserBubble(
+    message: ChatItem.UserMessage,
+    onImageClick: (ChatMessage.Part.Image) -> Unit = {},
+    onOpenAttachment: (ChatMessage.Part.Attachment) -> Unit = {},
+    loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray? = { null },
+) {
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
         Surface(
             modifier = Modifier.widthIn(max = 320.dp),
             color = MaterialTheme.colorScheme.primaryContainer,
             shape = RoundedCornerShape(12.dp),
         ) {
-            MarkdownBody(
-                text = message.text,
+            Column(
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-            )
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (message.text.isNotBlank()) MarkdownBody(text = message.text)
+                message.images.forEach { image ->
+                    HistoryImageThumbnail(
+                        image = image,
+                        loadImageBytes = loadImageBytes,
+                        onClick = { onImageClick(image) },
+                    )
+                }
+                message.attachments.forEach { attachment ->
+                    AttachmentChipRow(attachment = attachment, onClick = { onOpenAttachment(attachment) })
+                }
+            }
         }
     }
 }
+
+/** An image of a history user message (ticket 034): a bounded-decode thumbnail —
+ * the bytes come from the inline base64 or, for file-referenced sources, from a
+ * /files fetch. A failed resolve falls back to the generic sheet glyph; a tap opens
+ * the full-screen viewer. */
+@Composable
+private fun HistoryImageThumbnail(
+    image: ChatMessage.Part.Image,
+    loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray?,
+    onClick: () -> Unit,
+) {
+    var resolved by remember(image) { mutableStateOf(false) }
+    val thumbnail by produceState<ImageBitmap?>(initialValue = null, image) {
+        val bytes = loadImageBytes(image)
+        if (bytes != null) {
+            value = withContext(Dispatchers.Default) { decodeSampledThumbnail(bytes, THUMBNAIL_PX) }
+        }
+        resolved = true
+    }
+    val bitmap = thumbnail
+    val shape = RoundedCornerShape(8.dp)
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap,
+            contentDescription = "Attached image",
+            modifier = Modifier
+                .size(120.dp)
+                .clip(shape)
+                .clickable(onClick = onClick),
+            contentScale = ContentScale.Crop,
+        )
+    } else if (resolved) {
+        Box(
+            Modifier
+                .size(120.dp)
+                .clip(shape)
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center,
+        ) {
+            CopyGlyph(
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                background = MaterialTheme.colorScheme.surfaceVariant,
+                modifier = Modifier.size(24.dp),
+            )
+        }
+    } else {
+        Box(
+            Modifier
+                .size(120.dp)
+                .clip(shape)
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center,
+        ) {
+            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+        }
+    }
+}
+
+/** A non-image attachment inside a history bubble (ticket 034): generic sheet glyph,
+ * name and size. Tappable only when the fileId was recovered from the notice — the
+ * tap downloads the bytes and opens them in another app. */
+@Composable
+private fun AttachmentChipRow(attachment: ChatMessage.Part.Attachment, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(8.dp)
+    Surface(
+        shape = shape,
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier
+            .clip(shape)
+            .clickable(enabled = attachment.fileId != null, onClick = onClick)
+            .semantics { contentDescription = "Attachment ${attachment.name}" },
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            CopyGlyph(
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                background = MaterialTheme.colorScheme.surfaceVariant,
+                modifier = Modifier.size(18.dp),
+            )
+            Column {
+                Text(
+                    text = attachment.name,
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 180.dp),
+                )
+                Text(
+                    text = formatFileSize(attachment.sizeBytes),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/** Tap-to-dismiss full-screen image viewer (ticket 034): the bytes resolve like the
+ * thumbnail's, decoded bounded so a megapixel photo never lands in memory at full size. */
+@Composable
+private fun FullScreenImageViewer(
+    image: ChatMessage.Part.Image,
+    loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray?,
+    onDismiss: () -> Unit,
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .clickable(onClick = onDismiss),
+            contentAlignment = Alignment.Center,
+        ) {
+            val bitmap by produceState<ImageBitmap?>(initialValue = null, image) {
+                val bytes = loadImageBytes(image)
+                if (bytes != null) {
+                    value = withContext(Dispatchers.Default) { decodeSampledThumbnail(bytes, FULL_IMAGE_PX) }
+                }
+            }
+            val resolved = bitmap
+            if (resolved != null) {
+                Image(
+                    bitmap = resolved,
+                    contentDescription = "Attached image",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Fit,
+                )
+            } else {
+                CircularProgressIndicator()
+            }
+        }
+    }
+}
+
+private const val FULL_IMAGE_PX = 2048
 
 /** Web-parity assistant row (ticket 024): full-width plain markdown on the chat
  * background — no bubble — with a small copy action underneath that puts the raw
@@ -1256,6 +1502,9 @@ private fun ChatContentPreview() {
             onEffortSelected = {},
             onAttach = {},
             onAttachmentRemoved = {},
+            onImageClick = {},
+            onOpenAttachment = {},
+            loadImageBytes = { null },
         )
     }
 }

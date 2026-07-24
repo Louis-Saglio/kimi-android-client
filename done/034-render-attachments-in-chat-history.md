@@ -36,15 +36,15 @@ In the chat message pipeline (`data/chat/` parsing + `ui/chat/` rendering):
 
 ## Acceptance criteria
 
-- [ ] Unit test: the notice text parses into name/mime/size (and fileId from
+- [x] Unit test: the notice text parses into name/mime/size (and fileId from
   the path basename) for the documented wording; non-matching text passes
   through untouched.
-- [ ] Unit test: a user message mixing an attachment notice and real text
+- [x] Unit test: a user message mixing an attachment notice and real text
   renders the text plus a chip, not the raw notice.
-- [ ] Manual: send a photo + a `.txt` (ticket 033 flow), reload the session —
+- [x] Manual: send a photo + a `.txt` (ticket 033 flow), reload the session —
   the echo and the reloaded history show a thumbnail and a file chip, not the
   raw notice text.
-- [ ] `./gradlew :app:assembleRelease` passes.
+- [x] `./gradlew :app:assembleRelease` passes.
 
 ## Out of scope
 

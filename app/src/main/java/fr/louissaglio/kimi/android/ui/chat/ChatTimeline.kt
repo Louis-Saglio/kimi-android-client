@@ -89,9 +89,16 @@ class ChatTimeline {
             return
         }
         val text = message.parts.filterIsInstance<ChatMessage.Part.Text>().joinToString("\n") { it.text }
-        if (text.isBlank()) return
-        if (committed.filterIsInstance<ChatItem.UserMessage>().any { it.text == text }) return
-        committed += ChatItem.UserMessage("spliced_${syntheticSpliceCount++}", text)
+        val attachments = message.parts.filterIsInstance<ChatMessage.Part.Attachment>()
+        val images = message.parts.filterIsInstance<ChatMessage.Part.Image>()
+        if (text.isBlank() && attachments.isEmpty() && images.isEmpty()) return
+        if (committed.filterIsInstance<ChatItem.UserMessage>().any {
+                it.text == text && it.attachments == attachments && it.images == images
+            }
+        ) {
+            return
+        }
+        committed += ChatItem.UserMessage("spliced_${syntheticSpliceCount++}", text, attachments, images)
     }
 
     /** Deltas extend the last live bubble; after a tool row a new bubble starts, so a
@@ -150,7 +157,11 @@ class ChatTimeline {
         when (message.role) {
             ChatMessage.Role.User -> {
                 val text = message.parts.filterIsInstance<ChatMessage.Part.Text>().joinToString("\n") { it.text }
-                if (text.isNotBlank()) committed += ChatItem.UserMessage(message.id, text)
+                val attachments = message.parts.filterIsInstance<ChatMessage.Part.Attachment>()
+                val images = message.parts.filterIsInstance<ChatMessage.Part.Image>()
+                if (text.isNotBlank() || attachments.isNotEmpty() || images.isNotEmpty()) {
+                    committed += ChatItem.UserMessage(message.id, text, attachments, images)
+                }
             }
             ChatMessage.Role.Assistant -> {
                 val text = message.parts.filterIsInstance<ChatMessage.Part.Text>().joinToString("\n") { it.text }

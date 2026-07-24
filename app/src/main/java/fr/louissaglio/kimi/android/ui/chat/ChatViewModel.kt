@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
+import fr.louissaglio.kimi.android.data.chat.FileDownload
 import fr.louissaglio.kimi.android.data.chat.FileMeta
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.data.chat.QuestionAnswer
@@ -227,6 +228,11 @@ class ChatViewModel @Inject constructor(
             state.copy(attachments = state.attachments.filterNot { it.localId == localId })
         }
     }
+
+    /** Bytes of one uploaded file (`GET /api/v1/files/{id}`) — history attachment chips
+     * and image viewers fetch their content on demand (ticket 034). */
+    suspend fun downloadFile(fileId: String): Result<FileDownload> =
+        chatRepository.downloadFile(settingsRepository.current(), fileId)
 
     private fun markAttachment(localId: String, status: PendingAttachment.Status) {
         _uiState.update { state ->

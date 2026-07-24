@@ -37,6 +37,19 @@ data class ContentPartDto(
     // tools like AskUserQuestion); rendered by the expanded tool row (ticket 023).
     val output: JsonElement? = null,
     @SerialName("is_error") val isError: Boolean? = null,
+    // image parts (ticket 034): the inline source. History carries a data-url,
+    // the prompt ACK echo raw base64, a file reference a file_id (docs/server-api.md).
+    val source: MediaSourceDto? = null,
+)
+
+/** `source` of an image content part; each `kind` fills only its own fields. */
+@Serializable
+data class MediaSourceDto(
+    val kind: String = "",
+    @SerialName("media_type") val mediaType: String? = null,
+    val data: String? = null,
+    val url: String? = null,
+    @SerialName("file_id") val fileId: String? = null,
 )
 
 @Serializable

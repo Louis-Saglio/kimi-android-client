@@ -27,5 +27,24 @@ data class ChatMessage(
 
         /** [output] is the full result text, shown by the expanded row (ticket 023). */
         data class ToolResult(val toolCallId: String, val isError: Boolean, val output: String = "") : Part
+
+        /** A non-image uploaded file, recovered from the server's `Attached file "…"`
+         * text notice (AttachmentNotice, ticket 034). [fileId] comes from the
+         * materialized basename prefix; null means the bytes cannot be fetched back. */
+        data class Attachment(
+            val name: String,
+            val mimeType: String,
+            val sizeBytes: Long,
+            val fileId: String?,
+        ) : Part
+
+        /** An uploaded image inlined into the message (ticket 034). [base64Data] is set
+         * for base64 and data-url sources (ACK echo and history shapes,
+         * docs/server-api.md), [fileId] for a file-referenced source. */
+        data class Image(
+            val mediaType: String,
+            val base64Data: String?,
+            val fileId: String?,
+        ) : Part
     }
 }

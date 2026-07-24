@@ -155,6 +155,39 @@ class ChatRepository @Inject constructor(
         }
 
     /**
+     * Downloads one uploaded file (`GET /api/v1/files/{id}`, docs/server-api.md) —
+     * attachment chips and image viewers fetch their bytes on demand (ticket 034).
+     * The bearer token rides on the shared client.
+     */
+    suspend fun downloadFile(settings: ServerSettings, fileId: String): Result<FileDownload> =
+        withContext(Dispatchers.IO) {
+            val request = try {
+                Request.Builder()
+                    .url(settings.serverUrl.trim().trimEnd('/') + "/api/v1/files/$fileId")
+                    .build()
+            } catch (e: IllegalArgumentException) {
+                return@withContext Result.failure(DataError.InvalidUrl)
+            }
+            try {
+                client.newCall(request).execute().use { response ->
+                    when {
+                        response.code == 401 -> Result.failure(DataError.Auth)
+                        !response.isSuccessful -> Result.failure(DataError.Http(response.code))
+                        else -> Result.success(
+                            FileDownload(
+                                bytes = response.body?.bytes() ?: ByteArray(0),
+                                mediaType = response.body?.contentType()?.toString()
+                                    ?: "application/octet-stream",
+                            ),
+                        )
+                    }
+                }
+            } catch (e: IOException) {
+                Result.failure(DataError.Network(e))
+            }
+        }
+
+    /**
      * Uploads one file (`POST /api/v1/files`, multipart, docs/server-api.md, Files) and
      * returns its server metadata. The returned [FileMeta.mediaType] is sniffed from the
      * bytes server-side, so it — not the declared [mediaType] — decides the prompt part
@@ -1029,14 +1062,33 @@ class ChatRepository @Inject constructor(
         "text" -> text
             ?.let { if (stripEnvelopes) InternalEnvelopes.strip(it) else it }
             ?.takeIf { it.isNotBlank() }
-            ?.let { ChatMessage.Part.Text(it) }
+            // The server rewrites a prompt's file parts into this notice
+            // (docs/server-api.md, Prompts); recover the chip instead of rendering
+            // the raw sentence (ticket 034). User-role only: stripEnvelopes gates it.
+            ?.let { if (stripEnvelopes) AttachmentNotice.parse(it) ?: ChatMessage.Part.Text(it) else ChatMessage.Part.Text(it) }
         "thinking" -> thinking?.let { ChatMessage.Part.Thinking(it) }
+        "image" -> source?.toDomain()
         "tool_use" -> toolCallId?.let {
             ChatMessage.Part.ToolUse(it, toolName.orEmpty(), ToolPreview.of(input), formatDetail(input))
         }
         "tool_result" -> toolCallId?.let { ChatMessage.Part.ToolResult(it, isError ?: false, formatDetail(output)) }
         else -> null
     }
+
+    private fun MediaSourceDto.toDomain(): ChatMessage.Part.Image? = when (kind) {
+        "base64" -> data?.let { ChatMessage.Part.Image(mediaType.orEmpty(), base64Data = it, fileId = null) }
+        "url" -> url?.let { parseDataUrl(it) }
+        "file" -> fileId?.let { ChatMessage.Part.Image(mediaType.orEmpty(), base64Data = null, fileId = it) }
+        else -> null
+    }
+
+    private val DATA_URL_RE = Regex("""^data:([^;,]+);base64,(.*)$""", RegexOption.DOT_MATCHES_ALL)
+
+    /** History inlines images as `data:<mime>;base64,…` urls (docs/server-api.md). */
+    private fun parseDataUrl(url: String): ChatMessage.Part.Image? =
+        DATA_URL_RE.matchEntire(url)?.let {
+            ChatMessage.Part.Image(it.groupValues[1], base64Data = it.groupValues[2], fileId = null)
+        }
 
     private companion object {
         const val MAX_BACKOFF_SHIFT = 5 // 1 s << 5 = 32 s, clamped to 30 s below

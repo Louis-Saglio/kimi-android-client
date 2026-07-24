@@ -120,6 +120,62 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun `history maps the attachment notice and image parts to domain parts`() = runBlocking {
+        // Fixture per docs/server-api.md (ticket 034): the server rewrites file parts
+        // into the "Attached file" notice; images come back as a data-url source in
+        // history, as raw base64 in the prompt ACK echo, or as a file reference.
+        server.enqueue(
+            MockResponse().setBody(
+                """
+                {"code":0,"msg":"success","data":{"items":[
+                  {"id":"msg_1","session_id":"session_1","role":"user",
+                   "content":[
+                     {"type":"text","text":"Attached file \"notes.txt\" (text/plain, 340 bytes): /home/ubuntu/.kimi-code/sessions/wd_1/session_2/attachments/f_01KYA4RCBE4NPA1RX5TT7DB5J9-notes.txt — open it with the Read tool"},
+                     {"type":"text","text":"what is in these?"},
+                     {"type":"image","source":{"kind":"url","url":"data:image/png;base64,aGVsbG8="}},
+                     {"type":"image","source":{"kind":"base64","media_type":"image/jpeg","data":"anBlZw=="}},
+                     {"type":"image","source":{"kind":"file","file_id":"f_abc","media_type":"image/webp"}}
+                   ],
+                   "created_at":"2026-07-24T04:12:10.000Z"}
+                ],"has_more":false},"request_id":"01KX"}
+                """.trimIndent(),
+            ),
+        )
+
+        val messages = repository.getMessages(settings(), "session_1").getOrThrow()
+
+        assertEquals(
+            ChatMessage(
+                "msg_1",
+                ChatMessage.Role.User,
+                listOf(
+                    ChatMessage.Part.Attachment("notes.txt", "text/plain", 340, "f_01KYA4RCBE4NPA1RX5TT7DB5J9"),
+                    ChatMessage.Part.Text("what is in these?"),
+                    ChatMessage.Part.Image("image/png", base64Data = "aGVsbG8=", fileId = null),
+                    ChatMessage.Part.Image("image/jpeg", base64Data = "anBlZw==", fileId = null),
+                    ChatMessage.Part.Image("image/webp", base64Data = null, fileId = "f_abc"),
+                ),
+            ),
+            messages.single(),
+        )
+    }
+
+    @Test
+    fun `downloadFile streams the bytes and the content type`() = runBlocking {
+        server.enqueue(
+            MockResponse()
+                .setBody("hello file")
+                .setHeader("Content-Type", "text/plain; charset=utf-8"),
+        )
+
+        val download = repository.downloadFile(settings(), "f_1").getOrThrow()
+
+        assertEquals("/api/v1/files/f_1", server.takeRequest().path)
+        assertEquals("text/plain; charset=utf-8", download.mediaType)
+        assertEquals("hello file", String(download.bytes))
+    }
+
+    @Test
     fun `history tool result output and error flag reach the activity row`() = runBlocking {
         // Fixture per docs/server-api.md (ticket 023): the expanded row reads the full
         // call input and the result output, plus the error tint from is_error.
