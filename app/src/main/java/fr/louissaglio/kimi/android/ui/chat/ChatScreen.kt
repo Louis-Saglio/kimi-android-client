@@ -19,7 +19,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -58,6 +60,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -68,6 +71,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
@@ -280,12 +284,38 @@ private fun ChatContent(
     }
 }
 
+/** Near-bottom slop: a fling that stops a few pixels above the end still counts
+ * as "at the bottom" for auto-scroll purposes (ticket 030). */
+private val AutoScrollThreshold = 32.dp
+
 @Composable
-private fun MessageList(items: List<ChatItem>, modifier: Modifier = Modifier) {
-    // reverseLayout pins the viewport to the newest row: new content auto-scrolls into
-    // view only when already at the bottom, and never yanks a scrolled-up reader.
+internal fun MessageList(
+    items: List<ChatItem>,
+    modifier: Modifier = Modifier,
+    listState: LazyListState = rememberLazyListState(),
+) {
+    // reverseLayout alone does NOT pin the viewport to the newest row: with stable
+    // keys, LazyList re-anchors the scroll position to the key of the first visible
+    // item, so any tail insertion (tool row, new bubble) silently moves the anchor
+    // off the bottom and the follow stops (ticket 030). Track at-bottom continuously
+    // and re-pin on every insertion; growth of the bottom item needs no handling
+    // (a (0,0) pin survives it), and a scrolled-up reader is never yanked.
+    val thresholdPx = with(LocalDensity.current) { AutoScrollThreshold.toPx() }
+    var isAtBottom by remember { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            listState.firstVisibleItemIndex == 0 &&
+                listState.firstVisibleItemScrollOffset <= thresholdPx
+        }.collect { isAtBottom = it }
+    }
+    LaunchedEffect(items.size) {
+        // Reads the pre-insertion value: this effect runs after composition apply,
+        // before the layout pass that would move firstVisibleItemIndex off 0.
+        if (isAtBottom) listState.scrollToItem(0)
+    }
     LazyColumn(
         modifier = modifier.fillMaxSize(),
+        state = listState,
         reverseLayout = true,
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
