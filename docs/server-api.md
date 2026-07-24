@@ -5,8 +5,8 @@ by Kimi Code Web. Documented and verified against the live server on 2026-07-23
 (server version `0.29.0`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
-steer, questions, abort, permissions, WebSocket events, plus the workspace list
-used by the mobile create-session flow. Explicitly skipped:
+steer, questions, abort, permissions, WebSocket events, file attachments, plus
+the workspace list used by the mobile create-session flow. Explicitly skipped:
 `fs:*`, terminals, cron, goals, providers, skills.
 
 Every endpoint below was executed against the live server; the exact commands
@@ -358,6 +358,48 @@ Observed tags, all paired with attributes allowed on the opening tag:
   client renders the inner prompt as a dedicated cron turn; the app hides the
   envelope entirely for now).
 
+## Files (attachments)
+
+File upload backs message attachments: upload the bytes first, then reference
+the returned `file_id` in a prompt's `content` items (see Prompts below). The
+endpoints below were verified live on 0.29.0 (2026-07-24); the prompt-side
+rewriting behavior is derived from the server source
+(`MoonshotAI/kimi-code`, `packages/kap-server/src/routes/prompts.ts`) and is
+pending live verification by the mobile attachment feature.
+
+### Upload — `POST /api/v1/files`
+
+`multipart/form-data`, one file per request. Fields: `file` (binary, required),
+`name` (optional display-name override), `expires_in_sec` (optional TTL).
+
+```bash
+curl -s -X POST http://127.0.0.1:58627/api/v1/files \
+  -H "Authorization: Bearer <token>" \
+  -F "file=@attach-check.txt" -F "name=attach-check.txt"
+```
+
+```json
+{"code": 0, "msg": "success",
+ "data": {"id": "f_e49777a6-…", "name": "attach-check.txt",
+          "media_type": "text/plain", "size": 27,
+          "created_at": "2026-07-24T11:56:55.720Z"},
+ "request_id": "01KY9ZRNGF3Y5EA7V12YY8D7GX"}
+```
+
+- File ids are `f_` + ULID/UUID. Any MIME type is accepted; the per-file limit
+  is **50 MiB** (server-enforced, truncated uploads are rejected 413/41301).
+- The server advertises this as `capabilities.file_upload: true` in
+  `GET /api/v1/meta`.
+
+### Download — `GET /api/v1/files/{file_id}`
+
+Binary stream; supports `Range` (`accept-ranges: bytes` verified).
+`content-disposition: inline` for image/video/audio, `attachment` otherwise.
+
+### Delete — `DELETE /api/v1/files/{file_id}`
+
+Response: `{"code":0,"msg":"success","data":{"deleted":true},…}` (verified).
+
 ## Prompts
 
 ### Send — `POST /api/v1/sessions/{id}/prompts`
@@ -386,6 +428,31 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../promp
 
 - `prompt_id` equals `user_message_id` (the ULID `msg_...` id of the user
   message).
+- `content` is a typed union, not just text. For user prompts the client may
+  send (derived from `packages/protocol/src/message.ts`, pending live
+  verification):
+  - `{"type":"text","text":"…"}`
+  - `{"type":"image","source":{"kind":"file","file_id":"f_…"}}` — for uploaded
+    `image/*` files. (`url` and `base64` source kinds also exist in the
+    schema.)
+  - `{"type":"video","source":{"kind":"file","file_id":"f_…"}}` — uploaded
+    `video/*`.
+  - `{"type":"file","file_id":"f_…","name":"…","media_type":"…","size":123}` —
+    any other uploaded file. The web client picks the kind purely by MIME
+    prefix (`image/*` → image, `video/*` → video, else file).
+- The server **rewrites attachment parts** before enqueueing, so history
+  (`GET .../messages`) does not contain the original items
+  (source-derived, pending live verification):
+  - `file` parts become a **text part**:
+    `Attached file "<name>" (<mime>, <size> bytes): <abs path> — open it with
+    the Read tool`. The bytes are materialized under
+    `<sessionDir>/attachments/<fileId>-<sanitized name>` — the agent reads them
+    from disk; the web client parses this notice back into a chip with a regex,
+    so its wording is a client contract.
+  - Uploaded images are converted to `{"type":"image","source":{"kind":"base64",…}}`
+    (compressed if large, with a text caption; formats the model rejects
+    degrade to the "Attached file" notice above).
+  - Videos appear as `{type:"video", source:{kind:"file", file_id}}` over REST.
 - Optional body fields (per-prompt overrides): `permission_mode`
   (`manual`/`auto`/`yolo` — `manual` verified live), `model` (verified: a
   session with empty `agent_config.model` runs when the prompt carries one),
