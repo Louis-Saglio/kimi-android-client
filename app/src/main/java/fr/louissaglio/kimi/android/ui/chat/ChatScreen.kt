@@ -149,6 +149,7 @@ fun ChatScreen(
         onSubmitQuestion = viewModel::onSubmitQuestion,
         onDismissQuestion = viewModel::onDismissQuestion,
         onModelSelected = viewModel::onModelSelected,
+        onEffortSelected = viewModel::onEffortSelected,
     )
 }
 
@@ -170,6 +171,7 @@ private fun ChatContent(
     onSubmitQuestion: () -> Unit,
     onDismissQuestion: () -> Unit,
     onModelSelected: (String) -> Unit,
+    onEffortSelected: (String) -> Unit,
 ) {
     var showModelPicker by rememberSaveable { mutableStateOf(false) }
     Scaffold(
@@ -302,6 +304,7 @@ private fun ChatContent(
         ModelPickerSheet(
             uiState = uiState,
             onModelSelected = onModelSelected,
+            onEffortSelected = onEffortSelected,
             onDismiss = { showModelPicker = false },
         )
     }
@@ -309,12 +312,16 @@ private fun ChatContent(
 
 /** Model picker bottom sheet (ticket 031): every server model with its context size,
  * a "Default" label on the server-wide default, and a check on the effective one
- * (the session's choice, else the default). A tap persists and dismisses. */
+ * (the session's choice, else the default). Below it, the thinking-effort section
+ * (ticket 032) lists the current model's efforts — hidden entirely for models without
+ * `support_efforts` — with a check on the stored choice, or a "Default" hint on the
+ * model's `default_effort` when nothing is stored. A tap persists and dismisses. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ModelPickerSheet(
     uiState: ChatViewModel.UiState,
     onModelSelected: (String) -> Unit,
+    onEffortSelected: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val currentModelId = uiState.sessionModel ?: uiState.serverDefaultModel
@@ -361,6 +368,52 @@ private fun ModelPickerSheet(
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.primary,
                         )
+                    }
+                }
+            }
+            if (uiState.supportedEfforts.isNotEmpty()) {
+                Text(
+                    text = "Thinking effort",
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                uiState.supportedEfforts.forEach { effort ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 48.dp)
+                            .clickable {
+                                onEffortSelected(effort)
+                                onDismiss()
+                            }
+                            .padding(horizontal = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(
+                                text = effort,
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                            if (uiState.selectedEffort == null && effort == uiState.defaultEffort) {
+                                Text(
+                                    text = "Default",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            }
+                        }
+                        if (effort == uiState.selectedEffort) {
+                            Text(
+                                text = "✓",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
                     }
                 }
             }
@@ -964,10 +1017,18 @@ private fun ChatContentPreview() {
                 questionSelections = mapOf("q_0" to "opt_0_1"),
                 availableModels = listOf(
                     ServerModel("managed:kimi-code", "kimi-code/kimi-for-coding", "K2.7 Coding", 262_144),
-                    ServerModel("managed:kimi-code", "kimi-code/k3", "K3", 1_048_576),
+                    ServerModel(
+                        "managed:kimi-code",
+                        "kimi-code/k3",
+                        "K3",
+                        1_048_576,
+                        supportEfforts = listOf("low", "high", "max"),
+                        defaultEffort = "high",
+                    ),
                 ),
                 modelsAvailable = true,
                 serverDefaultModel = "kimi-code/k3",
+                sessionEffort = "low",
             ),
             sessionId = "session_86df049a-e22b-480e-842e-488b77c5469b",
             snackbarHostState = remember { SnackbarHostState() },
@@ -983,6 +1044,7 @@ private fun ChatContentPreview() {
             onSubmitQuestion = {},
             onDismissQuestion = {},
             onModelSelected = {},
+            onEffortSelected = {},
         )
     }
 }

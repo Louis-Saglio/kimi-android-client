@@ -78,6 +78,8 @@ class ChatViewModel @Inject constructor(
         val serverDefaultModel: String? = null,
         /** The model chosen for this session; null = follow the server default. */
         val sessionModel: String? = null,
+        /** The thinking effort chosen for this session; null = follow the server default. */
+        val sessionEffort: String? = null,
     ) {
         /** True when every item of the head question has an answer (option picked or other text). */
         val isQuestionSubmittable: Boolean
@@ -94,6 +96,25 @@ class ChatViewModel @Inject constructor(
                 return availableModels.firstOrNull { it.model == id }
                     ?.displayName?.takeIf { it.isNotBlank() } ?: id
             }
+
+        /** The model the session effectively runs on: the session choice, else the server default. */
+        val currentModel: ServerModel?
+            get() = availableModels.firstOrNull { it.model == (sessionModel ?: serverDefaultModel) }
+
+        /** Efforts the sheet may offer (ticket 032); empty hides the effort section —
+         * models without `support_efforts` expose no effort UI at all. */
+        val supportedEfforts: List<String>
+            get() = currentModel?.supportEfforts.orEmpty()
+
+        /** The effort shown as selected in the sheet; null when nothing is stored or the
+         * stored value is incompatible with the current model (such a stale value is not
+         * sent either — ChatRepository.promptThinking drops it). */
+        val selectedEffort: String?
+            get() = sessionEffort?.takeIf { it in supportedEfforts }
+
+        /** The current model's server default effort, for the sheet's "Default" hint. */
+        val defaultEffort: String?
+            get() = currentModel?.defaultEffort
     }
 
     sealed interface Effect {
@@ -429,6 +450,7 @@ class ChatViewModel @Inject constructor(
                             modelsAvailable = true,
                             serverDefaultModel = chatRepository.getDefaultModel(settings),
                             sessionModel = chatRepository.getSessionModel(sessionId),
+                            sessionEffort = chatRepository.getSessionEffort(sessionId),
                         )
                     }
                 }
@@ -442,6 +464,12 @@ class ChatViewModel @Inject constructor(
     fun onModelSelected(model: String) {
         _uiState.update { it.copy(sessionModel = model) }
         viewModelScope.launch { chatRepository.setSessionModel(sessionId, model) }
+    }
+
+    /** Persists the picked effort for this session; subsequent prompts carry it. */
+    fun onEffortSelected(effort: String) {
+        _uiState.update { it.copy(sessionEffort = effort) }
+        viewModelScope.launch { chatRepository.setSessionEffort(sessionId, effort) }
     }
 
     /**

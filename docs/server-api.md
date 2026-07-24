@@ -132,7 +132,10 @@ Verified live on 0.29.0 (2026-07-24, `capabilities` arrays trimmed):
 - `model` is the id to send as the per-prompt `"model"` field
   (`POST /api/v1/sessions/{id}/prompts`).
 - `support_efforts` / `default_effort` are present only on models with
-  thinking-effort levels (K3 on 0.29.0); absent elsewhere.
+  thinking-effort levels (K3 on 0.29.0); absent elsewhere. The values are the
+  accepted per-prompt `"thinking"` strings (plus `"off"` — see
+  `POST .../prompts`); a model *without* `support_efforts` still accepts an
+  effort string but degrades it to plain thinking-on (`thinking_level: "on"`).
 - The server-wide default model is *not* in this response — it comes from
   `GET /api/v1/config` (`data.default_model`, `kimi-code/k3` on 0.29.0).
 
@@ -388,6 +391,25 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../promp
   session with empty `agent_config.model` runs when the prompt carries one),
   `thinking`, `plan_mode`, `swarm_mode`, `agent_id`, `metadata`,
   `goal_objective`, `goal_control`.
+- `thinking` (verified live 2026-07-24, ticket 032) is a **plain effort
+  string**, not an object: `"thinking": "low"`. Values come from the model's
+  `support_efforts` (`GET /api/v1/models`; K3 on 0.29.0: `low`/`high`/`max`,
+  plus `off` per the error message below). The honored level reads back via
+  `GET /api/v1/sessions/{id}/status` (`data.thinking_level`, e.g. `"low"` after
+  a `"low"` prompt) and live via the `agent.status.updated` model/usage
+  variant's `thinkingEffort`. Error behavior:
+  - An object shape (`{"enabled":true,"effort":"low"}` or `{"effort":"low"}`)
+    is rejected up front: envelope code `40001`
+    (`thinking: Invalid input: expected string, received object`); the prompt
+    does not run.
+  - An unknown effort (`"banana"`) is rejected up front: envelope code `50001`
+    (`Thinking effort "banana" is not supported by model "kimi-code/k3".
+    Supported efforts: off, low, high, max.`); the prompt does not run.
+  - An effort sent with a model that has no `support_efforts` (e.g.
+    `"thinking":"low"` with `kimi-code/kimi-for-coding`) is **accepted**: the
+    turn runs and `thinking_level` reads back as `"on"` — the server degrades
+    the effort to plain thinking-on instead of erroring. Clients should still
+    only send efforts from the model's `support_efforts`.
 - The server is asynchronous: the HTTP response only acknowledges the prompt;
   results arrive over the WebSocket.
 - While the session is busy, a posted prompt is accepted but queued: the

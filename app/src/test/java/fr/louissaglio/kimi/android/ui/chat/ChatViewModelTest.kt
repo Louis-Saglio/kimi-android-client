@@ -2,6 +2,7 @@ package fr.louissaglio.kimi.android.ui.chat
 
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.preferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.lifecycle.SavedStateHandle
@@ -834,6 +835,56 @@ class ChatViewModelTest {
         }
         assertEquals("kimi-code/kimi-for-coding-highspeed", recreated.uiState.value.sessionModel)
         assertEquals("K2.7 Coding Highspeed", recreated.uiState.value.currentModelLabel)
+    }
+
+    @Test
+    fun `selected effort persists and survives ViewModel recreation`() = runBlocking {
+        viewModel.onScreenStarted()
+        awaitState { it.modelsAvailable }
+
+        viewModel.onEffortSelected("low")
+
+        awaitState { it.sessionEffort == "low" }
+        val state = viewModel.uiState.value
+        // K3 (the effective model) offers its efforts; the stored one is selected.
+        assertEquals(listOf("low", "high", "max"), state.supportedEfforts)
+        assertEquals("low", state.selectedEffort)
+        assertEquals("high", state.defaultEffort)
+
+        // Recreation over the same DataStore: the choice is reloaded, not lost.
+        val recreated = ChatViewModel(
+            ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }, dataStore),
+            SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
+            settingsRepository,
+            SavedStateHandle(mapOf("sessionId" to "session_1")),
+        )
+        recreated.onScreenStarted()
+        val deadline = System.currentTimeMillis() + 5_000
+        while (System.currentTimeMillis() < deadline) {
+            val current = recreated.uiState.value
+            if (current.modelsAvailable && current.sessionEffort != null) break
+            delay(10)
+        }
+        assertEquals("low", recreated.uiState.value.sessionEffort)
+        assertEquals("low", recreated.uiState.value.selectedEffort)
+    }
+
+    @Test
+    fun `stored effort incompatible with the session's model exposes no effort selection`() = runBlocking {
+        // Picked on K3, then the session switched to K2.7 (no support_efforts):
+        // the sheet shows no effort section and no selection (ticket 032).
+        dataStore.edit {
+            it[stringPreferencesKey("effort_for_session_session_1")] = "low"
+            it[stringPreferencesKey("model_for_session_session_1")] = "kimi-code/kimi-for-coding"
+        }
+        viewModel.onScreenStarted()
+        awaitState { it.modelsAvailable && it.sessionModel != null }
+
+        val state = viewModel.uiState.value
+        assertEquals("low", state.sessionEffort)
+        assertEquals(emptyList<String>(), state.supportedEfforts)
+        assertNull(state.selectedEffort)
+        assertNull(state.defaultEffort)
     }
 
     private suspend fun awaitServerSocket(): WebSocket = withTimeout(5_000) {

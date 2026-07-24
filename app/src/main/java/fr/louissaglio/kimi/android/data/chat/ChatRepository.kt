@@ -159,7 +159,8 @@ class ChatRepository @Inject constructor(
      */
     suspend fun sendPrompt(settings: ServerSettings, sessionId: String, text: String): Result<Unit> =
         withContext(Dispatchers.IO) {
-            postPrompt(settings, sessionId, text, promptModel(settings, sessionId)).map { }
+            val model = promptModel(settings, sessionId)
+            postPrompt(settings, sessionId, text, model, promptThinking(settings, sessionId, model)).map { }
         }
 
     /**
@@ -170,7 +171,8 @@ class ChatRepository @Inject constructor(
      */
     suspend fun steer(settings: ServerSettings, sessionId: String, text: String): Result<Unit> =
         withContext(Dispatchers.IO) {
-            val promptId = postPrompt(settings, sessionId, text, promptModel(settings, sessionId))
+            val model = promptModel(settings, sessionId)
+            val promptId = postPrompt(settings, sessionId, text, model, promptThinking(settings, sessionId, model))
                 .getOrElse { return@withContext Result.failure(it) }
             postSteer(settings, sessionId, promptId)
         }
@@ -202,6 +204,42 @@ class ChatRepository @Inject constructor(
     /** Persists the session's model choice; subsequent prompts carry it (see [promptModel]). */
     suspend fun setSessionModel(sessionId: String, model: String) {
         dataStore.edit { it[stringPreferencesKey("model_for_session_$sessionId")] = model.trim() }
+    }
+
+    /**
+     * The thinking effort stamped on a prompt (ticket 032): the session's stored choice,
+     * but only when the models cache confirms the effective [model] supports it — a stale
+     * choice (e.g. picked on K3, then the session switched to K2.7) is dropped instead of
+     * sent. No stored value, an uncached models list, or a model without effort levels all
+     * mean no `thinking` field (the server default applies). The cache is read, never
+     * populated here: the send path must not block on a models fetch.
+     */
+    private suspend fun promptThinking(settings: ServerSettings, sessionId: String, model: String?): String? {
+        val effort = sessionEffort(sessionId) ?: return null
+        val baseUrl = settings.serverUrl.trim().trimEnd('/')
+        val models = cachedModels?.takeIf { it.first == baseUrl }?.second ?: return null
+        val supportEfforts = models.firstOrNull { it.model == model }?.supportEfforts ?: return null
+        return effort.takeIf { it in supportEfforts }
+    }
+
+    /**
+     * The effort chosen for one session (ticket 032), persisted in DataStore as a plain
+     * `effort_for_session_<sessionId>` string preference ([sessionModel]'s pattern).
+     * No stored value = follow the server default.
+     */
+    private suspend fun sessionEffort(sessionId: String): String? =
+        dataStore.data
+            .catch { e -> if (e is IOException) emit(emptyPreferences()) else throw e }
+            .first()[stringPreferencesKey("effort_for_session_$sessionId")]
+            ?.takeIf { it.isNotBlank() }
+
+    /** The session's stored effort choice, null when the session follows the server default. */
+    suspend fun getSessionEffort(sessionId: String): String? =
+        withContext(Dispatchers.IO) { sessionEffort(sessionId) }
+
+    /** Persists the session's effort choice; subsequent prompts carry it (see [promptThinking]). */
+    suspend fun setSessionEffort(sessionId: String, effort: String) {
+        dataStore.edit { it[stringPreferencesKey("effort_for_session_$sessionId")] = effort.trim() }
     }
 
     /**
@@ -319,12 +357,15 @@ class ChatRepository @Inject constructor(
         }
     }
 
-    /** POSTs the prompt and returns its id (queued while busy, running otherwise). */
+    /** POSTs the prompt and returns its id (queued while busy, running otherwise).
+     * [thinking] is the verified per-prompt effort override (a plain string,
+     * docs/server-api.md); null leaves the field out. */
     private fun postPrompt(
         settings: ServerSettings,
         sessionId: String,
         text: String,
         model: String?,
+        thinking: String?,
     ): Result<String> {
         val body = buildJsonObject {
             putJsonArray("content") {
@@ -334,6 +375,7 @@ class ChatRepository @Inject constructor(
                 }
             }
             if (model != null) put("model", model)
+            if (thinking != null) put("thinking", thinking)
         }.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
         val request = try {
             Request.Builder()

@@ -567,6 +567,108 @@ class ChatRepositoryTest {
         assertEquals("/api/v1/sessions/session_1/prompts:steer", server.takeRequest().path)
     }
 
+    /** Enqueues the live 0.29.0 models list (docs/server-api.md) and primes the
+     * repository's models cache — the effort is only sent once the cache confirms
+     * the session's model supports it (ticket 032). */
+    private suspend fun primeModelsCache() {
+        server.enqueue(
+            MockResponse().setBody(
+                """
+                {"code":0,"msg":"success","data":{"items":[
+                  {"provider":"managed:kimi-code","model":"kimi-code/kimi-for-coding",
+                   "display_name":"K2.7 Coding","max_context_size":262144},
+                  {"provider":"managed:kimi-code","model":"kimi-code/k3",
+                   "display_name":"K3","max_context_size":1048576,
+                   "support_efforts":["low","high","max"],"default_effort":"high"}
+                ]},"request_id":"01KX"}
+                """.trimIndent(),
+            ),
+        )
+        repository.getModels(settings()).getOrThrow()
+        assertEquals("/api/v1/models", server.takeRequest().path)
+    }
+
+    private fun enqueuePromptAck() = server.enqueue(
+        MockResponse().setBody(
+            """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
+                """"status":"running","created_at":"2026-07-24T00:00:00.000Z"},"request_id":"01KX"}""",
+        ),
+    )
+
+    @Test
+    fun `sendPrompt sends the session's stored effort in the prompt body`() = runBlocking {
+        repository.setSessionModel("session_1", "kimi-code/k3")
+        repository.setSessionEffort("session_1", "low")
+        primeModelsCache()
+        enqueuePromptAck()
+
+        val result = repository.sendPrompt(settings(), "session_1", "hello")
+
+        assertTrue(result.isSuccess)
+        val prompt = server.takeRequest()
+        assertEquals("/api/v1/sessions/session_1/prompts", prompt.path)
+        assertEquals(
+            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/k3","thinking":"low"}""",
+            prompt.body.readUtf8(),
+        )
+    }
+
+    @Test
+    fun `steer sends the session's stored effort in the prompt body`() = runBlocking {
+        repository.setSessionModel("session_1", "kimi-code/k3")
+        repository.setSessionEffort("session_1", "max")
+        primeModelsCache()
+        enqueuePromptAck()
+        server.enqueue(
+            MockResponse().setBody(
+                """{"code":0,"msg":"success","data":{"steered":true,"prompt_ids":["msg_1"]},"request_id":"01KX"}""",
+            ),
+        )
+
+        val result = repository.steer(settings(), "session_1", "Stop counting")
+
+        assertTrue(result.isSuccess)
+        val prompt = server.takeRequest()
+        assertEquals(
+            """{"content":[{"type":"text","text":"Stop counting"}],"model":"kimi-code/k3","thinking":"max"}""",
+            prompt.body.readUtf8(),
+        )
+        assertEquals("/api/v1/sessions/session_1/prompts:steer", server.takeRequest().path)
+    }
+
+    @Test
+    fun `no stored effort sends no thinking field`() = runBlocking {
+        repository.setSessionModel("session_1", "kimi-code/k3")
+        primeModelsCache()
+        enqueuePromptAck()
+
+        val result = repository.sendPrompt(settings(), "session_1", "hello")
+
+        assertTrue(result.isSuccess)
+        assertEquals(
+            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/k3"}""",
+            server.takeRequest().body.readUtf8(),
+        )
+    }
+
+    @Test
+    fun `stored effort incompatible with the session's model is not sent`() = runBlocking {
+        // Picked on K3, then the session switched to K2.7 (no support_efforts):
+        // the stale effort must not reach the wire (ticket 032).
+        repository.setSessionModel("session_1", "kimi-code/kimi-for-coding")
+        repository.setSessionEffort("session_1", "low")
+        primeModelsCache()
+        enqueuePromptAck()
+
+        val result = repository.sendPrompt(settings(), "session_1", "hello")
+
+        assertTrue(result.isSuccess)
+        assertEquals(
+            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/kimi-for-coding"}""",
+            server.takeRequest().body.readUtf8(),
+        )
+    }
+
     @Test
     fun `abortPrompt posts an empty body to the abort endpoint`() = runBlocking {
         server.enqueue(
