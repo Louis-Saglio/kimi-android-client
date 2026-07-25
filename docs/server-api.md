@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-07-23
-(server version `0.29.0`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-07-25
+(server version `0.29.1`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments, plus
@@ -12,15 +12,15 @@ the workspace list used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `0.28.1`
-(verified 2026-07-22; see git history), `0.27.0` before that, and `0.23.3`
-before that. The drift from 0.28.1 to 0.29.0 is small and almost entirely
-**additive**: a new `thinkingEffort` field and a new `since` timestamp on
-`agent.status.updated`, a new `tool_call` phase kind, and one field removal —
-the steered user message in `context.spliced` no longer carries an `id` (treat
-spliced-message ids as optional). Details inline. Server updates are installed
-by the `kimi-nightly-update` systemd timer (see `scripts/`), which re-verifies
-this protocol after every update.
+**Protocol history:** this document previously described server `0.29.0`
+(verified 2026-07-23; see git history), `0.28.1` before that, `0.27.0` before
+that, and `0.23.3` before that. The drift from 0.29.0 to 0.29.1 is **negligible**
+for the core loop: every REST and WebSocket shape the Android app parses is
+unchanged; only server-side defaults and the models catalog moved (`config`
+default model is now `kimi-code/kimi-for-coding`, and `GET /api/v1/models`
+gains `kimi-code/k3-256k` plus refreshed `capabilities` arrays). Details inline.
+Server updates are installed by the `kimi-nightly-update` systemd timer (see
+`scripts/`), which re-verifies this protocol after every update.
 
 ## Base URL & auth
 
@@ -41,7 +41,7 @@ this protocol after every update.
   so it cannot validate credentials. Use **`GET /api/v1/meta`** as the
   credential check endpoint: `200` ⇒ token valid, `401` ⇒ missing or invalid.
 
-Verified (server 0.29.0, 2026-07-23):
+Verified (server 0.29.1, 2026-07-25):
 
 ```bash
 # No token -> rejected on authenticated routes
@@ -84,7 +84,7 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
 {
   "code": 0, "msg": "success",
   "data": {
-    "server_version": "0.29.0",
+    "server_version": "0.29.1",
     "capabilities": {"websocket": true, "file_upload": true, "fs_query": true, "mcp": true, "tasks": true, "terminal": true},
     "server_id": "01KY6G09444HX8HSQVQN0HTB6R",
     "started_at": "2026-07-23T03:23:44.644Z",
@@ -106,7 +106,7 @@ The models the server can run, for model pickers. Requires the token.
 curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/models
 ```
 
-Verified live on 0.29.0 (2026-07-24, `capabilities` arrays trimmed):
+Verified live on 0.29.1 (2026-07-25, `capabilities` arrays trimmed):
 
 ```json
 {
@@ -115,17 +115,21 @@ Verified live on 0.29.0 (2026-07-24, `capabilities` arrays trimmed):
     "items": [
       {"provider": "managed:kimi-code", "model": "kimi-code/kimi-for-coding",
        "display_name": "K2.7 Coding", "max_context_size": 262144,
-       "capabilities": ["thinking", "..."]},
+       "capabilities": ["thinking", "always_thinking", "image_in", "video_in", "tool_use"]},
       {"provider": "managed:kimi-code", "model": "kimi-code/kimi-for-coding-highspeed",
        "display_name": "K2.7 Coding Highspeed", "max_context_size": 262144,
-       "capabilities": ["thinking", "..."]},
+       "capabilities": ["thinking", "always_thinking", "image_in", "video_in", "tool_use"]},
       {"provider": "managed:kimi-code", "model": "kimi-code/k3",
        "display_name": "K3", "max_context_size": 1048576,
-       "capabilities": ["thinking", "..."],
+       "capabilities": ["thinking", "always_thinking", "image_in", "video_in", "tool_use"],
+       "support_efforts": ["low", "high", "max"], "default_effort": "high"},
+      {"provider": "managed:kimi-code", "model": "kimi-code/k3-256k",
+       "display_name": "k3-256k", "max_context_size": 262144,
+       "capabilities": ["thinking", "always_thinking", "image_in", "tool_use"],
        "support_efforts": ["low", "high", "max"], "default_effort": "high"}
     ]
   },
-  "request_id": "01KY9JECVD33XXVPEXZP3KA758"
+  "request_id": "01KYBNP3X8A93HA8HT9CG27H3E"
 }
 ```
 
@@ -137,7 +141,8 @@ Verified live on 0.29.0 (2026-07-24, `capabilities` arrays trimmed):
   `POST .../prompts`); a model *without* `support_efforts` still accepts an
   effort string but degrades it to plain thinking-on (`thinking_level: "on"`).
 - The server-wide default model is *not* in this response — it comes from
-  `GET /api/v1/config` (`data.default_model`, `kimi-code/k3` on 0.29.0).
+  `GET /api/v1/config` (`data.default_model`, `kimi-code/kimi-for-coding` on
+  0.29.1; the server may change this default independently of protocol drift).
 
 ## Sessions
 
@@ -1064,8 +1069,8 @@ selected option and free text both re-verified 2026-07-23:
 ## Verification log
 
 - REST probes: `curl` against `http://127.0.0.1:58627/api/v1/...` (commands
-  inline above), server `0.29.0` (`backend: v2`).
-- Auth (re-verified 2026-07-23): `/api/v1/meta` → `401` without a token or
+  inline above), server `0.29.1` (`backend: v2`).
+- Auth (re-verified 2026-07-25): `/api/v1/meta` → `401` without a token or
   with a wrong one, `200` with `Authorization: Bearer <token>`;
   `/api/v1/healthz` is public (always `200`). Auth is server-native (bearer
   token), enforced on all authenticated REST and WebSocket routes;
@@ -1085,16 +1090,28 @@ selected option and free text both re-verified 2026-07-23:
   resolved questions (`code:40902` "already resolved"). Questions triggered by
   prompting the session to call its `AskUserQuestion` tool. No heartbeat
   frames observed.
-- 0.28.1 → 0.29.0 drift found (all in `agent.status.updated` except the last):
-  `thinkingEffort` field on the model/usage variant, `since` on active `phase`
-  objects, `toolCallId` next to `approvalId` in the `awaiting_approval` phase,
-  a new `tool_call` phase kind, and the steered `context.spliced` user message
-  losing its `id`. Nothing removed or renamed elsewhere; every shape the
-  Android app parses is unchanged.
+- 0.29.0 → 0.29.1 drift found: **none in the core loop**. REST shapes
+  (`sessions`, `workspaces`, `messages`, `prompts`, `prompts:steer`,
+  `approvals`, `questions`, `:abort`, `files`) and every WebSocket event
+  payload the Android app consumes are byte-for-byte identical to 0.29.0.
+  Changes are confined to server-side defaults and the models catalog:
+  `GET /api/v1/config` now returns `default_model: "kimi-code/kimi-for-coding"`
+  (was `kimi-code/k3`), and `GET /api/v1/models` adds `kimi-code/k3-256k` and
+  refreshes `capabilities` to `["thinking", "always_thinking", "image_in",
+  "video_in", "tool_use"]` (k3-256k omits `"video_in"`). No Android DTO or
+  parser needs updating.
+- 2026-07-25 0.29.1 round-trips (throwaway session `session_c42940aa-...` in
+  `/tmp/spike`): manual tool-call approval (approve path), `AskUserQuestion`
+  surface + answer via `POST .../questions/{qid}`, queued prompt while busy,
+  `prompts:steer`, mid-run `:abort`, file upload/download/delete, and prompt
+  with a `file` attachment (history confirmed the `Attached file "…"` notice
+  wording, including the em dash, and `<sessionDir>/attachments/`
+  materialization). All captured with `websocat` 1.14.0 against
+  `ws://127.0.0.1:58627/api/v1/ws`; no heartbeat frames observed.
 - Housekeeping notes: the `kimi-web.service` unit has `PrivateTmp=yes`, so
   `/tmp/spike` must exist in the service's mount namespace (see Sessions →
   Create). There is no session-delete endpoint (`DELETE` → 404, re-verified
-  2026-07-23); throwaway sessions created for the captures were left in place.
+  2026-07-25); throwaway sessions created for the captures were left in place.
 - 2026-07-24 attachment round-trips on 0.29.0 (session `attach-spike`, cwd the
   repo root): upload/download (incl. `Range` 206 and `content-disposition`
   inline-vs-attachment)/delete of text and png files; prompt with
