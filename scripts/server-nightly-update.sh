@@ -11,11 +11,15 @@
 # (~/.kimi-code/bin/kimi.bak, kept by the installer) and marks the broken
 # version so it is not retried every night. Whenever the running server
 # version differs from the last verified one — whether the change came from
-# this job or not — launches a headless kimi agent
-# (scripts/protocol-update-prompt.md) that re-verifies the wire protocol,
-# rewrites docs/server-api.md, files todo/ tickets for app breakage, and
-# commits + pushes the result. State advances only after a successful agent
-# run, so failures retry the next night. Installed as
+# this job or not — fetches the upstream commit list between the two releases
+# from the public MoonshotAI/kimi-code GitHub repo (tags
+# `@moonshot-ai/kimi-code@<version>`) into
+# $STATE_DIR/pending-changelog.md, then launches a headless kimi agent
+# (scripts/protocol-update-prompt.md) that uses it to know exactly what
+# changed, re-verifies the wire protocol, rewrites docs/server-api.md, files
+# todo/ tickets for app breakage, and commits + pushes the result. State
+# advances only after a successful agent run, so failures retry the next
+# night. Installed as
 # kimi-nightly-update.service/.timer — see /home/ubuntu/administration.md.
 set -euo pipefail
 
@@ -27,6 +31,8 @@ KIMI=/home/ubuntu/.kimi-code/bin/kimi
 META_URL=http://127.0.0.1:58627/api/v1/meta
 LATEST_URL=https://code.kimi.com/kimi-code/latest
 TOKEN_FILE=/home/ubuntu/.kimi-code/server.token
+GH_TOKEN_FILE=/home/ubuntu/.github_token
+CHANGELOG_FILE=$STATE_DIR/pending-changelog.md
 
 mkdir -p "$STATE_DIR"
 exec 9>"$STATE_DIR/lock"
@@ -61,6 +67,42 @@ rollback() {
     cp -f "$KIMI.bak" "$KIMI"
     echo "kimi-nightly-update: rolled back to $("$KIMI" -V) (broken binary kept at $STATE_DIR/kimi.failed-$latest)"
     sudo -n systemctl restart kimi-web.service
+}
+
+# Fetch the commits and changed files between two upstream releases from the
+# public MoonshotAI/kimi-code repo (tags `@moonshot-ai/kimi-code@<version>`)
+# into $CHANGELOG_FILE, so the verification agent knows exactly what the new
+# release changed instead of reverse-engineering the running server. On any
+# failure, writes a fallback note so the agent probes the live server instead.
+write_changelog() {
+    local old=$1 new=$2 payload auth=()
+    [ -r "$GH_TOKEN_FILE" ] && auth=(-H "Authorization: Bearer $(cat "$GH_TOKEN_FILE")")
+    if payload=$(curl -fsSL --max-time 30 "${auth[@]}" \
+        "https://api.github.com/repos/MoonshotAI/kimi-code/compare/@moonshot-ai/kimi-code@$old...@moonshot-ai/kimi-code@$new"); then
+        printf '%s' "$payload" | python3 -c '
+import json, sys
+old, new = sys.argv[1], sys.argv[2]
+d = json.load(sys.stdin)
+total = d.get("total_commits", "?")
+compare_url = "https://github.com/MoonshotAI/kimi-code/compare/@moonshot-ai/kimi-code@%s...@moonshot-ai/kimi-code@%s" % (old, new)
+print("# Upstream changes %s -> %s" % (old, new))
+print()
+print(compare_url)
+print()
+print("Commits (%s):" % total)
+for c in d.get("commits", []):
+    subject = c["commit"]["message"].splitlines()[0]
+    print("- %s %s" % (c["sha"][:8], subject))
+print()
+print("Files changed (truncated to 100):")
+for f in d.get("files", [])[:100]:
+    print("- %s: %s" % (f["status"], f["filename"]))
+' "$old" "$new" > "$CHANGELOG_FILE"
+        echo "kimi-nightly-update: wrote upstream changelog $old -> $new to $CHANGELOG_FILE"
+    else
+        echo "kimi-nightly-update: could not fetch upstream changelog ($old -> $new); agent will probe the live server"
+        printf '# Upstream changes %s -> %s\n\nFetch failed (missing tag or network). Fall back to reverse-engineering the running server.\n' "$old" "$new" > "$CHANGELOG_FILE"
+    fi
 }
 
 installed=$("$KIMI" -V)
@@ -119,8 +161,14 @@ if [ "$version" = "$last" ]; then
 fi
 
 echo "kimi-nightly-update: server version changed: ${last:-none} -> $version; re-verifying protocol"
+if [ -n "$last" ]; then
+    write_changelog "$last" "$version" || true
+else
+    rm -f "$CHANGELOG_FILE"
+fi
 if (cd "$REPO" && timeout 2700 "$KIMI" -p "$(cat "$REPO/scripts/protocol-update-prompt.md")"); then
     echo "$version" > "$STATE_FILE"
+    rm -f "$CHANGELOG_FILE"
     echo "kimi-nightly-update: re-verification for $version completed"
 else
     echo "kimi-nightly-update: re-verification for $version FAILED (will retry tomorrow)"
