@@ -211,6 +211,8 @@ fun ChatScreen(
         onDeny = viewModel::onDeny,
         onQuestionOptionPicked = viewModel::onQuestionOptionPicked,
         onQuestionOtherTextChange = viewModel::onQuestionOtherTextChange,
+        onQuestionNext = viewModel::onQuestionNext,
+        onQuestionBack = viewModel::onQuestionBack,
         onSubmitQuestion = viewModel::onSubmitQuestion,
         onDismissQuestion = viewModel::onDismissQuestion,
         onModelSelected = viewModel::onModelSelected,
@@ -305,6 +307,8 @@ private fun ChatContent(
     onDeny: () -> Unit,
     onQuestionOptionPicked: (itemId: String, optionId: String) -> Unit,
     onQuestionOtherTextChange: (itemId: String, text: String) -> Unit,
+    onQuestionNext: () -> Unit,
+    onQuestionBack: () -> Unit,
     onSubmitQuestion: () -> Unit,
     onDismissQuestion: () -> Unit,
     onModelSelected: (String) -> Unit,
@@ -396,11 +400,15 @@ private fun ChatContent(
                     QuestionCard(
                         question = question,
                         queueSize = uiState.pendingQuestions.size,
+                        step = uiState.questionStep,
                         selections = uiState.questionSelections,
                         otherTexts = uiState.questionOtherTexts,
+                        isStepAnswered = uiState.isQuestionStepAnswered,
                         isSubmittable = uiState.isQuestionSubmittable,
                         onOptionPicked = onQuestionOptionPicked,
                         onOtherTextChange = onQuestionOtherTextChange,
+                        onNext = onQuestionNext,
+                        onBack = onQuestionBack,
                         onSubmit = onSubmitQuestion,
                         onDismiss = onDismissQuestion,
                     )
@@ -679,18 +687,27 @@ private fun ApprovalCard(
     }
 }
 
+/** One item per step (ticket 035): stacking every item pushed the card past the screen
+ * for multi-item questions, clipping the top options. The wizard paginates the items —
+ * Back/Next walk them, Submit replaces Next on the last one — and the scrollable,
+ * height-capped item area is the safety net for a single item with a long option list. */
 @Composable
 private fun QuestionCard(
     question: PendingQuestion,
     queueSize: Int,
+    step: Int,
     selections: Map<String, String>,
     otherTexts: Map<String, String>,
+    isStepAnswered: Boolean,
     isSubmittable: Boolean,
     onOptionPicked: (itemId: String, optionId: String) -> Unit,
     onOtherTextChange: (itemId: String, text: String) -> Unit,
+    onNext: () -> Unit,
+    onBack: () -> Unit,
     onSubmit: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val item = question.items.getOrNull(step) ?: return
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -705,11 +722,18 @@ private fun QuestionCard(
                 text = buildString {
                     append("Question from Kimi")
                     if (queueSize > 1) append(" — 1 of $queueSize")
+                    if (question.items.size > 1) append(" · item ${step + 1} of ${question.items.size}")
                 },
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSecondaryContainer,
             )
-            question.items.forEach { item ->
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 360.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 if (item.header.isNotBlank()) {
                     Text(text = item.header, style = MaterialTheme.typography.labelMedium)
                 }
@@ -753,7 +777,14 @@ private fun QuestionCard(
                 horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
             ) {
                 OutlinedButton(onClick = onDismiss) { Text("Dismiss") }
-                Button(onClick = onSubmit, enabled = isSubmittable) { Text("Submit") }
+                if (step > 0) {
+                    OutlinedButton(onClick = onBack) { Text("‹ Back") }
+                }
+                if (step < question.items.lastIndex) {
+                    Button(onClick = onNext, enabled = isStepAnswered) { Text("Next ›") }
+                } else {
+                    Button(onClick = onSubmit, enabled = isSubmittable) { Text("Submit") }
+                }
             }
         }
     }
@@ -1466,10 +1497,31 @@ private fun ChatContentPreview() {
                                 ),
                                 allowOther = true,
                             ),
+                            PendingQuestion.Item(
+                                id = "q_1",
+                                header = "Mode",
+                                text = "Fast or safe?",
+                                options = listOf(
+                                    PendingQuestion.Option("opt_1_0", "fast", "skip checks"),
+                                    PendingQuestion.Option("opt_1_1", "safe", "run checks"),
+                                ),
+                                allowOther = false,
+                            ),
+                            PendingQuestion.Item(
+                                id = "q_2",
+                                header = "Confirm",
+                                text = "Yes or no?",
+                                options = listOf(
+                                    PendingQuestion.Option("opt_2_0", "yes", "go ahead"),
+                                    PendingQuestion.Option("opt_2_1", "no", "stop"),
+                                ),
+                                allowOther = false,
+                            ),
                         ),
                     ),
                 ),
                 questionSelections = mapOf("q_0" to "opt_0_1"),
+                questionStep = 1,
                 availableModels = listOf(
                     ServerModel("managed:kimi-code", "kimi-code/kimi-for-coding", "K2.7 Coding", 262_144),
                     ServerModel(
@@ -1496,6 +1548,8 @@ private fun ChatContentPreview() {
             onDeny = {},
             onQuestionOptionPicked = { _, _ -> },
             onQuestionOtherTextChange = { _, _ -> },
+            onQuestionNext = {},
+            onQuestionBack = {},
             onSubmitQuestion = {},
             onDismissQuestion = {},
             onModelSelected = {},

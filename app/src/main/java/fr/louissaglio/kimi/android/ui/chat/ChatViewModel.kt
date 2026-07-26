@@ -93,6 +93,8 @@ class ChatViewModel @Inject constructor(
         val questionSelections: Map<String, String> = emptyMap(),
         /** Draft free-text answers for the head question: item id → typed text. */
         val questionOtherTexts: Map<String, String> = emptyMap(),
+        /** Wizard step (ticket 035): index into the head question's items shown by the card. */
+        val questionStep: Int = 0,
         /** Models the server offers; empty until the fetch lands (or after it failed). */
         val availableModels: List<ServerModel> = emptyList(),
         /** True once the models fetch succeeded — false while loading and after a
@@ -108,6 +110,12 @@ class ChatViewModel @Inject constructor(
         /** True when every item of the head question has an answer (option picked or other text). */
         val isQuestionSubmittable: Boolean
             get() = pendingQuestions.firstOrNull()?.items?.all { item ->
+                questionOtherTexts[item.id]?.isNotBlank() == true || questionSelections.containsKey(item.id)
+            } == true
+
+        /** True when the item at [questionStep] has an answer — gates the wizard's Next. */
+        val isQuestionStepAnswered: Boolean
+            get() = pendingQuestions.firstOrNull()?.items?.getOrNull(questionStep)?.let { item ->
                 questionOtherTexts[item.id]?.isNotBlank() == true || questionSelections.containsKey(item.id)
             } == true
 
@@ -334,6 +342,23 @@ class ChatViewModel @Inject constructor(
         _uiState.update { it.copy(questionOtherTexts = it.questionOtherTexts + (itemId to text)) }
     }
 
+    /** Advances the question wizard (ticket 035) to the next item. No-ops on the last
+     * item or while the current item is unanswered, same gating as the Next button. */
+    fun onQuestionNext() {
+        _uiState.update { state ->
+            val lastIndex = state.pendingQuestions.firstOrNull()?.items?.lastIndex ?: return@update state
+            if (!state.isQuestionStepAnswered || state.questionStep >= lastIndex) state
+            else state.copy(questionStep = state.questionStep + 1)
+        }
+    }
+
+    /** Steps the question wizard back to the previous item; drafted answers are kept. */
+    fun onQuestionBack() {
+        _uiState.update { state ->
+            if (state.questionStep > 0) state.copy(questionStep = state.questionStep - 1) else state
+        }
+    }
+
     /** POSTs the drafted answers for the head question. No-ops while an item is
      * unanswered. The card clears on the server's question.answered event — for our own
      * answers too — so a failed POST leaves the card up and only reports the error. */
@@ -434,7 +459,7 @@ class ChatViewModel @Inject constructor(
                         pendingQuestions = it.pendingQuestions
                             .filterNot { q -> q.questionId == event.question.questionId } +
                             event.question,
-                    ).prunedQuestionDrafts()
+                    ).prunedQuestionDrafts(it)
                 }
             }
             is SessionEvent.QuestionResolved -> {
@@ -442,7 +467,7 @@ class ChatViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(
                         pendingQuestions = it.pendingQuestions.filterNot { q -> q.questionId == event.questionId },
-                    ).prunedQuestionDrafts()
+                    ).prunedQuestionDrafts(it)
                 }
             }
             else -> {
@@ -481,7 +506,7 @@ class ChatViewModel @Inject constructor(
         viewModelScope.launch {
             chatRepository.getPendingQuestions(settingsRepository.current(), sessionId)
                 .onSuccess { questions ->
-                    _uiState.update { it.copy(pendingQuestions = questions).prunedQuestionDrafts() }
+                    _uiState.update { it.copy(pendingQuestions = questions).prunedQuestionDrafts(it) }
                 }
         }
     }
@@ -499,18 +524,29 @@ class ChatViewModel @Inject constructor(
             chatRepository.getPendingQuestions(settingsRepository.current(), sessionId)
                 .onSuccess { questions ->
                     if (questionEventCount == eventsAtSeed) {
-                        _uiState.update { it.copy(pendingQuestions = questions).prunedQuestionDrafts() }
+                        _uiState.update { it.copy(pendingQuestions = questions).prunedQuestionDrafts(it) }
                     }
                 }
         }
     }
 
-    /** Drops draft answers whose item id belongs to no pending question anymore. */
-    private fun UiState.prunedQuestionDrafts(): UiState {
+    /** Drops draft answers whose item id belongs to no pending question anymore, and
+     * resets the wizard step (ticket 035) when the queue head changed or shrank past it. */
+    private fun UiState.prunedQuestionDrafts(previous: UiState): UiState {
         val itemIds = pendingQuestions.flatMap { q -> q.items.map { item -> item.id } }.toSet()
+        val head = pendingQuestions.firstOrNull()
+        val step =
+            if (head == null || head.questionId != previous.pendingQuestions.firstOrNull()?.questionId ||
+                questionStep > head.items.lastIndex
+            ) {
+                0
+            } else {
+                questionStep
+            }
         return copy(
             questionSelections = questionSelections.filterKeys { it in itemIds },
             questionOtherTexts = questionOtherTexts.filterKeys { it in itemIds },
+            questionStep = step,
         )
     }
 

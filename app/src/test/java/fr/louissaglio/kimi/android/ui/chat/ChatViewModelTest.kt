@@ -39,6 +39,7 @@ import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -657,6 +658,81 @@ class ChatViewModelTest {
     }
 
     @Test
+    fun `wizard next advances only when the current item is answered`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(multiItemQuestionRequestedFrame(id = "tool_q1"))
+        awaitState { it.pendingQuestions.isNotEmpty() }
+
+        assertEquals(0, viewModel.uiState.value.questionStep)
+        assertFalse(viewModel.uiState.value.isQuestionStepAnswered)
+
+        // The current item has no answer yet: Next is a no-op.
+        viewModel.onQuestionNext()
+        assertEquals(0, viewModel.uiState.value.questionStep)
+
+        viewModel.onQuestionOptionPicked("q_0", "opt_0_1")
+        assertTrue(viewModel.uiState.value.isQuestionStepAnswered)
+        viewModel.onQuestionNext()
+        assertEquals(1, viewModel.uiState.value.questionStep)
+    }
+
+    @Test
+    fun `wizard next is a no-op on the last item`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(multiItemQuestionRequestedFrame(id = "tool_q1"))
+        awaitState { it.pendingQuestions.isNotEmpty() }
+
+        viewModel.onQuestionOptionPicked("q_0", "opt_0_1")
+        viewModel.onQuestionNext()
+        viewModel.onQuestionOptionPicked("q_1", "opt_1_0")
+        viewModel.onQuestionNext()
+        assertEquals(2, viewModel.uiState.value.questionStep)
+
+        viewModel.onQuestionOptionPicked("q_2", "opt_2_0")
+        viewModel.onQuestionNext()
+        assertEquals(2, viewModel.uiState.value.questionStep)
+    }
+
+    @Test
+    fun `wizard back returns to the previous item and keeps the draft`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(multiItemQuestionRequestedFrame(id = "tool_q1"))
+        awaitState { it.pendingQuestions.isNotEmpty() }
+
+        viewModel.onQuestionOptionPicked("q_0", "opt_0_1")
+        viewModel.onQuestionNext()
+        assertEquals(1, viewModel.uiState.value.questionStep)
+
+        viewModel.onQuestionBack()
+        assertEquals(0, viewModel.uiState.value.questionStep)
+        assertEquals("opt_0_1", viewModel.uiState.value.questionSelections["q_0"])
+
+        // Back on the first item is a no-op.
+        viewModel.onQuestionBack()
+        assertEquals(0, viewModel.uiState.value.questionStep)
+    }
+
+    @Test
+    fun `wizard step resets when the queue head advances`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(multiItemQuestionRequestedFrame(id = "tool_q1"))
+        socket.send(questionRequestedFrame(id = "tool_q2"))
+        awaitState { it.pendingQuestions.size == 2 }
+
+        viewModel.onQuestionOptionPicked("q_0", "opt_0_1")
+        viewModel.onQuestionNext()
+        assertEquals(1, viewModel.uiState.value.questionStep)
+
+        socket.send(questionAnsweredFrame("tool_q1"))
+        awaitState { it.pendingQuestions.map { q -> q.questionId } == listOf("tool_q2") }
+        assertEquals(0, viewModel.uiState.value.questionStep)
+    }
+
+    @Test
     fun `dismiss posts to the dismiss endpoint and the card clears on dismissed`() = runBlocking {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
@@ -1083,6 +1159,23 @@ class ChatViewModelTest {
             """"questions":[{"id":"q_0","question":"Red or blue?","header":"Color",""" +
             """"options":[{"id":"opt_0_0","label":"red","description":"warm color"},""" +
             """{"id":"opt_0_1","label":"blue","description":"cool color"}],"allow_other":true}],""" +
+            """"created_at":"2026-07-20T06:06:49.808Z","agentId":"main","sessionId":"session_1"}}"""
+
+    /** Three-item variant of [questionRequestedFrame], for the wizard tests (ticket 035). */
+    private fun multiItemQuestionRequestedFrame(id: String): String =
+        """{"type":"event.question.requested","seq":9,"epoch":"ep_1","session_id":"session_1",""" +
+            """"timestamp":"2026-07-20T06:06:49.808Z","payload":{"type":"event.question.requested",""" +
+            """"question_id":"$id","session_id":"session_1","turn_id":0,"tool_call_id":"$id",""" +
+            """"questions":[""" +
+            """{"id":"q_0","question":"Red or blue?","header":"Color",""" +
+            """"options":[{"id":"opt_0_0","label":"red","description":"warm color"},""" +
+            """{"id":"opt_0_1","label":"blue","description":"cool color"}],"allow_other":true},""" +
+            """{"id":"q_1","question":"Fast or safe?","header":"Mode",""" +
+            """"options":[{"id":"opt_1_0","label":"fast","description":"skip checks"},""" +
+            """{"id":"opt_1_1","label":"safe","description":"run checks"}],"allow_other":false},""" +
+            """{"id":"q_2","question":"Yes or no?","header":"Confirm",""" +
+            """"options":[{"id":"opt_2_0","label":"yes","description":"go ahead"},""" +
+            """{"id":"opt_2_1","label":"no","description":"stop"}],"allow_other":false}],""" +
             """"created_at":"2026-07-20T06:06:49.808Z","agentId":"main","sessionId":"session_1"}}"""
 
     private fun questionAnsweredFrame(id: String): String =
