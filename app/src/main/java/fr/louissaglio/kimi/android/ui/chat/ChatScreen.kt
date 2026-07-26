@@ -137,17 +137,23 @@ fun ChatScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    // Document/photo picker for composer attachments (ticket 033): the Uri is resolved
+    // Document/photo picker for composer attachments (ticket 033): each Uri is resolved
     // eagerly into name/size/mime/bytes so chips can render and the send path uploads.
-    val attachLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) {
+    // GetMultipleContents (not GetContent) so multi-selected files all come back via
+    // ClipData instead of being silently dropped down to the last one.
+    val attachLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+        if (uris.isNotEmpty()) {
             scope.launch {
-                val resolved = withContext(Dispatchers.IO) { resolveAttachment(context.contentResolver, uri) }
-                if (resolved != null) {
-                    viewModel.onAttachmentPicked(resolved.name, resolved.sizeBytes, resolved.mimeType, resolved.bytes)
-                } else {
-                    snackbarHostState.showSnackbar("Could not read the picked file")
+                var failed = 0
+                for (uri in uris) {
+                    val resolved = withContext(Dispatchers.IO) { resolveAttachment(context.contentResolver, uri) }
+                    if (resolved != null) {
+                        viewModel.onAttachmentPicked(resolved.name, resolved.sizeBytes, resolved.mimeType, resolved.bytes)
+                    } else {
+                        failed++
+                    }
                 }
+                if (failed > 0) snackbarHostState.showSnackbar("Could not read $failed picked file(s)")
             }
         }
     }
