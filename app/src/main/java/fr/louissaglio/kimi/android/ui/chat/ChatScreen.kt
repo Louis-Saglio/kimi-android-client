@@ -15,6 +15,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -50,6 +52,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
@@ -93,11 +97,15 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -126,10 +134,15 @@ import fr.louissaglio.kimi.android.data.chat.ServerModel
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 import fr.louissaglio.kimi.android.ui.theme.successColor
 import java.io.File
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 @Composable
 fun ChatScreen(
@@ -1099,6 +1112,10 @@ private fun MarkdownBody(text: String, modifier: Modifier = Modifier) {
     )
 }
 
+/** User prompt bubble (ticket 039): the web's hover actions become a long-press →
+ * dropdown menu (M3 touch idiom) with a Copy entry, and the server timestamp shows as
+ * a subtle caption under the bubble, right-aligned with it. The caption swaps to a
+ * green "✓ Copied" for a moment after a copy; [AssistantBubble] shares the idiom. */
 @Composable
 internal fun UserBubble(
     message: ChatItem.UserMessage,
@@ -1106,28 +1123,108 @@ internal fun UserBubble(
     onOpenAttachment: (ChatMessage.Part.Attachment) -> Unit = {},
     loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray? = { null },
 ) {
+    val clipboard = LocalClipboardManager.current
+    var menuExpanded by remember { mutableStateOf(false) }
+    var copied by remember { mutableStateOf(false) }
+    LaunchedEffect(copied) {
+        if (copied) {
+            delay(1_500)
+            copied = false
+        }
+    }
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
-        Surface(
-            modifier = Modifier.widthIn(max = 320.dp),
-            color = MaterialTheme.colorScheme.primaryContainer,
-            shape = RoundedCornerShape(12.dp),
-        ) {
-            Column(
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                if (message.text.isNotBlank()) MarkdownBody(text = message.text)
-                message.images.forEach { image ->
-                    HistoryImageThumbnail(
-                        image = image,
-                        loadImageBytes = loadImageBytes,
-                        onClick = { onImageClick(image) },
+        Column(horizontalAlignment = Alignment.End) {
+            Box {
+                Surface(
+                    modifier = Modifier
+                        .widthIn(max = 320.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .longPressable { menuExpanded = true }
+                        .semantics {
+                            onLongClick(label = "Message options") {
+                                menuExpanded = true
+                                true
+                            }
+                        },
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    shape = RoundedCornerShape(12.dp),
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        if (message.text.isNotBlank()) MarkdownBody(text = message.text)
+                        message.images.forEach { image ->
+                            HistoryImageThumbnail(
+                                image = image,
+                                loadImageBytes = loadImageBytes,
+                                onClick = { onImageClick(image) },
+                            )
+                        }
+                        message.attachments.forEach { attachment ->
+                            AttachmentChipRow(attachment = attachment, onClick = { onOpenAttachment(attachment) })
+                        }
+                    }
+                }
+                DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Copy") },
+                        onClick = {
+                            clipboard.setText(AnnotatedString(message.text))
+                            copied = true
+                            menuExpanded = false
+                        },
                     )
                 }
-                message.attachments.forEach { attachment ->
-                    AttachmentChipRow(attachment = attachment, onClick = { onOpenAttachment(attachment) })
-                }
             }
+            val caption = when {
+                copied -> "✓ Copied"
+                message.createdAt != null -> formatMessageTimestamp(message.createdAt)
+                else -> null
+            }
+            if (caption != null) {
+                Text(
+                    text = caption,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (copied) MaterialTheme.successColor else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp, end = 4.dp),
+                )
+            }
+        }
+    }
+}
+
+/** Web-style timestamp caption (ticket 039): locale short date + time, device zone. */
+private val MessageTimestampFormat: DateTimeFormatter =
+    DateTimeFormatter.ofLocalizedDateTime(FormatStyle.SHORT, FormatStyle.SHORT)
+
+private fun formatMessageTimestamp(instant: Instant): String =
+    MessageTimestampFormat.withZone(ZoneId.systemDefault()).format(instant)
+
+/** Long-press detector for the message rows' copy menu (ticket 039). Unlike
+ * `combinedClickable`, it never consumes the down event: the markdown renderer's
+ * link taps and the attachment/image clickables watch the stream without consuming
+ * either, so a consuming parent would silently cancel them. This watches the
+ * Initial pass — taps, scrolls and drags pass through to the children untouched;
+ * only a finger held still past the long-press timeout fires, and the release of
+ * that long-press is swallowed so the child under the finger does not also fire. */
+private fun Modifier.longPressable(onLongPress: () -> Unit): Modifier = pointerInput(Unit) {
+    awaitEachGesture {
+        val down = awaitFirstDown(pass = PointerEventPass.Initial, requireUnconsumed = false)
+        val slop = viewConfiguration.touchSlop
+        while (true) {
+            val event = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                awaitPointerEvent(PointerEventPass.Initial)
+            }
+            if (event == null) {
+                onLongPress()
+                awaitPointerEvent(PointerEventPass.Initial).changes
+                    .forEach { if (it.changedToUpIgnoreConsumed()) it.consume() }
+                break
+            }
+            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+            if (!change.pressed) break // released in time: a tap for the children
+            if ((change.position - down.position).getDistance() > slop) break // scroll or drag
         }
     }
 }
@@ -1274,33 +1371,14 @@ private fun FullScreenImageViewer(
 private const val FULL_IMAGE_PX = 2048
 
 /** Web-parity assistant row (ticket 024): full-width plain markdown on the chat
- * background — no bubble — with a small copy action underneath that puts the raw
- * markdown source on the clipboard. Live and final messages share this path, so
- * streaming deltas get the same layout. Thinking stays above the reply, dimmed. */
+ * background — no bubble. Live and final messages share this path, so streaming
+ * deltas get the same layout. Thinking stays above the reply, dimmed. Copy uses the
+ * same long-press → menu idiom as the user bubble (ticket 039 follow-up); the raw
+ * markdown source goes to the clipboard and a brief "✓ Copied" caption confirms. */
 @Composable
 internal fun AssistantBubble(message: ChatItem.AssistantMessage) {
-    Column(Modifier.fillMaxWidth()) {
-        if (message.thinking.isNotBlank()) {
-            Text(
-                text = message.thinking,
-                style = MaterialTheme.typography.bodySmall,
-                fontStyle = FontStyle.Italic,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            if (message.text.isNotBlank()) Spacer(Modifier.size(6.dp))
-        }
-        if (message.text.isNotBlank()) {
-            MarkdownBody(text = message.text)
-            CopyMessageAction(rawMarkdown = message.text)
-        }
-    }
-}
-
-/** Subtle copy affordance under each assistant message (ticket 024): a small
- * outlined-sheet glyph that swaps to a green check for a moment on tap. */
-@Composable
-private fun CopyMessageAction(rawMarkdown: String) {
     val clipboard = LocalClipboardManager.current
+    var menuExpanded by remember { mutableStateOf(false) }
     var copied by remember { mutableStateOf(false) }
     LaunchedEffect(copied) {
         if (copied) {
@@ -1308,29 +1386,45 @@ private fun CopyMessageAction(rawMarkdown: String) {
             copied = false
         }
     }
-    Box(
-        modifier = Modifier
-            .padding(top = 4.dp)
-            .size(28.dp)
-            .clip(RoundedCornerShape(6.dp))
-            .clickable {
-                clipboard.setText(AnnotatedString(rawMarkdown))
-                copied = true
+    Box {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .longPressable { menuExpanded = true }
+                .semantics {
+                    onLongClick(label = "Message options") {
+                        menuExpanded = true
+                        true
+                    }
+                },
+        ) {
+            if (message.thinking.isNotBlank()) {
+                Text(
+                    text = message.thinking,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontStyle = FontStyle.Italic,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (message.text.isNotBlank()) Spacer(Modifier.size(6.dp))
             }
-            .semantics { contentDescription = "Copy message" },
-        contentAlignment = Alignment.Center,
-    ) {
-        if (copied) {
-            Text(
-                text = "✓",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.successColor,
-            )
-        } else {
-            CopyGlyph(
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                background = MaterialTheme.colorScheme.background,
-                modifier = Modifier.size(14.dp),
+            if (message.text.isNotBlank()) MarkdownBody(text = message.text)
+            if (copied) {
+                Text(
+                    text = "✓ Copied",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.successColor,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+        }
+        DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+            DropdownMenuItem(
+                text = { Text("Copy") },
+                onClick = {
+                    clipboard.setText(AnnotatedString(message.text))
+                    copied = true
+                    menuExpanded = false
+                },
             )
         }
     }
@@ -1600,7 +1694,11 @@ private fun ChatContentPreview() {
             uiState = ChatViewModel.UiState(
                 isLoading = false,
                 items = listOf(
-                    ChatItem.UserMessage("msg_1", "Why did the build fail? Reply **briefly**."),
+                    ChatItem.UserMessage(
+                        "msg_1",
+                        "Why did the build fail? Reply **briefly**.",
+                        createdAt = Instant.parse("2026-07-26T06:30:00Z"),
+                    ),
                     ChatItem.AssistantMessage(
                         "msg_2",
                         "### Root cause\n\nMissing `Content-Type` header in `PostRequest`.\n\n" +

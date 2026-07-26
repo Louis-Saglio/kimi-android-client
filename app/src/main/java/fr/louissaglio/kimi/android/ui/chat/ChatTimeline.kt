@@ -113,7 +113,7 @@ class ChatTimeline {
         ) {
             return
         }
-        committed += ChatItem.UserMessage("spliced_${syntheticSpliceCount++}", text, attachments, images)
+        committed += ChatItem.UserMessage("spliced_${syntheticSpliceCount++}", text, attachments, images, message.createdAt)
     }
 
     /** Deltas extend the last live bubble; after a tool row a new bubble starts, so a
@@ -172,7 +172,7 @@ class ChatTimeline {
                 val attachments = message.parts.filterIsInstance<ChatMessage.Part.Attachment>()
                 val images = message.parts.filterIsInstance<ChatMessage.Part.Image>()
                 if (text.isNotBlank() || attachments.isNotEmpty() || images.isNotEmpty()) {
-                    committed += ChatItem.UserMessage(message.id, text, attachments, images)
+                    committed += ChatItem.UserMessage(message.id, text, attachments, images, message.createdAt)
                 }
             }
             ChatMessage.Role.Assistant -> {

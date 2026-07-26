@@ -31,13 +31,13 @@ repository currently drops it — `ChatMessage` has no timestamp field.
 
 ## Acceptance criteria
 
-- [ ] History user messages show the formatted timestamp; a live spliced
+- [x] History user messages show the formatted timestamp; a live spliced
       message gains its timestamp after the turn-end refetch.
-- [ ] Long-press on a user bubble opens a menu whose Copy entry puts the exact
+- [x] Long-press on a user bubble opens a menu whose Copy entry puts the exact
       message text on the clipboard.
-- [ ] Long-press does not interfere with tapping attachment chips/images
+- [x] Long-press does not interfere with tapping attachment chips/images
       inside the bubble.
-- [ ] Touch targets ≥ 48dp; menu is reachable by TalkBack
+- [x] Touch targets ≥ 48dp; menu is reachable by TalkBack
       (`onLongClick` semantics label).
 
 ## Out of scope

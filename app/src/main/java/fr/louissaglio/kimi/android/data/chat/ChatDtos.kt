@@ -20,6 +20,8 @@ data class MessageDto(
     val id: String = "",
     val role: String = "",
     val content: List<ContentPartDto> = emptyList(),
+    // ISO-8601 UTC instant ("2026-07-23T03:27:03.317Z"); absent on splice echoes.
+    @SerialName("created_at") val createdAt: String? = null,
 )
 
 /** Flat part shape: each `type` fills only its own fields, the rest stay null. */

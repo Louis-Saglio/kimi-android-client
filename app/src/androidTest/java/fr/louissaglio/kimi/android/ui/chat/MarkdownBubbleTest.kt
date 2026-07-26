@@ -6,19 +6,25 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.UriHandler
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.click
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.sp
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
+import java.time.Instant
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -127,18 +133,22 @@ class MarkdownBubbleTest {
         composeTestRule.onNodeWithText("**", substring = true).assertDoesNotExist()
     }
 
-    // Ticket 024: the copy action under an assistant message must place the raw
-    // markdown source — not the rendered text — on the device clipboard.
+    // Ticket 039 follow-up: the assistant copy action lives in the same long-press
+    // menu as the user bubble's — it must still place the raw markdown source, not
+    // the rendered text, on the device clipboard.
     @Test
-    fun copyActionPutsRawMarkdownOnClipboard() {
+    fun longPressCopyPutsRawMarkdownOnClipboard() {
         val markdown = "Fix it **now** with `sudo make`"
         assistantBubble(markdown)
 
-        composeTestRule.onNodeWithContentDescription("Copy message").performClick()
+        composeTestRule.onNode(SemanticsMatcher.keyIsDefined(SemanticsActions.OnLongClick))
+            .performSemanticsAction(SemanticsActions.OnLongClick)
+        composeTestRule.onNodeWithText("Copy").assertIsDisplayed().performClick()
 
         val clipboard = ApplicationProvider.getApplicationContext<Context>()
             .getSystemService(ClipboardManager::class.java)
         assertEquals(markdown, clipboard.primaryClip?.getItemAt(0)?.text?.toString())
+        composeTestRule.onNodeWithText("✓ Copied").assertIsDisplayed()
     }
 
     // Ticket 021: a code block line longer than the screen must scroll
@@ -166,5 +176,92 @@ class MarkdownBubbleTest {
         val sizes = text.spanStyles.map { it.item.fontSize }.filter { it != TextUnit.Unspecified }
         assertTrue("expected a sized span on the heading", sizes.isNotEmpty())
         assertTrue("heading too large: $sizes", sizes.all { it <= 26.sp })
+    }
+
+    // Ticket 039: the web's per-message hover actions become a long-press → menu on
+    // touch; the Copy entry must place the exact message text on the clipboard and
+    // the caption swaps to a brief "✓ Copied".
+    @Test
+    fun longPressCopyPutsExactTextOnClipboard() {
+        val text = "Deploy with **force** please"
+        composeTestRule.setContent {
+            KimiTheme {
+                UserBubble(ChatItem.UserMessage("u1", text))
+            }
+        }
+
+        composeTestRule.onNode(SemanticsMatcher.keyIsDefined(SemanticsActions.OnLongClick))
+            .performSemanticsAction(SemanticsActions.OnLongClick)
+        composeTestRule.onNodeWithText("Copy").assertIsDisplayed().performClick()
+
+        val clipboard = ApplicationProvider.getApplicationContext<Context>()
+            .getSystemService(ClipboardManager::class.java)
+        assertEquals(text, clipboard.primaryClip?.getItemAt(0)?.text?.toString())
+        composeTestRule.onNodeWithText("✓ Copied").assertIsDisplayed()
+    }
+
+    // Ticket 039: a real held touch must open the menu too — the semantics action
+    // covers TalkBack, this exercises the custom non-consuming pointer detector
+    // (ChatScreen.longPressable) that lets link taps and chip clicks pass through.
+    @Test
+    fun heldTouchOpensCopyMenu() {
+        composeTestRule.setContent {
+            KimiTheme {
+                UserBubble(ChatItem.UserMessage("u1", "hold me"))
+            }
+        }
+
+        val bubble = composeTestRule.onNodeWithText("hold me")
+        bubble.performTouchInput { down(center) }
+        composeTestRule.mainClock.advanceTimeBy(1_000)
+        composeTestRule.onNodeWithText("Copy").assertIsDisplayed()
+        bubble.performTouchInput { up() }
+    }
+
+    // Ticket 039: a history user message shows its server timestamp as a caption
+    // under the bubble (locale short date + time — the exact text is locale- and
+    // timezone-dependent, but a short time always shows colon-separated digits).
+    @Test
+    fun userBubbleShowsTimestampCaption() {
+        composeTestRule.setContent {
+            KimiTheme {
+                UserBubble(
+                    ChatItem.UserMessage("u1", "hi", createdAt = Instant.parse("2026-07-26T06:30:00Z")),
+                )
+            }
+        }
+
+        composeTestRule.onNode(
+            SemanticsMatcher("timestamp caption") { node ->
+                node.config.getOrNull(SemanticsProperties.Text)
+                    ?.any { it.text.contains(Regex("\\d{1,2}:\\d{2}")) } == true
+            },
+        ).assertIsDisplayed()
+    }
+
+    // Ticket 039: the bubble's long-press must not steal real touches from the
+    // attachment chips inside it — the chip's own clickable wins the pointer pass.
+    @Test
+    fun attachmentChipTapStillFiresInsideLongPressBubble() {
+        var opened: String? = null
+        composeTestRule.setContent {
+            KimiTheme {
+                UserBubble(
+                    ChatItem.UserMessage(
+                        "u1",
+                        "see attached",
+                        attachments = listOf(
+                            ChatMessage.Part.Attachment("notes.txt", "text/plain", 340, "f_1"),
+                        ),
+                    ),
+                    onOpenAttachment = { opened = it.name },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithContentDescription("Attachment notes.txt", useUnmergedTree = true)
+            .performTouchInput { click() }
+
+        assertEquals("notes.txt", opened)
     }
 }

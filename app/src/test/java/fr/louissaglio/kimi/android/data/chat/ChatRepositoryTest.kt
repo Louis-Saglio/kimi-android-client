@@ -8,6 +8,7 @@ import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import fr.louissaglio.kimi.android.ui.chat.ChatItem
 import fr.louissaglio.kimi.android.ui.chat.ChatTimeline
 import fr.louissaglio.kimi.android.ui.chat.ToolStatus
+import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.delay
@@ -93,7 +94,12 @@ class ChatRepositoryTest {
         // Wire order is newest-first; domain order is oldest-first.
         assertEquals(3, messages.size)
         assertEquals(
-            ChatMessage("msg_1", ChatMessage.Role.User, listOf(ChatMessage.Part.Text("run echo hi"))),
+            ChatMessage(
+                "msg_1",
+                ChatMessage.Role.User,
+                listOf(ChatMessage.Part.Text("run echo hi")),
+                createdAt = Instant.parse("2026-07-17T04:12:10.000Z"),
+            ),
             messages[0],
         )
         assertEquals(
@@ -110,12 +116,40 @@ class ChatRepositoryTest {
                         input = "{\n    \"command\": \"echo doc-verify\"\n}",
                     ),
                 ),
+                createdAt = Instant.parse("2026-07-17T04:12:10.500Z"),
             ),
             messages[1],
         )
         assertEquals(
-            ChatMessage("msg_3", ChatMessage.Role.Tool, listOf(ChatMessage.Part.ToolResult("tool_1", true, "hi\n"))),
+            ChatMessage(
+                "msg_3",
+                ChatMessage.Role.Tool,
+                listOf(ChatMessage.Part.ToolResult("tool_1", true, "hi\n")),
+                createdAt = Instant.parse("2026-07-17T04:12:11.000Z"),
+            ),
             messages[2],
+        )
+    }
+
+    @Test
+    fun `a malformed created_at is dropped instead of failing the message`() = runBlocking {
+        server.enqueue(
+            MockResponse().setBody(
+                """
+                {"code":0,"msg":"success","data":{"items":[
+                  {"id":"msg_1","session_id":"session_1","role":"user",
+                   "content":[{"type":"text","text":"hi"}],
+                   "created_at":"not-a-timestamp"}
+                ],"has_more":false},"request_id":"01KX"}
+                """.trimIndent(),
+            ),
+        )
+
+        val messages = repository.getMessages(settings(), "session_1").getOrThrow()
+
+        assertEquals(
+            ChatMessage("msg_1", ChatMessage.Role.User, listOf(ChatMessage.Part.Text("hi")), createdAt = null),
+            messages.single(),
         )
     }
 
@@ -155,6 +189,7 @@ class ChatRepositoryTest {
                     ChatMessage.Part.Image("image/jpeg", base64Data = "anBlZw==", fileId = null),
                     ChatMessage.Part.Image("image/webp", base64Data = null, fileId = "f_abc"),
                 ),
+                createdAt = Instant.parse("2026-07-24T04:12:10.000Z"),
             ),
             messages.single(),
         )

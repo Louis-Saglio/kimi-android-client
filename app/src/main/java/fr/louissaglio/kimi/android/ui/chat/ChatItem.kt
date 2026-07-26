@@ -1,6 +1,7 @@
 package fr.louissaglio.kimi.android.ui.chat
 
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
+import java.time.Instant
 
 enum class ToolStatus { Running, Done, Error }
 
@@ -11,12 +12,15 @@ sealed interface ChatItem {
     val id: String
 
     /** [attachments] are the non-image files recovered from the server's notice text,
-     * [images] the inlined image parts (ticket 034); both empty for plain messages. */
+     * [images] the inlined image parts (ticket 034); both empty for plain messages.
+     * [createdAt] is the server timestamp, shown as a caption under the bubble
+     * (ticket 039); null on live spliced messages until the turn-end refetch. */
     data class UserMessage(
         override val id: String,
         val text: String,
         val attachments: List<ChatMessage.Part.Attachment> = emptyList(),
         val images: List<ChatMessage.Part.Image> = emptyList(),
+        val createdAt: Instant? = null,
     ) : ChatItem
 
     data class AssistantMessage(

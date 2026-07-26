@@ -2,6 +2,7 @@ package fr.louissaglio.kimi.android.ui.chat
 
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
+import java.time.Instant
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -45,6 +46,57 @@ class ChatTimelineTest {
             ),
             timeline.items(),
         )
+    }
+
+    @Test
+    fun `history and spliced user messages carry their timestamp to the bubble`() {
+        val timeline = ChatTimeline()
+        val stamp = Instant.parse("2026-07-26T06:30:00Z")
+
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage("msg_1", ChatMessage.Role.User, listOf(ChatMessage.Part.Text("hi")), createdAt = stamp),
+            ),
+            keepLive = false,
+        )
+        timeline.apply(
+            SessionEvent.ContextSpliced(
+                listOf(
+                    ChatMessage("msg_2", ChatMessage.Role.User, listOf(ChatMessage.Part.Text("again")), createdAt = stamp),
+                ),
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                ChatItem.UserMessage("msg_1", "hi", createdAt = stamp),
+                ChatItem.UserMessage("msg_2", "again", createdAt = stamp),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `a live spliced message gains its timestamp on the turn-end refetch`() {
+        val timeline = ChatTimeline()
+        val stamp = Instant.parse("2026-07-26T06:30:00Z")
+
+        // The splice echo carries no created_at: the bubble starts without a caption.
+        timeline.apply(
+            SessionEvent.ContextSpliced(
+                listOf(ChatMessage("msg_1", ChatMessage.Role.User, listOf(ChatMessage.Part.Text("hi")))),
+            ),
+        )
+        assertEquals(listOf(ChatItem.UserMessage("msg_1", "hi", createdAt = null)), timeline.items())
+
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage("msg_1", ChatMessage.Role.User, listOf(ChatMessage.Part.Text("hi")), createdAt = stamp),
+            ),
+            keepLive = false,
+        )
+
+        assertEquals(listOf(ChatItem.UserMessage("msg_1", "hi", createdAt = stamp)), timeline.items())
     }
 
     @Test

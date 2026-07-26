@@ -11,6 +11,7 @@ import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.data.chat.ServerModel
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
+import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -480,11 +481,18 @@ class ChatViewModelTest {
         """.trimIndent()
         socket.send(turnEndedFrame(reason = "completed"))
 
-        // The refetch replaces committed rows wholesale: still exactly one bubble.
+        // The refetch replaces committed rows wholesale: still exactly one bubble,
+        // now carrying the server timestamp (ticket 039).
         awaitRequest("/messages")
         delay(300)
         assertEquals(
-            listOf(ChatItem.UserMessage("msg_1", "hello from the phone")),
+            listOf(
+                ChatItem.UserMessage(
+                    "msg_1",
+                    "hello from the phone",
+                    createdAt = Instant.parse("2026-07-19T00:00:00.500Z"),
+                ),
+            ),
             viewModel.uiState.value.items,
         )
     }

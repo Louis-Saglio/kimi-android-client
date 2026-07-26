@@ -9,6 +9,7 @@ import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.network.Envelope
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import java.io.IOException
+import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
@@ -1052,6 +1053,8 @@ class ChatRepository @Inject constructor(
             id = id,
             role = domainRole,
             parts = content.mapNotNull { it.toDomain(stripEnvelopes = domainRole == ChatMessage.Role.User) },
+            // A malformed timestamp must not fail the whole message: drop it, keep the rest.
+            createdAt = createdAt?.let { runCatching { Instant.parse(it) }.getOrNull() },
         )
     }
 

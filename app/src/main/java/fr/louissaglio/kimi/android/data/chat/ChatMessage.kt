@@ -1,14 +1,18 @@
 package fr.louissaglio.kimi.android.data.chat
 
+import java.time.Instant
+
 /**
  * Domain model for a history message, as exposed by [ChatRepository] to ViewModels.
  * Mirrors `GET /api/v1/sessions/{id}/messages` (docs/server-api.md), reduced to the
- * part types the chat screen renders.
+ * part types the chat screen renders. [createdAt] is the server's `created_at`;
+ * null on splice echoes that carry no timestamp.
  */
 data class ChatMessage(
     val id: String,
     val role: Role,
     val parts: List<Part>,
+    val createdAt: Instant? = null,
 ) {
     enum class Role { User, Assistant, Tool, Other }
 
