@@ -121,6 +121,7 @@ import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.data.chat.ServerModel
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
+import fr.louissaglio.kimi.android.ui.theme.successColor
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -1258,7 +1259,7 @@ private fun CopyMessageAction(rawMarkdown: String) {
             Text(
                 text = "✓",
                 style = MaterialTheme.typography.labelMedium,
-                color = SuccessGreen,
+                color = MaterialTheme.successColor,
             )
         } else {
             CopyGlyph(
@@ -1372,7 +1373,7 @@ internal fun ToolRow(activity: ChatItem.ToolActivity) {
                 ToolStatus.Done -> Text(
                     text = "✓",
                     style = MaterialTheme.typography.labelMedium,
-                    color = SuccessGreen,
+                    color = MaterialTheme.successColor,
                 )
                 ToolStatus.Error -> Text(
                     text = "✗",
@@ -1443,8 +1444,6 @@ private fun ToolDetailBlock(text: String, color: Color, pinnedToBottom: Boolean 
         }
     }
 }
-
-private val SuccessGreen = Color(0xFF4CAF50)
 
 @Composable
 private fun ErrorState(message: String, onRetry: () -> Unit, enabled: Boolean) {
