@@ -57,6 +57,20 @@ data class MediaSourceDto(
 @Serializable
 data class SessionStatusData(
     val busy: Boolean = false,
+    // Context window fill (ticket 041); absent on older servers.
+    @SerialName("context_tokens") val contextTokens: Long? = null,
+    @SerialName("max_context_tokens") val maxContextTokens: Long? = null,
+)
+
+/**
+ * `agent.status.updated` payload (docs/server-api.md, volatile). Two variants share the
+ * event type: the model/usage one carries [contextTokens]/[maxContextTokens], the phase
+ * one carries `phase` — its null token fields must not clobber the stored values.
+ */
+@Serializable
+data class AgentStatusUpdatedPayload(
+    val contextTokens: Long? = null,
+    val maxContextTokens: Long? = null,
 )
 
 /** `data` of `GET /api/v1/config`; only the server-wide default model is consumed. */

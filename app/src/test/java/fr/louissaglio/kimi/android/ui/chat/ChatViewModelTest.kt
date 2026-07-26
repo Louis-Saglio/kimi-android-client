@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.preferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.lifecycle.SavedStateHandle
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
+import fr.louissaglio.kimi.android.data.chat.ContextUsage
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.data.chat.ServerModel
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
@@ -106,6 +107,10 @@ class ChatViewModelTest {
         """{"code":0,"msg":"success","data":{"default_model":"kimi-code/k3"},"request_id":"r"}"""
 
     @Volatile
+    private var statusBody =
+        """{"code":0,"msg":"success","data":{"busy":false},"request_id":"r"}"""
+
+    @Volatile
     private var serverSocket: WebSocket? = null
 
     /** The WS upgrade waits behind the six startup GETs (messages/questions/session/
@@ -152,9 +157,7 @@ class ChatViewModelTest {
                         // the test's gate, and the socket must not wait for that.
                         servedStartupGets.countDown()
                         statusResponseGate?.await(5, TimeUnit.SECONDS)
-                        MockResponse().setBody(
-                            """{"code":0,"msg":"success","data":{"busy":false},"request_id":"r"}""",
-                        )
+                        MockResponse().setBody(statusBody)
                     }
                     path == "/api/v1/sessions/session_1/prompts" -> MockResponse().setBody(
                         """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
@@ -282,6 +285,38 @@ class ChatViewModelTest {
         socket.send(approvalResolvedFrame("ap_1"))
         awaitState { it.pendingApprovals.isEmpty() }
         assertEquals(emptyList<ChatViewModel.PendingApproval>(), viewModel.uiState.value.pendingApprovals)
+    }
+
+    @Test
+    fun `status poll seeds the context usage ring`() = runBlocking {
+        statusBody =
+            """{"code":0,"msg":"success","data":{"busy":false,"context_tokens":25050,""" +
+            """"max_context_tokens":1048576,"context_usage":0.0239},"request_id":"r"}"""
+
+        viewModel.onScreenStarted()
+        awaitState { it.contextUsage != null }
+
+        assertEquals(ContextUsage(25050, 1048576), viewModel.uiState.value.contextUsage)
+    }
+
+    @Test
+    fun `usage frames grow the ring live, phase frames leave it untouched`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        // No token counts in the default /status body: the ring stays hidden.
+        assertNull(viewModel.uiState.value.contextUsage)
+
+        socket.send(agentStatusPhaseFrame())
+        delay(200)
+        assertNull(viewModel.uiState.value.contextUsage)
+
+        socket.send(agentStatusUsageFrame(25050, 1048576))
+        awaitState { it.contextUsage != null }
+        assertEquals(ContextUsage(25050, 1048576), viewModel.uiState.value.contextUsage)
+
+        socket.send(agentStatusPhaseFrame())
+        delay(200)
+        assertEquals(ContextUsage(25050, 1048576), viewModel.uiState.value.contextUsage)
     }
 
     @Test
@@ -1196,5 +1231,21 @@ class ChatViewModelTest {
         """{"type":"event.question.dismissed","seq":28,"epoch":"ep_1","session_id":"session_1",""" +
             """"timestamp":"2026-07-20T06:12:37.844Z","payload":{"type":"event.question.dismissed",""" +
             """"question_id":"$id","dismissed_at":"2026-07-20T06:12:37.844Z",""" +
+            """"agentId":"main","sessionId":"session_1"}}"""
+
+    /** Verbatim 0.29.0 model/usage variant (docs/server-api.md, Agent status). */
+    private fun agentStatusUsageFrame(used: Long, max: Long): String =
+        """{"type":"agent.status.updated","seq":30,"epoch":"ep_1","volatile":true,""" +
+            """"session_id":"session_1","timestamp":"2026-07-26T00:00:00.000Z",""" +
+            """"payload":{"type":"agent.status.updated","model":"kimi-code/k3","thinkingEffort":"high",""" +
+            """"maxContextTokens":$max,"usage":{},"contextTokens":$used,""" +
+            """"agentId":"main","sessionId":"session_1"}}"""
+
+    /** Verbatim 0.29.0 phase variant: no token counts, must not clobber the ring. */
+    private fun agentStatusPhaseFrame(): String =
+        """{"type":"agent.status.updated","seq":31,"epoch":"ep_1","volatile":true,""" +
+            """"session_id":"session_1","timestamp":"2026-07-26T00:00:01.000Z",""" +
+            """"payload":{"type":"agent.status.updated",""" +
+            """"phase":{"kind":"running","turnId":0,"step":0,"stepId":"","since":1784777223312},""" +
             """"agentId":"main","sessionId":"session_1"}}"""
 }

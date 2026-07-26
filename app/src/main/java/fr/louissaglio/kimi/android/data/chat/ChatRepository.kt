@@ -98,7 +98,25 @@ sealed interface SessionEvent {
     /** The question was answered or dismissed — by this client or another one
      * (event.question.answered / event.question.dismissed share the consumed shape). */
     data class QuestionResolved(val questionId: String) : SessionEvent
+
+    /** Live context window fill (agent.status.updated, model/usage variant — ticket 041).
+     * Only emitted when the frame carries both token counts; phase-variant frames of the
+     * same event type emit nothing and leave the stored value untouched. */
+    data class ContextUsageUpdated(val contextUsage: ContextUsage) : SessionEvent
 }
+
+/** Context window fill of a session: used tokens out of the model's maximum. */
+data class ContextUsage(
+    val usedTokens: Long,
+    val maxTokens: Long,
+)
+
+/** Snapshot of `GET /api/v1/sessions/{id}/status` (ticket 041): [busy] is the mid-turn
+ * flag; [contextUsage] is null on older servers that send no token counts. */
+data class SessionStatus(
+    val busy: Boolean,
+    val contextUsage: ContextUsage?,
+)
 
 /** What the socket reports to the collector: connection lifecycle + session events. */
 sealed interface SocketEvent {
@@ -722,8 +740,9 @@ class ChatRepository @Inject constructor(
         }
     }
 
-    /** Lightweight live status (`GET /api/v1/sessions/{id}/status`): true when the session is mid-turn. */
-    suspend fun isSessionRunning(settings: ServerSettings, sessionId: String): Result<Boolean> =
+    /** Lightweight live status (`GET /api/v1/sessions/{id}/status`): the mid-turn flag
+     * plus the context window fill when the server sends token counts (ticket 041). */
+    suspend fun getSessionStatus(settings: ServerSettings, sessionId: String): Result<SessionStatus> =
         withContext(Dispatchers.IO) {
             val request = try {
                 Request.Builder()
@@ -743,7 +762,16 @@ class ChatRepository @Inject constructor(
                             )
                             when {
                                 envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
-                                else -> Result.success(envelope.data?.busy == true)
+                                else -> Result.success(
+                                    SessionStatus(
+                                        busy = envelope.data?.busy == true,
+                                        contextUsage = envelope.data?.let { data ->
+                                            val used = data.contextTokens
+                                            val max = data.maxContextTokens
+                                            if (used != null && max != null) ContextUsage(used, max) else null
+                                        },
+                                    ),
+                                )
                             }
                         } catch (e: SerializationException) {
                             Result.failure(DataError.MalformedResponse(e))
@@ -902,6 +930,16 @@ class ChatRepository @Inject constructor(
                     ?.let { onEvent(SessionEvent.QuestionResolved(it.questionId)) }
             "turn.started" -> onEvent(SessionEvent.TurnStarted)
             "turn.ended" -> onEvent(SessionEvent.TurnEnded(frame.decodePayload<TurnEndedPayload>()?.reason.orEmpty()))
+            // Volatile (docs/server-api.md): the model/usage variant carries the token
+            // counts; the phase variant has them null and emits nothing (ticket 041).
+            "agent.status.updated" -> frame.decodePayload<AgentStatusUpdatedPayload>()
+                ?.let { payload ->
+                    val used = payload.contextTokens
+                    val max = payload.maxContextTokens
+                    if (used != null && max != null) {
+                        onEvent(SessionEvent.ContextUsageUpdated(ContextUsage(used, max)))
+                    }
+                }
             "prompt.submitted" -> onEvent(SessionEvent.PromptSubmitted)
             "context.spliced" -> frame.decodePayload<ContextSplicedPayload>()
                 ?.let { onEvent(SessionEvent.ContextSpliced(it.messages.map { msg -> msg.toDomain() })) }

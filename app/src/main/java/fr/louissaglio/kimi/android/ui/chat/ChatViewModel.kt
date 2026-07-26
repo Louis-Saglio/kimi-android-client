@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
+import fr.louissaglio.kimi.android.data.chat.ContextUsage
 import fr.louissaglio.kimi.android.data.chat.FileDownload
 import fr.louissaglio.kimi.android.data.chat.FileMeta
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
@@ -106,6 +107,9 @@ class ChatViewModel @Inject constructor(
         val sessionModel: String? = null,
         /** The thinking effort chosen for this session; null = follow the server default. */
         val sessionEffort: String? = null,
+        /** Context window fill for the top-bar ring (ticket 041); null until the first
+         * /status response or live agent.status.updated event arrives. */
+        val contextUsage: ContextUsage? = null,
     ) {
         /** True when every item of the head question has an answer (option picked or other text). */
         val isQuestionSubmittable: Boolean
@@ -184,7 +188,7 @@ class ChatViewModel @Inject constructor(
     private var socketJob: Job? = null
     private var historyJob: Job? = null
 
-    /** Bumped on every turn.started/turn.ended event, so [seedWorkingState] can drop a
+    /** Bumped on every turn.started/turn.ended event, so [seedSessionStatus] can drop a
      * response that a newer turn event has already overtaken. Only touched on Main. */
     private var turnEventCount = 0
 
@@ -192,13 +196,17 @@ class ChatViewModel @Inject constructor(
      * can drop a response that a newer question event has already overtaken. */
     private var questionEventCount = 0
 
+    /** Bumped on every live context-usage event, so [seedSessionStatus] can drop a
+     * /status snapshot a newer agent.status.updated frame has already overtaken. */
+    private var contextUsageEventCount = 0
+
     /** Wired to ON_START: (re)loads history and opens the socket. Also fires when the
      * app returns to the foreground, which is the re-sync path after an OS-level drop. */
     fun onScreenStarted() {
         refreshHistory(clearLive = false)
         seedPendingQuestions()
         refreshSessionInfo()
-        seedWorkingState()
+        seedSessionStatus()
         loadModels()
         startSocket()
     }
@@ -470,6 +478,10 @@ class ChatViewModel @Inject constructor(
                     ).prunedQuestionDrafts(it)
                 }
             }
+            is SessionEvent.ContextUsageUpdated -> {
+                contextUsageEventCount++
+                _uiState.update { it.copy(contextUsage = event.contextUsage) }
+            }
             else -> {
                 timeline.apply(event)
                 _uiState.update { it.copy(items = timeline.items()) }
@@ -603,17 +615,27 @@ class ChatViewModel @Inject constructor(
     }
 
     /** Seeds the working indicator when opening a session that is already mid-turn
-     * (turn events only fire on transitions). Failure just leaves the indicator off.
-     * A turn event landing while the GET is in flight — a turn.started, but also the
-     * turn.ended of a quick abort — is newer than the seed's snapshot, so the late
-     * response is dropped instead of overriding it. */
-    private fun seedWorkingState() {
-        val eventsAtSeed = turnEventCount
+     * (turn events only fire on transitions), and the top-bar context-usage ring
+     * (ticket 041) from the same /status snapshot. Failure just leaves both untouched.
+     * A turn event or a live context-usage event landing while the GET is in flight is
+     * newer than the seed's snapshot, so the late response is dropped for that field
+     * instead of overriding it. */
+    private fun seedSessionStatus() {
+        val turnEventsAtSeed = turnEventCount
+        val contextEventsAtSeed = contextUsageEventCount
         viewModelScope.launch {
-            chatRepository.isSessionRunning(settingsRepository.current(), sessionId)
-                .onSuccess { running ->
-                    if (turnEventCount == eventsAtSeed) {
-                        _uiState.update { it.copy(isWorking = running) }
+            chatRepository.getSessionStatus(settingsRepository.current(), sessionId)
+                .onSuccess { status ->
+                    _uiState.update {
+                        it.copy(
+                            isWorking = if (turnEventCount == turnEventsAtSeed) status.busy else it.isWorking,
+                            contextUsage =
+                                if (contextUsageEventCount == contextEventsAtSeed && status.contextUsage != null) {
+                                    status.contextUsage
+                                } else {
+                                    it.contextUsage
+                                },
+                        )
                     }
                 }
         }

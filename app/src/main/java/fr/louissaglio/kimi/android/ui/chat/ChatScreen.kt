@@ -370,9 +370,13 @@ private fun ChatContent(
                     }
                 },
                 actions = {
-                    // Working spinner and stop stay here (ticket 038): screen-level
-                    // status. The model selector moved into the composer — it is a
-                    // per-message concern, not screen chrome.
+                    // Context ring first (ticket 041), then working spinner and stop
+                    // (ticket 038): screen-level chrome, ordered so the ring doesn't
+                    // shift when the spinner appears and disappears. Hidden until the
+                    // first /status or live status event delivers the usage.
+                    uiState.contextUsage?.let { usage ->
+                        ContextUsageRing(usage)
+                    }
                     if (uiState.isWorking) {
                         CircularProgressIndicator(
                             modifier = Modifier

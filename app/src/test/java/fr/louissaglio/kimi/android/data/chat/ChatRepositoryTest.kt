@@ -791,13 +791,74 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun `isSessionRunning maps the busy flag`() = runBlocking {
+    fun `getSessionStatus maps the busy flag and the context usage`() = runBlocking {
         server.enqueue(
-            MockResponse().setBody("""{"code":0,"msg":"success","data":{"busy":true},"request_id":"01KX"}"""),
+            MockResponse().setBody(
+                """{"code":0,"msg":"success","data":{"busy":true,"context_tokens":25050,""" +
+                    """"max_context_tokens":1048576,"context_usage":0.0239},"request_id":"01KX"}""",
+            ),
         )
 
-        assertEquals(true, repository.isSessionRunning(settings(), "session_1").getOrThrow())
+        assertEquals(
+            SessionStatus(busy = true, contextUsage = ContextUsage(25050, 1048576)),
+            repository.getSessionStatus(settings(), "session_1").getOrThrow(),
+        )
         assertEquals("/api/v1/sessions/session_1/status", server.takeRequest().path)
+    }
+
+    @Test
+    fun `getSessionStatus without token counts reports no context usage`() = runBlocking {
+        server.enqueue(
+            MockResponse().setBody("""{"code":0,"msg":"success","data":{"busy":false},"request_id":"01KX"}"""),
+        )
+
+        assertEquals(
+            SessionStatus(busy = false, contextUsage = null),
+            repository.getSessionStatus(settings(), "session_1").getOrThrow(),
+        )
+    }
+
+    @Test
+    fun `agent status usage frame emits the context usage, phase frame emits nothing`() = runBlocking {
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: Response) {
+                        // Verbatim 0.29.0 shapes (docs/server-api.md, Agent status).
+                        webSocket.send(
+                            """{"type":"agent.status.updated","seq":2,"epoch":"ep_1","volatile":true,""" +
+                                """"session_id":"session_1","timestamp":"2026-07-26T00:00:00.000Z",""" +
+                                """"payload":{"type":"agent.status.updated","model":"kimi-code/k3",""" +
+                                """"thinkingEffort":"high","maxContextTokens":1048576,"usage":{},""" +
+                                """"contextTokens":25050,"agentId":"main","sessionId":"session_1"}}""",
+                        )
+                        webSocket.send(
+                            """{"type":"agent.status.updated","seq":5,"epoch":"ep_1","volatile":true,""" +
+                                """"session_id":"session_1","timestamp":"2026-07-26T00:00:01.000Z",""" +
+                                """"payload":{"type":"agent.status.updated",""" +
+                                """"phase":{"kind":"running","turnId":0,"step":0,"stepId":"",""" +
+                                """"since":1784777223312},"agentId":"main","sessionId":"session_1"}}""",
+                        )
+                    }
+                },
+            ),
+        )
+
+        val emitted = CopyOnWriteArrayList<SocketEvent>()
+        val job = launch { repository.observeSession(settings(), "session_1").collect { emitted += it } }
+        try {
+            // Wait past the phase frame: give the stream a moment to deliver both, then
+            // assert only the usage one produced an event.
+            withTimeout(5_000) { while (emitted.none { it is SocketEvent.Event }) delay(10) }
+            delay(200)
+        } finally {
+            job.cancel()
+        }
+
+        assertEquals(
+            listOf(SocketEvent.Event(SessionEvent.ContextUsageUpdated(ContextUsage(25050, 1048576)))),
+            emitted.filterIsInstance<SocketEvent.Event>(),
+        )
     }
 
     @Test
