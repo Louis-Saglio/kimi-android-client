@@ -5,7 +5,8 @@ import fr.louissaglio.kimi.android.data.chat.ChatMessage
 enum class ToolStatus { Running, Done, Error }
 
 /** One row of the chat timeline. [id] is the LazyColumn key: message id for bubbles,
- * tool call id for activity rows, synthetic `live_N` for in-flight streaming bubbles. */
+ * tool call id for activity rows, first tool call id of the run for [ToolGroup],
+ * synthetic `live_N` for in-flight streaming bubbles. */
 sealed interface ChatItem {
     val id: String
 
@@ -38,4 +39,15 @@ sealed interface ChatItem {
         val input: String = "",
         val output: String = "",
     ) : ChatItem
+
+    /** A run of consecutive tool calls collapsed into one card (ticket 037), like the
+     * web client. Built by [ChatTimeline] — the reducer groups in both the committed
+     * and the live path, so a non-tool row always splits the run. [id] is the first
+     * tool call's id: appending to the group while a turn streams keeps the key stable. */
+    data class ToolGroup(
+        override val id: String,
+        val tools: List<ToolActivity>,
+    ) : ChatItem {
+        constructor(tool: ToolActivity) : this(tool.id, listOf(tool))
+    }
 }

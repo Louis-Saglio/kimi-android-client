@@ -198,13 +198,15 @@ class ChatRepositoryTest {
 
         assertEquals(
             listOf(
-                ChatItem.ToolActivity(
-                    "tool_1",
-                    "Bash",
-                    ToolStatus.Error,
-                    "./gradlew test",
-                    input = "{\n    \"command\": \"./gradlew test\"\n}",
-                    output = "FAIL 3 tests\n",
+                ChatItem.ToolGroup(
+                    ChatItem.ToolActivity(
+                        "tool_1",
+                        "Bash",
+                        ToolStatus.Error,
+                        "./gradlew test",
+                        input = "{\n    \"command\": \"./gradlew test\"\n}",
+                        output = "FAIL 3 tests\n",
+                    ),
                 ),
             ),
             timeline.items(),
@@ -234,12 +236,14 @@ class ChatRepositoryTest {
         assertEquals(
             listOf(
                 ChatItem.UserMessage("msg_1", "run echo doc-verify"),
-                ChatItem.ToolActivity(
-                    "tool_er2XKV7KXHB4A3U2AXGxZfrY",
-                    "Bash",
-                    ToolStatus.Running,
-                    "echo doc-verify",
-                    input = "{\n    \"command\": \"echo doc-verify\"\n}",
+                ChatItem.ToolGroup(
+                    ChatItem.ToolActivity(
+                        "tool_er2XKV7KXHB4A3U2AXGxZfrY",
+                        "Bash",
+                        ToolStatus.Running,
+                        "echo doc-verify",
+                        input = "{\n    \"command\": \"echo doc-verify\"\n}",
+                    ),
                 ),
             ),
             timeline.items(),

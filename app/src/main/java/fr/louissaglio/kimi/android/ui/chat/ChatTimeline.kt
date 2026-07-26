@@ -33,13 +33,28 @@ class ChatTimeline {
             live.clear()
             return
         }
-        live.removeAll { item ->
-            when (item) {
-                is ChatItem.ToolActivity -> committed.any { it.id == item.id }
+        val committedToolIds = committed.filterIsInstance<ChatItem.ToolGroup>()
+            .flatMap { group -> group.tools.map { it.id } }
+            .toSet()
+        // A live group may be half-committed (a refetch landed mid-run): drop only the
+        // tools the server now has, keep the rest under the first survivor's id.
+        for (index in live.indices.reversed()) {
+            when (val item = live[index]) {
+                is ChatItem.ToolGroup -> {
+                    val survivors = item.tools.filterNot { it.id in committedToolIds }
+                    if (survivors.isEmpty()) {
+                        live.removeAt(index)
+                    } else if (survivors.size < item.tools.size) {
+                        live[index] = ChatItem.ToolGroup(survivors.first().id, survivors)
+                    }
+                }
                 is ChatItem.AssistantMessage ->
-                    committed.filterIsInstance<ChatItem.AssistantMessage>()
-                        .any { it.text == item.text && it.thinking == item.thinking }
-                else -> false
+                    if (committed.filterIsInstance<ChatItem.AssistantMessage>()
+                            .any { it.text == item.text && it.thinking == item.thinking }
+                    ) {
+                        live.removeAt(index)
+                    }
+                else -> Unit
             }
         }
     }
@@ -122,11 +137,9 @@ class ChatTimeline {
      * a finished call keeps its definitive result, and a history refetch replaces the
      * rows wholesale, clearing whatever accumulated. */
     private fun appendToolProgress(toolCallId: String, chunk: String) {
-        val index = live.indexOfFirst { it is ChatItem.ToolActivity && it.id == toolCallId }
-        if (index < 0) return
-        val existing = live[index] as ChatItem.ToolActivity
-        if (existing.status != ToolStatus.Running) return
-        live[index] = existing.copy(output = existing.output + chunk)
+        live.updateTool(toolCallId) { existing ->
+            if (existing.status == ToolStatus.Running) existing.copy(output = existing.output + chunk) else existing
+        }
     }
 
     private fun upsertTool(
@@ -138,19 +151,18 @@ class ChatTimeline {
         output: String = "",
         replaceOutput: Boolean = false,
     ) {
-        val index = live.indexOfFirst { it is ChatItem.ToolActivity && it.id == toolCallId }
-        if (index >= 0) {
-            val existing = live[index] as ChatItem.ToolActivity
-            live[index] = existing.copy(
+        var found = false
+        live.updateTool(toolCallId) { existing ->
+            found = true
+            existing.copy(
                 name = existing.name.ifBlank { name },
                 preview = existing.preview.ifBlank { preview },
                 input = existing.input.ifBlank { input },
                 output = if (replaceOutput) output else existing.output.ifBlank { output },
                 status = status,
             )
-        } else {
-            live += ChatItem.ToolActivity(toolCallId, name, status, preview, input, output)
         }
+        if (!found) live.appendTool(ChatItem.ToolActivity(toolCallId, name, status, preview, input, output))
     }
 
     private fun flatten(message: ChatMessage) {
@@ -170,26 +182,59 @@ class ChatTimeline {
                     committed += ChatItem.AssistantMessage(message.id, text, thinking)
                 }
                 message.parts.filterIsInstance<ChatMessage.Part.ToolUse>().forEach {
-                    committed +=
-                        ChatItem.ToolActivity(it.toolCallId, it.toolName, ToolStatus.Running, it.preview, it.input)
+                    committed.appendTool(
+                        ChatItem.ToolActivity(it.toolCallId, it.toolName, ToolStatus.Running, it.preview, it.input),
+                    )
                 }
             }
             ChatMessage.Role.Tool ->
                 message.parts.filterIsInstance<ChatMessage.Part.ToolResult>().forEach { result ->
-                    val index = committed.indexOfLast { it is ChatItem.ToolActivity && it.id == result.toolCallId }
                     val status = if (result.isError) ToolStatus.Error else ToolStatus.Done
-                    if (index >= 0) {
-                        val existing = committed[index] as ChatItem.ToolActivity
-                        committed[index] = existing.copy(
+                    var found = false
+                    committed.updateTool(result.toolCallId) { existing ->
+                        found = true
+                        existing.copy(
                             status = status,
                             output = existing.output.ifBlank { result.output },
                         )
-                    } else {
+                    }
+                    if (!found) {
                         // Result without a matching call (e.g. page boundary): show it anyway.
-                        committed += ChatItem.ToolActivity(result.toolCallId, "", status, output = result.output)
+                        committed.appendTool(ChatItem.ToolActivity(result.toolCallId, "", status, output = result.output))
                     }
                 }
             ChatMessage.Role.Other -> Unit
+        }
+    }
+
+    /** Appends [tool] to the trailing group, or opens a new one when the last row is
+     * not a tool run — a non-tool row between two calls splits them into two groups
+     * (ticket 037). The group id stays the first call's id, so a growing live group
+     * keeps its LazyColumn key. */
+    private fun MutableList<ChatItem>.appendTool(tool: ChatItem.ToolActivity) {
+        val last = lastOrNull()
+        if (last is ChatItem.ToolGroup) {
+            this[lastIndex] = last.copy(tools = last.tools + tool)
+        } else {
+            this += ChatItem.ToolGroup(tool)
+        }
+    }
+
+    /** In-place update of the row [toolCallId] inside whichever group holds it,
+     * searched from the tail (a result matches its most recent call). No-op when the
+     * id is unknown. */
+    private fun MutableList<ChatItem>.updateTool(
+        toolCallId: String,
+        update: (ChatItem.ToolActivity) -> ChatItem.ToolActivity,
+    ) {
+        for (groupIndex in indices.reversed()) {
+            val group = this[groupIndex] as? ChatItem.ToolGroup ?: continue
+            val toolIndex = group.tools.indexOfFirst { it.id == toolCallId }
+            if (toolIndex < 0) continue
+            val tools = group.tools.toMutableList()
+            tools[toolIndex] = update(tools[toolIndex])
+            this[groupIndex] = group.copy(tools = tools)
+            return
         }
     }
 }

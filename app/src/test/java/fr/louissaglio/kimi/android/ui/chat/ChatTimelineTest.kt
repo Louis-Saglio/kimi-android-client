@@ -10,6 +10,9 @@ class ChatTimelineTest {
     private fun userMessage(id: String, text: String) =
         ChatMessage(id, ChatMessage.Role.User, listOf(ChatMessage.Part.Text(text)))
 
+    /** A single tool row as the group the reducer wraps it in (ticket 037). */
+    private fun toolGroup(tool: ChatItem.ToolActivity) = ChatItem.ToolGroup(tool)
+
     @Test
     fun `a user message mixing an attachment and real text renders the text plus a chip`() {
         val timeline = ChatTimeline()
@@ -72,7 +75,7 @@ class ChatTimelineTest {
     }
 
     @Test
-    fun `history flattens to bubbles and tool rows in order`() {
+    fun `history flattens to bubbles and tool groups in order`() {
         val timeline = ChatTimeline()
 
         timeline.replaceHistory(
@@ -96,7 +99,82 @@ class ChatTimelineTest {
             listOf(
                 ChatItem.UserMessage("msg_1", "run echo hi"),
                 ChatItem.AssistantMessage("msg_2", "let me run that", "hmm"),
-                ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done),
+                toolGroup(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done)),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `adjacent history tool calls coalesce into one group`() {
+        val timeline = ChatTimeline()
+
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage(
+                    "msg_1",
+                    ChatMessage.Role.Assistant,
+                    listOf(
+                        ChatMessage.Part.ToolUse("tool_1", "Bash"),
+                        ChatMessage.Part.ToolUse("tool_2", "Read"),
+                    ),
+                ),
+                ChatMessage(
+                    "msg_2",
+                    ChatMessage.Role.Tool,
+                    listOf(
+                        ChatMessage.Part.ToolResult("tool_1", false),
+                        ChatMessage.Part.ToolResult("tool_2", false),
+                    ),
+                ),
+            ),
+            keepLive = false,
+        )
+
+        assertEquals(
+            listOf(
+                ChatItem.ToolGroup(
+                    "tool_1",
+                    listOf(
+                        ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done),
+                        ChatItem.ToolActivity("tool_2", "Read", ToolStatus.Done),
+                    ),
+                ),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `an assistant message between two tool runs splits the group`() {
+        val timeline = ChatTimeline()
+
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage(
+                    "msg_1",
+                    ChatMessage.Role.Assistant,
+                    listOf(ChatMessage.Part.ToolUse("tool_1", "Bash")),
+                ),
+                ChatMessage("msg_2", ChatMessage.Role.Tool, listOf(ChatMessage.Part.ToolResult("tool_1", false))),
+                ChatMessage(
+                    "msg_3",
+                    ChatMessage.Role.Assistant,
+                    listOf(
+                        ChatMessage.Part.Text("now reading the file"),
+                        ChatMessage.Part.ToolUse("tool_2", "Read"),
+                    ),
+                ),
+                ChatMessage("msg_4", ChatMessage.Role.Tool, listOf(ChatMessage.Part.ToolResult("tool_2", false))),
+            ),
+            keepLive = false,
+        )
+
+        assertEquals(
+            listOf(
+                toolGroup(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done)),
+                ChatItem.AssistantMessage("msg_3", "now reading the file", ""),
+                toolGroup(ChatItem.ToolActivity("tool_2", "Read", ToolStatus.Done)),
             ),
             timeline.items(),
         )
@@ -119,7 +197,7 @@ class ChatTimelineTest {
         )
 
         assertEquals(
-            listOf(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Error)),
+            listOf(toolGroup(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Error))),
             timeline.items(),
         )
     }
@@ -141,7 +219,7 @@ class ChatTimelineTest {
         )
 
         assertEquals(
-            listOf(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, "echo doc-verify")),
+            listOf(toolGroup(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, "echo doc-verify"))),
             timeline.items(),
         )
     }
@@ -156,7 +234,7 @@ class ChatTimelineTest {
         )
 
         assertEquals(
-            listOf(ChatItem.ToolActivity("tool_9", "", ToolStatus.Done, "")),
+            listOf(toolGroup(ChatItem.ToolActivity("tool_9", "", ToolStatus.Done, ""))),
             timeline.items(),
         )
     }
@@ -169,7 +247,35 @@ class ChatTimelineTest {
         timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "echo doc-verify"))
 
         assertEquals(
-            listOf(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Running, "echo doc-verify")),
+            listOf(toolGroup(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Running, "echo doc-verify"))),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `a live stream appends new calls to the open group until a bubble splits it`() {
+        val timeline = ChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted)
+
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash"))
+        timeline.apply(SessionEvent.ToolCallStarted("tool_2", "Read"))
+        timeline.apply(SessionEvent.ToolCallResult("tool_1", false))
+        // Text after the run starts a new bubble, so the next call opens a new group.
+        timeline.apply(SessionEvent.AssistantDelta("one more"))
+        timeline.apply(SessionEvent.ToolCallStarted("tool_3", "Bash"))
+
+        assertEquals(
+            listOf(
+                ChatItem.ToolGroup(
+                    "tool_1",
+                    listOf(
+                        ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done),
+                        ChatItem.ToolActivity("tool_2", "Read", ToolStatus.Running),
+                    ),
+                ),
+                ChatItem.AssistantMessage("live_0", "one more", ""),
+                toolGroup(ChatItem.ToolActivity("tool_3", "Bash", ToolStatus.Running)),
+            ),
             timeline.items(),
         )
     }
@@ -185,7 +291,7 @@ class ChatTimelineTest {
         timeline.apply(SessionEvent.ToolCallResult("tool_1", false))
 
         assertEquals(
-            listOf(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, "echo hi")),
+            listOf(toolGroup(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, "echo hi"))),
             timeline.items(),
         )
     }
@@ -200,13 +306,15 @@ class ChatTimelineTest {
 
         assertEquals(
             listOf(
-                ChatItem.ToolActivity(
-                    "tool_1",
-                    "Bash",
-                    ToolStatus.Error,
-                    "./gradlew test",
-                    input = "{\n    \"command\": \"./gradlew test\"\n}",
-                    output = "FAIL 3 tests\n",
+                toolGroup(
+                    ChatItem.ToolActivity(
+                        "tool_1",
+                        "Bash",
+                        ToolStatus.Error,
+                        "./gradlew test",
+                        input = "{\n    \"command\": \"./gradlew test\"\n}",
+                        output = "FAIL 3 tests\n",
+                    ),
                 ),
             ),
             timeline.items(),
@@ -226,8 +334,13 @@ class ChatTimelineTest {
 
         assertEquals(
             listOf(
-                ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Running, "build", output = "> Task :app:assemble\n"),
-                ChatItem.ToolActivity("tool_2", "Bash", ToolStatus.Running, "test", output = "compiling...\nrunning tests\n"),
+                ChatItem.ToolGroup(
+                    "tool_1",
+                    listOf(
+                        ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Running, "build", output = "> Task :app:assemble\n"),
+                        ChatItem.ToolActivity("tool_2", "Bash", ToolStatus.Running, "test", output = "compiling...\nrunning tests\n"),
+                    ),
+                ),
             ),
             timeline.items(),
         )
@@ -246,7 +359,7 @@ class ChatTimelineTest {
         timeline.apply(SessionEvent.ToolCallProgress("tool_1", "late chunk\n"))
 
         assertEquals(
-            listOf(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, output = "final\n")),
+            listOf(toolGroup(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, output = "final\n"))),
             timeline.items(),
         )
     }
@@ -262,7 +375,7 @@ class ChatTimelineTest {
         timeline.apply(SessionEvent.ToolCallResult("tool_1", false, "hi\n"))
 
         assertEquals(
-            listOf(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, "echo hi", output = "hi\n")),
+            listOf(toolGroup(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, "echo hi", output = "hi\n"))),
             timeline.items(),
         )
     }
@@ -293,7 +406,36 @@ class ChatTimelineTest {
         )
 
         assertEquals(
-            listOf(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, "build", output = "BUILD OK\n")),
+            listOf(toolGroup(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, "build", output = "BUILD OK\n"))),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `mid-turn refetch keeps the uncommitted tail of a live group`() {
+        val timeline = ChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash"))
+        timeline.apply(SessionEvent.ToolCallStarted("tool_2", "Read"))
+
+        // The refetch landed mid-run: tool_1 is committed server-side, tool_2 is not.
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage(
+                    "msg_1",
+                    ChatMessage.Role.Assistant,
+                    listOf(ChatMessage.Part.ToolUse("tool_1", "Bash")),
+                ),
+                ChatMessage("msg_2", ChatMessage.Role.Tool, listOf(ChatMessage.Part.ToolResult("tool_1", false))),
+            ),
+            keepLive = true,
+        )
+
+        assertEquals(
+            listOf(
+                toolGroup(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done)),
+                toolGroup(ChatItem.ToolActivity("tool_2", "Read", ToolStatus.Running)),
+            ),
             timeline.items(),
         )
     }
@@ -315,7 +457,7 @@ class ChatTimelineTest {
         assertEquals(
             listOf(
                 ChatItem.AssistantMessage("live_0", "hello", "thinking"),
-                ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done),
+                toolGroup(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done)),
                 ChatItem.AssistantMessage("live_1", "done", ""),
             ),
             timeline.items(),
@@ -364,7 +506,7 @@ class ChatTimelineTest {
             listOf(
                 ChatItem.UserMessage("msg_1", "hi"),
                 ChatItem.AssistantMessage("msg_2", "hello", ""),
-                ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done),
+                toolGroup(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done)),
             ),
             timeline.items(),
         )

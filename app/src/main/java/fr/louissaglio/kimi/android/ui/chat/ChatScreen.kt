@@ -53,12 +53,14 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
@@ -643,6 +645,9 @@ internal fun MessageList(
                         loadImageBytes = loadImageBytes,
                     )
                 is ChatItem.AssistantMessage -> AssistantBubble(item)
+                is ChatItem.ToolGroup -> ToolGroupCard(item)
+                // Bare rows are not produced by ChatTimeline anymore (ticket 037) but
+                // stay renderable for tests and previews.
                 is ChatItem.ToolActivity -> ToolRow(item)
             }
         }
@@ -1304,6 +1309,74 @@ private fun CopyGlyph(tint: Color, background: Color, modifier: Modifier = Modif
     }
 }
 
+/** A run of consecutive tool calls as one card (ticket 037), mirroring the web
+ * client's collapsed group: a header with the aggregate status — spinner while any
+ * call runs, error mark if any failed, success check when all are done — then the
+ * rows themselves, each keeping its own expand/collapse.
+ *
+ * M3 outlined card, matching the web's "lighter fill + thin grey border": the fill is
+ * `surfaceContainerLow` (a step above the chat background in both themes), the border
+ * the default 1dp `outlineVariant` hairline — no elevation, the chat surface is flat. */
+@Composable
+internal fun ToolGroupCard(group: ChatItem.ToolGroup) {
+    val status = when {
+        group.tools.any { it.status == ToolStatus.Running } -> ToolStatus.Running
+        group.tools.any { it.status == ToolStatus.Error } -> ToolStatus.Error
+        else -> ToolStatus.Done
+    }
+    OutlinedCard(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.outlinedCardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+    ) {
+        Column(Modifier.padding(horizontal = 10.dp, vertical = 4.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                when (status) {
+                    ToolStatus.Running -> CircularProgressIndicator(
+                        modifier = Modifier
+                            .size(12.dp)
+                            .semantics { contentDescription = "Tools running" },
+                        strokeWidth = 1.5.dp,
+                    )
+                    // No success slot in the M3 scheme: a literal green, readable on both themes.
+                    ToolStatus.Done -> Text(
+                        text = "✓",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.successColor,
+                    )
+                    ToolStatus.Error -> Text(
+                        text = "✗",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                Text(
+                    text = buildString {
+                        append(group.tools.size)
+                        append(if (group.tools.size == 1) " tool call · " else " tool calls · ")
+                        append(
+                            when (status) {
+                                ToolStatus.Running -> "running"
+                                ToolStatus.Done -> "done"
+                                ToolStatus.Error -> "error"
+                            },
+                        )
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            group.tools.forEachIndexed { index, tool ->
+                // 1dp outlineVariant hairline between rows, like the web's row separators.
+                if (index > 0) HorizontalDivider()
+                ToolRow(tool)
+            }
+        }
+    }
+}
+
 /** Web-style compact tool row (ticket 022): leading tool icon, name, one-line
  * monospace preview of the input with end-ellipsis, and the status as a glyph —
  * spinner while running, green check on success, red cross on error.
@@ -1477,9 +1550,33 @@ private fun ChatContentPreview() {
                             "```\ncurl -X POST /retry\n```",
                         thinking = "Let me look at the failure output.",
                     ),
-                    ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, preview = "curl -X POST /retry"),
+                    ChatItem.ToolGroup(
+                        "tool_1",
+                        listOf(
+                            ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, preview = "curl -X POST /retry"),
+                            ChatItem.ToolActivity("tool_2", "Read", ToolStatus.Done, preview = "app/build.gradle.kts"),
+                        ),
+                    ),
+                    ChatItem.ToolGroup(
+                        "tool_3",
+                        listOf(
+                            ChatItem.ToolActivity("tool_3", "Bash", ToolStatus.Done, preview = "./gradlew test"),
+                            ChatItem.ToolActivity("tool_4", "Bash", ToolStatus.Error, preview = "./gradlew lint"),
+                        ),
+                    ),
                     ChatItem.AssistantMessage("live_0", "Streaming reply…", thinking = ""),
-                    ChatItem.ToolActivity("tool_2", "Read", ToolStatus.Running, preview = "app/build.gradle.kts"),
+                    ChatItem.ToolGroup(
+                        "tool_5",
+                        listOf(
+                            ChatItem.ToolActivity("tool_5", "Read", ToolStatus.Done, preview = "docs/server-api.md"),
+                            ChatItem.ToolActivity(
+                                "tool_6",
+                                "Bash",
+                                ToolStatus.Running,
+                                preview = "./gradlew assembleRelease",
+                            ),
+                        ),
+                    ),
                 ),
                 isWorking = true,
                 isReconnecting = true,
