@@ -23,9 +23,9 @@ bubble (tighter trailing corner) via `shapes.large.copy(...)`.
 
 ## Acceptance criteria
 
-- [ ] `rg 'RoundedCornerShape\(\s*\d' app/src/main` returns no hits in the
+- [x] `rg 'RoundedCornerShape\(\s*\d' app/src/main` returns no hits in the
       chat UI (previews/theme excepted).
-- [ ] No visual regression beyond the intended token mapping — check
+- [x] No visual regression beyond the intended token mapping — check
       `ChatContentPreview` in both themes.
 
 ## Out of scope

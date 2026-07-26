@@ -37,7 +37,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CornerSize
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -389,7 +389,7 @@ private fun ChatContent(
                             Box(
                                 Modifier
                                     .size(14.dp)
-                                    .clip(RoundedCornerShape(3.dp))
+                                    .clip(MaterialTheme.shapes.extraSmall)
                                     .background(MaterialTheme.colorScheme.onSurfaceVariant),
                             )
                         }
@@ -768,7 +768,7 @@ private fun QuestionCard(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
+                            .clip(MaterialTheme.shapes.small)
                             .clickable { onOptionPicked(item.id, option.id) },
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -854,7 +854,7 @@ private fun ChatInputBar(
             // chip and send. The field carries no outline or fill of its own — the
             // container is the boundary.
             Surface(
-                shape = RoundedCornerShape(24.dp),
+                shape = MaterialTheme.shapes.extraLarge,
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
             ) {
                 Column {
@@ -927,7 +927,7 @@ private fun ModelChip(label: String, onClick: () -> Unit) {
         modifier = Modifier
             .padding(start = 4.dp)
             .heightIn(min = 48.dp)
-            .clip(RoundedCornerShape(20.dp))
+            .clip(MaterialTheme.shapes.large)
             .clickable(onClick = onClick)
             .semantics { contentDescription = "Model: $label" }
             .padding(horizontal = 12.dp),
@@ -961,7 +961,7 @@ private fun AttachmentChip(
 ) {
     val failed = attachment.status == ChatViewModel.PendingAttachment.Status.Failed
     Surface(
-        shape = RoundedCornerShape(8.dp),
+        shape = MaterialTheme.shapes.small,
         color = if (failed) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceVariant,
     ) {
         Row(
@@ -995,7 +995,7 @@ private fun AttachmentChip(
             Box(
                 modifier = Modifier
                     .size(28.dp)
-                    .clip(RoundedCornerShape(6.dp))
+                    .clip(MaterialTheme.shapes.small)
                     .clickable(onClick = onRemove)
                     .semantics { contentDescription = "Remove ${attachment.name}" },
                 contentAlignment = Alignment.Center,
@@ -1027,7 +1027,7 @@ private fun AttachmentThumbnail(attachment: ChatViewModel.PendingAttachment) {
             contentDescription = null,
             modifier = Modifier
                 .size(36.dp)
-                .clip(RoundedCornerShape(6.dp)),
+                .clip(MaterialTheme.shapes.small),
             contentScale = ContentScale.Crop,
         )
     } else {
@@ -1135,10 +1135,12 @@ internal fun UserBubble(
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
         Column(horizontalAlignment = Alignment.End) {
             Box {
+                // Web parity: tighter trailing corner on the user bubble.
+                val bubbleShape = MaterialTheme.shapes.large.copy(bottomEnd = CornerSize(4.dp))
                 Surface(
                     modifier = Modifier
                         .widthIn(max = 320.dp)
-                        .clip(RoundedCornerShape(12.dp))
+                        .clip(bubbleShape)
                         .longPressable { menuExpanded = true }
                         .semantics {
                             onLongClick(label = "Message options") {
@@ -1147,7 +1149,7 @@ internal fun UserBubble(
                             }
                         },
                     color = MaterialTheme.colorScheme.primaryContainer,
-                    shape = RoundedCornerShape(12.dp),
+                    shape = bubbleShape,
                 ) {
                     Column(
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
@@ -1248,7 +1250,7 @@ private fun HistoryImageThumbnail(
         resolved = true
     }
     val bitmap = thumbnail
-    val shape = RoundedCornerShape(8.dp)
+    val shape = MaterialTheme.shapes.small
     if (bitmap != null) {
         Image(
             bitmap = bitmap,
@@ -1291,7 +1293,7 @@ private fun HistoryImageThumbnail(
  * tap downloads the bytes and opens them in another app. */
 @Composable
 private fun AttachmentChipRow(attachment: ChatMessage.Part.Attachment, onClick: () -> Unit) {
-    val shape = RoundedCornerShape(8.dp)
+    val shape = MaterialTheme.shapes.small
     Surface(
         shape = shape,
         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -1655,7 +1657,7 @@ private fun ToolDetailBlock(text: String, color: Color, pinnedToBottom: Boolean 
     if (pinnedToBottom) {
         LaunchedEffect(text) { scrollState.scrollTo(scrollState.maxValue) }
     }
-    Surface(color = color, shape = RoundedCornerShape(8.dp)) {
+    Surface(color = color, shape = MaterialTheme.shapes.small) {
         Box(
             Modifier
                 .fillMaxWidth()
