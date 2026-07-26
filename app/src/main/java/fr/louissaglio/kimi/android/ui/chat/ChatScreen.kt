@@ -46,7 +46,6 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -70,6 +69,8 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -356,16 +357,9 @@ private fun ChatContent(
                     }
                 },
                 actions = {
-                    // Model picker (ticket 031): hidden while the models list is loading
-                    // or after a failed fetch — sending never depends on it.
-                    uiState.currentModelLabel?.let { label ->
-                        AssistChip(
-                            onClick = { showModelPicker = true },
-                            label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                            modifier = Modifier.semantics { contentDescription = "Model: $label" },
-                        )
-                        Spacer(Modifier.width(4.dp))
-                    }
+                    // Working spinner and stop stay here (ticket 038): screen-level
+                    // status. The model selector moved into the composer — it is a
+                    // per-message concern, not screen chrome.
                     if (uiState.isWorking) {
                         CircularProgressIndicator(
                             modifier = Modifier
@@ -427,6 +421,13 @@ private fun ChatContent(
                     isSending = uiState.isSending,
                     isWorking = uiState.isWorking,
                     attachments = uiState.attachments,
+                    // "K3 · high": the effective effort trails the model name like the
+                    // web composer's label; hidden entirely until the models fetch lands.
+                    modelLabel = uiState.currentModelLabel?.let { label ->
+                        val effort = uiState.selectedEffort ?: uiState.defaultEffort
+                        if (effort != null) "$label · $effort" else label
+                    },
+                    onModelClick = { showModelPicker = true },
                     onTextChange = onInputChange,
                     onSend = onSend,
                     onAttach = onAttach,
@@ -808,6 +809,8 @@ private fun ChatInputBar(
     isSending: Boolean,
     isWorking: Boolean,
     attachments: List<ChatViewModel.PendingAttachment>,
+    modelLabel: String?,
+    onModelClick: () -> Unit,
     onTextChange: (String) -> Unit,
     onSend: () -> Unit,
     onAttach: () -> Unit,
@@ -833,47 +836,104 @@ private fun ChatInputBar(
                     }
                 }
             }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.Bottom,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            // One rounded container echoes the web composer pill (ticket 038): the field
+            // spans the full width on top, an action row below holds attach, the model
+            // chip and send. The field carries no outline or fill of its own — the
+            // container is the boundary.
+            Surface(
+                shape = RoundedCornerShape(24.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
             ) {
-                IconButton(
-                    onClick = onAttach,
-                    enabled = !isSending,
-                    modifier = Modifier
-                        .padding(bottom = 4.dp)
-                        .semantics { contentDescription = "Attach a file" },
-                ) {
-                    Icon(Icons.Filled.Add, contentDescription = null)
-                }
-                OutlinedTextField(
-                    value = text,
-                    onValueChange = onTextChange,
-                    modifier = Modifier
-                        .weight(1f)
-                        .semantics { contentDescription = "Message input" },
-                    placeholder = { Text(if (isWorking) "Steer the running turn…" else "Message Kimi…") },
-                    // Grows with content up to 5 lines, then scrolls internally.
-                    maxLines = 5,
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                    keyboardActions = KeyboardActions(onSend = { if (canSend) onSend() }),
-                )
-                if (isWorking) {
-                    Button(onClick = onSend, enabled = canSend) {
-                        Text("Steer")
-                    }
-                } else {
-                    FilledIconButton(
-                        onClick = onSend,
-                        enabled = canSend,
-                        modifier = Modifier.semantics { contentDescription = "Send" },
+                Column {
+                    TextField(
+                        value = text,
+                        onValueChange = onTextChange,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .semantics { contentDescription = "Message input" },
+                        placeholder = { Text(if (isWorking) "Steer the running turn…" else "Message Kimi…") },
+                        // Grows with content up to 5 lines, then scrolls internally.
+                        maxLines = 5,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                        keyboardActions = KeyboardActions(onSend = { if (canSend) onSend() }),
+                        colors = TextFieldDefaults.colors(
+                            focusedContainerColor = Color.Transparent,
+                            unfocusedContainerColor = Color.Transparent,
+                            disabledContainerColor = Color.Transparent,
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent,
+                        ),
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null)
+                        IconButton(
+                            onClick = onAttach,
+                            enabled = !isSending,
+                            modifier = Modifier.semantics { contentDescription = "Attach a file" },
+                        ) {
+                            Icon(Icons.Filled.Add, contentDescription = null)
+                        }
+                        modelLabel?.let { label -> ModelChip(label = label, onClick = onModelClick) }
+                        Spacer(Modifier.weight(1f))
+                        if (isWorking) {
+                            Button(
+                                onClick = onSend,
+                                enabled = canSend,
+                                // M3 Buttons default to 40dp tall; the composer row
+                                // keeps every touch target at 48dp.
+                                modifier = Modifier.heightIn(min = 48.dp),
+                            ) {
+                                Text("Steer")
+                            }
+                        } else {
+                            FilledIconButton(
+                                onClick = onSend,
+                                enabled = canSend,
+                                modifier = Modifier.semantics { contentDescription = "Send" },
+                            ) {
+                                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null)
+                            }
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+/** Model/effort selector inside the composer (ticket 038): a low-key row with a
+ * chevron, opening the same ModelPickerSheet the top-bar chip used to. The whole
+ * row keeps the ≥ 48dp M3 touch target the web's compact hit area lacks. */
+@Composable
+private fun ModelChip(label: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .padding(start = 4.dp)
+            .heightIn(min = 48.dp)
+            .clip(RoundedCornerShape(20.dp))
+            .clickable(onClick = onClick)
+            .semantics { contentDescription = "Model: $label" }
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Icon(
+            imageVector = Icons.Filled.KeyboardArrowDown,
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
