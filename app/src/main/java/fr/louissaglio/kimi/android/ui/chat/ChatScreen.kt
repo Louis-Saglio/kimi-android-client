@@ -10,7 +10,12 @@ import android.provider.OpenableColumns
 import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -344,6 +349,7 @@ private fun ChatContent(
     loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray?,
 ) {
     var showModelPicker by rememberSaveable { mutableStateOf(false) }
+    var showTodos by rememberSaveable { mutableStateOf(false) }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -434,6 +440,19 @@ private fun ChatContent(
                         onDismiss = onDismissQuestion,
                     )
                 }
+                // The agent's todo list (ticket 042) sits directly above the composer;
+                // its TodoList tool calls no longer appear as timeline rows.
+                AnimatedVisibility(
+                    visible = !uiState.todos.isNullOrEmpty(),
+                    enter = expandVertically() + fadeIn(),
+                    exit = shrinkVertically() + fadeOut(),
+                ) {
+                    TodosSummaryRow(
+                        todos = uiState.todos.orEmpty(),
+                        onClick = { showTodos = true },
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                    )
+                }
                 ChatInputBar(
                     text = uiState.inputText,
                     isSending = uiState.isSending,
@@ -494,6 +513,12 @@ private fun ChatContent(
             onEffortSelected = onEffortSelected,
             onDismiss = { showModelPicker = false },
         )
+    }
+    // Re-derived from the state at open time: a clearing TodoList call while the sheet
+    // is up simply closes it (there is nothing left to show).
+    val todos = uiState.todos
+    if (showTodos && !todos.isNullOrEmpty()) {
+        TodosSheet(todos = todos, onDismiss = { showTodos = false })
     }
 }
 

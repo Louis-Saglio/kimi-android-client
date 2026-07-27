@@ -2,6 +2,8 @@ package fr.louissaglio.kimi.android.ui.chat
 
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
+import fr.louissaglio.kimi.android.data.chat.Todo
+import fr.louissaglio.kimi.android.data.chat.TodoParser
 
 /**
  * Pure reducer behind the chat screen: flattens history messages into timeline rows
@@ -18,7 +20,24 @@ class ChatTimeline {
     private var liveBubbleCount = 0
     private var syntheticSpliceCount = 0
 
+    /** Todo tool calls seen so far (ticket 042): their rows are suppressed — the
+     * widget replaces them — and their results must not surface as orphan rows. Ids
+     * are globally unique per session, so the set is never pruned. */
+    private val todoCallIds = mutableSetOf<String>()
+
+    // The widget mirrors the latest TodoList call (ticket 042). History and live calls
+    // are tracked apart for the same reason as the row lists: a mid-turn refetch
+    // re-derives the committed value while a live call not yet committed stays the
+    // latest. null = no call seen, empty = the last call cleared the list; both hide
+    // the widget.
+    private var committedTodos: List<Todo>? = null
+    private var liveTodos: List<Todo>? = null
+
     fun items(): List<ChatItem> = committed + live
+
+    /** Live calls win over history (they are newer) until the turn-end refetch
+     * commits them. */
+    fun todos(): List<Todo>? = liveTodos ?: committedTodos
 
     /**
      * Replaces committed rows from a fresh history fetch. With [keepLive] (mid-turn
@@ -28,9 +47,11 @@ class ChatTimeline {
      */
     fun replaceHistory(messages: List<ChatMessage>, keepLive: Boolean) {
         committed.clear()
+        committedTodos = null
         messages.forEach(::flatten)
         if (!keepLive) {
             live.clear()
+            liveTodos = null
             return
         }
         val committedToolIds = committed.filterIsInstance<ChatItem.ToolGroup>()
@@ -63,15 +84,27 @@ class ChatTimeline {
         when (event) {
             // Defensive clear: a new turn must never inherit a previous turn's leftovers
             // (possible only if the earlier turn.ended refetch failed).
-            SessionEvent.TurnStarted -> live.clear()
+            SessionEvent.TurnStarted -> {
+                live.clear()
+                // Same defensive clear as the rows: the turn-end refetch has already
+                // committed the previous turn's calls.
+                liveTodos = null
+            }
             is SessionEvent.AssistantDelta -> appendDelta(event.delta, thinking = false)
             is SessionEvent.ThinkingDelta -> appendDelta(event.delta, thinking = true)
             is SessionEvent.ToolCallDelta ->
-                upsertTool(event.toolCallId, event.name, ToolStatus.Running)
+                if (isTodoCall(event.toolCallId, event.name)) Unit
+                else upsertTool(event.toolCallId, event.name, ToolStatus.Running)
             is SessionEvent.ToolCallStarted ->
-                upsertTool(event.toolCallId, event.name, ToolStatus.Running, event.preview, input = event.input)
+                if (isTodoCall(event.toolCallId, event.name)) {
+                    // The todo state comes from the call's input, not its result.
+                    TodoParser.of(event.name, event.input)?.let { liveTodos = it }
+                } else {
+                    upsertTool(event.toolCallId, event.name, ToolStatus.Running, event.preview, input = event.input)
+                }
             is SessionEvent.ToolCallResult ->
-                upsertTool(
+                if (event.toolCallId in todoCallIds) Unit
+                else upsertTool(
                     event.toolCallId,
                     "",
                     if (event.isError) ToolStatus.Error else ToolStatus.Done,
@@ -79,7 +112,8 @@ class ChatTimeline {
                     // The definitive result replaces any accumulated progress wholesale.
                     replaceOutput = true,
                 )
-            is SessionEvent.ToolCallProgress -> appendToolProgress(event.toolCallId, event.chunk)
+            is SessionEvent.ToolCallProgress ->
+                if (event.toolCallId !in todoCallIds) appendToolProgress(event.toolCallId, event.chunk)
             is SessionEvent.ContextSpliced -> event.messages.forEach(::appendSpliced)
             // TurnEnded / PromptSubmitted: the ViewModel refetches history instead.
             else -> Unit
@@ -165,6 +199,14 @@ class ChatTimeline {
         if (!found) live.appendTool(ChatItem.ToolActivity(toolCallId, name, status, preview, input, output))
     }
 
+    /** Records a call as the agent's todo tool (ticket 042): its row is suppressed and
+     * later result/progress frames for the id are dropped too. */
+    private fun isTodoCall(toolCallId: String, name: String): Boolean {
+        if (name != TodoParser.TOOL_NAME) return false
+        todoCallIds += toolCallId
+        return true
+    }
+
     private fun flatten(message: ChatMessage) {
         when (message.role) {
             ChatMessage.Role.User -> {
@@ -182,13 +224,18 @@ class ChatTimeline {
                     committed += ChatItem.AssistantMessage(message.id, text, thinking)
                 }
                 message.parts.filterIsInstance<ChatMessage.Part.ToolUse>().forEach {
-                    committed.appendTool(
-                        ChatItem.ToolActivity(it.toolCallId, it.toolName, ToolStatus.Running, it.preview, it.input),
-                    )
+                    if (isTodoCall(it.toolCallId, it.toolName)) {
+                        TodoParser.of(it.toolName, it.input)?.let { parsed -> committedTodos = parsed }
+                    } else {
+                        committed.appendTool(
+                            ChatItem.ToolActivity(it.toolCallId, it.toolName, ToolStatus.Running, it.preview, it.input),
+                        )
+                    }
                 }
             }
             ChatMessage.Role.Tool ->
                 message.parts.filterIsInstance<ChatMessage.Part.ToolResult>().forEach { result ->
+                    if (result.toolCallId in todoCallIds) return@forEach
                     val status = if (result.isError) ToolStatus.Error else ToolStatus.Done
                     var found = false
                     committed.updateTool(result.toolCallId) { existing ->

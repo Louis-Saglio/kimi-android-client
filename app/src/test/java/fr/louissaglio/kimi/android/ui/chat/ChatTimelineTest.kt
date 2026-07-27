@@ -2,6 +2,7 @@ package fr.louissaglio.kimi.android.ui.chat
 
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
+import fr.louissaglio.kimi.android.data.chat.Todo
 import java.time.Instant
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -680,5 +681,123 @@ class ChatTimelineTest {
         )
 
         assertEquals(listOf(ChatItem.UserMessage("msg_9", "stop counting")), timeline.items())
+    }
+
+    // Ticket 042: TodoList tool calls feed the composer widget instead of the timeline.
+
+    private val todoInput = """{"todos": [{"title": "one", "status": "done"}, {"title": "two", "status": "pending"}]}"""
+    private val expectedTodos = listOf(Todo("one", Todo.Status.Done), Todo("two", Todo.Status.Pending))
+
+    @Test
+    fun `a history todo call renders no rows and derives the widget state`() {
+        val timeline = ChatTimeline()
+
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage(
+                    "msg_1",
+                    ChatMessage.Role.Assistant,
+                    listOf(
+                        ChatMessage.Part.Text("planning"),
+                        ChatMessage.Part.ToolUse("tool_1", "TodoList", input = todoInput),
+                    ),
+                ),
+                // The result must not surface as an orphan row either.
+                ChatMessage("msg_2", ChatMessage.Role.Tool, listOf(ChatMessage.Part.ToolResult("tool_1", false))),
+            ),
+            keepLive = false,
+        )
+
+        assertEquals(listOf(ChatItem.AssistantMessage("msg_1", "planning", "")), timeline.items())
+        assertEquals(expectedTodos, timeline.todos())
+    }
+
+    @Test
+    fun `a live todo call renders no rows and derives the widget state`() {
+        val timeline = ChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted)
+
+        // Argument deltas carry the name only; the started frame carries the input.
+        timeline.apply(SessionEvent.ToolCallDelta("tool_1", "TodoList"))
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "TodoList", input = todoInput))
+        timeline.apply(SessionEvent.ToolCallResult("tool_1", false))
+        timeline.apply(SessionEvent.ToolCallProgress("tool_1", "stray\n"))
+
+        assertEquals(emptyList<ChatItem>(), timeline.items())
+        assertEquals(expectedTodos, timeline.todos())
+    }
+
+    @Test
+    fun `the latest todo call wins across history and live events`() {
+        val timeline = ChatTimeline()
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage(
+                    "msg_1",
+                    ChatMessage.Role.Assistant,
+                    listOf(ChatMessage.Part.ToolUse("tool_1", "TodoList", input = todoInput)),
+                ),
+            ),
+            keepLive = false,
+        )
+        timeline.apply(SessionEvent.TurnStarted)
+
+        timeline.apply(
+            SessionEvent.ToolCallStarted(
+                "tool_2",
+                "TodoList",
+                input = """{"todos": [{"title": "new", "status": "in_progress"}]}""",
+            ),
+        )
+
+        assertEquals(listOf(Todo("new", Todo.Status.InProgress)), timeline.todos())
+    }
+
+    @Test
+    fun `an empty todos array hides the widget again`() {
+        val timeline = ChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "TodoList", input = todoInput))
+
+        timeline.apply(SessionEvent.ToolCallStarted("tool_2", "TodoList", input = """{"todos": []}"""))
+
+        assertEquals(emptyList<Todo>(), timeline.todos())
+    }
+
+    @Test
+    fun `a mid-turn refetch keeps a live todo state the server has not committed yet`() {
+        val timeline = ChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "TodoList", input = todoInput))
+
+        // The refetch predates the call: the live state is newer and must survive.
+        timeline.replaceHistory(listOf(userMessage("msg_1", "hi")), keepLive = true)
+
+        assertEquals(expectedTodos, timeline.todos())
+    }
+
+    @Test
+    fun `the turn-end refetch re-derives the widget state from the canonical history`() {
+        val timeline = ChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "TodoList", input = todoInput))
+
+        // History without any todo call: the live leftover is gone.
+        timeline.replaceHistory(listOf(userMessage("msg_1", "hi")), keepLive = false)
+        assertEquals(null, timeline.todos())
+
+        // History carrying the call (now committed): same state, derived from history.
+        timeline.apply(SessionEvent.TurnStarted)
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage(
+                    "msg_2",
+                    ChatMessage.Role.Assistant,
+                    listOf(ChatMessage.Part.ToolUse("tool_1", "TodoList", input = todoInput)),
+                ),
+            ),
+            keepLive = false,
+        )
+        assertEquals(expectedTodos, timeline.todos())
     }
 }

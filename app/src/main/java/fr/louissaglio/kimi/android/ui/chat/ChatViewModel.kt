@@ -14,6 +14,7 @@ import fr.louissaglio.kimi.android.data.chat.QuestionAnswer
 import fr.louissaglio.kimi.android.data.chat.ServerModel
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.SocketEvent
+import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
 import fr.louissaglio.kimi.android.data.sessions.displayName
 import fr.louissaglio.kimi.android.data.sessions.displayNameFor
@@ -110,6 +111,9 @@ class ChatViewModel @Inject constructor(
         /** Context window fill for the top-bar ring (ticket 041); null until the first
          * /status response or live agent.status.updated event arrives. */
         val contextUsage: ContextUsage? = null,
+        /** The agent's latest todo list, mirrored from its TodoList tool calls
+         * (ticket 042); null or empty hides the widget above the composer. */
+        val todos: List<Todo>? = null,
     ) {
         /** True when every item of the head question has an answer (option picked or other text). */
         val isQuestionSubmittable: Boolean
@@ -431,7 +435,7 @@ class ChatViewModel @Inject constructor(
             SessionEvent.TurnStarted -> {
                 turnEventCount++
                 timeline.apply(event)
-                _uiState.update { it.copy(isWorking = true, items = timeline.items()) }
+                _uiState.update { it.copy(isWorking = true, items = timeline.items(), todos = timeline.todos()) }
             }
             is SessionEvent.TurnEnded -> {
                 turnEventCount++
@@ -484,7 +488,7 @@ class ChatViewModel @Inject constructor(
             }
             else -> {
                 timeline.apply(event)
-                _uiState.update { it.copy(items = timeline.items()) }
+                _uiState.update { it.copy(items = timeline.items(), todos = timeline.todos()) }
             }
         }
     }
@@ -496,7 +500,9 @@ class ChatViewModel @Inject constructor(
             chatRepository.getMessages(settingsRepository.current(), sessionId)
                 .onSuccess { messages ->
                     timeline.replaceHistory(messages, keepLive = !clearLive)
-                    _uiState.update { it.copy(isLoading = false, items = timeline.items(), error = null) }
+                    _uiState.update {
+                        it.copy(isLoading = false, items = timeline.items(), todos = timeline.todos(), error = null)
+                    }
                 }
                 .onFailure { error ->
                     if (_uiState.value.items.isEmpty()) {

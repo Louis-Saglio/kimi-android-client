@@ -667,6 +667,39 @@ The web bundle hints at further answer kinds (`multi`, `multi_with_other`,
 `skipped`) and optional `method`/`note` body fields — **not verified live**;
 treat as leads only.
 
+## Todos
+
+The agent's todo list has **no dedicated endpoint or WS event** on this
+protocol. Clients derive it from the agent's `TodoList` tool calls, exactly as
+the web client does (`apps/kimi-web/src/composables/latestTodos.ts`). Verified
+against upstream source on `main` 2026-07-27
+(`packages/agent-core-v2/src/agent/tools/todo-list/todoListTool.ts`,
+`packages/agent-core-v2/src/session/todo/todoItem.ts`) — **not captured live**;
+treat the shapes as source-verified, not wire-verified.
+
+- **Tool name:** `TodoList` (upstream `TODO_LIST_TOOL_NAME`). It appears
+  wherever tool calls do: `toolUse` content parts in message history, and live
+  `tool.call.delta` / `tool.call.started` WS events.
+- **Input schema:** `{"todos": [{"title": string, "status": "pending" |
+  "in_progress" | "done"}]}`. Every *write* carries the **full** list.
+- **Write vs read:** a call *without* the `todos` key is a read-only query —
+  the list is unchanged; skip it and keep looking back. An empty `todos`
+  array clears the list.
+- **Derivation rule:** scan the messages backwards for the newest `TodoList`
+  call whose input carries a `todos` array — that is the current state.
+- **Not on this wire:** upstream also persists the list as
+  `tools.update_store` records (key `todo`) and a transcript-level
+  `TranscriptTodo` entity (`todo.upsert`); neither has been observed on the
+  session WS protocol documented here.
+- **Web-client tolerance (FYI):** `latestTodos.ts` also maps `completed` →
+  `done` and falls back to a `content` field for the title, for Claude-style
+  `TodoWrite` compatibility. This server's `TodoList` tool emits only the
+  schema above; the Android app does not replicate those fallbacks.
+
+The Android app implements this derivation in `TodoParser` + `ChatTimeline`
+(ticket 042) and hides `TodoList` tool rows from the timeline in favour of a
+summary widget.
+
 ## WebSocket
 
 ### URL & handshake
