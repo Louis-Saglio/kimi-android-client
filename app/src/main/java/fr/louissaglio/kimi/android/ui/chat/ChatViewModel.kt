@@ -15,13 +15,13 @@ import fr.louissaglio.kimi.android.data.chat.ServerModel
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.SocketEvent
 import fr.louissaglio.kimi.android.data.chat.Todo
+import fr.louissaglio.kimi.android.data.chat.TodoParser
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
 import fr.louissaglio.kimi.android.data.sessions.displayName
 import fr.louissaglio.kimi.android.data.sessions.displayNameFor
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import java.util.UUID
 import javax.inject.Inject
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
 
 @HiltViewModel
 class ChatViewModel @Inject constructor(
@@ -37,6 +38,8 @@ class ChatViewModel @Inject constructor(
     private val sessionsRepository: SessionsRepository,
     private val settingsRepository: SettingsRepository,
     savedStateHandle: SavedStateHandle,
+    // Default mirrors the DI Json for direct construction in tests.
+    private val todoParser: TodoParser = TodoParser(Json { ignoreUnknownKeys = true }),
 ) : ViewModel() {
 
     private val sessionId: String = checkNotNull(savedStateHandle["sessionId"])
@@ -188,7 +191,7 @@ class ChatViewModel @Inject constructor(
     private val _effects = Channel<Effect>(Channel.BUFFERED)
     val effects = _effects.receiveAsFlow()
 
-    private val timeline = ChatTimeline()
+    private val timeline = ChatTimeline(todoParser)
     private var socketJob: Job? = null
     private var historyJob: Job? = null
 
@@ -404,29 +407,26 @@ class ChatViewModel @Inject constructor(
     private fun startSocket() {
         socketJob?.cancel()
         socketJob = viewModelScope.launch {
-            try {
-                chatRepository.observeSession(settingsRepository.current(), sessionId)
-                    .collect { event ->
-                        when (event) {
-                            SocketEvent.Connected ->
-                                _uiState.update { it.copy(isReconnecting = false) }
-                            SocketEvent.Reconnected -> {
-                                _uiState.update { it.copy(isReconnecting = false) }
-                                // The cursor resume replays missed events; the refetch
-                                // heals anything beyond the server's replay buffer.
-                                refreshHistory(clearLive = false)
-                                refreshPendingQuestions()
-                            }
-                            SocketEvent.Disconnected ->
-                                _uiState.update { it.copy(isReconnecting = true) }
-                            is SocketEvent.Event -> applySessionEvent(event.event)
+            chatRepository.observeSession(settingsRepository.current(), sessionId)
+                .collect { event ->
+                    when (event) {
+                        SocketEvent.Connected ->
+                            _uiState.update { it.copy(isReconnecting = false) }
+                        SocketEvent.Reconnected -> {
+                            _uiState.update { it.copy(isReconnecting = false) }
+                            // The cursor resume replays missed events; the refetch
+                            // heals anything beyond the server's replay buffer.
+                            refreshHistory(clearLive = false)
+                            refreshPendingQuestions()
                         }
+                        SocketEvent.Disconnected ->
+                            _uiState.update { it.copy(isReconnecting = true) }
+                        // No-op: the history load validates the URL first and owns the
+                        // user-facing error.
+                        is SocketEvent.Failed -> Unit
+                        is SocketEvent.Event -> applySessionEvent(event.event)
                     }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: DataError.InvalidUrl) {
-                // Surfaced by the history load, which validates the URL first.
-            }
+                }
         }
     }
 

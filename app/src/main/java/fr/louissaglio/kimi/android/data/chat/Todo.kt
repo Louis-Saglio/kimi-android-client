@@ -1,5 +1,7 @@
 package fr.louissaglio.kimi.android.data.chat
 
+import javax.inject.Inject
+import javax.inject.Singleton
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -15,14 +17,12 @@ data class Todo(val title: String, val status: Status) {
 /**
  * Extracts the todo list from a tool call's input JSON, in the spirit of [ToolPreview]:
  * deliberately dumb and total — malformed input parses to null, never crashes.
+ * Uses the shared DI Json (same ignoreUnknownKeys config the parser relies on).
  */
-object TodoParser {
-
-    /** The tool name the server emits for the agent's todo tool. */
-    const val TOOL_NAME = "TodoList"
-
-    private val json = Json { ignoreUnknownKeys = true }
-
+@Singleton
+class TodoParser @Inject constructor(
+    private val json: Json,
+) {
     /** The todo list carried by a TodoList call, or null when [name] is not the todo
      * tool or [input] is missing/malformed — the caller then leaves the current widget
      * state untouched. An empty `todos` array parses to an empty list, which clears the
@@ -44,5 +44,10 @@ object TodoParser {
             }
             Todo(title, status)
         }
+    }
+
+    companion object {
+        /** The tool name the server emits for the agent's todo tool. */
+        const val TOOL_NAME = "TodoList"
     }
 }

@@ -1,10 +1,13 @@
 package fr.louissaglio.kimi.android.data.chat
 
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
 class TodoParserTest {
+
+    private val parser = TodoParser(Json { ignoreUnknownKeys = true })
 
     @Test
     fun `a full list parses all three statuses`() {
@@ -24,33 +27,33 @@ class TodoParserTest {
                 Todo("wire the widget", Todo.Status.InProgress),
                 Todo("ship it", Todo.Status.Pending),
             ),
-            TodoParser.of("TodoList", input),
+            parser.of("TodoList", input),
         )
     }
 
     @Test
     fun `an empty todos array parses to an empty list, which hides the widget`() {
-        assertEquals(emptyList<Todo>(), TodoParser.of("TodoList", """{"todos": []}"""))
+        assertEquals(emptyList<Todo>(), parser.of("TodoList", """{"todos": []}"""))
     }
 
     @Test
     fun `a non-todo tool parses to null`() {
-        assertNull(TodoParser.of("Bash", """{"todos": [{"title": "x", "status": "done"}]}"""))
+        assertNull(parser.of("Bash", """{"todos": [{"title": "x", "status": "done"}]}"""))
     }
 
     @Test
     fun `malformed or missing input parses to null, never crashes`() {
-        assertNull(TodoParser.of("TodoList", ""))
-        assertNull(TodoParser.of("TodoList", "   "))
-        assertNull(TodoParser.of("TodoList", "{not json"))
-        assertNull(TodoParser.of("TodoList", """["todos"]"""))
-        assertNull(TodoParser.of("TodoList", """{"todos": "not-an-array"}"""))
-        assertNull(TodoParser.of("TodoList", """{"other": []}"""))
+        assertNull(parser.of("TodoList", ""))
+        assertNull(parser.of("TodoList", "   "))
+        assertNull(parser.of("TodoList", "{not json"))
+        assertNull(parser.of("TodoList", """["todos"]"""))
+        assertNull(parser.of("TodoList", """{"todos": "not-an-array"}"""))
+        assertNull(parser.of("TodoList", """{"other": []}"""))
     }
 
     @Test
     fun `an unknown status degrades to pending`() {
-        val todos = TodoParser.of("TodoList", """{"todos": [{"title": "x", "status": "blocked"}]}""")
+        val todos = parser.of("TodoList", """{"todos": [{"title": "x", "status": "blocked"}]}""")
 
         assertEquals(listOf(Todo("x", Todo.Status.Pending)), todos)
     }
@@ -59,6 +62,6 @@ class TodoParserTest {
     fun `items without a usable title are skipped`() {
         val input = """{"todos": [{"status": "done"}, {"title": "  "}, "junk", {"title": "real", "status": "done"}]}"""
 
-        assertEquals(listOf(Todo("real", Todo.Status.Done)), TodoParser.of("TodoList", input))
+        assertEquals(listOf(Todo("real", Todo.Status.Done)), parser.of("TodoList", input))
     }
 }

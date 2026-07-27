@@ -14,6 +14,7 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -301,6 +302,13 @@ class ChatRepositoryTest {
         val result = repository.getMessages(ServerSettings(serverUrl = "not a url"), "session_1")
 
         assertTrue(result.exceptionOrNull() is DataError.InvalidUrl)
+    }
+
+    @Test
+    fun `observeSession with an invalid base URL emits Failed and completes`() = runBlocking {
+        val events = repository.observeSession(ServerSettings(serverUrl = "not a url"), "session_1").toList()
+
+        assertEquals(listOf(SocketEvent.Failed(DataError.InvalidUrl)), events)
     }
 
     @Test

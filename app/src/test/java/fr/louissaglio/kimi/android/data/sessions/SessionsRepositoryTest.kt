@@ -102,9 +102,7 @@ class SessionsRepositoryTest {
 
         val result = repository.listSessions(settings())
 
-        val error = result.exceptionOrNull()
-        assertTrue(error is DataError.Api)
-        assertEquals(50001, (error as DataError.Api).code)
+        assertEquals(DataError.Api(50001, "boom"), result.exceptionOrNull())
     }
 
     @Test
@@ -178,8 +176,7 @@ class SessionsRepositoryTest {
 
         val error = repository.createSession(settings(), "/tmp/nope", null).exceptionOrNull()
 
-        assertTrue(error is DataError.Api)
-        assertEquals("workspace root /tmp/nope does not exist", (error as DataError.Api).serverMessage)
+        assertEquals(DataError.Api(40409, "workspace root /tmp/nope does not exist"), error)
     }
 
     @Test

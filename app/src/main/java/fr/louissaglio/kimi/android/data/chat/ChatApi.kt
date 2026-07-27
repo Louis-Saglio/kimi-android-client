@@ -1,0 +1,269 @@
+package fr.louissaglio.kimi.android.data.chat
+
+import fr.louissaglio.kimi.android.data.DataError
+import fr.louissaglio.kimi.android.data.network.ApiClient
+import fr.louissaglio.kimi.android.data.network.Envelope
+import fr.louissaglio.kimi.android.data.network.toAckResult
+import fr.louissaglio.kimi.android.data.network.toResult
+import fr.louissaglio.kimi.android.data.settings.ServerSettings
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.addJsonObject
+import okhttp3.MultipartBody
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+
+/**
+ * The session REST verbs (docs/server-api.md). Every call goes through the
+ * [ApiClient] scaffold, which owns the error boundary: failures come back as
+ * [Result.failure] of [DataError].
+ */
+internal class ChatApi(
+    private val api: ApiClient,
+    private val mapper: ChatMessageMapper,
+) {
+    /**
+     * Fetches one page of history from `GET /api/v1/sessions/{id}/messages`, mapped to
+     * domain messages oldest-first (the wire order is newest-first). The hardcoded
+     * page_size=100 caps history at 100 messages; `has_more` is parsed into
+     * [MessageListData] but not acted on yet (pagination: todo/043).
+     */
+    suspend fun messages(settings: ServerSettings, sessionId: String): Result<List<ChatMessage>> =
+        api.get(settings, "/api/v1/sessions/$sessionId/messages?page_size=100") { body ->
+            api.json.decodeFromString<Envelope<MessageListData>>(body).toResult().map { data ->
+                // Wire order is newest-first; domain messages are oldest-first.
+                data.items.asReversed().map { mapper.toDomain(it) }
+            }
+        }
+
+    /**
+     * Downloads one uploaded file (`GET /api/v1/files/{id}`, docs/server-api.md) —
+     * attachment chips and image viewers fetch their bytes on demand (ticket 034).
+     * The bearer token rides on the shared client.
+     */
+    suspend fun downloadFile(settings: ServerSettings, fileId: String): Result<FileDownload> =
+        api.getResponse(settings, "/api/v1/files/$fileId") { response ->
+            Result.success(
+                FileDownload(
+                    bytes = response.body?.bytes() ?: ByteArray(0),
+                    mediaType = response.body?.contentType()?.toString()
+                        ?: "application/octet-stream",
+                ),
+            )
+        }
+
+    /**
+     * Uploads one file (`POST /api/v1/files`, multipart, docs/server-api.md, Files) and
+     * returns its server metadata. The returned [FileMeta.mediaType] is sniffed from the
+     * bytes server-side, so it — not the declared [mediaType] — decides the prompt part
+     * kind in [postPrompt]. One file per request; the caller uploads sequentially.
+     */
+    suspend fun uploadFile(
+        settings: ServerSettings,
+        name: String,
+        mediaType: String,
+        bytes: ByteArray,
+    ): Result<FileMeta> {
+        val body = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart(
+                "file",
+                name,
+                bytes.toRequestBody(mediaType.toMediaTypeOrNull()),
+            )
+            .addFormDataPart("name", name)
+            .build()
+        return api.post(settings, "/api/v1/files", body) { responseBody ->
+            api.json.decodeFromString<Envelope<FileUploadData>>(responseBody).toResult().map { data ->
+                FileMeta(id = data.id, name = data.name, mediaType = data.mediaType, sizeBytes = data.size)
+            }
+        }
+    }
+
+    /** POSTs the prompt and returns its id (queued while busy, running otherwise).
+     * [thinking] is the verified per-prompt effort override (a plain string,
+     * docs/server-api.md); null leaves the field out. [attachments] become content items
+     * before the text item (ticket 033): an `image` part for image MIME types, a `file`
+     * part otherwise (docs/server-api.md, Prompts). A blank [text] adds no text item — the
+     * caller guarantees text and attachments are not both empty. */
+    suspend fun postPrompt(
+        settings: ServerSettings,
+        sessionId: String,
+        text: String,
+        attachments: List<FileMeta>,
+        model: String?,
+        thinking: String?,
+    ): Result<String> {
+        val body = api.jsonBody {
+            putJsonArray("content") {
+                for (attachment in attachments) {
+                    if (attachment.isImage) {
+                        addJsonObject {
+                            put("type", "image")
+                            putJsonObject("source") {
+                                put("kind", "file")
+                                put("file_id", attachment.id)
+                            }
+                        }
+                    } else {
+                        addJsonObject {
+                            put("type", "file")
+                            put("file_id", attachment.id)
+                            put("name", attachment.name)
+                            put("media_type", attachment.mediaType)
+                            put("size", attachment.sizeBytes)
+                        }
+                    }
+                }
+                if (text.isNotBlank()) {
+                    addJsonObject {
+                        put("type", "text")
+                        put("text", text)
+                    }
+                }
+            }
+            if (model != null) put("model", model)
+            if (thinking != null) put("thinking", thinking)
+        }
+        return api.post(settings, "/api/v1/sessions/$sessionId/prompts", body) { responseBody ->
+            api.json.decodeFromString<Envelope<PromptData>>(responseBody).toResult().map { it.promptId }
+        }
+    }
+
+    /** `POST /api/v1/sessions/{id}/prompts:steer`: injects the queued prompt into the
+     * active turn (docs/server-api.md, Steer). */
+    suspend fun postSteer(settings: ServerSettings, sessionId: String, promptId: String): Result<Unit> {
+        val body = api.jsonBody {
+            putJsonArray("prompt_ids") { add(promptId) }
+        }
+        return api.post(settings, "/api/v1/sessions/$sessionId/prompts:steer", body) { responseBody ->
+            api.json.decodeFromString<Envelope<JsonObject>>(responseBody).toAckResult()
+        }
+    }
+
+    /**
+     * Aborts the running turn (`POST /api/v1/sessions/{id}:abort`, docs/server-api.md).
+     * The ack only confirms the request; the teardown (prompt.aborted → turn.ended)
+     * arrives over the WebSocket, so success carries no payload.
+     */
+    suspend fun abortPrompt(settings: ServerSettings, sessionId: String): Result<Unit> =
+        api.post(settings, "/api/v1/sessions/$sessionId:abort", api.jsonBody {}) { body ->
+            api.json.decodeFromString<Envelope<JsonObject>>(body).toAckResult()
+        }
+
+    /**
+     * Posts the user's decision for one approval request
+     * (`POST /api/v1/sessions/{id}/approvals/{approvalId}`, docs/server-api.md). The ack
+     * only confirms the decision was registered; the pending UI clears when the
+     * `event.approval.resolved` frame arrives over the WebSocket.
+     */
+    suspend fun postApprovalDecision(
+        settings: ServerSettings,
+        sessionId: String,
+        approvalId: String,
+        approved: Boolean,
+    ): Result<Unit> {
+        val body = api.jsonBody {
+            put("decision", if (approved) "approved" else "rejected")
+        }
+        return api.post(settings, "/api/v1/sessions/$sessionId/approvals/$approvalId", body) { responseBody ->
+            api.json.decodeFromString<Envelope<JsonObject>>(responseBody).toAckResult()
+        }
+    }
+
+    /**
+     * Polls the pending questions of the session
+     * (`GET /api/v1/sessions/{id}/questions?status=pending`, docs/server-api.md) — the
+     * source of truth used to re-derive the pending question after a reconnect or a
+     * history refetch, since `GET .../questions/{qid}` does not exist.
+     */
+    suspend fun pendingQuestions(settings: ServerSettings, sessionId: String): Result<List<PendingQuestion>> =
+        api.get(settings, "/api/v1/sessions/$sessionId/questions?status=pending") { body ->
+            api.json.decodeFromString<Envelope<QuestionListData>>(body).toResult().map { data ->
+                data.items.map { mapper.toDomain(it) }
+            }
+        }
+
+    /**
+     * Posts the user's answers for one question
+     * (`POST /api/v1/sessions/{id}/questions/{questionId}`, docs/server-api.md): keys are
+     * the per-question item ids, values carry `kind` plus `option_id` or `text`. The ack
+     * only confirms the answers were registered; the pending UI clears when the
+     * `event.question.answered` frame arrives over the WebSocket.
+     */
+    suspend fun answerQuestion(
+        settings: ServerSettings,
+        sessionId: String,
+        questionId: String,
+        answers: List<QuestionAnswer>,
+    ): Result<Unit> {
+        val body = api.jsonBody {
+            putJsonObject("answers") {
+                for (answer in answers) {
+                    putJsonObject(answer.itemId) {
+                        when (answer) {
+                            is QuestionAnswer.OptionPick -> {
+                                put("kind", "single")
+                                put("option_id", answer.optionId)
+                            }
+                            is QuestionAnswer.Other -> {
+                                put("kind", "other")
+                                put("text", answer.text)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return api.post(settings, "/api/v1/sessions/$sessionId/questions/$questionId", body) { responseBody ->
+            api.json.decodeFromString<Envelope<JsonObject>>(responseBody).toAckResult()
+        }
+    }
+
+    /**
+     * Dismisses one pending question (`POST /api/v1/sessions/{id}/questions/{questionId}:dismiss`,
+     * docs/server-api.md). Beware: a successful dismiss comes back with the non-zero
+     * envelope code 40909 — success is `data.dismissed`, not `code == 0`. The pending UI
+     * clears when the `event.question.dismissed` frame arrives over the WebSocket.
+     */
+    suspend fun dismissQuestion(
+        settings: ServerSettings,
+        sessionId: String,
+        questionId: String,
+    ): Result<Unit> =
+        api.post(settings, "/api/v1/sessions/$sessionId/questions/$questionId:dismiss", api.jsonBody {}) { body ->
+            // Dismiss acks succeed with envelope code 40909 (docs/server-api.md):
+            // gate on `data.dismissed`.
+            val envelope = api.json.decodeFromString<Envelope<JsonObject>>(body)
+            val dismissed = envelope.data?.get("dismissed")?.jsonPrimitive?.booleanOrNull == true
+            when {
+                envelope.code == 0 || dismissed -> Result.success(Unit)
+                else -> Result.failure(DataError.Api(envelope.code, envelope.msg))
+            }
+        }
+
+    /** Lightweight live status (`GET /api/v1/sessions/{id}/status`): the mid-turn flag
+     * plus the context window fill when the server sends token counts (ticket 041). */
+    suspend fun sessionStatus(settings: ServerSettings, sessionId: String): Result<SessionStatus> =
+        api.get(settings, "/api/v1/sessions/$sessionId/status") { body ->
+            val envelope = api.json.decodeFromString<Envelope<SessionStatusData>>(body)
+            when {
+                envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
+                else -> Result.success(
+                    SessionStatus(
+                        busy = envelope.data?.busy == true,
+                        contextUsage = envelope.data?.let { data ->
+                            val used = data.contextTokens
+                            val max = data.maxContextTokens
+                            if (used != null && max != null) ContextUsage(used, max) else null
+                        },
+                    ),
+                )
+            }
+        }
+}

@@ -2,254 +2,56 @@ package fr.louissaglio.kimi.android.data.chat
 
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
-import androidx.datastore.preferences.core.edit
-import androidx.datastore.preferences.core.emptyPreferences
-import androidx.datastore.preferences.core.stringPreferencesKey
-import fr.louissaglio.kimi.android.data.DataError
-import fr.louissaglio.kimi.android.data.network.Envelope
+import fr.louissaglio.kimi.android.data.network.ApiClient
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
-import java.io.IOException
-import java.time.Instant
-import java.util.UUID
-import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.FlowCollector
-import kotlinx.coroutines.flow.catch
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.withContext
-import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonNull
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.add
-import kotlinx.serialization.json.addJsonObject
-import kotlinx.serialization.json.booleanOrNull
-import kotlinx.serialization.json.decodeFromJsonElement
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.put
-import kotlinx.serialization.json.putJsonArray
-import kotlinx.serialization.json.putJsonObject
-import okhttp3.HttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.Response
-import okhttp3.WebSocket
-import okhttp3.WebSocketListener
 
-/** Events of one session, parsed from the WebSocket stream (docs/server-api.md). */
-sealed interface SessionEvent {
-    data object TurnStarted : SessionEvent
-    data class TurnEnded(val reason: String) : SessionEvent
-    data class AssistantDelta(val delta: String) : SessionEvent
-    data class ThinkingDelta(val delta: String) : SessionEvent
-    data class ToolCallDelta(val toolCallId: String, val name: String) : SessionEvent
-
-    /** [preview] is derived from the started payload's display/args (ToolPreview), so the
-     * live row shows what the call is doing from the start, not only after a refetch.
-     * [input] is the full arguments as pretty-printed JSON, for the expanded row. */
-    data class ToolCallStarted(
-        val toolCallId: String,
-        val name: String,
-        val preview: String = "",
-        val input: String = "",
-    ) : SessionEvent
-
-    /** [output] is the full result text, shown by the expanded row (ticket 023). */
-    data class ToolCallResult(val toolCallId: String, val isError: Boolean, val output: String = "") : SessionEvent
-
-    /** One live output chunk of a running tool (tool.progress, volatile — ticket 025).
-     * Never creates a timeline row on its own; the definitive tool.result output
-     * replaces the accumulated chunks wholesale. */
-    data class ToolCallProgress(val toolCallId: String, val chunk: String) : SessionEvent
-
-    /** Messages spliced into the context inline (0.27.0): carries the just-sent user
-     * message, which replaced prompt.submitted as the sent-prompt echo. */
-    data class ContextSpliced(val messages: List<ChatMessage>) : SessionEvent
-
-    /** A tool call waits on the user's decision. [summary] is the compact argument
-     * preview for the approval card (the command for shell calls, else the action). */
-    data class ApprovalRequested(val approvalId: String, val toolName: String, val summary: String) : SessionEvent
-
-    /** The request was decided — by this client or another one (event.approval.resolved). */
-    data class ApprovalResolved(val approvalId: String) : SessionEvent
-
-    /** The agent asks the user a structured question (event.question.requested); the
-     * payload carries the full question inline — there is no detail endpoint to fetch. */
-    data class QuestionRequested(val question: PendingQuestion) : SessionEvent
-
-    /** The question was answered or dismissed — by this client or another one
-     * (event.question.answered / event.question.dismissed share the consumed shape). */
-    data class QuestionResolved(val questionId: String) : SessionEvent
-
-    /** Live context window fill (agent.status.updated, model/usage variant — ticket 041).
-     * Only emitted when the frame carries both token counts; phase-variant frames of the
-     * same event type emit nothing and leave the stored value untouched. */
-    data class ContextUsageUpdated(val contextUsage: ContextUsage) : SessionEvent
-}
-
-/** Context window fill of a session: used tokens out of the model's maximum. */
-data class ContextUsage(
-    val usedTokens: Long,
-    val maxTokens: Long,
-)
-
-/** Snapshot of `GET /api/v1/sessions/{id}/status` (ticket 041): [busy] is the mid-turn
- * flag; [contextUsage] is null on older servers that send no token counts. */
-data class SessionStatus(
-    val busy: Boolean,
-    val contextUsage: ContextUsage?,
-)
-
-/** What the socket reports to the collector: connection lifecycle + session events. */
-sealed interface SocketEvent {
-    /** First connection of this collection. */
-    data object Connected : SocketEvent
-
-    /** Re-connected after a drop; the server replays events newer than the resume cursor. */
-    data object Reconnected : SocketEvent
-
-    /** Connection lost (or never established); a retry with backoff is scheduled. */
-    data object Disconnected : SocketEvent
-
-    data class Event(val event: SessionEvent) : SocketEvent
-}
-
+/**
+ * Thin public facade of the chat data layer: delegates the REST verbs to [ChatApi],
+ * the WebSocket stream to [SessionSocket], the per-session model/effort prefs to
+ * [SessionPrefsStore] and the models/config fetches to [ModelsRepository], keeping
+ * only the send-path glue (model/effort resolution) here. This is the error
+ * boundary: failures come back as [Result.failure] of
+ * [fr.louissaglio.kimi.android.data.DataError].
+ */
 @Singleton
 class ChatRepository @Inject constructor(
-    private val client: OkHttpClient,
-    private val json: Json,
-    private val dataStore: DataStore<Preferences>,
+    client: OkHttpClient,
+    json: Json,
+    dataStore: DataStore<Preferences>,
 ) {
-    // Protocol-level WS pings keep the socket alive through dead NAT routes: the v2
-    // server sends no app-level pings (docs/server-api.md, Heartbeat). The read timeout
-    // stays disabled so an idle stream is not cut (the shared client sets 30 s for REST).
-    private val socketClient = client.newBuilder()
-        .readTimeout(0, TimeUnit.SECONDS)
-        .pingInterval(20, TimeUnit.SECONDS)
-        .build()
+    private val api = ApiClient(client, json)
+    private val mapper = ChatMessageMapper(json)
+    private val chatApi = ChatApi(api, mapper)
+    private val models = ModelsRepository(api)
+    private val prefs = SessionPrefsStore(dataStore)
+    private val socket = SessionSocket(client, json, mapper)
 
     /**
-     * Fetches one page of history from `GET /api/v1/sessions/{id}/messages` (pagination
-     * is out of scope for v1), mapped to domain messages oldest-first (the wire order is
-     * newest-first). This is the error boundary: failures come back as [Result.failure]
-     * of [DataError].
+     * Fetches one page of history from `GET /api/v1/sessions/{id}/messages` (the
+     * hardcoded page cap is tracked in todo/043), mapped to domain messages
+     * oldest-first (the wire order is newest-first).
      */
     suspend fun getMessages(settings: ServerSettings, sessionId: String): Result<List<ChatMessage>> =
-        withContext(Dispatchers.IO) {
-            val request = try {
-                Request.Builder()
-                    .url(
-                        settings.serverUrl.trim().trimEnd('/') +
-                            "/api/v1/sessions/$sessionId/messages?page_size=100",
-                    )
-                    .build()
-            } catch (e: IllegalArgumentException) {
-                return@withContext Result.failure(DataError.InvalidUrl)
-            }
-            try {
-                client.newCall(request).execute().use { response ->
-                    when {
-                        response.code == 401 -> Result.failure(DataError.Auth)
-                        !response.isSuccessful -> Result.failure(DataError.Http(response.code))
-                        else -> parseMessages(response.body?.string().orEmpty())
-                    }
-                }
-            } catch (e: IOException) {
-                Result.failure(DataError.Network(e))
-            }
-        }
+        chatApi.messages(settings, sessionId)
 
-    /**
-     * Downloads one uploaded file (`GET /api/v1/files/{id}`, docs/server-api.md) —
-     * attachment chips and image viewers fetch their bytes on demand (ticket 034).
-     * The bearer token rides on the shared client.
-     */
+    /** Downloads one uploaded file (`GET /api/v1/files/{id}`) — attachment chips and
+     * image viewers fetch their bytes on demand (ticket 034). */
     suspend fun downloadFile(settings: ServerSettings, fileId: String): Result<FileDownload> =
-        withContext(Dispatchers.IO) {
-            val request = try {
-                Request.Builder()
-                    .url(settings.serverUrl.trim().trimEnd('/') + "/api/v1/files/$fileId")
-                    .build()
-            } catch (e: IllegalArgumentException) {
-                return@withContext Result.failure(DataError.InvalidUrl)
-            }
-            try {
-                client.newCall(request).execute().use { response ->
-                    when {
-                        response.code == 401 -> Result.failure(DataError.Auth)
-                        !response.isSuccessful -> Result.failure(DataError.Http(response.code))
-                        else -> Result.success(
-                            FileDownload(
-                                bytes = response.body?.bytes() ?: ByteArray(0),
-                                mediaType = response.body?.contentType()?.toString()
-                                    ?: "application/octet-stream",
-                            ),
-                        )
-                    }
-                }
-            } catch (e: IOException) {
-                Result.failure(DataError.Network(e))
-            }
-        }
+        chatApi.downloadFile(settings, fileId)
 
-    /**
-     * Uploads one file (`POST /api/v1/files`, multipart, docs/server-api.md, Files) and
-     * returns its server metadata. The returned [FileMeta.mediaType] is sniffed from the
-     * bytes server-side, so it — not the declared [mediaType] — decides the prompt part
-     * kind in [postPrompt]. One file per request; the caller uploads sequentially.
-     */
+    /** Uploads one file (`POST /api/v1/files`, multipart) and returns its server
+     * metadata (ticket 033). One file per request; the caller uploads sequentially. */
     suspend fun uploadFile(
         settings: ServerSettings,
         name: String,
         mediaType: String,
         bytes: ByteArray,
-    ): Result<FileMeta> = withContext(Dispatchers.IO) {
-        val body = MultipartBody.Builder()
-            .setType(MultipartBody.FORM)
-            .addFormDataPart(
-                "file",
-                name,
-                bytes.toRequestBody(mediaType.toMediaTypeOrNull()),
-            )
-            .addFormDataPart("name", name)
-            .build()
-        val request = try {
-            Request.Builder()
-                .url(settings.serverUrl.trim().trimEnd('/') + "/api/v1/files")
-                .post(body)
-                .build()
-        } catch (e: IllegalArgumentException) {
-            return@withContext Result.failure(DataError.InvalidUrl)
-        }
-        try {
-            client.newCall(request).execute().use { response ->
-                when {
-                    response.code == 401 -> Result.failure(DataError.Auth)
-                    !response.isSuccessful -> Result.failure(DataError.Http(response.code))
-                    else -> parseUploadAck(response.body?.string().orEmpty())
-                }
-            }
-        } catch (e: IOException) {
-            Result.failure(DataError.Network(e))
-        }
-    }
+    ): Result<FileMeta> = chatApi.uploadFile(settings, name, mediaType, bytes)
 
     /**
      * Sends a user prompt (`POST /api/v1/sessions/{id}/prompts`). The response only
@@ -263,11 +65,11 @@ class ChatRepository @Inject constructor(
         sessionId: String,
         text: String,
         attachments: List<FileMeta> = emptyList(),
-    ): Result<Unit> =
-        withContext(Dispatchers.IO) {
-            val model = promptModel(settings, sessionId)
-            postPrompt(settings, sessionId, text, attachments, model, promptThinking(settings, sessionId, model)).map { }
-        }
+    ): Result<Unit> {
+        val model = promptModel(settings, sessionId)
+        return chatApi.postPrompt(settings, sessionId, text, attachments, model, promptThinking(settings, sessionId, model))
+            .map { }
+    }
 
     /**
      * Steers a message into the running turn (docs/server-api.md, Steer): the prompt is
@@ -280,865 +82,103 @@ class ChatRepository @Inject constructor(
         sessionId: String,
         text: String,
         attachments: List<FileMeta> = emptyList(),
-    ): Result<Unit> =
-        withContext(Dispatchers.IO) {
-            val model = promptModel(settings, sessionId)
-            val promptId = postPrompt(settings, sessionId, text, attachments, model, promptThinking(settings, sessionId, model))
-                .getOrElse { return@withContext Result.failure(it) }
-            postSteer(settings, sessionId, promptId)
-        }
+    ): Result<Unit> {
+        val model = promptModel(settings, sessionId)
+        val promptId = chatApi.postPrompt(settings, sessionId, text, attachments, model, promptThinking(settings, sessionId, model))
+            .getOrElse { return Result.failure(it) }
+        return chatApi.postSteer(settings, sessionId, promptId)
+    }
 
     /**
      * The model stamped on every prompt (ticket 031): the session's own choice when one
-     * was picked, else the server default from [defaultModel] (the 017 behavior), else
-     * no model field at all. This resolution feeds [postPrompt], the single choke point
-     * both [sendPrompt] and [steer] go through.
+     * was picked, else the server default from [ModelsRepository.defaultModel] (the 017
+     * behavior), else no model field at all. This resolution feeds [ChatApi.postPrompt],
+     * the single choke point both [sendPrompt] and [steer] go through.
      */
     private suspend fun promptModel(settings: ServerSettings, sessionId: String): String? =
-        sessionModel(sessionId) ?: defaultModel(settings)
-
-    /**
-     * The model chosen for one session (ticket 031), persisted in DataStore as a plain
-     * `model_for_session_<sessionId>` string preference (SettingsRepository's pattern).
-     * No stored value = follow the server default.
-     */
-    private suspend fun sessionModel(sessionId: String): String? =
-        dataStore.data
-            .catch { e -> if (e is IOException) emit(emptyPreferences()) else throw e }
-            .first()[stringPreferencesKey("model_for_session_$sessionId")]
-            ?.takeIf { it.isNotBlank() }
-
-    /** The session's stored model choice, null when the session follows the server default. */
-    suspend fun getSessionModel(sessionId: String): String? =
-        withContext(Dispatchers.IO) { sessionModel(sessionId) }
-
-    /** Persists the session's model choice; subsequent prompts carry it (see [promptModel]). */
-    suspend fun setSessionModel(sessionId: String, model: String) {
-        dataStore.edit { it[stringPreferencesKey("model_for_session_$sessionId")] = model.trim() }
-    }
+        prefs.model(sessionId) ?: models.defaultModel(settings)
 
     /**
      * The thinking effort stamped on a prompt (ticket 032): the session's stored choice,
      * but only when the models cache confirms the effective [model] supports it — a stale
      * choice (e.g. picked on K3, then the session switched to K2.7) is dropped instead of
      * sent. No stored value, an uncached models list, or a model without effort levels all
-     * mean no `thinking` field (the server default applies). The cache is read, never
-     * populated here: the send path must not block on a models fetch.
+     * mean no `thinking` field (the server default applies).
      */
     private suspend fun promptThinking(settings: ServerSettings, sessionId: String, model: String?): String? {
-        val effort = sessionEffort(sessionId) ?: return null
-        val baseUrl = settings.serverUrl.trim().trimEnd('/')
-        val models = cachedModels?.takeIf { it.first == baseUrl }?.second ?: return null
-        val supportEfforts = models.firstOrNull { it.model == model }?.supportEfforts ?: return null
+        val effort = prefs.effort(sessionId) ?: return null
+        val supportEfforts = models.cachedSupportEfforts(settings, model) ?: return null
         return effort.takeIf { it in supportEfforts }
     }
 
-    /**
-     * The effort chosen for one session (ticket 032), persisted in DataStore as a plain
-     * `effort_for_session_<sessionId>` string preference ([sessionModel]'s pattern).
-     * No stored value = follow the server default.
-     */
-    private suspend fun sessionEffort(sessionId: String): String? =
-        dataStore.data
-            .catch { e -> if (e is IOException) emit(emptyPreferences()) else throw e }
-            .first()[stringPreferencesKey("effort_for_session_$sessionId")]
-            ?.takeIf { it.isNotBlank() }
+    /** The session's stored model choice, null when the session follows the server default. */
+    suspend fun getSessionModel(sessionId: String): String? = prefs.model(sessionId)
+
+    /** Persists the session's model choice; subsequent prompts carry it (see [promptModel]). */
+    suspend fun setSessionModel(sessionId: String, model: String) = prefs.setModel(sessionId, model)
 
     /** The session's stored effort choice, null when the session follows the server default. */
-    suspend fun getSessionEffort(sessionId: String): String? =
-        withContext(Dispatchers.IO) { sessionEffort(sessionId) }
+    suspend fun getSessionEffort(sessionId: String): String? = prefs.effort(sessionId)
 
     /** Persists the session's effort choice; subsequent prompts carry it (see [promptThinking]). */
-    suspend fun setSessionEffort(sessionId: String, effort: String) {
-        dataStore.edit { it[stringPreferencesKey("effort_for_session_$sessionId")] = effort.trim() }
-    }
+    suspend fun setSessionEffort(sessionId: String, effort: String) = prefs.setEffort(sessionId, effort)
 
-    /**
-     * The models the server offers (`GET /api/v1/models`), for the chat screen's model
-     * picker. Cached per server URL exactly like [defaultModel] (a settings change
-     * refetches); fetch failures are not cached, so the next open retries.
-     */
-    @Volatile
-    private var cachedModels: Pair<String, List<ServerModel>>? = null
+    /** The models the server offers (`GET /api/v1/models`), for the chat screen's model
+     * picker. Cached per server URL; fetch failures are not cached. */
+    suspend fun getModels(settings: ServerSettings): Result<List<ServerModel>> = models.models(settings)
 
-    suspend fun getModels(settings: ServerSettings): Result<List<ServerModel>> =
-        withContext(Dispatchers.IO) {
-            val baseUrl = settings.serverUrl.trim().trimEnd('/')
-            cachedModels?.let { if (it.first == baseUrl) return@withContext Result.success(it.second) }
-            val result = fetchModels(settings)
-            result.onSuccess { cachedModels = baseUrl to it }
-            result
-        }
+    /** The server-wide default model id; null when unknown — fetch failures degrade to
+     * null instead of blocking the caller. */
+    suspend fun getDefaultModel(settings: ServerSettings): String? = models.defaultModel(settings)
 
-    /** GET /api/v1/models → `data.items` (docs/server-api.md). */
-    private fun fetchModels(settings: ServerSettings): Result<List<ServerModel>> {
-        val request = try {
-            Request.Builder()
-                .url(settings.serverUrl.trim().trimEnd('/') + "/api/v1/models")
-                .build()
-        } catch (e: IllegalArgumentException) {
-            return Result.failure(DataError.InvalidUrl)
-        }
-        return try {
-            client.newCall(request).execute().use { response ->
-                when {
-                    response.code == 401 -> Result.failure(DataError.Auth)
-                    !response.isSuccessful -> Result.failure(DataError.Http(response.code))
-                    else -> try {
-                        val envelope = json.decodeFromString<Envelope<ModelListData>>(
-                            response.body?.string().orEmpty(),
-                        )
-                        when {
-                            envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
-                            envelope.data == null -> Result.failure(DataError.Api(envelope.code, "missing data"))
-                            else -> Result.success(envelope.data.items.map { it.toDomain() })
-                        }
-                    } catch (e: SerializationException) {
-                        Result.failure(DataError.MalformedResponse(e))
-                    }
-                }
-            }
-        } catch (e: IOException) {
-            Result.failure(DataError.Network(e))
-        }
-    }
-
-    private fun ModelDto.toDomain(): ServerModel = ServerModel(
-        provider = provider,
-        model = model,
-        displayName = displayName,
-        maxContextSize = maxContextSize,
-        supportEfforts = supportEfforts,
-        defaultEffort = defaultEffort,
-    )
-
-    /** The server-wide default model id ([defaultModel]'s cache); null when unknown —
-     * fetch failures degrade to null instead of blocking the caller. */
-    suspend fun getDefaultModel(settings: ServerSettings): String? =
-        withContext(Dispatchers.IO) { defaultModel(settings) }
-
-    /**
-     * The model to send with prompts: 0.28.0+ no longer falls back to the server's
-     * `default_model` for sessions with an empty `agent_config.model` (the turn fails
-     * with `model.not_configured`), so the app passes the server default explicitly
-     * (`GET /api/v1/config`). Resolved values — including "server has no default" — are
-     * cached per server URL (a settings change refetches); fetch failures are not
-     * cached and degrade to the pre-0.28 behavior: the prompt goes out without a model.
-     */
-    @Volatile
-    private var cachedDefaultModel: Pair<String, String?>? = null
-
-    private fun defaultModel(settings: ServerSettings): String? {
-        val baseUrl = settings.serverUrl.trim().trimEnd('/')
-        cachedDefaultModel?.let { if (it.first == baseUrl) return it.second }
-        val result = fetchDefaultModel(settings)
-        result.onSuccess { cachedDefaultModel = baseUrl to it }
-        return result.getOrNull()
-    }
-
-    /** GET /api/v1/config → `data.default_model` (null when the server has none). */
-    private fun fetchDefaultModel(settings: ServerSettings): Result<String?> {
-        val request = try {
-            Request.Builder()
-                .url(settings.serverUrl.trim().trimEnd('/') + "/api/v1/config")
-                .build()
-        } catch (e: IllegalArgumentException) {
-            return Result.failure(DataError.InvalidUrl)
-        }
-        return try {
-            client.newCall(request).execute().use { response ->
-                when {
-                    response.code == 401 -> Result.failure(DataError.Auth)
-                    !response.isSuccessful -> Result.failure(DataError.Http(response.code))
-                    else -> try {
-                        val envelope = json.decodeFromString<Envelope<ConfigData>>(
-                            response.body?.string().orEmpty(),
-                        )
-                        when {
-                            envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
-                            else -> Result.success(envelope.data?.defaultModel?.takeIf { it.isNotBlank() })
-                        }
-                    } catch (e: SerializationException) {
-                        Result.failure(DataError.MalformedResponse(e))
-                    }
-                }
-            }
-        } catch (e: IOException) {
-            Result.failure(DataError.Network(e))
-        }
-    }
-
-    /** POSTs the prompt and returns its id (queued while busy, running otherwise).
-     * [thinking] is the verified per-prompt effort override (a plain string,
-     * docs/server-api.md); null leaves the field out. [attachments] become content items
-     * before the text item (ticket 033): an `image` part for image MIME types, a `file`
-     * part otherwise (docs/server-api.md, Prompts). A blank [text] adds no text item — the
-     * caller guarantees text and attachments are not both empty. */
-    private fun postPrompt(
-        settings: ServerSettings,
-        sessionId: String,
-        text: String,
-        attachments: List<FileMeta>,
-        model: String?,
-        thinking: String?,
-    ): Result<String> {
-        val body = buildJsonObject {
-            putJsonArray("content") {
-                for (attachment in attachments) {
-                    if (attachment.isImage) {
-                        addJsonObject {
-                            put("type", "image")
-                            putJsonObject("source") {
-                                put("kind", "file")
-                                put("file_id", attachment.id)
-                            }
-                        }
-                    } else {
-                        addJsonObject {
-                            put("type", "file")
-                            put("file_id", attachment.id)
-                            put("name", attachment.name)
-                            put("media_type", attachment.mediaType)
-                            put("size", attachment.sizeBytes)
-                        }
-                    }
-                }
-                if (text.isNotBlank()) {
-                    addJsonObject {
-                        put("type", "text")
-                        put("text", text)
-                    }
-                }
-            }
-            if (model != null) put("model", model)
-            if (thinking != null) put("thinking", thinking)
-        }.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
-        val request = try {
-            Request.Builder()
-                .url(settings.serverUrl.trim().trimEnd('/') + "/api/v1/sessions/$sessionId/prompts")
-                .post(body)
-                .build()
-        } catch (e: IllegalArgumentException) {
-            return Result.failure(DataError.InvalidUrl)
-        }
-        return try {
-            client.newCall(request).execute().use { response ->
-                when {
-                    response.code == 401 -> Result.failure(DataError.Auth)
-                    !response.isSuccessful -> Result.failure(DataError.Http(response.code))
-                    else -> parsePromptAck(response.body?.string().orEmpty())
-                }
-            }
-        } catch (e: IOException) {
-            Result.failure(DataError.Network(e))
-        }
-    }
-
-    private fun postSteer(settings: ServerSettings, sessionId: String, promptId: String): Result<Unit> {
-        val body = buildJsonObject {
-            putJsonArray("prompt_ids") { add(promptId) }
-        }.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
-        val request = try {
-            Request.Builder()
-                .url(settings.serverUrl.trim().trimEnd('/') + "/api/v1/sessions/$sessionId/prompts:steer")
-                .post(body)
-                .build()
-        } catch (e: IllegalArgumentException) {
-            return Result.failure(DataError.InvalidUrl)
-        }
-        return try {
-            client.newCall(request).execute().use { response ->
-                when {
-                    response.code == 401 -> Result.failure(DataError.Auth)
-                    !response.isSuccessful -> Result.failure(DataError.Http(response.code))
-                    else -> parseAck(response.body?.string().orEmpty())
-                }
-            }
-        } catch (e: IOException) {
-            Result.failure(DataError.Network(e))
-        }
-    }
-
-    /**
-     * Aborts the running turn (`POST /api/v1/sessions/{id}:abort`, docs/server-api.md).
-     * The ack only confirms the request; the teardown (prompt.aborted → turn.ended)
-     * arrives over the WebSocket, so success carries no payload.
-     */
+    /** Aborts the running turn (`POST /api/v1/sessions/{id}:abort`); the teardown
+     * arrives over the WebSocket, so success carries no payload. */
     suspend fun abortPrompt(settings: ServerSettings, sessionId: String): Result<Unit> =
-        withContext(Dispatchers.IO) {
-            val body = "{}".toRequestBody("application/json; charset=utf-8".toMediaType())
-            val request = try {
-                Request.Builder()
-                    .url(settings.serverUrl.trim().trimEnd('/') + "/api/v1/sessions/$sessionId:abort")
-                    .post(body)
-                    .build()
-            } catch (e: IllegalArgumentException) {
-                return@withContext Result.failure(DataError.InvalidUrl)
-            }
-            try {
-                client.newCall(request).execute().use { response ->
-                    when {
-                        response.code == 401 -> Result.failure(DataError.Auth)
-                        !response.isSuccessful -> Result.failure(DataError.Http(response.code))
-                        else -> parseAck(response.body?.string().orEmpty())
-                    }
-                }
-            } catch (e: IOException) {
-                Result.failure(DataError.Network(e))
-            }
-        }
+        chatApi.abortPrompt(settings, sessionId)
 
-    /**
-     * Posts the user's decision for one approval request
-     * (`POST /api/v1/sessions/{id}/approvals/{approvalId}`, docs/server-api.md). The ack
-     * only confirms the decision was registered; the pending UI clears when the
-     * `event.approval.resolved` frame arrives over the WebSocket.
-     */
+    /** Posts the user's decision for one approval request; the pending UI clears when
+     * the `event.approval.resolved` frame arrives over the WebSocket. */
     suspend fun postApprovalDecision(
         settings: ServerSettings,
         sessionId: String,
         approvalId: String,
         approved: Boolean,
-    ): Result<Unit> = withContext(Dispatchers.IO) {
-        val body = buildJsonObject {
-            put("decision", if (approved) "approved" else "rejected")
-        }.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
-        val request = try {
-            Request.Builder()
-                .url(settings.serverUrl.trim().trimEnd('/') + "/api/v1/sessions/$sessionId/approvals/$approvalId")
-                .post(body)
-                .build()
-        } catch (e: IllegalArgumentException) {
-            return@withContext Result.failure(DataError.InvalidUrl)
-        }
-        try {
-            client.newCall(request).execute().use { response ->
-                when {
-                    response.code == 401 -> Result.failure(DataError.Auth)
-                    !response.isSuccessful -> Result.failure(DataError.Http(response.code))
-                    else -> parseAck(response.body?.string().orEmpty())
-                }
-            }
-        } catch (e: IOException) {
-            Result.failure(DataError.Network(e))
-        }
-    }
+    ): Result<Unit> = chatApi.postApprovalDecision(settings, sessionId, approvalId, approved)
 
-    /**
-     * Polls the pending questions of the session
-     * (`GET /api/v1/sessions/{id}/questions?status=pending`, docs/server-api.md) — the
-     * source of truth used to re-derive the pending question after a reconnect or a
-     * history refetch, since `GET .../questions/{qid}` does not exist.
-     */
+    /** Polls the pending questions of the session — the source of truth used to
+     * re-derive the pending question after a reconnect or a history refetch. */
     suspend fun getPendingQuestions(settings: ServerSettings, sessionId: String): Result<List<PendingQuestion>> =
-        withContext(Dispatchers.IO) {
-            val request = try {
-                Request.Builder()
-                    .url(
-                        settings.serverUrl.trim().trimEnd('/') +
-                            "/api/v1/sessions/$sessionId/questions?status=pending",
-                    )
-                    .build()
-            } catch (e: IllegalArgumentException) {
-                return@withContext Result.failure(DataError.InvalidUrl)
-            }
-            try {
-                client.newCall(request).execute().use { response ->
-                    when {
-                        response.code == 401 -> Result.failure(DataError.Auth)
-                        !response.isSuccessful -> Result.failure(DataError.Http(response.code))
-                        else -> parsePendingQuestions(response.body?.string().orEmpty())
-                    }
-                }
-            } catch (e: IOException) {
-                Result.failure(DataError.Network(e))
-            }
-        }
+        chatApi.pendingQuestions(settings, sessionId)
 
-    /**
-     * Posts the user's answers for one question
-     * (`POST /api/v1/sessions/{id}/questions/{questionId}`, docs/server-api.md): keys are
-     * the per-question item ids, values carry `kind` plus `option_id` or `text`. The ack
-     * only confirms the answers were registered; the pending UI clears when the
-     * `event.question.answered` frame arrives over the WebSocket.
-     */
+    /** Posts the user's answers for one question; the pending UI clears when the
+     * `event.question.answered` frame arrives over the WebSocket. */
     suspend fun answerQuestion(
         settings: ServerSettings,
         sessionId: String,
         questionId: String,
         answers: List<QuestionAnswer>,
-    ): Result<Unit> = withContext(Dispatchers.IO) {
-        val body = buildJsonObject {
-            putJsonObject("answers") {
-                for (answer in answers) {
-                    putJsonObject(answer.itemId) {
-                        when (answer) {
-                            is QuestionAnswer.OptionPick -> {
-                                put("kind", "single")
-                                put("option_id", answer.optionId)
-                            }
-                            is QuestionAnswer.Other -> {
-                                put("kind", "other")
-                                put("text", answer.text)
-                            }
-                        }
-                    }
-                }
-            }
-        }.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
-        val request = try {
-            Request.Builder()
-                .url(settings.serverUrl.trim().trimEnd('/') + "/api/v1/sessions/$sessionId/questions/$questionId")
-                .post(body)
-                .build()
-        } catch (e: IllegalArgumentException) {
-            return@withContext Result.failure(DataError.InvalidUrl)
-        }
-        try {
-            client.newCall(request).execute().use { response ->
-                when {
-                    response.code == 401 -> Result.failure(DataError.Auth)
-                    !response.isSuccessful -> Result.failure(DataError.Http(response.code))
-                    else -> parseAck(response.body?.string().orEmpty())
-                }
-            }
-        } catch (e: IOException) {
-            Result.failure(DataError.Network(e))
-        }
-    }
+    ): Result<Unit> = chatApi.answerQuestion(settings, sessionId, questionId, answers)
 
-    /**
-     * Dismisses one pending question (`POST /api/v1/sessions/{id}/questions/{questionId}:dismiss`,
-     * docs/server-api.md). Beware: a successful dismiss comes back with the non-zero
-     * envelope code 40909 — success is `data.dismissed`, not `code == 0`. The pending UI
-     * clears when the `event.question.dismissed` frame arrives over the WebSocket.
-     */
+    /** Dismisses one pending question; the pending UI clears when the
+     * `event.question.dismissed` frame arrives over the WebSocket. */
     suspend fun dismissQuestion(
         settings: ServerSettings,
         sessionId: String,
         questionId: String,
-    ): Result<Unit> = withContext(Dispatchers.IO) {
-        val body = "{}".toRequestBody("application/json; charset=utf-8".toMediaType())
-        val request = try {
-            Request.Builder()
-                .url(
-                    settings.serverUrl.trim().trimEnd('/') +
-                        "/api/v1/sessions/$sessionId/questions/$questionId:dismiss",
-                )
-                .post(body)
-                .build()
-        } catch (e: IllegalArgumentException) {
-            return@withContext Result.failure(DataError.InvalidUrl)
-        }
-        try {
-            client.newCall(request).execute().use { response ->
-                when {
-                    response.code == 401 -> Result.failure(DataError.Auth)
-                    !response.isSuccessful -> Result.failure(DataError.Http(response.code))
-                    else -> parseDismissAck(response.body?.string().orEmpty())
-                }
-            }
-        } catch (e: IOException) {
-            Result.failure(DataError.Network(e))
-        }
-    }
+    ): Result<Unit> = chatApi.dismissQuestion(settings, sessionId, questionId)
 
     /** Lightweight live status (`GET /api/v1/sessions/{id}/status`): the mid-turn flag
      * plus the context window fill when the server sends token counts (ticket 041). */
     suspend fun getSessionStatus(settings: ServerSettings, sessionId: String): Result<SessionStatus> =
-        withContext(Dispatchers.IO) {
-            val request = try {
-                Request.Builder()
-                    .url(settings.serverUrl.trim().trimEnd('/') + "/api/v1/sessions/$sessionId/status")
-                    .build()
-            } catch (e: IllegalArgumentException) {
-                return@withContext Result.failure(DataError.InvalidUrl)
-            }
-            try {
-                client.newCall(request).execute().use { response ->
-                    when {
-                        response.code == 401 -> Result.failure(DataError.Auth)
-                        !response.isSuccessful -> Result.failure(DataError.Http(response.code))
-                        else -> try {
-                            val envelope = json.decodeFromString<Envelope<SessionStatusData>>(
-                                response.body?.string().orEmpty(),
-                            )
-                            when {
-                                envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
-                                else -> Result.success(
-                                    SessionStatus(
-                                        busy = envelope.data?.busy == true,
-                                        contextUsage = envelope.data?.let { data ->
-                                            val used = data.contextTokens
-                                            val max = data.maxContextTokens
-                                            if (used != null && max != null) ContextUsage(used, max) else null
-                                        },
-                                    ),
-                                )
-                            }
-                        } catch (e: SerializationException) {
-                            Result.failure(DataError.MalformedResponse(e))
-                        }
-                    }
-                }
-            } catch (e: IOException) {
-                Result.failure(DataError.Network(e))
-            }
-        }
+        chatApi.sessionStatus(settings, sessionId)
 
     /**
      * Streams [SocketEvent]s for [sessionId]. One collection = one socket owned here
-     * (not by the UI); cancelling the collection closes it. On a drop the loop retries
-     * with exponential backoff (1 s doubling to 30 s) and re-subscribes with the last
-     * seen cursor, so the server replays missed events; the collector is told via
+     * (not by the UI); cancelling the collection closes it. On a drop the stream
+     * retries with exponential backoff and re-subscribes with the last seen cursor, so
+     * the server replays missed events; the collector is told via
      * [SocketEvent.Reconnected] so it can also refetch history.
      */
-    fun observeSession(settings: ServerSettings, sessionId: String): Flow<SocketEvent> = flow {
-        val wsUrl = buildWsUrl(settings) ?: throw DataError.InvalidUrl
-        val clientId = "android_${UUID.randomUUID()}"
-        var cursor: Cursor? = null
-        var everConnected = false
-        var attempt = 0
-        while (currentCoroutineContext().isActive) {
-            try {
-                runConnection(
-                    url = wsUrl.newBuilder().setQueryParameter("client_id", clientId).build(),
-                    sessionId = sessionId,
-                    cursor = cursor,
-                    onOpen = {
-                        attempt = 0
-                        emit(if (everConnected) SocketEvent.Reconnected else SocketEvent.Connected)
-                        everConnected = true
-                    },
-                    onCursor = { cursor = it },
-                    onEvent = { emit(SocketEvent.Event(it)) },
-                )
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                // Fall through to the reconnect backoff below.
-            }
-            emit(SocketEvent.Disconnected)
-            delay(backoffMillis(attempt))
-            attempt = (attempt + 1).coerceAtMost(MAX_BACKOFF_SHIFT)
-        }
-    }
-
-    private data class Cursor(val seq: Long, val epoch: String)
-
-    private sealed interface Signal {
-        data object Opened : Signal
-        data class Text(val text: String) : Signal
-        data object Closed : Signal
-        data class Failed(val cause: Throwable) : Signal
-    }
-
-    /**
-     * Runs one socket connection until it closes or fails. Listener callbacks (OkHttp
-     * threads) feed a channel consumed in this coroutine, so [onOpen]/[onEvent] run
-     * sequentially on the collector's context.
-     */
-    private suspend fun FlowCollector<SocketEvent>.runConnection(
-        url: HttpUrl,
-        sessionId: String,
-        cursor: Cursor?,
-        onOpen: suspend () -> Unit,
-        onCursor: (Cursor) -> Unit,
-        onEvent: suspend (SessionEvent) -> Unit,
-    ) {
-        val signals = Channel<Signal>(Channel.UNLIMITED)
-        val webSocket = socketClient.newWebSocket(
-            Request.Builder().url(url).build(),
-            object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    signals.trySend(Signal.Opened)
-                }
-
-                override fun onMessage(webSocket: WebSocket, text: String) {
-                    signals.trySend(Signal.Text(text))
-                }
-
-                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                    webSocket.close(code, reason)
-                    signals.trySend(Signal.Closed)
-                }
-
-                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                    signals.trySend(Signal.Closed)
-                }
-
-                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    signals.trySend(Signal.Failed(t))
-                }
-            },
-        )
-        try {
-            while (true) {
-                when (val signal = signals.receive()) {
-                    Signal.Opened -> {
-                        onOpen()
-                        webSocket.send(subscribeFrame(sessionId, cursor))
-                    }
-                    is Signal.Text -> handleFrame(signal.text, webSocket, onCursor, onEvent)
-                    Signal.Closed -> return
-                    is Signal.Failed -> throw IOException("WebSocket failed", signal.cause)
-                }
-            }
-        } finally {
-            webSocket.cancel()
-            signals.close()
-        }
-    }
-
-    /** One bad frame must not kill the connection: parse failures are dropped. */
-    private suspend fun handleFrame(
-        text: String,
-        webSocket: WebSocket,
-        onCursor: (Cursor) -> Unit,
-        onEvent: suspend (SessionEvent) -> Unit,
-    ) {
-        val frame = try {
-            json.decodeFromString<WsFrame>(text)
-        } catch (e: SerializationException) {
-            return
-        }
-        // Volatile frames share the seq of the event they piggyback on (docs/server-api.md):
-        // advancing the resume cursor on them could skip the substantive event on replay.
-        if (frame.seq != null && frame.epoch != null && !frame.volatile) onCursor(Cursor(frame.seq, frame.epoch))
-        when (frame.type) {
-            // Legacy protocol: pre-v2 servers closed the connection when app-level pings
-            // went unanswered; v2 sends none, answering stays harmless (docs/server-api.md).
-            "ping" -> frame.payload
-                ?.let { runCatching { json.decodeFromJsonElement(PingPayload.serializer(), it) }.getOrNull() }
-                ?.let { webSocket.send(pongFrame(it.nonce)) }
-            "assistant.delta" -> frame.decodePayload<DeltaPayload>()
-                ?.let { onEvent(SessionEvent.AssistantDelta(it.delta)) }
-            "thinking.delta" -> frame.decodePayload<DeltaPayload>()
-                ?.let { onEvent(SessionEvent.ThinkingDelta(it.delta)) }
-            "tool.call.delta" -> frame.decodePayload<ToolCallPayload>()
-                ?.let { onEvent(SessionEvent.ToolCallDelta(it.toolCallId, it.name)) }
-            "tool.call.started" -> frame.decodePayload<ToolCallPayload>()
-                ?.let { onEvent(SessionEvent.ToolCallStarted(it.toolCallId, it.name, it.preview(), formatDetail(it.args))) }
-            "tool.result" -> frame.decodePayload<ToolResultPayload>()
-                ?.let { onEvent(SessionEvent.ToolCallResult(it.toolCallId, it.isError, formatDetail(it.output))) }
-            // Volatile live stdout streaming (docs/server-api.md); the update kind is
-            // passed through as-is — only its text is consumed.
-            "tool.progress" -> frame.decodePayload<ToolProgressPayload>()
-                ?.let { onEvent(SessionEvent.ToolCallProgress(it.toolCallId, it.update?.text.orEmpty())) }
-            "event.approval.requested" -> frame.decodePayload<ApprovalRequestedPayload>()
-                ?.let { onEvent(SessionEvent.ApprovalRequested(it.approvalId, it.toolName, it.summary())) }
-            "event.approval.resolved" -> frame.decodePayload<ApprovalResolvedPayload>()
-                ?.let { onEvent(SessionEvent.ApprovalResolved(it.approvalId)) }
-            "event.question.requested" -> frame.decodePayload<QuestionRequestedPayload>()
-                ?.let { onEvent(SessionEvent.QuestionRequested(it.toDomain())) }
-            "event.question.answered", "event.question.dismissed" ->
-                frame.decodePayload<QuestionResolvedPayload>()
-                    ?.let { onEvent(SessionEvent.QuestionResolved(it.questionId)) }
-            "turn.started" -> onEvent(SessionEvent.TurnStarted)
-            "turn.ended" -> onEvent(SessionEvent.TurnEnded(frame.decodePayload<TurnEndedPayload>()?.reason.orEmpty()))
-            // Volatile (docs/server-api.md): the model/usage variant carries the token
-            // counts; the phase variant has them null and emits nothing (ticket 041).
-            "agent.status.updated" -> frame.decodePayload<AgentStatusUpdatedPayload>()
-                ?.let { payload ->
-                    val used = payload.contextTokens
-                    val max = payload.maxContextTokens
-                    if (used != null && max != null) {
-                        onEvent(SessionEvent.ContextUsageUpdated(ContextUsage(used, max)))
-                    }
-                }
-            "context.spliced" -> frame.decodePayload<ContextSplicedPayload>()
-                ?.let { onEvent(SessionEvent.ContextSpliced(it.messages.map { msg -> msg.toDomain() })) }
-            // server_hello, ack, and events we don't render yet: ignore.
-        }
-    }
-
-    private inline fun <reified T> WsFrame.decodePayload(): T? =
-        payload?.let { runCatching { json.decodeFromJsonElement<T>(it) }.getOrNull() }
-
-    private fun buildWsUrl(settings: ServerSettings): HttpUrl? =
-        // OkHttp's HttpUrl holds only http/https; newWebSocket derives ws/wss itself.
-        settings.serverUrl.trim().trimEnd('/').toHttpUrlOrNull()
-            ?.newBuilder()
-            ?.addPathSegments("api/v1/ws")
-            ?.build()
-
-    private fun subscribeFrame(sessionId: String, cursor: Cursor?): String = buildJsonObject {
-        put("type", "subscribe")
-        put("id", "c_1")
-        putJsonObject("payload") {
-            putJsonArray("session_ids") { add(sessionId) }
-            if (cursor != null) {
-                putJsonObject("cursors") {
-                    putJsonObject(sessionId) {
-                        put("seq", cursor.seq)
-                        put("epoch", cursor.epoch)
-                    }
-                }
-            }
-        }
-    }.toString()
-
-    private fun pongFrame(nonce: String): String = buildJsonObject {
-        put("type", "pong")
-        putJsonObject("payload") { put("nonce", nonce) }
-    }.toString()
-
-    private fun parseAck(body: String): Result<Unit> = try {
-        val envelope = json.decodeFromString<Envelope<JsonObject>>(body)
-        when {
-            envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
-            else -> Result.success(Unit)
-        }
-    } catch (e: SerializationException) {
-        Result.failure(DataError.MalformedResponse(e))
-    }
-
-    /** Dismiss acks succeed with envelope code 40909 (docs/server-api.md): gate on `data.dismissed`. */
-    private fun parseDismissAck(body: String): Result<Unit> = try {
-        val envelope = json.decodeFromString<Envelope<JsonObject>>(body)
-        val dismissed = envelope.data?.get("dismissed")?.jsonPrimitive?.booleanOrNull == true
-        when {
-            envelope.code == 0 || dismissed -> Result.success(Unit)
-            else -> Result.failure(DataError.Api(envelope.code, envelope.msg))
-        }
-    } catch (e: SerializationException) {
-        Result.failure(DataError.MalformedResponse(e))
-    }
-
-    private fun parsePendingQuestions(body: String): Result<List<PendingQuestion>> = try {
-        val envelope = json.decodeFromString<Envelope<QuestionListData>>(body)
-        when {
-            envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
-            envelope.data == null -> Result.failure(DataError.Api(envelope.code, "missing data"))
-            else -> Result.success(envelope.data.items.map { it.toDomain() })
-        }
-    } catch (e: SerializationException) {
-        Result.failure(DataError.MalformedResponse(e))
-    }
-
-    private fun parsePromptAck(body: String): Result<String> = try {
-        val envelope = json.decodeFromString<Envelope<PromptData>>(body)
-        when {
-            envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
-            envelope.data == null -> Result.failure(DataError.Api(envelope.code, "missing data"))
-            else -> Result.success(envelope.data.promptId)
-        }
-    } catch (e: SerializationException) {
-        Result.failure(DataError.MalformedResponse(e))
-    }
-
-    private fun parseUploadAck(body: String): Result<FileMeta> = try {
-        val envelope = json.decodeFromString<Envelope<FileUploadData>>(body)
-        when {
-            envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
-            envelope.data == null -> Result.failure(DataError.Api(envelope.code, "missing data"))
-            else -> envelope.data.let { data ->
-                Result.success(FileMeta(id = data.id, name = data.name, mediaType = data.mediaType, sizeBytes = data.size))
-            }
-        }
-    } catch (e: SerializationException) {
-        Result.failure(DataError.MalformedResponse(e))
-    }
-
-    private fun parseMessages(body: String): Result<List<ChatMessage>> = try {
-        val envelope = json.decodeFromString<Envelope<MessageListData>>(body)
-        when {
-            envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
-            envelope.data == null -> Result.failure(DataError.Api(envelope.code, "missing data"))
-            // Wire order is newest-first; domain messages are oldest-first.
-            else -> Result.success(envelope.data.items.asReversed().map { it.toDomain() })
-        }
-    } catch (e: SerializationException) {
-        Result.failure(DataError.MalformedResponse(e))
-    }
-
-    private fun ApprovalRequestedPayload.summary(): String =
-        toolInputDisplay?.command?.takeIf { it.isNotBlank() } ?: action
-
-    /** The row preview for a started call: the server's display command when it sent
-     * one, else derived from the arguments (ToolPreview). */
-    private fun ToolCallPayload.preview(): String =
-        display?.command?.takeIf { it.isNotBlank() } ?: ToolPreview.of(args)
-
-    // Pretty-printing for the expanded tool row (ticket 023): strings render as-is,
-    // JSON values (tool inputs, structured outputs) render indented.
-    private val prettyJson = Json(json) { prettyPrint = true }
-
-    /** Renders a wire JSON value for the expanded tool row: a plain string comes out as
-     * its raw text (shell output stays untouched), anything else as pretty-printed JSON. */
-    private fun formatDetail(element: JsonElement?): String = when {
-        element == null || element is JsonNull -> ""
-        element is JsonPrimitive && element.isString -> element.content
-        else -> prettyJson.encodeToString(JsonElement.serializer(), element)
-    }
-
-    private fun QuestionRequestedPayload.toDomain(): PendingQuestion = PendingQuestion(
-        questionId = questionId,
-        items = questions.map { item ->
-            PendingQuestion.Item(
-                id = item.id,
-                header = item.header,
-                text = item.question,
-                options = item.options.map { PendingQuestion.Option(it.id, it.label, it.description) },
-                allowOther = item.allowOther,
-            )
-        },
-    )
-
-    private fun MessageDto.toDomain(): ChatMessage {
-        val domainRole = when (role) {
-            "user" -> ChatMessage.Role.User
-            "assistant" -> ChatMessage.Role.Assistant
-            "tool" -> ChatMessage.Role.Tool
-            else -> ChatMessage.Role.Other
-        }
-        return ChatMessage(
-            id = id,
-            role = domainRole,
-            parts = content.mapNotNull { it.toDomain(stripEnvelopes = domainRole == ChatMessage.Role.User) },
-            // A malformed timestamp must not fail the whole message: drop it, keep the rest.
-            createdAt = createdAt?.let { runCatching { Instant.parse(it) }.getOrNull() },
-        )
-    }
-
-    private fun ContentPartDto.toDomain(stripEnvelopes: Boolean): ChatMessage.Part? = when (type) {
-        // Internal envelopes are stripped here — the single domain boundary every
-        // ingestion path (history, context.spliced echoes) flows through. A part
-        // left blank is dropped so ChatTimeline never sees an empty bubble's text.
-        "text" -> text
-            ?.let { if (stripEnvelopes) InternalEnvelopes.strip(it) else it }
-            ?.takeIf { it.isNotBlank() }
-            // The server rewrites a prompt's file parts into this notice
-            // (docs/server-api.md, Prompts); recover the chip instead of rendering
-            // the raw sentence (ticket 034). User-role only: stripEnvelopes gates it.
-            ?.let { if (stripEnvelopes) AttachmentNotice.parse(it) ?: ChatMessage.Part.Text(it) else ChatMessage.Part.Text(it) }
-        "thinking" -> thinking?.let { ChatMessage.Part.Thinking(it) }
-        "image" -> source?.toDomain()
-        "tool_use" -> toolCallId?.let {
-            ChatMessage.Part.ToolUse(it, toolName.orEmpty(), ToolPreview.of(input), formatDetail(input))
-        }
-        "tool_result" -> toolCallId?.let { ChatMessage.Part.ToolResult(it, isError ?: false, formatDetail(output)) }
-        else -> null
-    }
-
-    private fun MediaSourceDto.toDomain(): ChatMessage.Part.Image? = when (kind) {
-        "base64" -> data?.let { ChatMessage.Part.Image(mediaType.orEmpty(), base64Data = it, fileId = null) }
-        "url" -> url?.let { parseDataUrl(it) }
-        "file" -> fileId?.let { ChatMessage.Part.Image(mediaType.orEmpty(), base64Data = null, fileId = it) }
-        else -> null
-    }
-
-    private val DATA_URL_RE = Regex("""^data:([^;,]+);base64,(.*)$""", RegexOption.DOT_MATCHES_ALL)
-
-    /** History inlines images as `data:<mime>;base64,…` urls (docs/server-api.md). */
-    private fun parseDataUrl(url: String): ChatMessage.Part.Image? =
-        DATA_URL_RE.matchEntire(url)?.let {
-            ChatMessage.Part.Image(it.groupValues[1], base64Data = it.groupValues[2], fileId = null)
-        }
-
-    private companion object {
-        const val MAX_BACKOFF_SHIFT = 5 // 1 s << 5 = 32 s, clamped to 30 s below
-
-        fun backoffMillis(attempt: Int): Long = (1_000L shl attempt).coerceAtMost(30_000L)
-    }
+    fun observeSession(settings: ServerSettings, sessionId: String): Flow<SocketEvent> =
+        socket.observe(settings, sessionId)
 }

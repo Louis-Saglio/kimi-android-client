@@ -4,6 +4,7 @@ import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.TodoParser
+import kotlinx.serialization.json.Json
 
 /**
  * Pure reducer behind the chat screen: flattens history messages into timeline rows
@@ -13,7 +14,10 @@ import fr.louissaglio.kimi.android.data.chat.TodoParser
  * History (committed) and live (in-flight turn) rows are kept apart: a refetch replaces
  * committed rows wholesale, which is what makes reconnects gap- and duplicate-free.
  */
-class ChatTimeline {
+class ChatTimeline(
+    // Default mirrors the DI Json for direct construction in tests.
+    private val todoParser: TodoParser = TodoParser(Json { ignoreUnknownKeys = true }),
+) {
 
     private val committed = mutableListOf<ChatItem>()
     private val live = mutableListOf<ChatItem>()
@@ -98,9 +102,8 @@ class ChatTimeline {
             is SessionEvent.ToolCallStarted ->
                 if (isTodoCall(event.toolCallId, event.name)) {
                     // The todo state comes from the call's input, not its result.
-                    TodoParser.of(event.name, event.input)?.let { liveTodos = it }
-                } else {
-                    upsertTool(event.toolCallId, event.name, ToolStatus.Running, event.preview, input = event.input)
+                    todoParser.of(event.name, event.input)?.let { liveTodos = it }
+                } else {                    upsertTool(event.toolCallId, event.name, ToolStatus.Running, event.preview, input = event.input)
                 }
             is SessionEvent.ToolCallResult ->
                 if (event.toolCallId in todoCallIds) Unit
@@ -225,7 +228,7 @@ class ChatTimeline {
                 }
                 message.parts.filterIsInstance<ChatMessage.Part.ToolUse>().forEach {
                     if (isTodoCall(it.toolCallId, it.toolName)) {
-                        TodoParser.of(it.toolName, it.input)?.let { parsed -> committedTodos = parsed }
+                        todoParser.of(it.toolName, it.input)?.let { parsed -> committedTodos = parsed }
                     } else {
                         committed.appendTool(
                             ChatItem.ToolActivity(it.toolCallId, it.toolName, ToolStatus.Running, it.preview, it.input),

@@ -24,6 +24,11 @@ android {
         compose = true
     }
 
+    testOptions {
+        // android.util.Log calls (data-layer warnings) no-op in local unit tests.
+        unitTests.isReturnDefaultValues = true
+    }
+
     buildTypes {
         release {
             // No release keystore yet: sign with the debug config so the APK is installable.
