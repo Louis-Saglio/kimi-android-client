@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-07-25
-(server version `0.29.1`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-07-27
+(server version `0.29.2`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments, plus
@@ -12,15 +12,25 @@ the workspace list used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `0.29.0`
-(verified 2026-07-23; see git history), `0.28.1` before that, `0.27.0` before
-that, and `0.23.3` before that. The drift from 0.29.0 to 0.29.1 is **negligible**
-for the core loop: every REST and WebSocket shape the Android app parses is
-unchanged; only server-side defaults and the models catalog moved (`config`
-default model is now `kimi-code/kimi-for-coding`, and `GET /api/v1/models`
-gains `kimi-code/k3-256k` plus refreshed `capabilities` arrays). Details inline.
-Server updates are installed by the `kimi-nightly-update` systemd timer (see
-`scripts/`), which re-verifies this protocol after every update.
+**Protocol history:** this document previously described server `0.29.1`
+(verified 2026-07-25; see git history), `0.29.0` before that, `0.28.1` before
+that, `0.27.0` before that, and `0.23.3` before that. The drift from 0.29.1 to
+0.29.2 is **minor** for the core loop: every REST and WebSocket shape the
+Android app parses is unchanged, with one exception — a steered user message
+spliced via `context.spliced` **carries an `id` again** (0.29.0 had dropped
+it; on 0.29.2 it is a fresh ULID, not the queued prompt's id — details in the
+WS section). This is backward compatible for clients that followed the 0.29.0
+advice to treat spliced-message ids as optional. Outside the core loop the
+release adds provider write endpoints (`POST`/`PUT`/`DELETE /api/v1/providers`,
+`GET /api/v1/catalog/providers[/{catalog_id}]`; the single-provider GET now
+also reveals the stored `api_key`), an optional `desktop` flag on session
+export, and a WS frame-flush fix (timing only, no shape change). The models
+catalog is unchanged apart from the `kimi-code/k3-256k` display name
+(`"k3-256k"` → `"K3-256k"`); `GET /api/v1/config` `default_model` reads
+`kimi-code/k3` on this server again (it is a config value, not protocol — see
+Models). Details inline. Server updates are installed by the
+`kimi-nightly-update` systemd timer (see `scripts/`), which re-verifies this
+protocol after every update.
 
 ## Base URL & auth
 
@@ -41,7 +51,7 @@ Server updates are installed by the `kimi-nightly-update` systemd timer (see
   so it cannot validate credentials. Use **`GET /api/v1/meta`** as the
   credential check endpoint: `200` ⇒ token valid, `401` ⇒ missing or invalid.
 
-Verified (server 0.29.1, 2026-07-25):
+Verified (server 0.29.2, 2026-07-27):
 
 ```bash
 # No token -> rejected on authenticated routes
@@ -84,10 +94,10 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
 {
   "code": 0, "msg": "success",
   "data": {
-    "server_version": "0.29.1",
+    "server_version": "0.29.2",
     "capabilities": {"websocket": true, "file_upload": true, "fs_query": true, "mcp": true, "tasks": true, "terminal": true},
-    "server_id": "01KY6G09444HX8HSQVQN0HTB6R",
-    "started_at": "2026-07-23T03:23:44.644Z",
+    "server_id": "01KYJGGW0WVW0SR8X6388R34PP",
+    "started_at": "2026-07-27T19:23:41.468Z",
     "open_in_apps": [],
     "dangerous_bypass_auth": false,
     "backend": "v2"
@@ -106,7 +116,7 @@ The models the server can run, for model pickers. Requires the token.
 curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/models
 ```
 
-Verified live on 0.29.1 (2026-07-25, `capabilities` arrays trimmed):
+Verified live on 0.29.2 (2026-07-27, `capabilities` arrays trimmed):
 
 ```json
 {
@@ -124,7 +134,7 @@ Verified live on 0.29.1 (2026-07-25, `capabilities` arrays trimmed):
        "capabilities": ["thinking", "always_thinking", "image_in", "video_in", "tool_use"],
        "support_efforts": ["low", "high", "max"], "default_effort": "high"},
       {"provider": "managed:kimi-code", "model": "kimi-code/k3-256k",
-       "display_name": "k3-256k", "max_context_size": 262144,
+       "display_name": "K3-256k", "max_context_size": 262144,
        "capabilities": ["thinking", "always_thinking", "image_in", "tool_use"],
        "support_efforts": ["low", "high", "max"], "default_effort": "high"}
     ]
@@ -141,8 +151,10 @@ Verified live on 0.29.1 (2026-07-25, `capabilities` arrays trimmed):
   `POST .../prompts`); a model *without* `support_efforts` still accepts an
   effort string but degrades it to plain thinking-on (`thinking_level: "on"`).
 - The server-wide default model is *not* in this response — it comes from
-  `GET /api/v1/config` (`data.default_model`, `kimi-code/kimi-for-coding` on
-  0.29.1; the server may change this default independently of protocol drift).
+  `GET /api/v1/config` (`data.default_model`). This is a config value, not
+  protocol: it read `kimi-code/kimi-for-coding` on 0.29.1 (2026-07-25) and
+  `kimi-code/k3` on 0.29.2 (2026-07-27) — the server may change it
+  independently of protocol drift.
 
 ## Sessions
 
@@ -150,14 +162,14 @@ Verified live on 0.29.1 (2026-07-25, `capabilities` arrays trimmed):
 
 Query params (all optional): `page_size` (default 20), `before_id`, `after_id`
 (pagination cursors — `before_id` paging verified 2026-07-22, list shape
-re-verified 2026-07-23), `status`, `include_archive`, `archived_only`,
+re-verified 2026-07-27 on 0.29.2), `status`, `include_archive`, `archived_only`,
 `exclude_empty`, `workspace_id`.
 
 ```bash
 curl -s -H "Authorization: Bearer <token>" 'http://127.0.0.1:58627/api/v1/sessions?page_size=2'
 ```
 
-Session object shape (0.29.0, fields truncated for brevity):
+Session object shape (0.29.2, fields truncated for brevity):
 
 ```json
 {
@@ -255,8 +267,8 @@ session's current config (`"off"`/`"yolo"` observed on a fresh session).
 
 ### List — `GET /api/v1/workspaces`
 
-Returns every workspace the server knows about (verified live 2026-07-23,
-server `0.29.0`). Requires the token.
+Returns every workspace the server knows about (verified live 2026-07-27,
+server `0.29.2`). Requires the token.
 
 ```bash
 curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/workspaces
@@ -368,7 +380,11 @@ Observed tags, all paired with attributes allowed on the opening tag:
 File upload backs message attachments: upload the bytes first, then reference
 the returned `file_id` in a prompt's `content` items (see Prompts below). The
 endpoints and the prompt-side rewriting were verified live on 0.29.0
-(2026-07-24, session `attach-spike`); only the video rewrite and the
+(2026-07-24, session `attach-spike`) and re-verified on 0.29.2 (2026-07-27:
+upload/download/`Range` 206/delete of a text file, plus a `file` attachment
+prompt — the ACK echo and history carried the `Attached file "…"` notice
+byte-for-byte, em dash included, and the bytes materialized under
+`<sessionDir>/attachments/`); only the video rewrite and the
 unsupported-image-format fallback remain source-derived (see caveats below).
 
 ### Upload — `POST /api/v1/files`
@@ -549,7 +565,7 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../promp
   `turn.step.started` **in the same turn** (no new `turn.started`) →
   `turn.ended` `"completed"` → a single `prompt.completed` carrying the
   **original** active prompt id. The agent then follows the steered
-  instruction.
+  instruction. Re-verified 2026-07-27 on 0.29.2.
 
 ## Abort
 
@@ -564,8 +580,8 @@ curl -s -X POST 'http://127.0.0.1:58627/api/v1/sessions/session_b6be6715...:abor
 # {"code":0,"msg":"success","data":{"aborted":true},"request_id":"01KY6GFG4S5FPPXCFMP60X0FVH"}
 ```
 
-Verified mid-run on 0.29.0 (2026-07-23): the WS then emits
-`turn.step.interrupted` (`reason: "aborted"`) → `turn.ended`
+Verified mid-run on 0.29.0 (2026-07-23) and again on 0.29.2 (2026-07-27): the
+WS then emits `turn.step.interrupted` (`reason: "aborted"`) → `turn.ended`
 (`reason: "cancelled"`) → `event.session.work_changed` (idle) →
 `prompt.aborted`.
 
@@ -599,9 +615,10 @@ runs.
 
 The agent's user-question tool (`AskUserQuestion`) surfaces as **WebSocket
 events**; the answer or dismissal is posted back via REST. Re-verified
-2026-07-23 on 0.29.0 by prompting a session to call the tool — the question
-surfaced directly, with no approval gate, under the session's default
-permission mode.
+2026-07-27 on 0.29.2 (surface + selected-option answer + dismiss + polling,
+same session flow as 2026-07-23 on 0.29.0) by prompting a session to call the
+tool — the question surfaced directly, with no approval gate, under the
+session's default permission mode.
 
 1. Surface sequence: `tool.call.started` (`"name": "AskUserQuestion"`) →
    `event.session.work_changed` with `pending_interaction: "question"` →
@@ -674,8 +691,12 @@ protocol. Clients derive it from the agent's `TodoList` tool calls, exactly as
 the web client does (`apps/kimi-web/src/composables/latestTodos.ts`). Verified
 against upstream source on `main` 2026-07-27
 (`packages/agent-core-v2/src/agent/tools/todo-list/todoListTool.ts`,
-`packages/agent-core-v2/src/session/todo/todoItem.ts`) — **not captured live**;
-treat the shapes as source-verified, not wire-verified.
+`packages/agent-core-v2/src/session/todo/todoItem.ts`) **and captured live on
+0.29.2** (2026-07-27: a three-step prompt produced `tool.call.started` with
+`"name": "TodoList"` and args `{"todos": [{"status": "in_progress", "title":
+"Run echo step-one"}, {"status": "pending", "title": "Run echo step-two"},
+{"status": "pending", "title": "Run echo step-three"}]}`; history carried the
+same `toolUse` part).
 
 - **Tool name:** `TodoList` (upstream `TODO_LIST_TOOL_NAME`). It appears
   wherever tool calls do: `toolUse` content parts in message history, and live
@@ -750,9 +771,9 @@ its `ack`.
                        "cursors":{"session_b6be6715...":{"seq":2,"epoch":"ep_01KY6G589H3J9XHG6RF1RYAE59"}}}}
 ```
 
-**Resume after disconnect** (re-verified on 0.29.0: subscribing from `seq 70`
-replayed seqs 71–78 in order, from `seq 78` replayed the later question
-events):
+**Resume after disconnect** (re-verified on 0.29.2, 2026-07-27: subscribing
+from `seq 135` replayed seqs 136–142 in order; on 0.29.0: from `seq 70`
+replayed 71–78, from `seq 78` replayed the later question events):
 
 ```json
 {"type":"subscribe","id":"r_1","payload":{"session_ids":["session_..."],
@@ -779,11 +800,14 @@ Every event frame:
 }
 ```
 
-### Captured round-trips (0.29.0)
+### Captured round-trips
 
-Full prompt with a manual-permission tool call, recorded 2026-07-23 (command:
+Full prompt with a manual-permission tool call, recorded 2026-07-23 on 0.29.0
+and **re-verified event-for-event on 0.29.2 (2026-07-27)** (command:
 `POST .../prompts` with `permission_mode: "manual"`, approval via REST as
-above). Same skeleton as 0.28.1:
+above). Same skeleton as 0.28.1 (one nit: on the 0.29.2 capture `turn.started`
+(seq 4) arrived *before* the busy `event.session.work_changed` (seq 5); treat
+their relative order as unspecified):
 
 ```
 seq 2   agent.status.updated       model/usage variant (now with thinkingEffort)
@@ -824,14 +848,14 @@ seq 43  event.session.work_changed busy=false, last_turn_reason "cancelled"
 seq 44  prompt.aborted             {"promptId": "msg_...", "abortedAt": "..."}
 ```
 
-Steer round-trip (2026-07-23): prompt A ("list 60 facts about the Moon")
-running, prompt B posted while busy (`"status": "queued"`), then
-`POST prompts:steer` with B's id:
+Steer round-trip (2026-07-27 on 0.29.2, same skeleton as 2026-07-23 on
+0.29.0): prompt A ("list 60 facts about the Moon") running, prompt B posted
+while busy (`"status": "queued"`), then `POST prompts:steer` with B's id:
 
 ```
 seq 28  prompt.steered             activePromptId=A, promptIds=[B], B's content inline
 seq 29  turn.step.completed        the current step finishes normally
-seq 30  context.spliced            the steered user message — NO id (0.29.0, see below)
+seq 30  context.spliced            the steered user message — carries a FRESH id on 0.29.2 (see below)
 seq 31  turn.step.started          next step — SAME turn, no new turn.started
 seq 33  turn.ended                 reason "completed"
 seq 35  prompt.completed           promptId = A (the original active prompt)
@@ -854,7 +878,7 @@ Dismiss path instead of the answer (2026-07-23): `event.session.work_changed`
 (`"none"`) → `event.question.dismissed` → `tool.result` with output
 `{"answers":{},"note":"User dismissed the question without answering."}`.
 
-### Core event payloads (verbatim captures, 0.29.0)
+### Core event payloads (verbatim captures, re-verified 0.29.2)
 
 **New user message** (`context.spliced`; `messages` carries full message
 objects — `start`/`deleteCount` are splice coordinates into the context).
@@ -869,14 +893,17 @@ Unchanged:
 ```
 
 **Steered user message** (`context.spliced` after `prompt.steered`) —
-**changed in 0.29.0: the spliced steered message no longer carries an `id`**
-(0.28.1 carried one). Treat spliced-message ids as optional:
+**changed again in 0.29.2: the spliced steered message carries an `id`
+again** (0.29.0/0.29.1 dropped it). Note the id is a **fresh ULID**, not the
+queued prompt's `msg_...` id (`msg_01KYJGTJCZPX81AMH663V8881Z` below vs prompt
+id `msg_01KYJGT9HN3BCDQZ8MXG4AYH69`). Keep treating spliced-message ids as
+optional — both forms are in the wild (verbatim 0.29.2 capture, 2026-07-27):
 
 ```json
 {"type":"context.spliced","seq":30,"epoch":"ep_...","session_id":"session_...","timestamp":"...",
  "payload":{"type":"context.spliced","start":6,"deleteCount":0,
-  "messages":[{"role":"user","content":[{"type":"text","text":"Stop. Reply with exactly: steered-ok-0290"}],
-               "toolCalls":[],"origin":{"kind":"user"}}],
+  "messages":[{"role":"user","content":[{"type":"text","text":"Stop. Reply with exactly: steered-ok-0292"}],
+               "toolCalls":[],"origin":{"kind":"user"},"id":"msg_01KYJGTJCZPX81AMH663V8881Z"}],
   "agentId":"main","sessionId":"session_..."}}
 ```
 
@@ -1102,8 +1129,8 @@ selected option and free text both re-verified 2026-07-23:
 ## Verification log
 
 - REST probes: `curl` against `http://127.0.0.1:58627/api/v1/...` (commands
-  inline above), server `0.29.1` (`backend: v2`).
-- Auth (re-verified 2026-07-25): `/api/v1/meta` → `401` without a token or
+  inline above), server `0.29.2` (`backend: v2`).
+- Auth (re-verified 2026-07-27): `/api/v1/meta` → `401` without a token or
   with a wrong one, `200` with `Authorization: Bearer <token>`;
   `/api/v1/healthz` is public (always `200`). Auth is server-native (bearer
   token), enforced on all authenticated REST and WebSocket routes;
@@ -1123,6 +1150,36 @@ selected option and free text both re-verified 2026-07-23:
   resolved questions (`code:40902` "already resolved"). Questions triggered by
   prompting the session to call its `AskUserQuestion` tool. No heartbeat
   frames observed.
+- 0.29.1 → 0.29.2 drift found: **one shape change in the core loop** — the
+  steered user message spliced via `context.spliced` carries an `id` again (a
+  fresh ULID, not the queued prompt's id; 0.29.0/0.29.1 dropped it). Backward
+  compatible with the Android app (`MessageDto.id` defaults to `""`). Also
+  observed: `kimi-code/k3-256k`'s `display_name` is now `"K3-256k"`, and
+  `GET /api/v1/config` `default_model` reads `kimi-code/k3` (config value, not
+  protocol). Everything else — sessions/workspaces/messages/prompts/
+  prompts:steer/approvals/questions/`:abort`/files REST shapes, every WS event
+  payload, cursor-resume replay, and all error envelopes — is byte-for-byte
+  identical to 0.29.0/0.29.1. Upstream also added provider write endpoints
+  (`POST`/`PUT`/`DELETE /api/v1/providers`, `GET /api/v1/catalog/providers`),
+  an `api_key` reveal on the single-provider GET, a `desktop` flag on session
+  export, and a WS frame-flush fix — all outside the core loop; no Android DTO
+  or parser needs updating.
+- 2026-07-27 0.29.2 round-trips (throwaway session `session_43b9ba9b-...` in
+  `/tmp/spike`): manual tool-call approval (approve path, both
+  `permission.approval.*` and legacy `event.approval.*` shapes with
+  `expires_at` +24 h), queued prompt while busy, `prompts:steer` (fresh-id
+  splice capture), idle-session steer error (`code:40402`), empty
+  `prompt_ids` error (`code:40001`), mid-run `:abort`, `AskUserQuestion`
+  surface + selected-option answer + dismiss (HTTP 200 with `code:40909`) +
+  re-answer/re-dismiss (`code:40902`), `GET questions?status=pending` polling,
+  missing `status` param error (`code:40001`), `GET questions/{qid}` confirmed
+  404, live `TodoList` capture (three-step prompt), file
+  upload/download(`Range` 206)/delete, prompt with a `file` attachment
+  (history confirmed the `Attached file "…"` notice wording, including the em
+  dash, and `<sessionDir>/attachments/` materialization), WS cursor-resume
+  (seq 135 → replayed 136–142 in order), `DELETE /api/v1/sessions/{id}`
+  confirmed 404. All captured with `websocat` 1.14.0 against
+  `ws://127.0.0.1:58627/api/v1/ws`; no heartbeat frames observed.
 - 0.29.0 → 0.29.1 drift found: **none in the core loop**. REST shapes
   (`sessions`, `workspaces`, `messages`, `prompts`, `prompts:steer`,
   `approvals`, `questions`, `:abort`, `files`) and every WebSocket event
@@ -1144,7 +1201,7 @@ selected option and free text both re-verified 2026-07-23:
 - Housekeeping notes: the `kimi-web.service` unit has `PrivateTmp=yes`, so
   `/tmp/spike` must exist in the service's mount namespace (see Sessions →
   Create). There is no session-delete endpoint (`DELETE` → 404, re-verified
-  2026-07-25); throwaway sessions created for the captures were left in place.
+  2026-07-27); throwaway sessions created for the captures were left in place.
 - 2026-07-24 attachment round-trips on 0.29.0 (session `attach-spike`, cwd the
   repo root): upload/download (incl. `Range` 206 and `content-disposition`
   inline-vs-attachment)/delete of text and png files; prompt with
