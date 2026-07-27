@@ -1,12 +1,9 @@
 package fr.louissaglio.kimi.android.ui.chat
 
 import android.content.ActivityNotFoundException
-import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.provider.OpenableColumns
-import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -43,7 +40,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -54,7 +50,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
@@ -66,41 +61,22 @@ import fr.louissaglio.kimi.android.ui.common.EmptyState
 import fr.louissaglio.kimi.android.ui.common.ErrorState
 import fr.louissaglio.kimi.android.ui.common.LoadingState
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
-import java.io.File
 import java.time.Instant
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 @Composable
 fun ChatScreen(
-    sessionId: String,
     onNavigateBack: () -> Unit,
     viewModel: ChatViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    // Document/photo picker for composer attachments (ticket 033): each Uri is resolved
-    // eagerly into name/size/mime/bytes so chips can render and the send path uploads.
-    // GetMultipleContents (not GetContent) so multi-selected files all come back via
-    // ClipData instead of being silently dropped down to the last one.
+    // Document/photo picker for composer attachments (ticket 033): the ViewModel
+    // resolves each Uri via the AttachmentStore (size-capped) into a staged chip or
+    // an error effect. GetMultipleContents (not GetContent) so multi-selected files
+    // all come back via ClipData instead of being silently dropped down to the last one.
     val attachLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
-        if (uris.isNotEmpty()) {
-            scope.launch {
-                var failed = 0
-                for (uri in uris) {
-                    val resolved = withContext(Dispatchers.IO) { resolveAttachment(context.contentResolver, uri) }
-                    if (resolved != null) {
-                        viewModel.onAttachmentPicked(resolved.name, resolved.sizeBytes, resolved.mimeType, resolved.bytes)
-                    } else {
-                        failed++
-                    }
-                }
-                if (failed > 0) snackbarHostState.showSnackbar("Could not read $failed picked file(s)")
-            }
-        }
+        viewModel.onAttachmentsPicked(uris)
     }
     LaunchedEffect(Unit) {
         viewModel.effects.collect { effect ->
@@ -122,6 +98,14 @@ fun ChatScreen(
                     snackbarHostState.showSnackbar(effect.message)
                 is ChatViewModel.Effect.AbortFailed ->
                     snackbarHostState.showSnackbar(effect.message)
+                is ChatViewModel.Effect.AttachmentPickFailed ->
+                    snackbarHostState.showSnackbar(effect.message)
+                is ChatViewModel.Effect.OpenAttachmentFailed ->
+                    snackbarHostState.showSnackbar(effect.message)
+                is ChatViewModel.Effect.OpenFile ->
+                    if (!openWithOtherApp(context, effect.contentUri, effect.mimeType)) {
+                        viewModel.onOpenAttachmentFailed(effect.name)
+                    }
             }
         }
     }
@@ -130,28 +114,10 @@ fun ChatScreen(
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) { viewModel.onScreenStopped() }
     // History attachments (ticket 034): images resolve their bytes inline (base64) or
     // via /files; tapping a thumbnail opens the full-screen viewer, tapping a file
-    // chip downloads the bytes and hands them to another app through a FileProvider.
+    // chip routes through the ViewModel, which downloads, caches and emits OpenFile.
     var fullScreenImage by remember { mutableStateOf<ChatMessage.Part.Image?>(null) }
-    val loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray? = { image ->
-        resolveImageBytes(image) { fileId -> viewModel.downloadFile(fileId).getOrNull()?.bytes }
-    }
-    val onOpenAttachment: (ChatMessage.Part.Attachment) -> Unit = open@{ attachment ->
-        val fileId = attachment.fileId ?: return@open
-        scope.launch {
-            val download = viewModel.downloadFile(fileId).getOrNull()
-            if (download == null) {
-                snackbarHostState.showSnackbar("Could not download ${attachment.name}")
-                return@launch
-            }
-            val uri = withContext(Dispatchers.IO) { writeToCache(context, attachment.name, download.bytes) }
-            if (uri == null || !openWithOtherApp(context, uri, attachment.mimeType)) {
-                snackbarHostState.showSnackbar("No app can open ${attachment.name}")
-            }
-        }
-    }
     ChatContent(
         uiState = uiState,
-        sessionId = sessionId,
         snackbarHostState = snackbarHostState,
         onNavigateBack = onNavigateBack,
         onRetry = viewModel::onRetry,
@@ -171,35 +137,17 @@ fun ChatScreen(
         onAttach = { attachLauncher.launch("*/*") },
         onAttachmentRemoved = viewModel::onAttachmentRemoved,
         onImageClick = { fullScreenImage = it },
-        onOpenAttachment = onOpenAttachment,
-        loadImageBytes = loadImageBytes,
+        onOpenAttachment = viewModel::onOpenAttachment,
+        loadImageBytes = viewModel::imageBytes,
     )
     fullScreenImage?.let { image ->
         FullScreenImageViewer(
             image = image,
-            loadImageBytes = loadImageBytes,
+            loadImageBytes = viewModel::imageBytes,
             onDismiss = { fullScreenImage = null },
         )
     }
 }
-
-/** The bytes of a history image (ticket 034): decoded from the inline base64, or
- * fetched via `GET /api/v1/files/{id}` for a file-referenced source. */
-private suspend fun resolveImageBytes(
-    image: ChatMessage.Part.Image,
-    downloadFile: suspend (String) -> ByteArray?,
-): ByteArray? =
-    image.base64Data?.let { runCatching { Base64.decode(it, Base64.DEFAULT) }.getOrNull() }
-        ?: image.fileId?.let { downloadFile(it) }
-
-/** Writes downloaded bytes to the cache dir and returns a FileProvider content Uri
- * other apps may read (ticket 034); null on any failure. */
-private fun writeToCache(context: Context, name: String, bytes: ByteArray): Uri? = runCatching {
-    val dir = File(context.cacheDir, "attachments").apply { mkdirs() }
-    val safeName = name.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "attachment" }
-    val file = File(dir, safeName).apply { writeBytes(bytes) }
-    FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-}.getOrNull()
 
 /** Hands a downloaded attachment to whatever app can view it; false when none can. */
 private fun openWithOtherApp(context: Context, uri: Uri, mimeType: String): Boolean = try {
@@ -213,41 +161,10 @@ private fun openWithOtherApp(context: Context, uri: Uri, mimeType: String): Bool
     false
 }
 
-/** A picked document resolved to upload-ready bytes (ticket 033); null on any read
- * failure. The display name/size come from the provider's OpenableColumns, the MIME
- * type from the ContentResolver (the server re-sniffs it from the bytes anyway). */
-private class ResolvedAttachment(
-    val name: String,
-    val sizeBytes: Long,
-    val mimeType: String,
-    val bytes: ByteArray,
-)
-
-private fun resolveAttachment(contentResolver: ContentResolver, uri: Uri): ResolvedAttachment? {
-    val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
-    var name: String? = null
-    var size: Long = -1
-    contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-        if (cursor.moveToFirst()) {
-            cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME).takeIf { it >= 0 }
-                ?.let { name = cursor.getString(it) }
-            cursor.getColumnIndex(OpenableColumns.SIZE).takeIf { it >= 0 }
-                ?.let { size = cursor.getLong(it) }
-        }
-    }
-    return ResolvedAttachment(
-        name = name?.takeIf { it.isNotBlank() } ?: uri.lastPathSegment ?: "attachment",
-        sizeBytes = if (size >= 0) size else bytes.size.toLong(),
-        mimeType = contentResolver.getType(uri) ?: "application/octet-stream",
-        bytes = bytes,
-    )
-}
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ChatContent(
     uiState: ChatViewModel.UiState,
-    sessionId: String,
     snackbarHostState: SnackbarHostState,
     onNavigateBack: () -> Unit,
     onRetry: () -> Unit,
@@ -278,7 +195,7 @@ private fun ChatContent(
                 title = {
                     Column {
                         Text(
-                            text = uiState.sessionTitle ?: sessionId,
+                            text = uiState.sessionLabel,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -407,15 +324,16 @@ private fun ChatContent(
                     )
                 }
             }
+            val items = uiState.items
             when {
-                uiState.items.isEmpty() && uiState.error != null ->
-                    ErrorState(uiState.error, onRetry, enabled = !uiState.isLoading)
-                uiState.items.isEmpty() && uiState.isLoading ->
+                items.isNullOrEmpty() && uiState.error != null ->
+                    ErrorState(uiState.error, onRetry, enabled = true)
+                items == null ->
                     LoadingState()
-                uiState.items.isEmpty() ->
+                items.isEmpty() ->
                     EmptyState("No messages yet")
                 else -> MessageList(
-                    uiState.items,
+                    items,
                     Modifier.weight(1f),
                     onImageClick = onImageClick,
                     onOpenAttachment = onOpenAttachment,
@@ -451,7 +369,7 @@ private fun ChatContentPreview() {
     KimiTheme {
         ChatContent(
             uiState = ChatViewModel.UiState(
-                isLoading = false,
+                sessionId = "session_86df049a-e22b-480e-842e-488b77c5469b",
                 items = listOf(
                     ChatItem.UserMessage(
                         "msg_1",
@@ -556,7 +474,6 @@ private fun ChatContentPreview() {
                 serverDefaultModel = "kimi-code/k3",
                 sessionEffort = "low",
             ),
-            sessionId = "session_86df049a-e22b-480e-842e-488b77c5469b",
             snackbarHostState = remember { SnackbarHostState() },
             onNavigateBack = {},
             onRetry = {},

@@ -1,13 +1,16 @@
 package fr.louissaglio.kimi.android.ui.chat
 
+import android.net.Uri
+import android.util.Base64
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import fr.louissaglio.kimi.android.data.attachments.AttachmentStore
 import fr.louissaglio.kimi.android.data.toUserMessage
+import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
-import fr.louissaglio.kimi.android.data.chat.FileDownload
 import fr.louissaglio.kimi.android.data.chat.FileMeta
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.data.chat.QuestionAnswer
@@ -22,6 +25,7 @@ import fr.louissaglio.kimi.android.data.sessions.displayNameFor
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import java.util.UUID
 import javax.inject.Inject
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -30,6 +34,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 
 @HiltViewModel
@@ -37,6 +42,7 @@ class ChatViewModel @Inject constructor(
     private val chatRepository: ChatRepository,
     private val sessionsRepository: SessionsRepository,
     private val settingsRepository: SettingsRepository,
+    private val attachmentStore: AttachmentStore,
     savedStateHandle: SavedStateHandle,
     // Default mirrors the DI Json for direct construction in tests.
     private val todoParser: TodoParser = TodoParser(Json { ignoreUnknownKeys = true }),
@@ -57,17 +63,28 @@ class ChatViewModel @Inject constructor(
     )
 
     /**
+     * Upload bytes of one staged attachment (ticket 033). A plain holder, NOT a data
+     * class, on purpose: [PendingAttachment] sits in UiState, and a raw ByteArray field
+     * would drag referential array equality into the state's data-class equals (and
+     * megabyte content compares into every StateFlow emission). Identity on this holder
+     * is the cheap, correct semantics — staged bytes never mutate; chip updates go
+     * through `copy(status = …)`, which keeps the same holder reference.
+     */
+    class AttachmentBytes(val value: ByteArray)
+
+    /**
      * One attachment staged in the composer (ticket 033). [bytes] are read eagerly at
-     * pick time so the chip can render a thumbnail and the send path uploads them
-     * unchanged. [status] reflects the upload driven by [onSend]: Ready → Uploading →
-     * (Failed keeps the chip and blocks the send; the snackbar's Retry re-sends).
+     * pick time (size-capped, see [AttachmentStore.MAX_PICK_BYTES]) so the chip can
+     * render a thumbnail and the send path uploads them unchanged. [status] reflects
+     * the upload driven by [onSend]: Ready → Uploading → (Failed keeps the chip and
+     * blocks the send; the snackbar's Retry re-sends).
      */
     data class PendingAttachment(
         val localId: String,
         val name: String,
         val sizeBytes: Long,
         val mimeType: String,
-        val bytes: ByteArray,
+        val bytes: AttachmentBytes,
         val status: Status = Status.Ready,
     ) {
         enum class Status { Ready, Uploading, Failed }
@@ -75,12 +92,13 @@ class ChatViewModel @Inject constructor(
         val isImage: Boolean get() = mimeType.startsWith("image/")
     }
 
-    /** [items] is empty until the first load; [error] is shown only when there is nothing to display. */
+    /** [items] is null until the first load lands; [error] is shown only when there is nothing to display. */
     data class UiState(
-        val isLoading: Boolean = true,
-        val items: List<ChatItem> = emptyList(),
+        /** The session this screen shows; [sessionLabel] falls back to it until the title loads. */
+        val sessionId: String,
+        val items: List<ChatItem>? = null,
         val error: String? = null,
-        /** Top-bar label (title → cwd basename); null until loaded, the UI falls back to the id. */
+        /** Top-bar label source (title → cwd basename); null until loaded, see [sessionLabel]. */
         val sessionTitle: String? = null,
         /** Top-bar subtitle; null when the server sent no cwd. */
         val sessionCwd: String? = null,
@@ -118,6 +136,12 @@ class ChatViewModel @Inject constructor(
          * (ticket 042); null or empty hides the widget above the composer. */
         val todos: List<Todo>? = null,
     ) {
+        /** Top-bar label: the loaded title (or cwd basename), falling back to the raw
+         * session id — the single source of truth for the fallback, so the screen no
+         * longer needs the nav argument for it. */
+        val sessionLabel: String
+            get() = sessionTitle ?: sessionId
+
         /** True when every item of the head question has an answer (option picked or other text). */
         val isQuestionSubmittable: Boolean
             get() = pendingQuestions.firstOrNull()?.items?.all { item ->
@@ -174,10 +198,23 @@ class ChatViewModel @Inject constructor(
 
         /** Same contract as approvals: no resolved event, the question card stays up. */
         data class QuestionFailed(val message: String) : Effect
+
+        /** A picked file was not staged: unreadable, or over [AttachmentStore.MAX_PICK_BYTES]. */
+        data class AttachmentPickFailed(val message: String) : Effect
+
+        /** A history attachment's bytes are downloaded and persisted (ticket 034); the
+         * screen hands [contentUri] to another app via ACTION_VIEW and reports a missing
+         * viewer back through [onOpenAttachmentFailed]. [mimeType] is the server's
+         * response Content-Type — more reliable than the notice-parsed attachment MIME. */
+        data class OpenFile(val contentUri: Uri, val mimeType: String, val name: String) : Effect
+
+        /** The download or cache-write of a history attachment failed, or no app could open it. */
+        data class OpenAttachmentFailed(val message: String) : Effect
     }
 
     private val _uiState = MutableStateFlow(
         UiState(
+            sessionId = sessionId,
             sessionTitle = if (seedTitle != null || seedCwd != null) {
                 displayNameFor(sessionId, seedTitle, seedCwd)
             } else {
@@ -224,7 +261,7 @@ class ChatViewModel @Inject constructor(
     }
 
     fun onRetry() {
-        _uiState.update { it.copy(isLoading = it.items.isEmpty(), error = null) }
+        _uiState.update { it.copy(error = null) }
         onScreenStarted()
     }
 
@@ -232,17 +269,39 @@ class ChatViewModel @Inject constructor(
         _uiState.update { it.copy(inputText = value) }
     }
 
-    /** Stages a picked file as a composer chip (ticket 033). The screen has already
-     * resolved the content Uri into name/size/mime/bytes via the ContentResolver. */
-    fun onAttachmentPicked(name: String, sizeBytes: Long, mimeType: String, bytes: ByteArray) {
-        val attachment = PendingAttachment(
-            localId = UUID.randomUUID().toString(),
-            name = name,
-            sizeBytes = sizeBytes,
-            mimeType = mimeType,
-            bytes = bytes,
-        )
-        _uiState.update { it.copy(attachments = it.attachments + attachment) }
+    /** Stages picked files as composer chips (ticket 033): the store resolves each
+     * content Uri (size-capped, see [AttachmentStore.MAX_PICK_BYTES]); files that fail
+     * the read surface one [Effect.AttachmentPickFailed] each and are not staged. */
+    fun onAttachmentsPicked(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        viewModelScope.launch {
+            for (uri in uris) {
+                onAttachmentRead(withContext(Dispatchers.IO) { attachmentStore.read(uri) })
+            }
+        }
+    }
+
+    /** Handles one store read: stages the chip or surfaces why nothing was staged.
+     * Internal because unit tests have no android.net.Uri on the JVM — they drive this
+     * directly instead of going through [onAttachmentsPicked]. */
+    internal suspend fun onAttachmentRead(result: AttachmentStore.ReadResult) {
+        when (result) {
+            is AttachmentStore.ReadResult.Ok -> {
+                val picked = result.picked
+                val attachment = PendingAttachment(
+                    localId = UUID.randomUUID().toString(),
+                    name = picked.name,
+                    sizeBytes = picked.sizeBytes,
+                    mimeType = picked.mimeType,
+                    bytes = AttachmentBytes(picked.bytes),
+                )
+                _uiState.update { it.copy(attachments = it.attachments + attachment) }
+            }
+            is AttachmentStore.ReadResult.TooLarge ->
+                _effects.send(Effect.AttachmentPickFailed("${result.name} exceeds the 50 MiB upload limit"))
+            is AttachmentStore.ReadResult.Unreadable ->
+                _effects.send(Effect.AttachmentPickFailed("Could not read ${result.name}"))
+        }
     }
 
     /** Removes a staged chip before the send; the removed file is never uploaded. */
@@ -252,10 +311,38 @@ class ChatViewModel @Inject constructor(
         }
     }
 
-    /** Bytes of one uploaded file (`GET /api/v1/files/{id}`) — history attachment chips
-     * and image viewers fetch their content on demand (ticket 034). */
-    suspend fun downloadFile(fileId: String): Result<FileDownload> =
-        chatRepository.downloadFile(settingsRepository.current(), fileId)
+    /** Bytes of a history image (ticket 034): decoded from the inline base64, or fetched
+     * via `GET /api/v1/files/{id}` for a file-referenced source. Pull-based display data
+     * for the thumbnail/full-screen viewer, hence a call rather than state or an effect. */
+    suspend fun imageBytes(image: ChatMessage.Part.Image): ByteArray? =
+        image.base64Data?.let { runCatching { Base64.decode(it, Base64.DEFAULT) }.getOrNull() }
+            ?: image.fileId?.let { fileId ->
+                chatRepository.downloadFile(settingsRepository.current(), fileId).getOrNull()?.bytes
+            }
+
+    /** Downloads a history attachment's bytes, persists them via the store, and emits
+     * [Effect.OpenFile] for the screen to hand to another app (ticket 034). */
+    fun onOpenAttachment(attachment: ChatMessage.Part.Attachment) {
+        val fileId = attachment.fileId ?: return
+        viewModelScope.launch {
+            val download = chatRepository.downloadFile(settingsRepository.current(), fileId).getOrNull()
+            if (download == null) {
+                _effects.send(Effect.OpenAttachmentFailed("Could not download ${attachment.name}"))
+                return@launch
+            }
+            val uri = withContext(Dispatchers.IO) { attachmentStore.writeToCache(attachment.name, download.bytes) }
+            if (uri == null) {
+                _effects.send(Effect.OpenAttachmentFailed("No app can open ${attachment.name}"))
+            } else {
+                _effects.send(Effect.OpenFile(uri, download.mediaType, attachment.name))
+            }
+        }
+    }
+
+    /** The screen found no viewer for an [Effect.OpenFile] (ActivityNotFoundException). */
+    fun onOpenAttachmentFailed(name: String) {
+        viewModelScope.launch { _effects.send(Effect.OpenAttachmentFailed("No app can open $name")) }
+    }
 
     private fun markAttachment(localId: String, status: PendingAttachment.Status) {
         _uiState.update { state ->
@@ -286,7 +373,7 @@ class ChatViewModel @Inject constructor(
             val uploaded = mutableListOf<FileMeta>()
             for (attachment in state.attachments) {
                 markAttachment(attachment.localId, PendingAttachment.Status.Uploading)
-                chatRepository.uploadFile(settings, attachment.name, attachment.mimeType, attachment.bytes)
+                chatRepository.uploadFile(settings, attachment.name, attachment.mimeType, attachment.bytes.value)
                     .onSuccess { meta ->
                         uploaded += meta
                         markAttachment(attachment.localId, PendingAttachment.Status.Ready)
@@ -498,12 +585,12 @@ class ChatViewModel @Inject constructor(
                 .onSuccess { messages ->
                     timeline.replaceHistory(messages, keepLive = !clearLive)
                     _uiState.update {
-                        it.copy(isLoading = false, items = timeline.items(), todos = timeline.todos(), error = null)
+                        it.copy(items = timeline.items(), todos = timeline.todos(), error = null)
                     }
                 }
                 .onFailure { error ->
-                    if (_uiState.value.items.isEmpty()) {
-                        _uiState.update { it.copy(isLoading = false, error = error.toUserMessage()) }
+                    if (_uiState.value.items.isNullOrEmpty()) {
+                        _uiState.update { it.copy(error = error.toUserMessage()) }
                     } else {
                         _effects.send(Effect.RefreshFailed(error.toUserMessage()))
                     }

@@ -1,0 +1,111 @@
+package fr.louissaglio.kimi.android.data.attachments
+
+import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
+import androidx.core.content.FileProvider
+import dagger.hilt.android.qualifiers.ApplicationContext
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.InputStream
+import javax.inject.Inject
+import javax.inject.Singleton
+
+/**
+ * Platform attachment I/O behind the chat screen (tickets 033/034): reads picked
+ * content Uris into upload-ready bytes and persists downloaded bytes as FileProvider
+ * Uris other apps can open. An interface so ViewModel unit tests can fake it — the
+ * implementation needs a Context, which plain JVM tests do not have.
+ */
+interface AttachmentStore {
+
+    /** Reads a picked content Uri, at most [MAX_PICK_BYTES] of bytes. Blocking: call
+     * off the main thread. */
+    fun read(uri: Uri): ReadResult
+
+    /** Writes downloaded bytes to the cache dir and returns a FileProvider content Uri
+     * other apps may read (ticket 034); null on any failure. Blocking. */
+    fun writeToCache(name: String, bytes: ByteArray): Uri?
+
+    /** One picked document resolved to upload-ready bytes (ticket 033). The display
+     * name/size come from the provider's OpenableColumns, the MIME type from the
+     * ContentResolver (the server re-sniffs it from the bytes anyway). */
+    class Picked(
+        val name: String,
+        val sizeBytes: Long,
+        val mimeType: String,
+        val bytes: ByteArray,
+    )
+
+    sealed interface ReadResult {
+        data class Ok(val picked: Picked) : ReadResult
+
+        /** The file is over [MAX_PICK_BYTES]; nothing was staged. */
+        data class TooLarge(val name: String) : ReadResult
+
+        data class Unreadable(val name: String) : ReadResult
+    }
+
+    companion object {
+        /** Pick-time size cap: the server's per-file upload limit (docs/server-api.md,
+         * Files — 50 MiB, enforced with 413/41301). A larger pick could never upload,
+         * and its bytes would sit in UiState memory for nothing. */
+        const val MAX_PICK_BYTES = 50L * 1024 * 1024
+    }
+}
+
+@Singleton
+class AndroidAttachmentStore @Inject constructor(
+    @ApplicationContext private val context: Context,
+) : AttachmentStore {
+
+    override fun read(uri: Uri): AttachmentStore.ReadResult {
+        val resolver = context.contentResolver
+        var name: String? = null
+        var size: Long = -1
+        resolver.query(uri, null, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME).takeIf { it >= 0 }
+                    ?.let { name = cursor.getString(it) }
+                cursor.getColumnIndex(OpenableColumns.SIZE).takeIf { it >= 0 }
+                    ?.let { size = cursor.getLong(it) }
+            }
+        }
+        val displayName = name?.takeIf { it.isNotBlank() } ?: uri.lastPathSegment ?: "attachment"
+        // The advertised size is a hint only: the stream read below is capped too.
+        if (size > AttachmentStore.MAX_PICK_BYTES) return AttachmentStore.ReadResult.TooLarge(displayName)
+        val bytes = resolver.openInputStream(uri)?.use { it.readCapped(AttachmentStore.MAX_PICK_BYTES) }
+            ?: return AttachmentStore.ReadResult.Unreadable(displayName)
+        return AttachmentStore.ReadResult.Ok(
+            AttachmentStore.Picked(
+                name = displayName,
+                sizeBytes = if (size >= 0) size else bytes.size.toLong(),
+                mimeType = resolver.getType(uri) ?: "application/octet-stream",
+                bytes = bytes,
+            ),
+        )
+    }
+
+    override fun writeToCache(name: String, bytes: ByteArray): Uri? = runCatching {
+        val dir = File(context.cacheDir, "attachments").apply { mkdirs() }
+        val safeName = name.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "attachment" }
+        val file = File(dir, safeName).apply { writeBytes(bytes) }
+        // The authority and the cache path match the manifest provider and
+        // res/xml/file_paths.xml (ticket 034).
+        FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+    }.getOrNull()
+}
+
+/** Reads the whole stream, giving up (null) as soon as it exceeds [max] bytes. */
+private fun InputStream.readCapped(max: Long): ByteArray? {
+    val out = ByteArrayOutputStream()
+    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+    var total = 0L
+    while (true) {
+        val read = read(buffer, 0, minOf(buffer.size.toLong(), max + 1 - total).toInt())
+        if (read < 0) return out.toByteArray()
+        total += read
+        if (total > max) return null
+        out.write(buffer, 0, read)
+    }
+}

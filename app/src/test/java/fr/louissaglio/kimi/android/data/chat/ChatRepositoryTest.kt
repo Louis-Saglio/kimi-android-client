@@ -186,9 +186,9 @@ class ChatRepositoryTest {
                 listOf(
                     ChatMessage.Part.Attachment("notes.txt", "text/plain", 340, "f_01KYA4RCBE4NPA1RX5TT7DB5J9"),
                     ChatMessage.Part.Text("what is in these?"),
-                    ChatMessage.Part.Image("image/png", base64Data = "aGVsbG8=", fileId = null),
-                    ChatMessage.Part.Image("image/jpeg", base64Data = "anBlZw==", fileId = null),
-                    ChatMessage.Part.Image("image/webp", base64Data = null, fileId = "f_abc"),
+                    ChatMessage.Part.Image(base64Data = "aGVsbG8=", fileId = null),
+                    ChatMessage.Part.Image(base64Data = "anBlZw==", fileId = null),
+                    ChatMessage.Part.Image(base64Data = null, fileId = "f_abc"),
                 ),
                 createdAt = Instant.parse("2026-07-24T04:12:10.000Z"),
             ),

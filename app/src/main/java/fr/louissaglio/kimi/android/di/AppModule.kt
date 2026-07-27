@@ -10,6 +10,8 @@ import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
+import fr.louissaglio.kimi.android.data.attachments.AndroidAttachmentStore
+import fr.louissaglio.kimi.android.data.attachments.AttachmentStore
 import fr.louissaglio.kimi.android.data.network.BearerTokenInterceptor
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import java.util.concurrent.TimeUnit
@@ -45,6 +47,10 @@ object AppModule {
     @Provides
     @Singleton
     fun provideJson(): Json = Json { ignoreUnknownKeys = true }
+
+    @Provides
+    @Singleton
+    fun provideAttachmentStore(impl: AndroidAttachmentStore): AttachmentStore = impl
 
     @Provides
     @Singleton

@@ -252,7 +252,7 @@ private fun AttachmentChip(
 private fun AttachmentThumbnail(attachment: ChatViewModel.PendingAttachment) {
     val thumbnail by produceState<ImageBitmap?>(initialValue = null, attachment.bytes) {
         if (attachment.isImage) {
-            value = withContext(Dispatchers.Default) { decodeSampledThumbnail(attachment.bytes, THUMBNAIL_PX) }
+            value = withContext(Dispatchers.Default) { decodeSampledThumbnail(attachment.bytes.value, THUMBNAIL_PX) }
         }
     }
     val bitmap = thumbnail

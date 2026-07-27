@@ -26,7 +26,7 @@ class ChatTimelineTest {
                     ChatMessage.Role.User,
                     listOf(
                         ChatMessage.Part.Attachment("notes.txt", "text/plain", 340, "f_01KYA4RCBE4NPA1RX5TT7DB5J9"),
-                        ChatMessage.Part.Image("image/png", base64Data = "aGVsbG8=", fileId = null),
+                        ChatMessage.Part.Image(base64Data = "aGVsbG8=", fileId = null),
                         ChatMessage.Part.Text("what is in these?"),
                     ),
                 ),
@@ -42,7 +42,7 @@ class ChatTimelineTest {
                     attachments = listOf(
                         ChatMessage.Part.Attachment("notes.txt", "text/plain", 340, "f_01KYA4RCBE4NPA1RX5TT7DB5J9"),
                     ),
-                    images = listOf(ChatMessage.Part.Image("image/png", base64Data = "aGVsbG8=", fileId = null)),
+                    images = listOf(ChatMessage.Part.Image(base64Data = "aGVsbG8=", fileId = null)),
                 ),
             ),
             timeline.items(),

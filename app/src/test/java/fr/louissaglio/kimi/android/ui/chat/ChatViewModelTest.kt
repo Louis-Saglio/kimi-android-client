@@ -1,11 +1,13 @@
 package fr.louissaglio.kimi.android.ui.chat
 
+import android.net.Uri
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.preferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.lifecycle.SavedStateHandle
+import fr.louissaglio.kimi.android.data.attachments.AttachmentStore
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
@@ -141,6 +143,14 @@ class ChatViewModelTest {
             transform(state.value).also { state.value = it }
     }
 
+    /** The store's platform I/O never runs on the JVM: tests stage chips (and exercise
+     * the failure effects) through [ChatViewModel.onAttachmentRead] directly. */
+    private class FakeAttachmentStore : AttachmentStore {
+        override fun read(uri: Uri): AttachmentStore.ReadResult = throw UnsupportedOperationException()
+
+        override fun writeToCache(name: String, bytes: ByteArray): Uri? = throw UnsupportedOperationException()
+    }
+
     @Before
     fun setUp() {
         server.start()
@@ -258,6 +268,7 @@ class ChatViewModelTest {
             ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }, dataStore),
             SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
             settingsRepository,
+            FakeAttachmentStore(),
             SavedStateHandle(mapOf("sessionId" to "session_1")),
         )
     }
@@ -424,7 +435,7 @@ class ChatViewModelTest {
     fun `stop without a running turn sends no request`() = runBlocking {
         viewModel.onScreenStarted()
         awaitServerSocket()
-        awaitState { !it.isLoading }
+        awaitState { it.items != null }
         // Drain the history/status/WS requests recorded so far.
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
@@ -481,13 +492,13 @@ class ChatViewModelTest {
     fun `context spliced shows the sent prompt bubble without a history refetch`() = runBlocking {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
-        awaitState { !it.isLoading }
+        awaitState { it.items != null }
         // Drain the history/status/WS requests recorded so far.
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
         socket.send(contextSplicedFrame(id = "msg_1", text = "hello from the phone"))
 
-        awaitState { it.items.isNotEmpty() }
+        awaitState { !it.items.isNullOrEmpty() }
         assertEquals(
             listOf(ChatItem.UserMessage("msg_1", "hello from the phone")),
             viewModel.uiState.value.items,
@@ -501,10 +512,10 @@ class ChatViewModelTest {
     fun `no duplicate user bubble after the turn ended refetch`() = runBlocking {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
-        awaitState { !it.isLoading }
+        awaitState { it.items != null }
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
         socket.send(contextSplicedFrame(id = "msg_1", text = "hello from the phone"))
-        awaitState { it.items.size == 1 }
+        awaitState { it.items?.size == 1 }
 
         // The server committed the message; the turn.ended refetch returns it in history.
         messagesBody = """
@@ -563,7 +574,7 @@ class ChatViewModelTest {
     fun `sending while idle posts a plain prompt, not a steer`() = runBlocking {
         viewModel.onScreenStarted()
         awaitServerSocket()
-        awaitState { !it.isLoading }
+        awaitState { it.items != null }
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
         viewModel.onInputChange("hello")
@@ -588,8 +599,8 @@ class ChatViewModelTest {
 
         socket.send(steerEchoSplicedFrame(text = "Stop counting"))
 
-        awaitState { it.items.isNotEmpty() }
-        val items = viewModel.uiState.value.items
+        awaitState { !it.items.isNullOrEmpty() }
+        val items = viewModel.uiState.value.items.orEmpty()
         assertEquals(1, items.size)
         assertEquals("Stop counting", (items.single() as ChatItem.UserMessage).text)
         // The turn is still running and the echo needed no history refetch.
@@ -857,6 +868,7 @@ class ChatViewModelTest {
             ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }, dataStore),
             SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
             settingsRepository,
+            FakeAttachmentStore(),
             SavedStateHandle(
                 mapOf(
                     "sessionId" to "session_1",
@@ -876,6 +888,7 @@ class ChatViewModelTest {
             ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }, dataStore),
             SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
             settingsRepository,
+            FakeAttachmentStore(),
             SavedStateHandle(
                 mapOf("sessionId" to "session_1", "cwd" to "/home/ubuntu/kimi-android-client"),
             ),
@@ -965,6 +978,7 @@ class ChatViewModelTest {
             ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }, dataStore),
             SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
             settingsRepository,
+            FakeAttachmentStore(),
             SavedStateHandle(mapOf("sessionId" to "session_1")),
         )
         recreated.onScreenStarted()
@@ -997,6 +1011,7 @@ class ChatViewModelTest {
             ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }, dataStore),
             SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
             settingsRepository,
+            FakeAttachmentStore(),
             SavedStateHandle(mapOf("sessionId" to "session_1")),
         )
         recreated.onScreenStarted()
@@ -1032,10 +1047,10 @@ class ChatViewModelTest {
     fun `attachment send uploads the file then posts the prompt with its content item`() = runBlocking {
         viewModel.onScreenStarted()
         awaitServerSocket()
-        awaitState { !it.isLoading }
+        awaitState { it.items != null }
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
-        viewModel.onAttachmentPicked("a.txt", 5, "text/plain", "hello".toByteArray())
+        stagePicked("a.txt", 5, "text/plain", "hello".toByteArray())
         viewModel.onInputChange("see attached")
         viewModel.onSend()
 
@@ -1060,10 +1075,10 @@ class ChatViewModelTest {
         filesResponseGate = gate
         viewModel.onScreenStarted()
         awaitServerSocket()
-        awaitState { !it.isLoading }
+        awaitState { it.items != null }
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
-        viewModel.onAttachmentPicked("a.txt", 5, "text/plain", "hello".toByteArray())
+        stagePicked("a.txt", 5, "text/plain", "hello".toByteArray())
         viewModel.onSend()
         awaitState {
             it.isSending && it.attachments.single().status == ChatViewModel.PendingAttachment.Status.Uploading
@@ -1091,13 +1106,13 @@ class ChatViewModelTest {
         uploadsSucceed = false
         viewModel.onScreenStarted()
         awaitServerSocket()
-        awaitState { !it.isLoading }
+        awaitState { it.items != null }
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
         val effects = CopyOnWriteArrayList<ChatViewModel.Effect>()
         val effectJob = launch { viewModel.effects.collect { effects += it } }
         try {
-            viewModel.onAttachmentPicked("a.txt", 5, "text/plain", "hello".toByteArray())
+            stagePicked("a.txt", 5, "text/plain", "hello".toByteArray())
             viewModel.onSend()
             awaitRequest("/api/v1/files")
             withTimeout(5_000) { while (effects.isEmpty()) delay(10) }
@@ -1120,10 +1135,10 @@ class ChatViewModelTest {
     fun `removing a chip excludes the file from the send`() = runBlocking {
         viewModel.onScreenStarted()
         awaitServerSocket()
-        awaitState { !it.isLoading }
+        awaitState { it.items != null }
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
-        viewModel.onAttachmentPicked("a.txt", 5, "text/plain", "hello".toByteArray())
+        stagePicked("a.txt", 5, "text/plain", "hello".toByteArray())
         val localId = viewModel.uiState.value.attachments.single().localId
         viewModel.onAttachmentRemoved(localId)
         assertEquals(emptyList<ChatViewModel.PendingAttachment>(), viewModel.uiState.value.attachments)
@@ -1139,6 +1154,33 @@ class ChatViewModelTest {
         // No upload happened for the removed chip.
         assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
     }
+
+    @Test
+    fun `over-cap and unreadable picks emit AttachmentPickFailed and stage nothing`() = runBlocking {
+        val effects = CopyOnWriteArrayList<ChatViewModel.Effect>()
+        val effectJob = launch { viewModel.effects.collect { effects += it } }
+        try {
+            viewModel.onAttachmentRead(AttachmentStore.ReadResult.TooLarge("big.bin"))
+            viewModel.onAttachmentRead(AttachmentStore.ReadResult.Unreadable("broken.bin"))
+            withTimeout(5_000) { while (effects.size < 2) delay(10) }
+
+            assertEquals(
+                listOf(
+                    ChatViewModel.Effect.AttachmentPickFailed("big.bin exceeds the 50 MiB upload limit"),
+                    ChatViewModel.Effect.AttachmentPickFailed("Could not read broken.bin"),
+                ),
+                effects,
+            )
+            assertEquals(emptyList<ChatViewModel.PendingAttachment>(), viewModel.uiState.value.attachments)
+        } finally {
+            effectJob.cancel()
+        }
+    }
+
+    /** Stages a composer chip the way the pick flow does, without an android.net.Uri
+     * (unavailable on JVM unit tests). */
+    private suspend fun stagePicked(name: String, sizeBytes: Long, mimeType: String, bytes: ByteArray) =
+        viewModel.onAttachmentRead(AttachmentStore.ReadResult.Ok(AttachmentStore.Picked(name, sizeBytes, mimeType, bytes)))
 
     private suspend fun awaitServerSocket(): WebSocket = withTimeout(5_000) {
         while (serverSocket == null) delay(10)

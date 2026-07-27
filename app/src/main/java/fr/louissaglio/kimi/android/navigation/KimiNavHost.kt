@@ -58,11 +58,10 @@ fun KimiNavHost() {
                     defaultValue = null
                 },
             ),
-        ) { backStackEntry ->
-            ChatScreen(
-                sessionId = backStackEntry.arguments?.getString("sessionId").orEmpty(),
-                onNavigateBack = { navController.popBackStack() },
-            )
+        ) {
+            // sessionId/title/cwd reach the ViewModel through its SavedStateHandle;
+            // the screen itself needs nothing from the route.
+            ChatScreen(onNavigateBack = { navController.popBackStack() })
         }
     }
 }

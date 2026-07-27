@@ -87,16 +87,16 @@ internal class ChatMessageMapper(json: Json) {
     }
 
     private fun toDomain(dto: MediaSourceDto): ChatMessage.Part.Image? = when (dto.kind) {
-        "base64" -> dto.data?.let { ChatMessage.Part.Image(dto.mediaType.orEmpty(), base64Data = it, fileId = null) }
+        "base64" -> dto.data?.let { ChatMessage.Part.Image(base64Data = it, fileId = null) }
         "url" -> dto.url?.let { parseDataUrl(it) }
-        "file" -> dto.fileId?.let { ChatMessage.Part.Image(dto.mediaType.orEmpty(), base64Data = null, fileId = it) }
+        "file" -> dto.fileId?.let { ChatMessage.Part.Image(base64Data = null, fileId = it) }
         else -> null
     }
 
     /** History inlines images as `data:<mime>;base64,…` urls (docs/server-api.md). */
     private fun parseDataUrl(url: String): ChatMessage.Part.Image? =
         DATA_URL_RE.matchEntire(url)?.let {
-            ChatMessage.Part.Image(it.groupValues[1], base64Data = it.groupValues[2], fileId = null)
+            ChatMessage.Part.Image(base64Data = it.groupValues[2], fileId = null)
         }
 
     private companion object {
