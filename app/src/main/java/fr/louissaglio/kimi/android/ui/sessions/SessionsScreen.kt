@@ -21,7 +21,6 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -64,10 +63,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import fr.louissaglio.kimi.android.data.sessions.Session
 import fr.louissaglio.kimi.android.data.sessions.Workspace
 import fr.louissaglio.kimi.android.data.sessions.displayName
+import fr.louissaglio.kimi.android.ui.common.EmptyState
+import fr.louissaglio.kimi.android.ui.common.ErrorState
+import fr.louissaglio.kimi.android.ui.common.LoadingState
+import fr.louissaglio.kimi.android.ui.common.formatTimestamp
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 import java.time.Instant
-import java.time.ZoneId
-import java.time.format.DateTimeFormatter
 
 @Composable
 fun SessionsScreen(
@@ -157,12 +158,17 @@ private fun SessionsContent(
         ) {
             when {
                 uiState.sessions == null && uiState.error != null ->
-                    ErrorState(uiState.error, onRetry, enabled = !uiState.isLoading)
+                    // verticalScroll makes the otherwise static state reach pull-to-refresh's nested scroll.
+                    ErrorState(
+                        uiState.error,
+                        onRetry,
+                        enabled = !uiState.isLoading,
+                        modifier = Modifier.verticalScroll(rememberScrollState()),
+                    )
                 uiState.sessions == null ->
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator()
-                    }
-                uiState.sessions.isEmpty() -> EmptyState()
+                    LoadingState()
+                uiState.sessions.isEmpty() ->
+                    EmptyState("No sessions yet", modifier = Modifier.verticalScroll(rememberScrollState()))
                 else -> SessionList(uiState, onSessionClick, onEndReached)
             }
             PullToRefreshContainer(
@@ -363,35 +369,6 @@ private fun ApprovalBadge() {
         Text("!")
     }
 }
-
-@Composable
-private fun ErrorState(message: String, onRetry: () -> Unit, enabled: Boolean) {
-    // verticalScroll makes the otherwise static state reach pull-to-refresh's nested scroll.
-    Column(
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
-    ) {
-        Text(text = message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyLarge)
-        Button(onClick = onRetry, enabled = enabled) {
-            Text("Retry")
-        }
-    }
-}
-
-@Composable
-private fun EmptyState() {
-    Column(
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-    ) {
-        Text(text = "No sessions yet", style = MaterialTheme.typography.bodyLarge)
-    }
-}
-
-private fun formatTimestamp(instant: Instant): String =
-    DateTimeFormatter.ofPattern("MMM d, HH:mm").withZone(ZoneId.systemDefault()).format(instant)
 
 /** How close (in rows) to the list end the scroll must get before the next page loads. */
 private const val LOAD_MORE_THRESHOLD = 3

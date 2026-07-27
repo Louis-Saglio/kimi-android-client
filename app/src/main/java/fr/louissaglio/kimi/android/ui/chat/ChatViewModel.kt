@@ -4,7 +4,7 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
-import fr.louissaglio.kimi.android.data.DataError
+import fr.louissaglio.kimi.android.data.toUserMessage
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
 import fr.louissaglio.kimi.android.data.chat.FileDownload
@@ -642,15 +642,5 @@ class ChatViewModel @Inject constructor(
                     }
                 }
         }
-    }
-
-    private fun Throwable.toUserMessage(): String = when (this) {
-        is DataError.InvalidUrl -> "Invalid server URL — check Settings"
-        is DataError.Auth -> "Authentication failed — check Settings"
-        is DataError.Network -> "Server unreachable"
-        is DataError.Http -> "Unexpected server response (HTTP $code)"
-        is DataError.Api -> serverMessage.ifBlank { "Server error $code" }
-        is DataError.MalformedResponse -> "Malformed server response"
-        else -> message ?: "Unknown error"
     }
 }
