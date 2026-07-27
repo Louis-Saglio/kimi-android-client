@@ -12,6 +12,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -47,22 +48,31 @@ class ChatAutoScrollTest {
         }
     }
 
+    /** The final row is fully on screen and its tail sits at the viewport end
+     * (within the auto-scroll slop plus the 8dp end padding). */
+    private fun assertPinnedAtBottom(listState: LazyListState, itemCount: Int) {
+        val info = listState.layoutInfo
+        val last = info.visibleItemsInfo.last()
+        assertEquals(itemCount - 1, last.index)
+        val gapToEnd = info.viewportEndOffset - (last.offset + last.size)
+        val maxGapPx = with(composeTestRule.density) { (32.dp + 8.dp).toPx() }
+        assertTrue("tail is $gapToEnd px from the viewport end", gapToEnd in 0..maxGapPx.toInt())
+    }
+
     @Test
     fun pinnedAtBottomStaysPinnedWhenItemsAreAppended() {
         val items = mutableStateOf(messages(20))
         val listState = LazyListState()
         messageList(items, listState)
         composeTestRule.waitForIdle()
-        assertEquals(0, listState.firstVisibleItemIndex)
-        assertEquals(0, listState.firstVisibleItemScrollOffset)
+        assertPinnedAtBottom(listState, 20)
 
         items.value = items.value + toolCall("tool_1")
         composeTestRule.waitForIdle()
 
         // Pre-fix, the key-based re-anchor left the viewport on the old newest
-        // row (index 1), so this assertion was RED.
-        assertEquals(0, listState.firstVisibleItemIndex)
-        assertEquals(0, listState.firstVisibleItemScrollOffset)
+        // row, so this assertion was RED.
+        assertPinnedAtBottom(listState, 21)
     }
 
     @Test
