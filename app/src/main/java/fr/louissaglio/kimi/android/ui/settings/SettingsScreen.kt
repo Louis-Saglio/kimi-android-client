@@ -87,6 +87,9 @@ private fun SettingsContent(
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { innerPadding ->
+        // Stored settings land asynchronously: nothing renders until they arrive, so the
+        // fields never flash the defaults over the user's values.
+        if (!uiState.isLoaded) return@Scaffold
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -148,7 +151,7 @@ private fun SettingsContent(
 private fun SettingsContentPreview() {
     KimiTheme {
         SettingsContent(
-            uiState = SettingsViewModel.UiState(token = "tok123"),
+            uiState = SettingsViewModel.UiState(token = "tok123", isLoaded = true),
             snackbarHostState = remember { SnackbarHostState() },
             onNavigateBack = {},
             onServerUrlChange = {},

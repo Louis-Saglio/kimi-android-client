@@ -24,6 +24,9 @@ class SettingsViewModel @Inject constructor(
     data class UiState(
         val serverUrl: String = ServerSettings.DEFAULT_SERVER_URL,
         val token: String = "",
+        // False until the stored settings land: the screen renders nothing before that,
+        // so the fields never flash the defaults over the user's values.
+        val isLoaded: Boolean = false,
         val isTestingConnection: Boolean = false,
         val testResult: TestResult? = null,
     )
@@ -50,6 +53,7 @@ class SettingsViewModel @Inject constructor(
                 it.copy(
                     serverUrl = stored.serverUrl,
                     token = stored.token,
+                    isLoaded = true,
                 )
             }
         }

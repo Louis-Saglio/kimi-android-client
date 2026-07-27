@@ -118,6 +118,10 @@ data class WsFrame(
     val type: String = "",
     val seq: Long? = null,
     val epoch: String? = null,
+    // Only on high-frequency deltas; absent otherwise (docs/server-api.md). Volatile
+    // frames share the seq of the event they piggyback on, so they must not move the
+    // resume cursor.
+    val volatile: Boolean = false,
     val payload: JsonObject? = null,
 )
 

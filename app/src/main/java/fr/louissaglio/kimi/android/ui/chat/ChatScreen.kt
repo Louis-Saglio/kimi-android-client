@@ -515,8 +515,13 @@ private fun ChatContent(
         )
     }
     // Re-derived from the state at open time: a clearing TodoList call while the sheet
-    // is up simply closes it (there is nothing left to show).
+    // is up simply closes it (there is nothing left to show). The open flag resets on
+    // that transition too — otherwise the next non-empty list would pop the sheet back
+    // with no tap.
     val todos = uiState.todos
+    LaunchedEffect(todos.isNullOrEmpty()) {
+        if (todos.isNullOrEmpty()) showTodos = false
+    }
     if (showTodos && !todos.isNullOrEmpty()) {
         TodosSheet(todos = todos, onDismiss = { showTodos = false })
     }

@@ -115,7 +115,7 @@ class ChatTimeline {
             is SessionEvent.ToolCallProgress ->
                 if (event.toolCallId !in todoCallIds) appendToolProgress(event.toolCallId, event.chunk)
             is SessionEvent.ContextSpliced -> event.messages.forEach(::appendSpliced)
-            // TurnEnded / PromptSubmitted: the ViewModel refetches history instead.
+            // TurnEnded: the ViewModel refetches history instead.
             else -> Unit
         }
     }

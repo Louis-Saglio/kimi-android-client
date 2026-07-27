@@ -447,9 +447,6 @@ class ChatViewModel @Inject constructor(
                 refreshHistory(clearLive = true)
                 refreshPendingQuestions()
             }
-            SessionEvent.PromptSubmitted ->
-                // Pick up the new user message (the event carries no text).
-                refreshHistory(clearLive = false)
             is SessionEvent.ApprovalRequested ->
                 _uiState.update {
                     // Deduped: a reconnect replay must not queue the same request twice.

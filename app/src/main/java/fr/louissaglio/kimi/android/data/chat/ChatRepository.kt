@@ -78,7 +78,6 @@ sealed interface SessionEvent {
      * Never creates a timeline row on its own; the definitive tool.result output
      * replaces the accumulated chunks wholesale. */
     data class ToolCallProgress(val toolCallId: String, val chunk: String) : SessionEvent
-    data object PromptSubmitted : SessionEvent
 
     /** Messages spliced into the context inline (0.27.0): carries the just-sent user
      * message, which replaced prompt.submitted as the sent-prompt echo. */
@@ -138,9 +137,13 @@ class ChatRepository @Inject constructor(
     private val json: Json,
     private val dataStore: DataStore<Preferences>,
 ) {
-    // The app-level ping/pong keeps aliveness; disable the read timeout so an idle
-    // stream is not cut (the shared client sets 30 s for REST).
-    private val socketClient = client.newBuilder().readTimeout(0, TimeUnit.SECONDS).build()
+    // Protocol-level WS pings keep the socket alive through dead NAT routes: the v2
+    // server sends no app-level pings (docs/server-api.md, Heartbeat). The read timeout
+    // stays disabled so an idle stream is not cut (the shared client sets 30 s for REST).
+    private val socketClient = client.newBuilder()
+        .readTimeout(0, TimeUnit.SECONDS)
+        .pingInterval(20, TimeUnit.SECONDS)
+        .build()
 
     /**
      * Fetches one page of history from `GET /api/v1/sessions/{id}/messages` (pagination
@@ -899,9 +902,12 @@ class ChatRepository @Inject constructor(
         } catch (e: SerializationException) {
             return
         }
-        if (frame.seq != null && frame.epoch != null) onCursor(Cursor(frame.seq, frame.epoch))
+        // Volatile frames share the seq of the event they piggyback on (docs/server-api.md):
+        // advancing the resume cursor on them could skip the substantive event on replay.
+        if (frame.seq != null && frame.epoch != null && !frame.volatile) onCursor(Cursor(frame.seq, frame.epoch))
         when (frame.type) {
-            // The server closes the connection if app-level pings go unanswered.
+            // Legacy protocol: pre-v2 servers closed the connection when app-level pings
+            // went unanswered; v2 sends none, answering stays harmless (docs/server-api.md).
             "ping" -> frame.payload
                 ?.let { runCatching { json.decodeFromJsonElement(PingPayload.serializer(), it) }.getOrNull() }
                 ?.let { webSocket.send(pongFrame(it.nonce)) }
@@ -940,7 +946,6 @@ class ChatRepository @Inject constructor(
                         onEvent(SessionEvent.ContextUsageUpdated(ContextUsage(used, max)))
                     }
                 }
-            "prompt.submitted" -> onEvent(SessionEvent.PromptSubmitted)
             "context.spliced" -> frame.decodePayload<ContextSplicedPayload>()
                 ?.let { onEvent(SessionEvent.ContextSpliced(it.messages.map { msg -> msg.toDomain() })) }
             // server_hello, ack, and events we don't render yet: ignore.

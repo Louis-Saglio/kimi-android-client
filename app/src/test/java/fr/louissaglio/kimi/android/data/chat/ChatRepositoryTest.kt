@@ -906,6 +906,60 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun `volatile frames do not advance the resume cursor`() = runBlocking {
+        val clientFrames = CopyOnWriteArrayList<String>()
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: Response) {
+                        webSocket.send(
+                            """{"type":"turn.started","seq":5,"epoch":"ep_1","session_id":"session_1",""" +
+                                """"timestamp":"2026-07-23T03:28:34.668Z","payload":{"type":"turn.started","turnId":0}}""",
+                        )
+                        // Volatile frames share the seq of the event they piggyback on
+                        // (docs/server-api.md): this one must not move the resume cursor,
+                        // or the replay after a drop could skip the substantive seq-6 event.
+                        webSocket.send(
+                            """{"type":"assistant.delta","seq":6,"epoch":"ep_1","volatile":true,"offset":0,""" +
+                                """"session_id":"session_1","timestamp":"2026-07-23T03:28:34.768Z",""" +
+                                """"payload":{"type":"assistant.delta","turnId":0,"delta":"ok"}}""",
+                        )
+                        webSocket.close(1000, "drop")
+                    }
+
+                    override fun onMessage(webSocket: WebSocket, text: String) {
+                        clientFrames += text
+                    }
+                },
+            ),
+        )
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onMessage(webSocket: WebSocket, text: String) {
+                        clientFrames += text
+                    }
+                },
+            ),
+        )
+
+        val job = launch { repository.observeSession(settings(), "session_1").collect {} }
+        try {
+            // The reconnect goes through the 1 s first backoff step; only the resume
+            // subscribe carries a cursor (the first one may race the server's close and
+            // never reach the MockWebServer listener — it is not what is asserted).
+            withTimeout(10_000) { while (clientFrames.none { "\"cursors\"" in it }) delay(10) }
+        } finally {
+            job.cancel()
+        }
+
+        val resubscribe = clientFrames.first { "\"cursors\"" in it }
+        assertTrue(resubscribe, resubscribe.contains("\"seq\":5"))
+        assertTrue(resubscribe, resubscribe.contains("\"epoch\":\"ep_1\""))
+        Unit
+    }
+
+    @Test
     fun `tool call started frame emits the command preview`() = runBlocking {
         server.enqueue(
             MockResponse().withWebSocketUpgrade(
