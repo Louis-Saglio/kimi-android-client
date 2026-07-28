@@ -2,19 +2,26 @@ package fr.louissaglio.kimi.android.ui.chat
 
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
@@ -38,6 +45,13 @@ internal fun MessageList(
     loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray? = { null },
     /** Invoked with the subagentId when a linked `Agent` tool row is tapped (ticket 045). */
     onOpenSubagent: (String) -> Unit = {},
+    /** Top-anchored history pagination (ticket 046 on the sub-agent page; the 043
+     * mechanics): a small header spinner shows while an older page loads and
+     * [onHistoryTopReached] fires when the scroll position nears the top. Prepending
+     * keeps the scroll position — LazyColumn re-anchors on the first visible item's
+     * stable key. */
+    isLoadingMoreHistory: Boolean = false,
+    onHistoryTopReached: () -> Unit = {},
 ) {
     // No reverseLayout: a top-anchored list keeps a growing row's header in place
     // and pushes the rows below down, so expanded tool details unfold downward
@@ -79,12 +93,27 @@ internal fun MessageList(
             }
         }
     }
+    // History pagination trigger: near the top means the first (or second) row is
+    // visible. The ViewModel guards re-triggers (in-flight Job, has_more), so the
+    // plain derivedStateOf edge is enough — including a list shorter than the
+    // viewport, which is permanently "near the top" until the server says stop.
+    val nearTop by remember { derivedStateOf { listState.firstVisibleItemIndex <= 1 } }
+    LaunchedEffect(nearTop) {
+        if (nearTop) onHistoryTopReached()
+    }
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         state = listState,
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        if (isLoadingMoreHistory) {
+            item(key = "history_loading", contentType = "history_loading") {
+                Box(Modifier.fillMaxWidth().padding(4.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                }
+            }
+        }
         // Heterogeneous rows: the content type lets LazyColumn reuse composition
         // only across rows of the same bubble/card type.
         items(items, key = ChatItem::id, contentType = { it::class }) { item ->

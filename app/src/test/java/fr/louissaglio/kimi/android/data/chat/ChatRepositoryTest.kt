@@ -1539,6 +1539,90 @@ class ChatRepositoryTest {
         )
     }
 
+    @Test
+    fun `transcript sends agent_id and page_size and parses turns, frames and has_more`() = runBlocking {
+        server.enqueue(MockResponse().setBody(TRANSCRIPT_FINISHED_BODY))
+
+        val page = repository.getTranscript(settings(), "session_1", "agent-15", beforeTurn = null, pageSize = 20)
+            .getOrThrow()
+
+        val request = server.takeRequest()
+        assertEquals("/api/v1/sessions/session_1/transcript?agent_id=agent-15&page_size=20", request.path)
+
+        assertEquals("agent-15", page.agentId)
+        assertEquals(false, page.hasMore)
+        assertEquals(2, page.turns.size)
+        val t0 = page.turns[0]
+        assertEquals(TranscriptTurn("t0", 0, TranscriptState.Completed, null, t0.steps), t0)
+        assertEquals(2, t0.steps.size)
+        assertEquals(
+            listOf(
+                TranscriptFrame.Thinking("t0.1.f1", "Plan the listing."),
+                TranscriptFrame.Tool(
+                    id = "t0.1.tool_MxYFRM8czboqPL4FXxWD4rC1",
+                    toolCallId = "tool_MxYFRM8czboqPL4FXxWD4rC1",
+                    name = "Bash",
+                    running = false,
+                    preview = "ls -la /tmp/spike",
+                    input = "{\n    \"command\": \"ls -la /tmp/spike\"\n}",
+                    output = "total 0\ndrwxr-xr-x 2 ubuntu ubuntu 40 Jul 27 19:25 .\n",
+                ),
+            ),
+            t0.steps[0].frames,
+        )
+        assertEquals(
+            listOf(
+                TranscriptFrame.Thinking("t0.2.f1", "Empty dir."),
+                TranscriptFrame.Text("t0.2.f2", TranscriptFrame.Text.Role.Assistant, "`/tmp/spike` is empty — **0 files**."),
+            ),
+            t0.steps[1].frames,
+        )
+    }
+
+    @Test
+    fun `transcript sends the before_turn cursor when given`() = runBlocking {
+        server.enqueue(MockResponse().setBody(TRANSCRIPT_FINISHED_BODY))
+
+        repository.getTranscript(settings(), "session_1", "agent-15", beforeTurn = "t1", pageSize = 20).getOrThrow()
+
+        assertEquals(
+            "/api/v1/sessions/session_1/transcript?agent_id=agent-15&page_size=20&before_turn=t1",
+            server.takeRequest().path,
+        )
+    }
+
+    @Test
+    fun `transcript tolerates markers and maps the running state and a user prompt`() = runBlocking {
+        server.enqueue(MockResponse().setBody(TRANSCRIPT_RUNNING_BODY))
+        server.enqueue(MockResponse().setBody(TRANSCRIPT_USER_TURN_BODY))
+
+        // Running sub-agent (warm path): an undo marker rides along, the tool frame
+        // is still running with only its progress tail as output.
+        val running = repository.getTranscript(settings(), "session_1", "agent-23", beforeTurn = null, pageSize = 20)
+            .getOrThrow()
+        assertEquals(1, running.turns.size) // the marker item is dropped
+        val turn = running.turns[0]
+        assertEquals(TranscriptState.Running, turn.state)
+        assertEquals(
+            TranscriptFrame.Tool(
+                id = "t0.1.tool_4eOtxCMTEBHdpOehIhgnYAAe",
+                toolCallId = "tool_4eOtxCMTEBHdpOehIhgnYAAe",
+                name = "Bash",
+                running = true,
+                preview = "sleep 45 && echo awake",
+                input = "{\n    \"command\": \"sleep 45 && echo awake\",\n    \"timeout\": 60\n}",
+                output = "",
+            ),
+            turn.steps[0].frames[1],
+        )
+
+        // A user-origin main-agent turn carries its prompt (docs/server-api.md, Transcript).
+        val user = repository.getTranscript(settings(), "session_1", "main", beforeTurn = null, pageSize = 20)
+            .getOrThrow()
+        assertEquals("Do it again with normal Agent calls.", user.turns[0].prompt)
+        assertEquals(true, user.hasMore)
+    }
+
     private companion object {
         /** The generic prompts POST ack (docs/server-api.md): the client only reads
          * data.prompt_id back (to steer it in, or to ignore it) — status/created_at go
@@ -1546,5 +1630,82 @@ class ChatRepositoryTest {
         const val PROMPT_ACK_BODY =
             """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
                 """"status":"running","created_at":"2026-07-24T00:00:00.000Z"},"request_id":"01KX"}"""
+
+        /** Live 0.29.2 capture (2026-07-28, trimmed texts) of a FINISHED sub-agent's
+         * transcript, cold-rebuild path: core fields only, two completed
+         * system-triggered turns (the task turn, then the forced summary turn). */
+        const val TRANSCRIPT_FINISHED_BODY =
+            """{"code":0,"msg":"success","data":{"agent_id":"agent-15",""" +
+                """"items":[""" +
+                """{"kind":"turn","turnId":"t0","ordinal":0,"state":"completed",""" +
+                """"origin":{"kind":"other","payload":{"kind":"system_trigger","name":"subagent"}},""" +
+                """"steps":[""" +
+                """{"kind":"step","stepId":"t0.1","turnId":"t0","ordinal":1,"state":"completed",""" +
+                """"frames":[""" +
+                """{"kind":"thinking","frameId":"t0.1.f1","text":"Plan the listing."},""" +
+                """{"kind":"tool","frameId":"t0.1.tool_MxYFRM8czboqPL4FXxWD4rC1",""" +
+                """"toolCallId":"tool_MxYFRM8czboqPL4FXxWD4rC1","name":"Bash","state":"done",""" +
+                """"input":{"command":"ls -la /tmp/spike"},""" +
+                """"output":"total 0\ndrwxr-xr-x 2 ubuntu ubuntu 40 Jul 27 19:25 .\n"}]},""" +
+                """{"kind":"step","stepId":"t0.2","turnId":"t0","ordinal":2,"state":"completed",""" +
+                """"frames":[""" +
+                """{"kind":"thinking","frameId":"t0.2.f1","text":"Empty dir."},""" +
+                """{"kind":"text","frameId":"t0.2.f2","role":"assistant","text":"`/tmp/spike` is empty — **0 files**."}]}]},""" +
+                """{"kind":"turn","turnId":"t1","ordinal":1,"state":"completed",""" +
+                """"origin":{"kind":"other","payload":{"kind":"system_trigger","name":"subagent"}},""" +
+                """"steps":[""" +
+                """{"kind":"step","stepId":"t1.1","turnId":"t1","ordinal":1,"state":"completed",""" +
+                """"frames":[""" +
+                """{"kind":"thinking","frameId":"t1.1.f1","text":"Summarize comprehensively."},""" +
+                """{"kind":"text","frameId":"t1.1.f2","role":"assistant","text":"## Comprehensive Findings…"}]}]}],""" +
+                """"has_more":false,""" +
+                """"tasks":[],"interactions":[],"attachments":[],"todos":[],"meta":{},""" +
+                """"agents":[{"agentId":"main","type":"main"},{"agentId":"agent-15","type":"sub","parentAgentId":"main"}],""" +
+                """"pending_interactions":[],"seq":1},"request_id":"01KX"}"""
+
+        /** Live 0.29.2 capture (2026-07-28, trimmed) of a RUNNING sub-agent, warm path:
+         * startedAt fields, a running tool frame with inputText/display and no output
+         * yet, and an interleaved undo marker (the task-prompt splice). */
+        const val TRANSCRIPT_RUNNING_BODY =
+            """{"code":0,"msg":"success","data":{"agent_id":"agent-23",""" +
+                """"items":[""" +
+                """{"kind":"turn","turnId":"t0","ordinal":0,"state":"running",""" +
+                """"origin":{"kind":"other","payload":{"kind":"system_trigger","name":"subagent"}},""" +
+                """"startedAt":"2026-07-28T10:03:06.221Z",""" +
+                """"steps":[""" +
+                """{"kind":"step","stepId":"t0.1","turnId":"t0","ordinal":1,"state":"running",""" +
+                """"startedAt":"2026-07-28T10:03:06.237Z",""" +
+                """"frames":[""" +
+                """{"kind":"thinking","frameId":"t0.1.f1","text":"Run the sleep."},""" +
+                """{"kind":"tool","frameId":"t0.1.tool_4eOtxCMTEBHdpOehIhgnYAAe",""" +
+                """"toolCallId":"tool_4eOtxCMTEBHdpOehIhgnYAAe","name":"Bash","state":"running",""" +
+                """"input":{"command":"sleep 45 && echo awake","timeout":60},""" +
+                """"inputText":"{\"command\":\"sleep 45 && echo awake\",\"timeout\":60}",""" +
+                """"display":{"kind":"command","command":"sleep 45 && echo awake",""" +
+                """"cwd":"/home/ubuntu/kimi-android-client","language":"bash"}}]}]},""" +
+                """{"kind":"marker","markerId":"live-m1","marker":"undo",""" +
+                """"payload":{"start":0,"deleteCount":0,"messages":[{"role":"user",""" +
+                """"content":[{"type":"text","text":"Run the Bash command…"}],""" +
+                """"id":"msg_01KYM2V437","origin":{"kind":"system_trigger","name":"subagent"}}]},""" +
+                """"at":"2026-07-28T10:03:06.300Z"}],""" +
+                """"has_more":false,""" +
+                """"tasks":[],"interactions":[],"attachments":[],"todos":[],"meta":{},""" +
+                """"agents":[{"agentId":"main","type":"main"},{"agentId":"agent-23","type":"sub","parentAgentId":"main"}],""" +
+                """"pending_interactions":[],"seq":1},"request_id":"01KX"}"""
+
+        /** Live 0.29.2 capture (2026-07-28, trimmed) of a main-agent user-origin turn:
+         * the `prompt` field only exists on this origin kind. */
+        const val TRANSCRIPT_USER_TURN_BODY =
+            """{"code":0,"msg":"success","data":{"agent_id":"main",""" +
+                """"items":[""" +
+                """{"kind":"turn","turnId":"t3","ordinal":3,"state":"completed","origin":{"kind":"user"},""" +
+                """"prompt":"Do it again with normal Agent calls.",""" +
+                """"steps":[""" +
+                """{"kind":"step","stepId":"t3.1","turnId":"t3","ordinal":1,"state":"completed",""" +
+                """"frames":[{"kind":"text","frameId":"t3.1.f1","role":"assistant","text":"Done."}]}]}],""" +
+                """"has_more":true,""" +
+                """"tasks":[],"interactions":[],"attachments":[],"todos":[],"meta":{},""" +
+                """"agents":[{"agentId":"main","type":"main"}],""" +
+                """"pending_interactions":[],"seq":1},"request_id":"01KX"}"""
     }
 }

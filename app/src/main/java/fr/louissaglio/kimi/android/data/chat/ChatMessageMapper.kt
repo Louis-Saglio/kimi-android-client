@@ -4,7 +4,9 @@ import java.time.Instant
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 /**
  * Wire DTO → domain mapping for history messages and socket payloads (the single
@@ -98,6 +100,66 @@ internal class ChatMessageMapper(json: Json) {
         DATA_URL_RE.matchEntire(url)?.let {
             ChatMessage.Part.Image(base64Data = it.groupValues[2], fileId = null)
         }
+
+    /** Transcript page (docs/server-api.md, Transcript): marker items are dropped here,
+     * turns keep their ascending wire order. */
+    fun toDomain(dto: TranscriptData): TranscriptPage = TranscriptPage(
+        agentId = dto.agentId,
+        turns = dto.items.filter { it.kind == "turn" }.map(::toDomain),
+        hasMore = dto.hasMore,
+    )
+
+    private fun toDomain(dto: TranscriptItemDto): TranscriptTurn = TranscriptTurn(
+        id = dto.turnId,
+        ordinal = dto.ordinal,
+        state = transcriptState(dto.state),
+        prompt = dto.prompt?.takeIf { dto.origin?.kind == "user" }?.takeIf { it.isNotBlank() },
+        steps = dto.steps.map { step ->
+            TranscriptStep(
+                id = step.stepId,
+                state = transcriptState(step.state),
+                frames = step.frames.mapNotNull(::toDomain),
+            )
+        },
+    )
+
+    private fun toDomain(dto: TranscriptFrameDto): TranscriptFrame? = when (dto.kind) {
+        "thinking" -> dto.text?.let { TranscriptFrame.Thinking(dto.frameId, it) }
+        "text" -> dto.text?.let { text ->
+            TranscriptFrame.Text(
+                dto.frameId,
+                when (dto.role) {
+                    "assistant" -> TranscriptFrame.Text.Role.Assistant
+                    "user" -> TranscriptFrame.Text.Role.User
+                    else -> TranscriptFrame.Text.Role.Other
+                },
+                text,
+            )
+        }
+        "tool" -> dto.toolCallId?.let { toolCallId ->
+            TranscriptFrame.Tool(
+                id = dto.frameId,
+                toolCallId = toolCallId,
+                name = dto.name.orEmpty(),
+                running = dto.state == "running",
+                preview = ToolPreview.of(dto.input),
+                input = formatDetail(dto.input).ifBlank { dto.inputText.orEmpty() },
+                // The volatile progress tail stands in while no definitive output exists.
+                output = formatDetail(dto.output).ifBlank { progressText(dto.progress) },
+            )
+        }
+        else -> null
+    }
+
+    private fun transcriptState(state: String): TranscriptState = when (state) {
+        "running" -> TranscriptState.Running
+        "completed" -> TranscriptState.Completed
+        else -> TranscriptState.Other
+    }
+
+    /** The `{kind, text}` progress object of a tool frame; only the text is consumed. */
+    private fun progressText(progress: JsonObject?): String =
+        progress?.get("text")?.let { (it as? JsonPrimitive)?.contentOrNull }.orEmpty()
 
     private companion object {
         val DATA_URL_RE = Regex("""^data:([^;,]+);base64,(.*)$""", RegexOption.DOT_MATCHES_ALL)

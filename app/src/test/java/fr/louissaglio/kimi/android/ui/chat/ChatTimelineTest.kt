@@ -3,6 +3,10 @@ package fr.louissaglio.kimi.android.ui.chat
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.Todo
+import fr.louissaglio.kimi.android.data.chat.TranscriptFrame
+import fr.louissaglio.kimi.android.data.chat.TranscriptState
+import fr.louissaglio.kimi.android.data.chat.TranscriptStep
+import fr.louissaglio.kimi.android.data.chat.TranscriptTurn
 import java.time.Instant
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -939,5 +943,163 @@ class ChatTimelineTest {
         val tools = timeline.items().flatMap { (it as ChatItem.ToolGroup).tools }
         assertEquals(null, tools.first { it.id == "tool_1" }.subagentId)
         assertEquals(null, tools.first { it.id == "tool_2" }.subagentId)
+    }
+
+    // --- Transcript-backed sub-agent history (ticket 046) ----------------------------
+
+    private fun transcriptTurn(id: String, ordinal: Int, vararg steps: TranscriptStep) =
+        TranscriptTurn(id, ordinal, TranscriptState.Completed, prompt = null, steps = steps.toList())
+
+    private fun transcriptStep(id: String, vararg frames: TranscriptFrame) =
+        TranscriptStep(id, TranscriptState.Completed, frames.toList())
+
+    @Test
+    fun `a transcript page flattens into prompt, bubbles and tool rows`() {
+        val timeline = ChatTimeline(historyBacked = false)
+
+        timeline.replaceTranscript(
+            listOf(
+                TranscriptTurn(
+                    "t0", 0, TranscriptState.Completed, prompt = "list /tmp/spike",
+                    steps = listOf(
+                        transcriptStep(
+                            "t0.1",
+                            TranscriptFrame.Thinking("t0.1.f1", "Plan it."),
+                            TranscriptFrame.Tool(
+                                "t0.1.tool_1", "tool_1", "Bash", running = false,
+                                preview = "ls /tmp/spike", input = "{\n    \"command\": \"ls /tmp/spike\"\n}", output = "total 0\n",
+                            ),
+                        ),
+                        transcriptStep(
+                            "t0.2",
+                            TranscriptFrame.Thinking("t0.2.f1", "Empty."),
+                            TranscriptFrame.Text("t0.2.f2", TranscriptFrame.Text.Role.Assistant, "No files."),
+                            TranscriptFrame.Text("t0.2.f3", TranscriptFrame.Text.Role.Assistant, "Nothing to do."),
+                        ),
+                    ),
+                ),
+            ),
+            keepLive = false,
+        )
+
+        assertEquals(
+            listOf(
+                ChatItem.UserMessage("t0.prompt", "list /tmp/spike"),
+                ChatItem.AssistantMessage("t0.1.f1", "", thinking = "Plan it."),
+                toolGroup(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, "ls /tmp/spike", "{\n    \"command\": \"ls /tmp/spike\"\n}", "total 0\n")),
+                // Consecutive text frames join into one bubble (the message-history
+                // "\n" convention); the step boundary broke the thinking-only bubble.
+                ChatItem.AssistantMessage("t0.2.f1", "No files.\nNothing to do.", thinking = "Empty."),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `a mid-run transcript page keeps the uncommitted live tail without duplicates`() {
+        val timeline = ChatTimeline(historyBacked = false)
+        // The live tail: a finished tool call, a running one, and fresh text.
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "ls"))
+        timeline.apply(SessionEvent.ToolCallResult("tool_1", false, "total 0\n"))
+        timeline.apply(SessionEvent.ToolCallStarted("tool_2", "Bash", "pwd"))
+        timeline.apply(SessionEvent.AssistantDelta("Working on it"))
+
+        timeline.replaceTranscript(
+            listOf(
+                transcriptTurn(
+                    "t0", 0,
+                    transcriptStep(
+                        "t0.1",
+                        TranscriptFrame.Tool(
+                            "t0.1.tool_1", "tool_1", "Bash", running = false,
+                            preview = "ls", input = "", output = "total 0\n",
+                        ),
+                    ),
+                ),
+            ),
+            keepLive = true,
+        )
+
+        assertEquals(
+            listOf(
+                toolGroup(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, "ls", "", "total 0\n")),
+                // tool_1 dropped as committed; tool_2 survives on its own group.
+                toolGroup(ChatItem.ToolActivity("tool_2", "Bash", ToolStatus.Running, "pwd")),
+                ChatItem.AssistantMessage("live_0", "Working on it", thinking = ""),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `an older transcript page prepends deduplicated by turn id`() {
+        val timeline = ChatTimeline(historyBacked = false)
+        timeline.replaceTranscript(
+            listOf(
+                transcriptTurn(
+                    "t2", 2,
+                    transcriptStep("t2.1", TranscriptFrame.Text("t2.1.f1", TranscriptFrame.Text.Role.Assistant, "newest")),
+                ),
+            ),
+            keepLive = false,
+        )
+
+        timeline.prependTranscript(
+            listOf(
+                transcriptTurn(
+                    "t0", 0,
+                    transcriptStep("t0.1", TranscriptFrame.Text("t0.1.f1", TranscriptFrame.Text.Role.Assistant, "oldest")),
+                ),
+                transcriptTurn(
+                    "t1", 1,
+                    transcriptStep("t1.1", TranscriptFrame.Text("t1.1.f1", TranscriptFrame.Text.Role.Assistant, "middle")),
+                ),
+            ),
+        )
+        // A racing refetch of the same page must not add a row twice.
+        timeline.prependTranscript(
+            listOf(
+                transcriptTurn(
+                    "t1", 1,
+                    transcriptStep("t1.1", TranscriptFrame.Text("t1.1.f1", TranscriptFrame.Text.Role.Assistant, "middle")),
+                ),
+            ),
+        )
+
+        assertEquals(
+            listOf("oldest", "middle", "newest"),
+            timeline.items().map { (it as ChatItem.AssistantMessage).text },
+        )
+    }
+
+    @Test
+    fun `a fresh transcript page resets pagination and clears the live tail on completion`() {
+        val timeline = ChatTimeline(historyBacked = false)
+        timeline.prependTranscript(
+            listOf(
+                transcriptTurn(
+                    "t0", 0,
+                    transcriptStep("t0.1", TranscriptFrame.Text("t0.1.f1", TranscriptFrame.Text.Role.Assistant, "old page")),
+                ),
+            ),
+        )
+        timeline.apply(SessionEvent.AssistantDelta("live text"))
+
+        // The completion reconcile (keepLive = false): the live tail goes, history is
+        // canonical, and the prepended older page is dropped back to the newest page.
+        timeline.replaceTranscript(
+            listOf(
+                transcriptTurn(
+                    "t1", 1,
+                    transcriptStep("t1.1", TranscriptFrame.Text("t1.1.f1", TranscriptFrame.Text.Role.Assistant, "final")),
+                ),
+            ),
+            keepLive = false,
+        )
+
+        assertEquals(
+            listOf(ChatItem.AssistantMessage("t1.1.f1", "final", thinking = "")),
+            timeline.items(),
+        )
     }
 }

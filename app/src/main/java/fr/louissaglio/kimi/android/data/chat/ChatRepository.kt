@@ -39,6 +39,16 @@ class ChatRepository @Inject constructor(
     suspend fun getMessages(settings: ServerSettings, sessionId: String): Result<List<ChatMessage>> =
         chatApi.messages(settings, sessionId)
 
+    /** One page of an agent's turn-granular transcript — the sub-agent page's history
+     * backing (ticket 046). [beforeTurn] = null fetches the newest page. */
+    suspend fun getTranscript(
+        settings: ServerSettings,
+        sessionId: String,
+        agentId: String,
+        beforeTurn: String?,
+        pageSize: Int,
+    ): Result<TranscriptPage> = chatApi.transcript(settings, sessionId, agentId, beforeTurn, pageSize)
+
     /** Downloads one uploaded file (`GET /api/v1/files/{id}`) — attachment chips and
      * image viewers fetch their bytes on demand (ticket 034). */
     suspend fun downloadFile(settings: ServerSettings, fileId: String): Result<FileDownload> =

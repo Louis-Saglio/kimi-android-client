@@ -42,6 +42,25 @@ internal class ChatApi(
         }
 
     /**
+     * Fetches one page of an agent's turn-granular transcript
+     * (`GET /api/v1/sessions/{id}/transcript`, docs/server-api.md, Transcript) — the
+     * history backing of the sub-agent page (ticket 046). [beforeTurn] = null fetches
+     * the newest page; turns come back ascending within the page and stay so.
+     */
+    suspend fun transcript(
+        settings: ServerSettings,
+        sessionId: String,
+        agentId: String,
+        beforeTurn: String?,
+        pageSize: Int,
+    ): Result<TranscriptPage> {
+        val cursor = beforeTurn?.let { "&before_turn=$it" }.orEmpty()
+        return api.get(settings, "/api/v1/sessions/$sessionId/transcript?agent_id=$agentId&page_size=$pageSize$cursor") { body ->
+            api.json.decodeFromString<Envelope<TranscriptData>>(body).toResult().map(mapper::toDomain)
+        }
+    }
+
+    /**
      * Downloads one uploaded file (`GET /api/v1/files/{id}`, docs/server-api.md) —
      * attachment chips and image viewers fetch their bytes on demand (ticket 034).
      * The bearer token rides on the shared client.

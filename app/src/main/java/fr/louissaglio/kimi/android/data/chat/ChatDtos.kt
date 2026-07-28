@@ -263,3 +263,93 @@ data class SubagentLifecyclePayload(
     val resultSummary: String? = null,
     val error: String? = null,
 )
+
+// --- GET /api/v1/sessions/{id}/transcript (docs/server-api.md, Transcript) -----------
+// Turn-granular per-agent history (046), pinned from live 0.29.2 captures. The
+// cold-rebuild path omits the warm-only fields (startedAt/endedAt, usage/timing,
+// inputText/display/progress), so everything outside the core key set is optional.
+
+@Serializable
+data class TranscriptData(
+    @SerialName("agent_id") val agentId: String = "",
+    val items: List<TranscriptItemDto> = emptyList(),
+    @SerialName("has_more") val hasMore: Boolean = false,
+    // The session's unpaginated global state, shipped with every page. Pinned from the
+    // captures but not consumed (046 out of scope); element shapes were not observed
+    // (all empty on the captured pages), so they stay raw elements.
+    val tasks: List<JsonElement> = emptyList(),
+    val interactions: List<JsonElement> = emptyList(),
+    val attachments: List<JsonElement> = emptyList(),
+    val todos: List<JsonElement> = emptyList(),
+    val meta: JsonObject? = null,
+    val agents: List<TranscriptAgentDto> = emptyList(),
+    @SerialName("pending_interactions") val pendingInteractions: List<JsonElement> = emptyList(),
+    val seq: Long? = null,
+)
+
+/** One entry of the `agents` roster (observed: `{"agentId":"agent-17","type":"sub","parentAgentId":"main","label":"…"}`). */
+@Serializable
+data class TranscriptAgentDto(
+    val agentId: String = "",
+    val type: String = "",
+    val parentAgentId: String? = null,
+    val label: String? = null,
+)
+
+/** Flat item shape: [kind] is `turn` or `marker`, each filling only its own fields.
+ * Markers (`swarm.enter`/`exit`, `undo`) are tolerated by the parse, never rendered. */
+@Serializable
+data class TranscriptItemDto(
+    val kind: String = "",
+    // turn fields
+    val turnId: String = "",
+    val ordinal: Int = 0,
+    val state: String = "",
+    val origin: TranscriptOriginDto? = null,
+    // Only on user-origin turns: the prompting text (a sub-agent's internal
+    // system_trigger turns never carry it).
+    val prompt: String? = null,
+    val steps: List<TranscriptStepDto> = emptyList(),
+    // marker fields (not consumed)
+    val markerId: String? = null,
+    val marker: String? = null,
+)
+
+@Serializable
+data class TranscriptOriginDto(
+    val kind: String = "",
+    val payload: JsonObject? = null,
+)
+
+@Serializable
+data class TranscriptStepDto(
+    val kind: String = "",
+    val stepId: String = "",
+    val turnId: String = "",
+    val ordinal: Int = 0,
+    val state: String = "",
+    val frames: List<TranscriptFrameDto> = emptyList(),
+)
+
+/** Flat frame shape: [kind] `thinking`/`text`/`tool`, each filling only its own fields. */
+@Serializable
+data class TranscriptFrameDto(
+    val kind: String = "",
+    val frameId: String = "",
+    // thinking and text frames
+    val text: String? = null,
+    // text frames only ("assistant" observed; "user" would be a nudge)
+    val role: String? = null,
+    // tool frames
+    val toolCallId: String? = null,
+    val name: String? = null,
+    val state: String? = null,
+    val input: JsonObject? = null,
+    // Warm path only: the compact input string, the server display rendering, and the
+    // volatile progress tail ({kind, text}) of a finished/running call.
+    val inputText: String? = null,
+    val display: JsonObject? = null,
+    val progress: JsonObject? = null,
+    // String for shell-style tools, a JSON value for structured ones (like tool_result).
+    val output: JsonElement? = null,
+)

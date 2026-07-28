@@ -7,6 +7,8 @@ import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.MAIN_AGENT_ID
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.SubagentLifecycleEvent
+import fr.louissaglio.kimi.android.data.chat.TranscriptPage
+import fr.louissaglio.kimi.android.data.chat.TranscriptState
 import fr.louissaglio.kimi.android.di.StreamCoalesceWindowMillis
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -39,12 +41,14 @@ enum class SubagentStatus { Queued, Working, Suspended, Completed, Failed }
  * without a second socket (two sockets with independent resume cursors would
  * double-feed on every replay).
  *
- * Each entry owns a [ChatTimeline] in non-history-backed mode (a sub-agent's messages
- * never enter REST history) and its own streaming-delta coalescing, mirroring
- * ChatViewModel's leading-edge + ~100 ms trailing flush: a published state update costs
- * a full MarkdownBody re-parse per sub-agent page, so deltas publish at most once per
- * window during a burst. All mutations are confined to the Main dispatcher (ViewModel
- * callers and the flush jobs alike), keeping the reducer single-threaded.
+ * Each entry owns a [ChatTimeline] in non-history-backed mode (turn.started seals the
+ * finished internal turn's live rows; ticket 046's transcript pages feed the committed
+ * side via [applyTranscriptPage]/[prependTranscriptPage]) and its own streaming-delta
+ * coalescing, mirroring ChatViewModel's leading-edge + ~100 ms trailing flush: a
+ * published state update costs a full MarkdownBody re-parse per sub-agent page, so
+ * deltas publish at most once per window during a burst. All mutations are confined
+ * to the Main dispatcher (ViewModel callers and the flush jobs alike), keeping the
+ * reducer single-threaded.
  */
 @Singleton
 class SubagentStreamStore @Inject constructor(
@@ -65,6 +69,8 @@ class SubagentStreamStore @Inject constructor(
         val status: SubagentStatus,
         val resultSummary: String? = null,
         val error: String? = null,
+        /** True while older transcript turns exist beyond the loaded ones (ticket 046). */
+        val hasMoreTurns: Boolean = false,
         val items: List<ChatItem> = emptyList(),
     )
 
@@ -79,11 +85,37 @@ class SubagentStreamStore @Inject constructor(
         var error: String? = null
         val timeline = ChatTimeline(historyBacked = false)
 
+        /** Set by any started/suspended/completed/failed frame: transcript-derived
+         * status (ticket 046) applies only while no live lifecycle frame was seen. */
+        var sawLifecycle = false
+
+        // --- Transcript backing (ticket 046) -----------------------------------------
+        /** True once a transcript page landed; false for seed/live-only entries. */
+        var transcriptLoaded = false
+
+        /** Oldest loaded turn id — the `before_turn` cursor of the next older page. */
+        var oldestTurnId: String? = null
+        var hasMoreTurns = false
+
+        /** The task prompt from the `Agent` row's args (cold-open seed, ticket 045):
+         * the transcript never carries it (a sub-agent's turns are system-triggered),
+         * so it lives OUTSIDE the timeline — a refetch must not wipe the page's only
+         * user bubble. Rendered as the page's first row by [toState]. */
+        var seededPrompt: String? = null
+
         /** Deltas received but not yet published; null = no burst open. */
         var pendingDeltas: MutableList<SessionEvent>? = null
         var flushJob: Job? = null
 
-        fun toState() = SubagentState(id, name, description, runInBackground, status, resultSummary, error, timeline.items())
+        fun toState(): SubagentState {
+            val promptBubble = seededPrompt?.takeIf { it.isNotBlank() }
+                ?.let { listOf(ChatItem.UserMessage(SEEDED_PROMPT_ID, it)) }
+                .orEmpty()
+            return SubagentState(
+                id, name, description, runInBackground, status, resultSummary, error,
+                hasMoreTurns, promptBubble + timeline.items(),
+            )
+        }
     }
 
     // Lazy: JVM unit tests run with window = 0, which never launches a flush job, and
@@ -182,20 +214,70 @@ class SubagentStreamStore @Inject constructor(
             status = status,
         )
         stream.resultSummary = summary
-        // Mirror the live page's structure: the task prompt as a user bubble, the
-        // result summary as the final assistant bubble.
-        val seedMessages = buildList {
-            agentArg(row.input, "prompt")?.let { prompt ->
-                add(ChatMessage(SEEDED_PROMPT_ID, ChatMessage.Role.User, listOf(ChatMessage.Part.Text(prompt))))
-            }
-            if (summary != null) {
-                add(ChatMessage(SEEDED_SUMMARY_ID, ChatMessage.Role.Assistant, listOf(ChatMessage.Part.Text(summary))))
-            }
-        }
-        if (seedMessages.isNotEmpty()) {
-            stream.timeline.replaceHistory(seedMessages, keepLive = false)
+        // The task prompt lives outside the timeline (Stream.seededPrompt): a later
+        // transcript page (ticket 046) replaces timeline rows wholesale and would take
+        // the page's only user bubble with it.
+        stream.seededPrompt = agentArg(row.input, "prompt")
+        // The result summary stands in as the final assistant bubble until the
+        // transcript lands with the real turns.
+        if (summary != null) {
+            stream.timeline.replaceHistory(
+                listOf(ChatMessage(SEEDED_SUMMARY_ID, ChatMessage.Role.Assistant, listOf(ChatMessage.Part.Text(summary)))),
+                keepLive = false,
+            )
         }
         streams.getOrPut(sessionId) { mutableMapOf() }[subagentId] = stream
+        publish(sessionId)
+    }
+
+    /** True once a transcript page landed for [subagentId] (ticket 046) — the page's
+     * cue that a cold-open fetch is unnecessary (the socket keeps the entry fresh). */
+    fun hasTranscript(sessionId: String, subagentId: String): Boolean =
+        stream(sessionId, subagentId)?.transcriptLoaded == true
+
+    /** The `before_turn` cursor for the next older page; null when no transcript loaded. */
+    fun oldestTurnId(sessionId: String, subagentId: String): String? =
+        stream(sessionId, subagentId)?.oldestTurnId
+
+    /**
+     * Applies the newest transcript page (ticket 046): committed rows are replaced,
+     * the in-flight live tail survives per [keepLive] (the completion reconcile passes
+     * false — history is the canonical rendering of the finished run). Creates the
+     * entry when nothing seeded it (deep state loss: the page's transcript fetch is
+     * then its only data source) — the identity fields stay blank, the top bar falls
+     * back to the sub-agent id. Status comes from the turn states while no live
+     * lifecycle frame was seen.
+     */
+    fun applyTranscriptPage(sessionId: String, subagentId: String, page: TranscriptPage, keepLive: Boolean) {
+        val existing = stream(sessionId, subagentId)
+        // An empty page for an unknown id (the server answers one — not an error)
+        // creates nothing: the page keeps its "no transcript" empty state.
+        if (existing == null && page.turns.isEmpty()) return
+        val stream = existing ?: streams.getOrPut(sessionId) { mutableMapOf() }.getOrPut(subagentId) {
+            Stream(id = subagentId, name = "", description = "", runInBackground = false)
+        }
+        // Any coalesced text must apply BEFORE the replace wipes/dedups the live rows.
+        flushPendingDeltas(stream)
+        stream.timeline.replaceTranscript(page.turns, keepLive)
+        stream.transcriptLoaded = true
+        stream.oldestTurnId = page.turns.firstOrNull()?.id
+        stream.hasMoreTurns = page.hasMore
+        if (!stream.sawLifecycle && page.turns.isNotEmpty()) {
+            stream.status =
+                if (page.turns.lastOrNull()?.state == TranscriptState.Running) SubagentStatus.Working else SubagentStatus.Completed
+        }
+        publish(sessionId)
+    }
+
+    /** Prepends an older transcript page (ticket 046 pagination); the turn-id dedup in
+     * the timeline makes a racing [applyTranscriptPage] harmless. */
+    fun prependTranscriptPage(sessionId: String, subagentId: String, page: TranscriptPage) {
+        val stream = stream(sessionId, subagentId) ?: return
+        if (page.turns.isNotEmpty()) {
+            stream.timeline.prependTranscript(page.turns)
+            stream.oldestTurnId = page.turns.first().id
+        }
+        stream.hasMoreTurns = page.hasMore
         publish(sessionId)
     }
 
@@ -206,13 +288,21 @@ class SubagentStreamStore @Inject constructor(
         flushPendingDeltas(stream)
         when (event) {
             is SessionEvent.SubagentSpawned -> Unit // handled by spawn()
-            is SessionEvent.SubagentStarted -> stream.status = SubagentStatus.Working
-            is SessionEvent.SubagentSuspended -> stream.status = SubagentStatus.Suspended
+            is SessionEvent.SubagentStarted -> {
+                stream.sawLifecycle = true
+                stream.status = SubagentStatus.Working
+            }
+            is SessionEvent.SubagentSuspended -> {
+                stream.sawLifecycle = true
+                stream.status = SubagentStatus.Suspended
+            }
             is SessionEvent.SubagentCompleted -> {
+                stream.sawLifecycle = true
                 stream.status = SubagentStatus.Completed
                 stream.resultSummary = event.resultSummary.ifBlank { null }
             }
             is SessionEvent.SubagentFailed -> {
+                stream.sawLifecycle = true
                 stream.status = SubagentStatus.Failed
                 stream.error = event.error.ifBlank { null }
             }

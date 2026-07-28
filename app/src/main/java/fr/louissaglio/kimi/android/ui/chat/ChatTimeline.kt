@@ -5,6 +5,8 @@ import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.TodoParser
+import fr.louissaglio.kimi.android.data.chat.TranscriptFrame
+import fr.louissaglio.kimi.android.data.chat.TranscriptTurn
 import kotlinx.serialization.json.Json
 
 /**
@@ -14,9 +16,10 @@ import kotlinx.serialization.json.Json
  *
  * History (committed) and live (in-flight turn) rows are kept apart: a refetch replaces
  * committed rows wholesale, which is what makes reconnects gap- and duplicate-free.
- * Sub-agent streams (ticket 045) have no history endpoint: with [historyBacked] = false
- * the reducer never refetches and turn.started seals the finished internal turn's live
- * rows into the committed list instead of clearing them.
+ * Sub-agent streams (ticket 045) use [historyBacked] = false: turn.started seals the
+ * finished internal turn's live rows into the committed list instead of clearing them.
+ * Ticket 046 backs them with the per-agent transcript endpoint: [replaceTranscript] /
+ * [prependTranscript] feed turn pages into the same committed/live split.
  */
 class ChatTimeline(
     // Default mirrors the DI Json for direct construction in tests.
@@ -28,6 +31,10 @@ class ChatTimeline(
     private val live = mutableListOf<ChatItem>()
     private var liveBubbleCount = 0
     private var syntheticSpliceCount = 0
+
+    /** Turn ids of the committed transcript rows (ticket 046): the prepend dedup unit.
+     * Rebuilt by [replaceTranscript], grown by [prependTranscript]. */
+    private val committedTurnIds = mutableSetOf<String>()
 
     /** Todo tool calls seen so far (ticket 042): their rows are suppressed — the
      * widget replaces them — and their results must not surface as orphan rows. Ids
@@ -70,11 +77,55 @@ class ChatTimeline(
             liveTodos = null
             return
         }
+        pruneCommittedLive()
+    }
+
+    /**
+     * Ticket 046: a fresh transcript page (the newest turns) replaces committed rows —
+     * the transcript-backed twin of [replaceHistory]. Same [keepLive] contract: the
+     * sub-agent's in-flight live tail survives, minus the rows the server has since
+     * committed. Pagination state resets to the new page ([committedTurnIds] rebuilt);
+     * older pages previously prepended are dropped, exactly like a full refetch
+     * resetting message pagination (ticket 043 semantics).
+     */
+    fun replaceTranscript(turns: List<TranscriptTurn>, keepLive: Boolean) {
+        committed.clear()
+        committedTurnIds.clear()
+        committedTodos = null
+        turns.forEach { turn ->
+            flatten(committed, turn)
+            committedTurnIds += turn.id
+        }
+        reapplySubagentLinks()
+        if (!keepLive) {
+            live.clear()
+            liveTodos = null
+            return
+        }
+        pruneCommittedLive()
+    }
+
+    /**
+     * Ticket 046 pagination: an older transcript page prepends its rows before the
+     * loaded ones, deduplicated by turn id ([committedTurnIds]) — a racing
+     * [replaceTranscript] can never make a page apply twice. Live rows are untouched:
+     * they only ever grow at the newest end.
+     */
+    fun prependTranscript(turns: List<TranscriptTurn>) {
+        val fresh = turns.filter { committedTurnIds.add(it.id) }
+        if (fresh.isEmpty()) return
+        val head = mutableListOf<ChatItem>()
+        fresh.forEach { flatten(head, it) }
+        committed.addAll(0, head)
+    }
+
+    /** Drops the live rows a refetch has since committed, so [keepLive]-style replaces
+     * never show a row twice: tool rows dedup by call id (a half-committed group keeps
+     * its survivors under the first one's id), assistant bubbles by exact content. */
+    private fun pruneCommittedLive() {
         val committedToolIds = committed.filterIsInstance<ChatItem.ToolGroup>()
             .flatMap { group -> group.tools.map { it.id } }
             .toSet()
-        // A live group may be half-committed (a refetch landed mid-run): drop only the
-        // tools the server now has, keep the rest under the first survivor's id.
         for (index in live.indices.reversed()) {
             when (val item = live[index]) {
                 is ChatItem.ToolGroup -> {
@@ -320,6 +371,70 @@ class ChatTimeline(
                     }
                 }
             ChatMessage.Role.Other -> Unit
+        }
+    }
+
+    /**
+     * Flattens one transcript turn into [target] rows (ticket 046): the turn's prompt
+     * (user-origin turns only) becomes a user bubble; within each step, consecutive
+     * thinking/text frames accumulate into one assistant bubble (joined "\n" like the
+     * message-history flatten) and tool frames break bubbles into their own grouped
+     * rows — mirroring how live deltas and tool rows interleave. The sub-agent's own
+     * todo tool calls are suppressed exactly like the live path (no widget renders
+     * them). Row ids are the server frame/turn ids, so [prependTranscript] pages and
+     * refetches dedup cleanly.
+     */
+    private fun flatten(target: MutableList<ChatItem>, turn: TranscriptTurn) {
+        turn.prompt?.let { prompt ->
+            target += ChatItem.UserMessage("${turn.id}.prompt", prompt)
+        }
+        for (step in turn.steps) {
+            var text = ""
+            var thinking = ""
+            var bubbleId: String? = null
+            fun flushBubble() {
+                val id = bubbleId ?: return
+                if (text.isNotBlank() || thinking.isNotBlank()) {
+                    target += ChatItem.AssistantMessage(id, text, thinking)
+                }
+                text = ""
+                thinking = ""
+                bubbleId = null
+            }
+            for (frame in step.frames) {
+                when (frame) {
+                    is TranscriptFrame.Thinking -> {
+                        if (bubbleId == null) bubbleId = frame.id
+                        thinking = listOf(thinking, frame.text).filter { it.isNotBlank() }.joinToString("\n")
+                    }
+                    is TranscriptFrame.Text ->
+                        if (frame.role == TranscriptFrame.Text.Role.User) {
+                            flushBubble()
+                            target += ChatItem.UserMessage(frame.id, frame.text)
+                        } else {
+                            if (bubbleId == null) bubbleId = frame.id
+                            text = listOf(text, frame.text).filter { it.isNotBlank() }.joinToString("\n")
+                        }
+                    is TranscriptFrame.Tool -> {
+                        flushBubble()
+                        if (isTodoCall(frame.toolCallId, frame.name)) {
+                            todoParser.of(frame.name, frame.input)?.let { parsed -> committedTodos = parsed }
+                        } else {
+                            target.appendTool(
+                                ChatItem.ToolActivity(
+                                    frame.toolCallId,
+                                    frame.name,
+                                    if (frame.running) ToolStatus.Running else ToolStatus.Done,
+                                    frame.preview,
+                                    frame.input,
+                                    frame.output,
+                                ),
+                            )
+                        }
+                    }
+                }
+            }
+            flushBubble()
         }
     }
 

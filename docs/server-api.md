@@ -377,6 +377,100 @@ Observed tags, all paired with attributes allowed on the opening tag:
   client renders the inner prompt as a dedicated cron turn; the app hides the
   envelope entirely for now).
 
+## Transcript
+
+### Per-agent transcript — `GET /api/v1/sessions/{id}/transcript`
+
+Turn-granular committed history for ONE agent — `"main"` or any sub-agent id —
+which makes it the history backing of the sub-agent page (the `/messages`
+history only ever carries the main agent). Verified live on 0.29.2
+(2026-07-28), including a running sub-agent and the cold-session rebuild path.
+
+Query params:
+
+- `agent_id` — **required**; omitted → `40001` ("expected string, received
+  undefined"). Answers for any agent id, finished or running. An UNKNOWN id is
+  not an error: `code:0` with `items: []`, `has_more: false` (an unknown
+  session is `40401` as usual).
+- `page_size` — default 20, min 1, max 100 (`0` or `>100` → `40001`). Counts
+  **turns**; interleaved `marker` items ride along (a 20-turn page shipped 33
+  items: 20 turns + 13 markers).
+- `before_turn` / `after_turn` — turn-id cursors. Paging backwards past the
+  oldest turn answers `items: []` with `has_more: false` (not an error).
+
+Pagination contract (verified with `page_size=1` against a 2-turn sub-agent):
+the cursor-less call returns the **newest** page, `has_more` tells whether
+older turns exist, and `before_turn=<turnId>` returns the next older page.
+**Within a page turns are ascending by `ordinal`** (oldest-first) — the
+opposite of `/messages` intra-page order. `after_turn=t0&page_size=2` pages
+forward (ascending, `has_more` true while newer turns remain).
+
+`data` fields beyond `agent_id`/`items`/`has_more` — `tasks`, `interactions`,
+`attachments`, `todos`, `meta`, `agents`, `pending_interactions`, `seq` — are
+the session's **unpaginated global state**, shipped with every page (the
+`agents` roster: `{agentId, type: "main"|"sub", parentAgentId?, label?}`). The
+Android app consumes none of them.
+
+`items` has two entry kinds: `turn` and `marker`.
+
+Turn → step → frame structure (verbatim keys, running sub-agent capture):
+
+```json
+{"kind":"turn","turnId":"t0","ordinal":0,"state":"running",
+ "origin":{"kind":"other","payload":{"kind":"system_trigger","name":"subagent"}},
+ "startedAt":"2026-07-28T10:03:06.221Z",
+ "steps":[
+  {"kind":"step","stepId":"t0.1","turnId":"t0","ordinal":1,"state":"running",
+   "startedAt":"2026-07-28T10:03:06.237Z",
+   "frames":[
+    {"kind":"thinking","frameId":"t0.1.f1","text":"The user wants me to run a sleep 45 command…"},
+    {"kind":"tool","frameId":"t0.1.tool_4eOtxCMTEBHdpOehIhgnYAAe","toolCallId":"tool_4eOtxCMTEBHdpOehIhgnYAAe",
+     "name":"Bash","state":"running",
+     "input":{"command":"sleep 45 && echo awake","timeout":60},
+     "inputText":"{\"command\":\"sleep 45 && echo awake\",\"timeout\":60}",
+     "display":{"kind":"command","command":"sleep 45 && echo awake","cwd":"/home/ubuntu/kimi-android-client","language":"bash"}}]}]}
+```
+
+- Turn: `turnId` (`"t0"`, `"t1"`, …), `ordinal`, `state` (`"running"` /
+  `"completed"` observed), `origin`, `steps`. `origin` is `{"kind":"user"}`
+  for user-prompted turns — those additionally carry a top-level **`prompt`**
+  field with the prompt text (seen on main-agent turns) — or
+  `{"kind":"other","payload":{"kind":"system_trigger","name":"subagent"}}` for
+  a sub-agent's internal turns (the task turn and the forced result-summary
+  turn; **no** `prompt` field — the task text is not in the transcript turns).
+- Step: `stepId` (`"t0.1"`), `turnId`, `ordinal`, `state`, `frames`.
+- Frames: `thinking` (`frameId`, `text`), `text` (`frameId`, `role` —
+  `"assistant"` observed — `text`), and `tool` (`frameId`, `toolCallId`,
+  `name`, `state` `"running"`/`"done"`, `input` (args object), `output`).
+  A step can hold several frames of the same kind (two `text` frames seen).
+- **Warm vs cold rebuild:** answers computed from the live session add
+  `startedAt`/`endedAt` on turns and steps, `finishReason`/`usage`/`timing` on
+  steps, and `inputText`/`display`/`progress` on tool frames; the cold-session
+  rebuild from persisted wire records ships only `turnId`/`ordinal`/`state`/
+  `origin`/`steps` on turns and the core frame fields (`input`+`output` on
+  finished tool frames). Treat every field outside the core set as optional.
+
+Markers are interleaved between turns and must be tolerated, not rendered:
+
+```json
+{"kind":"marker","markerId":"m1","marker":"swarm.enter","payload":{"trigger":"tool"},"at":"2026-07-28T06:17:58.498Z"}
+{"kind":"marker","markerId":"live-m1","marker":"undo",
+ "payload":{"start":0,"deleteCount":0,"messages":[{"role":"user","content":[{"type":"text","text":"…"}],"id":"msg_01KYM2V437…","origin":{"kind":"system_trigger","name":"subagent"}}]}}
+```
+
+`swarm.enter`/`swarm.exit` bracket AgentSwarm runs on the main transcript;
+`undo` markers carry context splices (the sub-agent's task prompt message —
+git-context envelope included — shows up here, full `MessageDto` shape) and
+persist after completion on the warm path. They vanish on the cold rebuild.
+
+Finished sub-agent, cold-rebuild path (throwaway session left from 045,
+`agent_id=agent-15`, `page_size=3`, trimmed): two turns, both
+`state:"completed"`, origin `system_trigger/subagent`, frames limited to
+`thinking`/`text`/`tool` with `input`+`output`; `has_more:false`.
+
+Out of scope for the app (unused siblings under the same route prefix):
+`/transcript/ops`, `/transcript/user-messages`, `/transcript/plan`.
+
 ## Files (attachments)
 
 File upload backs message attachments: upload the bytes first, then reference
@@ -1363,6 +1457,16 @@ selected option and free text both re-verified 2026-07-23:
 
 ## Verification log
 
+- 2026-07-28 transcript round-trips on `0.29.2` (ticket 046): finished
+  sub-agent (`agent-15`, cold rebuild), running then finished sub-agent
+  (`agent-23`, throwaway session `session_59566ec0-...` — first prompt needed
+  `"model":"kimi-code/k3"`, a fresh session without one fails silently with an
+  empty completed turn), `page_size=1` two-page walk with `before_turn` (past
+  the oldest → `items:[]` + `has_more:false`), `after_turn` forward page,
+  `agent_id` omitted → `40001`, `page_size=0`/`101`/`200` → `40001`, default
+  page (20 turns + 13 interleaved markers = 33 items), `swarm.enter`/`exit`
+  and `undo` markers on the main transcript, `prompt` field on user-origin
+  turns. All `curl` against `http://100.64.0.1:80/api/v1/...`.
 - 2026-07-28 sub-agent round-trips on `0.29.2` (throwaway session
   `session_1525d049-...` in `/tmp/spike`; first prompt needed
   `"model":"kimi-code/k3"` — a fresh session has no model and fails with

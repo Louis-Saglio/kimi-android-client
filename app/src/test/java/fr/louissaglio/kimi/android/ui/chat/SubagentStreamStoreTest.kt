@@ -2,6 +2,11 @@ package fr.louissaglio.kimi.android.ui.chat
 
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
+import fr.louissaglio.kimi.android.data.chat.TranscriptFrame
+import fr.louissaglio.kimi.android.data.chat.TranscriptPage
+import fr.louissaglio.kimi.android.data.chat.TranscriptState
+import fr.louissaglio.kimi.android.data.chat.TranscriptStep
+import fr.louissaglio.kimi.android.data.chat.TranscriptTurn
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
@@ -233,6 +238,109 @@ class SubagentStreamStoreTest {
         )
 
         assertNull(entry("agent-12"))
+    }
+
+    // --- Transcript backing (ticket 046) ----------------------------------------------
+
+    private fun transcriptPage(
+        turns: List<TranscriptTurn>,
+        hasMore: Boolean = false,
+    ) = TranscriptPage("agent-12", turns, hasMore)
+
+    private fun finishedTurn(id: String, ordinal: Int, text: String) = TranscriptTurn(
+        id, ordinal, TranscriptState.Completed, null,
+        listOf(
+            TranscriptStep(
+                "$id.1", TranscriptState.Completed,
+                listOf(TranscriptFrame.Text("$id.1.f1", TranscriptFrame.Text.Role.Assistant, text)),
+            ),
+        ),
+    )
+
+    @Test
+    fun `a transcript page creates the entry from nothing, status from the turn states`() = runBlocking {
+        // Deep state loss: no spawn, no seed — the page's transcript fetch is the
+        // entry's only data source (identity fields stay blank, the top bar falls back
+        // to the id).
+        store.applyTranscriptPage(SESSION_ID, "agent-12", transcriptPage(listOf(finishedTurn("t0", 0, "done")), hasMore = true), keepLive = false)
+
+        val created = entry("agent-12")!!
+        assertEquals(SubagentStatus.Completed, created.status)
+        assertEquals(true, created.hasMoreTurns)
+        assertEquals("t0", store.oldestTurnId(SESSION_ID, "agent-12"))
+        assertEquals(listOf(ChatItem.AssistantMessage("t0.1.f1", "done", thinking = "")), created.items)
+
+        // A transcript carrying a running turn derives Working instead.
+        store.applyTranscriptPage(
+            SESSION_ID, "agent-13",
+            TranscriptPage(
+                "agent-13",
+                listOf(TranscriptTurn("t0", 0, TranscriptState.Running, null, emptyList())),
+                hasMore = false,
+            ),
+            keepLive = false,
+        )
+        assertEquals(SubagentStatus.Working, entry("agent-13")!!.status)
+    }
+
+    @Test
+    fun `a live lifecycle status is never derived back by a transcript page`() = runBlocking {
+        store.apply(SESSION_ID, spawned("agent-12"))
+        store.apply(SESSION_ID, SessionEvent.SubagentStarted("agent-12"))
+
+        // A stale page (all turns completed) must not flip the live Working status.
+        store.applyTranscriptPage(SESSION_ID, "agent-12", transcriptPage(listOf(finishedTurn("t0", 0, "stale"))), keepLive = true)
+
+        assertEquals(SubagentStatus.Working, entry("agent-12")!!.status)
+    }
+
+    @Test
+    fun `a transcript page merges under the live tail and a later page prepends`() = runBlocking {
+        store.apply(SESSION_ID, spawned("agent-12"))
+        store.apply(SESSION_ID, SessionEvent.AssistantDelta("fresh live text", "agent-12"))
+
+        store.applyTranscriptPage(SESSION_ID, "agent-12", transcriptPage(listOf(finishedTurn("t1", 1, "committed")), hasMore = true), keepLive = true)
+        assertEquals(
+            listOf(
+                ChatItem.AssistantMessage("t1.1.f1", "committed", thinking = ""),
+                ChatItem.AssistantMessage("live_0", "fresh live text", thinking = ""),
+            ),
+            entry("agent-12")!!.items,
+        )
+
+        store.prependTranscriptPage(SESSION_ID, "agent-12", transcriptPage(listOf(finishedTurn("t0", 0, "older"))))
+        val state = entry("agent-12")!!
+        assertEquals(
+            listOf("older", "committed", "fresh live text"),
+            state.items.map { (it as ChatItem.AssistantMessage).text },
+        )
+        assertEquals("t0", store.oldestTurnId(SESSION_ID, "agent-12"))
+        assertEquals(false, state.hasMoreTurns)
+    }
+
+    @Test
+    fun `the seeded prompt bubble survives the transcript that replaces the summary`() = runBlocking {
+        // 045 seed first (cold open), then 046's fetch lands: the prompt bubble is the
+        // page's only user row (the transcript never carries the task prompt), the
+        // seeded summary bubble gives way to the real turns.
+        store.seedFromAgentRow(
+            SESSION_ID,
+            agentRow(output = "agent_id: agent-12\nactual_subagent_type: explore\nstatus: completed\n\n[summary]\nthe final report"),
+        )
+
+        store.applyTranscriptPage(SESSION_ID, "agent-12", transcriptPage(listOf(finishedTurn("t0", 0, "the real final text"))), keepLive = false)
+
+        val state = entry("agent-12")!!
+        assertEquals("explore", state.name)
+        assertEquals("doc-verify", state.description)
+        assertEquals(SubagentStatus.Completed, state.status)
+        assertEquals(
+            listOf(
+                ChatItem.UserMessage("seeded_prompt", "Reply ok"),
+                ChatItem.AssistantMessage("t0.1.f1", "the real final text", thinking = ""),
+            ),
+            state.items,
+        )
     }
 
     private fun agentRow(

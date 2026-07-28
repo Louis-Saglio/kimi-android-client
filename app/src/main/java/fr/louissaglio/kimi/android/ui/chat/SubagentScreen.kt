@@ -24,13 +24,16 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import fr.louissaglio.kimi.android.ui.common.EmptyState
+import fr.louissaglio.kimi.android.ui.common.ErrorState
+import fr.louissaglio.kimi.android.ui.common.LoadingState
 
 /**
- * Read-only sub-agent page (ticket 045): the sub-agent's own stream — spliced prompts
- * as user bubbles, assistant text and thinking, tool rows — with no composer, no
- * approval cards and no question wizard (a sub-agent cannot be talked to; its
- * questions and approvals stay in the main chat). The list reuses the chat's
- * [MessageList], auto-scroll included.
+ * Read-only sub-agent page (ticket 045), transcript-backed since ticket 046: the
+ * sub-agent's committed history (fetched per-agent from the transcript endpoint) plus
+ * its live stream — spliced prompts as user bubbles, assistant text and thinking,
+ * tool rows — with no composer, no approval cards and no question wizard (a sub-agent
+ * cannot be talked to; its questions and approvals stay in the main chat). The list
+ * reuses the chat's [MessageList], auto-scroll and history pagination included.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -53,7 +56,7 @@ fun SubagentScreen(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        uiState.name?.let { name ->
+                        uiState.name?.takeIf { it.isNotBlank() }?.let { name ->
                             Text(
                                 text = name,
                                 maxLines = 1,
@@ -79,14 +82,19 @@ fun SubagentScreen(
     ) { innerPadding ->
         Box(Modifier.fillMaxSize().padding(innerPadding)) {
             when {
-                // The spawn predates the app's subscription (deep-ish state loss):
-                // transcript REST backing lands with ticket 046.
-                uiState.status == null -> EmptyState(
-                    "No stream for this sub-agent — the app connected after it started. " +
-                        "Its result appears on the Agent tool row in the chat.",
-                )
+                // The transcript fetch is the page's only data source here (no spawn,
+                // no seed, no stream): its failure gets the full-screen retry.
+                uiState.error != null && uiState.items.isEmpty() ->
+                    ErrorState(uiState.error!!, onRetry = viewModel::onRetry, enabled = !uiState.isLoading)
+                uiState.status == null && uiState.isLoading -> LoadingState()
+                // Neither a live stream nor a transcript entry exists.
+                uiState.status == null -> EmptyState("No transcript for this sub-agent.")
                 uiState.items.isEmpty() -> EmptyState("No activity yet")
-                else -> MessageList(uiState.items)
+                else -> MessageList(
+                    uiState.items,
+                    isLoadingMoreHistory = uiState.isLoadingMoreHistory,
+                    onHistoryTopReached = viewModel::onHistoryTopReached,
+                )
             }
         }
     }

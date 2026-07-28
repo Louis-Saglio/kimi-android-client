@@ -43,8 +43,8 @@ stored in the app settings).
   `Formatters` — reuse them instead of adding one-off copies.
 - Sub-agent streams (045): `SessionSocket` tags transcript events with the
   emitting `agentId`; sub-agent-scoped events route to `SubagentStreamStore`
-  (ui/chat, session-scoped singleton keyed by session, one non-history-backed
-  `ChatTimeline` per sub-agent, same delta coalescing as ChatViewModel). The
+  (ui/chat, session-scoped singleton keyed by session, one `ChatTimeline` per
+  sub-agent, same delta coalescing as ChatViewModel). The
   chat's socket collection is the store's ONLY feeder: a socket gate in
   ChatViewModel keeps it alive while a sub-agent page of the session is open
   (SubagentViewModel registers via pageOpened/pageClosed) — never open a
@@ -54,7 +54,15 @@ stored in the app settings).
   trailing open button navigates to the page. Cold-open (spawn before
   subscribe): linked rows seed their store entry from the call args/result
   (identity, status, `prompt` user bubble + `[summary]` assistant bubble)
-  via `seedFromAgentRow`.
+  via `seedFromAgentRow`. Transcript backing (046): the page's history comes
+  from `GET .../transcript?agent_id=…` (`ChatApi.transcript` →
+  turn/step/frame domain model in `data/chat/Transcript.kt`, NOT
+  `ChatMessage`); `SubagentViewModel` fetches the newest page on cold open
+  (keepLive merge under the live tail), refetches canonically when the
+  sub-agent reaches a terminal state, and pages older turns with
+  `before_turn` on scroll-to-top (prepend, dedup by turn id). The seeded
+  task-prompt bubble lives outside the timeline (`Stream.seededPrompt`) —
+  the transcript never carries the task prompt.
 - Streaming: `ChatViewModel` conflates assistant/thinking deltas (leading edge
   immediately, then one emission per ~100 ms window, flushed before any
   non-delta event) because `MarkdownBody` re-parses on every emission. The
