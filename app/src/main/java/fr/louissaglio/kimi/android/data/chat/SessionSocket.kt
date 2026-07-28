@@ -115,6 +115,10 @@ internal class SessionSocket(
         onCursor: (Cursor) -> Unit,
         onEvent: suspend (SessionEvent) -> Unit,
     ) {
+        // UNLIMITED is not a backpressure risk worth bounding: the collector
+        // (ChatViewModel) coalesces streaming deltas before any heavy work (UiState
+        // emission → full markdown re-parse), so a frame burst can only ever queue
+        // cheap unparsed strings here, never unbounded expensive downstream work.
         val signals = Channel<Signal>(Channel.UNLIMITED)
         val webSocket = socketClient.newWebSocket(
             Request.Builder().url(url).build(),

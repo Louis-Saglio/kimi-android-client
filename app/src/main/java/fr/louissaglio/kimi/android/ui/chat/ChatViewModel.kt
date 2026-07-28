@@ -23,11 +23,13 @@ import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
 import fr.louissaglio.kimi.android.data.sessions.displayName
 import fr.louissaglio.kimi.android.data.sessions.displayNameFor
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
+import fr.louissaglio.kimi.android.di.StreamCoalesceWindowMillis
 import java.util.UUID
 import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -46,6 +48,10 @@ class ChatViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     // Default mirrors the DI Json for direct construction in tests.
     private val todoParser: TodoParser = TodoParser(Json { ignoreUnknownKeys = true }),
+    // Default mirrors the DI value (AppModule) for direct construction in tests;
+    // pass 0 to publish every delta immediately (the pre-conflation behavior).
+    @StreamCoalesceWindowMillis
+    private val streamCoalesceWindowMillis: Long = 100L,
 ) : ViewModel() {
 
     private val sessionId: String = checkNotNull(savedStateHandle["sessionId"])
@@ -244,6 +250,18 @@ class ChatViewModel @Inject constructor(
      * /status snapshot a newer agent.status.updated frame has already overtaken. */
     private var contextUsageEventCount = 0
 
+    // --- Streaming-delta conflation (see startSocket's collect) -------------------
+    // All three are confined to Main: the socket collect, the flush loop, and
+    // onScreenStopped all run on viewModelScope's dispatcher (or are called from it).
+
+    /** Deltas received but not yet published; null = no burst open. Holds only
+     * [SessionEvent.AssistantDelta]/[SessionEvent.ThinkingDelta], consecutive
+     * same-kind entries merged into one. */
+    private var pendingDeltas: MutableList<SessionEvent>? = null
+
+    /** The trailing-flush timer of an open burst; null when no burst is open. */
+    private var deltaFlushJob: Job? = null
+
     /** Wired to ON_START: (re)loads history and opens the socket. Also fires when the
      * app returns to the foreground, which is the re-sync path after an OS-level drop. */
     fun onScreenStarted() {
@@ -255,8 +273,10 @@ class ChatViewModel @Inject constructor(
         startSocket()
     }
 
-    /** Wired to ON_STOP: the socket is only held while the screen is visible. */
+    /** Wired to ON_STOP: the socket is only held while the screen is visible. Coalesced
+     * deltas flush first, so no received text is ever held back (or lost with the timer). */
     fun onScreenStopped() {
+        flushPendingDeltas()
         socketJob?.cancel()
     }
 
@@ -491,29 +511,127 @@ class ChatViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Collects the session socket. Streaming deltas (assistant/thinking) are conflated
+     * here, at the ViewModel layer, so the UiState — and with it MarkdownBody, which
+     * re-parses the whole streaming bubble per emission — updates at most once per
+     * [streamCoalesceWindowMillis] during a burst instead of once per socket frame.
+     *
+     * Semantics (window > 0):
+     * - The FIRST delta of a burst applies immediately: the bubble starts rendering
+     *   without waiting out a window.
+     * - Later deltas accumulate in [pendingDeltas] (consecutive same-kind deltas merge
+     *   into one append) and publish once per window from [runDeltaFlushLoop]; a full
+     *   quiet window closes the burst, re-arming the leading edge.
+     * - ANY other socket event — turn/approval/question/tool/status frames and the
+     *   connection lifecycle alike — flushes the pending text first, so no substantive
+     *   event is ever delayed behind coalesced text and the pre-completion state is
+     *   exact. No delta is lost and order is preserved: a flush replays the buffered
+     *   events through the timeline in arrival order.
+     *
+     * With window = 0 every delta publishes on arrival (the pre-conflation behavior).
+     */
     private fun startSocket() {
         socketJob?.cancel()
         socketJob = viewModelScope.launch {
             chatRepository.observeSession(settingsRepository.current(), sessionId)
                 .collect { event ->
-                    when (event) {
-                        SocketEvent.Connected ->
-                            _uiState.update { it.copy(isReconnecting = false) }
-                        SocketEvent.Reconnected -> {
-                            _uiState.update { it.copy(isReconnecting = false) }
-                            // The cursor resume replays missed events; the refetch
-                            // heals anything beyond the server's replay buffer.
-                            refreshHistory(clearLive = false)
-                            refreshPendingQuestions()
+                    val sessionEvent = (event as? SocketEvent.Event)?.event
+                    if (sessionEvent != null && sessionEvent.isStreamDelta()) {
+                        onStreamDelta(sessionEvent)
+                    } else {
+                        flushPendingDeltas()
+                        when (event) {
+                            SocketEvent.Connected ->
+                                _uiState.update { it.copy(isReconnecting = false) }
+                            SocketEvent.Reconnected -> {
+                                _uiState.update { it.copy(isReconnecting = false) }
+                                // The cursor resume replays missed events; the refetch
+                                // heals anything beyond the server's replay buffer.
+                                refreshHistory(clearLive = false)
+                                refreshPendingQuestions()
+                            }
+                            SocketEvent.Disconnected ->
+                                _uiState.update { it.copy(isReconnecting = true) }
+                            // No-op: the history load validates the URL first and owns the
+                            // user-facing error.
+                            is SocketEvent.Failed -> Unit
+                            is SocketEvent.Event -> applySessionEvent(event.event)
                         }
-                        SocketEvent.Disconnected ->
-                            _uiState.update { it.copy(isReconnecting = true) }
-                        // No-op: the history load validates the URL first and owns the
-                        // user-facing error.
-                        is SocketEvent.Failed -> Unit
-                        is SocketEvent.Event -> applySessionEvent(event.event)
                     }
                 }
+        }
+    }
+
+    private fun SessionEvent.isStreamDelta(): Boolean =
+        this is SessionEvent.AssistantDelta || this is SessionEvent.ThinkingDelta
+
+    /** One delta applied+published on its own — the leading edge, and every delta
+     * when the window is 0. */
+    private fun applyTimelineEvent(event: SessionEvent) {
+        timeline.apply(event)
+        _uiState.update { it.copy(items = timeline.items(), todos = timeline.todos()) }
+    }
+
+    private fun onStreamDelta(event: SessionEvent) {
+        if (streamCoalesceWindowMillis <= 0L) {
+            applyTimelineEvent(event)
+            return
+        }
+        val pending = pendingDeltas
+        if (pending == null) {
+            // Leading edge of a burst: publish immediately, then coalesce until the
+            // stream pauses for a full window.
+            applyTimelineEvent(event)
+            pendingDeltas = mutableListOf()
+            deltaFlushJob = viewModelScope.launch { runDeltaFlushLoop() }
+        } else {
+            pending.mergeDelta(event)
+        }
+    }
+
+    /** Trailing flush of an open burst: publishes the accumulated deltas once per
+     * window; a window with nothing new closes the burst so the next delta renders
+     * on its leading edge again. */
+    private suspend fun runDeltaFlushLoop() {
+        while (true) {
+            delay(streamCoalesceWindowMillis)
+            val pending = pendingDeltas ?: return
+            if (pending.isEmpty()) {
+                pendingDeltas = null
+                deltaFlushJob = null
+                return
+            }
+            pending.forEach(timeline::apply)
+            pending.clear()
+            _uiState.update { it.copy(items = timeline.items(), todos = timeline.todos()) }
+        }
+    }
+
+    /** Publishes any coalesced deltas NOW, in arrival order, and closes the burst.
+     * Runs before every non-delta socket event and on ON_STOP; no-op outside a burst. */
+    private fun flushPendingDeltas() {
+        deltaFlushJob?.cancel()
+        deltaFlushJob = null
+        val pending = pendingDeltas ?: return
+        pendingDeltas = null
+        if (pending.isEmpty()) return
+        pending.forEach(timeline::apply)
+        _uiState.update { it.copy(items = timeline.items(), todos = timeline.todos()) }
+    }
+
+    /** Consecutive same-kind deltas merge into one, so a flush costs one append per
+     * text stream. Assistant and thinking deltas never merge across kinds; each kind
+     * appends to its own bubble field, so keeping them as separate list entries
+     * preserves the observable arrival order. */
+    private fun MutableList<SessionEvent>.mergeDelta(event: SessionEvent) {
+        val last = lastOrNull()
+        when {
+            last is SessionEvent.AssistantDelta && event is SessionEvent.AssistantDelta ->
+                set(lastIndex, SessionEvent.AssistantDelta(last.delta + event.delta))
+            last is SessionEvent.ThinkingDelta && event is SessionEvent.ThinkingDelta ->
+                set(lastIndex, SessionEvent.ThinkingDelta(last.delta + event.delta))
+            else -> add(event)
         }
     }
 
@@ -570,10 +688,7 @@ class ChatViewModel @Inject constructor(
                 contextUsageEventCount++
                 _uiState.update { it.copy(contextUsage = event.contextUsage) }
             }
-            else -> {
-                timeline.apply(event)
-                _uiState.update { it.copy(items = timeline.items(), todos = timeline.todos()) }
-            }
+            else -> applyTimelineEvent(event)
         }
     }
 

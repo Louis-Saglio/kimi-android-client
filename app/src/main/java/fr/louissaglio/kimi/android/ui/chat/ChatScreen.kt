@@ -115,7 +115,19 @@ fun ChatScreen(
     // History attachments (ticket 034): images resolve their bytes inline (base64) or
     // via /files; tapping a thumbnail opens the full-screen viewer, tapping a file
     // chip routes through the ViewModel, which downloads, caches and emits OpenFile.
-    var fullScreenImage by remember { mutableStateOf<ChatMessage.Part.Image?>(null) }
+    //
+    // The callbacks flowing into the lazy list are hoisted to stable references:
+    // recreated on every recomposition (fresh lambda, fresh callable reference), they
+    // would defeat item-level skipping — the compiler auto-remembers only captures it
+    // proves stable, and the ViewModel/launcher/state delegate don't qualify.
+    val fullScreenImageState = remember { mutableStateOf<ChatMessage.Part.Image?>(null) }
+    var fullScreenImage by fullScreenImageState
+    val onImageClick = remember { { image: ChatMessage.Part.Image -> fullScreenImageState.value = image } }
+    val onAttach = remember(attachLauncher) { { attachLauncher.launch("*/*") } }
+    val onOpenAttachment: (ChatMessage.Part.Attachment) -> Unit =
+        remember(viewModel) { viewModel::onOpenAttachment }
+    val loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray? =
+        remember(viewModel) { viewModel::imageBytes }
     ChatContent(
         uiState = uiState,
         snackbarHostState = snackbarHostState,
@@ -134,16 +146,16 @@ fun ChatScreen(
         onDismissQuestion = viewModel::onDismissQuestion,
         onModelSelected = viewModel::onModelSelected,
         onEffortSelected = viewModel::onEffortSelected,
-        onAttach = { attachLauncher.launch("*/*") },
+        onAttach = onAttach,
         onAttachmentRemoved = viewModel::onAttachmentRemoved,
-        onImageClick = { fullScreenImage = it },
-        onOpenAttachment = viewModel::onOpenAttachment,
-        loadImageBytes = viewModel::imageBytes,
+        onImageClick = onImageClick,
+        onOpenAttachment = onOpenAttachment,
+        loadImageBytes = loadImageBytes,
     )
     fullScreenImage?.let { image ->
         FullScreenImageViewer(
             image = image,
-            loadImageBytes = viewModel::imageBytes,
+            loadImageBytes = loadImageBytes,
             onDismiss = { fullScreenImage = null },
         )
     }

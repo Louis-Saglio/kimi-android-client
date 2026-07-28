@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -285,6 +286,9 @@ class ChatViewModelTest {
             settingsRepository,
             FakeAttachmentStore(),
             SavedStateHandle(mapOf("sessionId" to "session_1")),
+            // The suite asserts per-event application: 0 publishes every delta on
+            // arrival (the pre-conflation behavior), no timer involved.
+            streamCoalesceWindowMillis = 0,
         )
     }
 
@@ -311,6 +315,84 @@ class ChatViewModelTest {
         socket.send(approvalResolvedFrame("ap_1"))
         awaitState(viewModel.uiState) { it.pendingApprovals.isEmpty() }
         assertEquals(emptyList<ChatViewModel.PendingApproval>(), viewModel.uiState.value.pendingApprovals)
+    }
+
+    @Test
+    fun `stream deltas publish the leading edge then coalesce until a substantive event flushes`() = runBlocking {
+        val vm = newViewModel(streamCoalesceWindowMillis = 100)
+        vm.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(vm.uiState) { it.items != null }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        val (texts, recorder) = assistantTextRecorder(vm)
+        try {
+            socket.send(assistantDeltaFrame("Hello", seq = 5))
+            // The burst's leading edge renders immediately, without waiting out the window.
+            awaitCondition { texts == listOf("Hello") }
+
+            socket.send(assistantDeltaFrame(" world", seq = 6))
+            socket.send(assistantDeltaFrame("!", seq = 7))
+            // In-order stream: the approval frame is processed after both deltas, and
+            // pending text flushes before it applies.
+            socket.send(approvalRequestedFrame(id = "ap_1", tool = "Bash", action = "Running: ls", command = "ls"))
+            awaitState(vm.uiState) { it.pendingApprovals.isNotEmpty() }
+
+            // The two trailing deltas became ONE emission, published before the approval.
+            assertEquals(listOf("Hello", "Hello world!"), texts)
+        } finally {
+            recorder.cancel()
+        }
+    }
+
+    @Test
+    fun `turn ended flushes the accumulated text exactly before the completion applies`() = runBlocking {
+        val vm = newViewModel(streamCoalesceWindowMillis = 100)
+        vm.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(vm.uiState) { it.items != null }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        val (texts, recorder) = assistantTextRecorder(vm)
+        try {
+            socket.send(turnStartedFrame())
+            awaitState(vm.uiState) { it.isWorking }
+            socket.send(assistantDeltaFrame("Hello", seq = 5))
+            awaitCondition { texts == listOf("Hello") }
+
+            socket.send(assistantDeltaFrame(" world!", seq = 6))
+            socket.send(turnEndedFrame(reason = "completed"))
+            // The turn-end refetch is issued after the flush: once it has run, the
+            // accumulated text was necessarily published first, and in full.
+            awaitRequest("/messages")
+            awaitState(vm.uiState) { !it.isWorking }
+
+            assertEquals(listOf("Hello", "Hello world!"), texts)
+        } finally {
+            recorder.cancel()
+        }
+    }
+
+    @Test
+    fun `window zero publishes every delta on arrival`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        val (texts, recorder) = assistantTextRecorder(viewModel)
+        try {
+            socket.send(assistantDeltaFrame("H", seq = 5))
+            socket.send(assistantDeltaFrame("e", seq = 6))
+            socket.send(assistantDeltaFrame("llo", seq = 7))
+            awaitCondition { texts.lastOrNull() == "Hello" }
+
+            // One emission per delta — the pre-conflation behavior the rest of the
+            // suite asserts.
+            assertEquals(listOf("H", "He", "Hello"), texts)
+        } finally {
+            recorder.cancel()
+        }
     }
 
     @Test
@@ -1192,6 +1274,35 @@ class ChatViewModelTest {
         return serverSocket!!
     }
 
+    /** A ViewModel with a non-zero coalescing window (the shared [viewModel] runs with
+     * 0 = publish-every-delta). The flush timer never fires in this harness — nothing
+     * pumps the test scheduler under runBlocking — so flushes are driven by the
+     * substantive events each test sends, deterministically. */
+    private fun newViewModel(streamCoalesceWindowMillis: Long): ChatViewModel = ChatViewModel(
+        ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }, dataStore),
+        SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
+        settingsRepository,
+        FakeAttachmentStore(),
+        SavedStateHandle(mapOf("sessionId" to "session_1")),
+        streamCoalesceWindowMillis = streamCoalesceWindowMillis,
+    )
+
+    /** Records the distinct last-assistant-bubble texts published to the UiState, in
+     * order — the observable trace of the delta conflation. The collector never
+     * suspends on work, so no emission is conflated away. Cancel the job in finally. */
+    private fun CoroutineScope.assistantTextRecorder(
+        viewModel: ChatViewModel,
+    ): Pair<CopyOnWriteArrayList<String>, Job> {
+        val texts = CopyOnWriteArrayList<String>()
+        val job = launch(Dispatchers.Unconfined) {
+            viewModel.uiState.collect { state ->
+                val text = state.items?.filterIsInstance<ChatItem.AssistantMessage>()?.lastOrNull()?.text
+                if (text != null && texts.lastOrNull() != text) texts += text
+            }
+        }
+        return texts to job
+    }
+
     /** Drains recorded requests until the approvals POST arrives (history/status/WS came first). */
     private fun awaitRequest(pathSubstring: String): RecordedRequest {
         val deadline = System.currentTimeMillis() + 5_000
@@ -1206,6 +1317,12 @@ class ChatViewModelTest {
         """{"type":"turn.started","seq":20,"epoch":"ep_1","session_id":"session_1",""" +
             """"timestamp":"2026-07-19T00:00:00.000Z","payload":{"type":"turn.started","turnId":1,""" +
             """"origin":{"kind":"user"},"agentId":"main","sessionId":"session_1"}}"""
+
+    /** Verbatim 0.29.0 volatile streaming frame (docs/server-api.md, assistant.delta). */
+    private fun assistantDeltaFrame(delta: String, seq: Int): String =
+        """{"type":"assistant.delta","seq":$seq,"epoch":"ep_1","volatile":true,"offset":0,""" +
+            """"session_id":"session_1","timestamp":"2026-07-19T00:00:00.000Z",""" +
+            """"payload":{"type":"assistant.delta","turnId":1,"delta":"$delta","agentId":"main","sessionId":"session_1"}}"""
 
     private fun turnEndedFrame(reason: String): String =
         """{"type":"turn.ended","seq":21,"epoch":"ep_1","session_id":"session_1",""" +

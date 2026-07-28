@@ -27,9 +27,18 @@ import okhttp3.OkHttpClient
 @Retention(AnnotationRetention.BINARY)
 annotation class ApplicationScope
 
+/** Coalescing window for chat streaming deltas (see ChatViewModel.startSocket). */
+@Qualifier
+@Retention(AnnotationRetention.BINARY)
+annotation class StreamCoalesceWindowMillis
+
 @Module
 @InstallIn(SingletonComponent::class)
 object AppModule {
+
+    @Provides
+    @StreamCoalesceWindowMillis
+    fun provideStreamCoalesceWindowMillis(): Long = 100L
 
     @Provides
     @Singleton

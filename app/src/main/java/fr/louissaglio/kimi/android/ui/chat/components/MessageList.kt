@@ -83,7 +83,9 @@ internal fun MessageList(
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        items(items, key = ChatItem::id) { item ->
+        // Heterogeneous rows: the content type lets LazyColumn reuse composition
+        // only across rows of the same bubble/card type.
+        items(items, key = ChatItem::id, contentType = { it::class }) { item ->
             when (item) {
                 is ChatItem.UserMessage ->
                     UserBubble(

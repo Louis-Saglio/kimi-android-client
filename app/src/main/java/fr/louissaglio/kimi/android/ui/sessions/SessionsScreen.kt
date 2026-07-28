@@ -303,11 +303,11 @@ private fun SessionList(
     }
     LaunchedEffect(endReached) { if (endReached) onEndReached() }
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-        items(sessions, key = Session::id) { session ->
+        items(sessions, key = Session::id, contentType = { "session" }) { session ->
             SessionRow(session, onClick = { onSessionClick(session) })
         }
         if (uiState.isLoadingMore || uiState.loadMoreError != null) {
-            item(key = "load_more_footer") {
+            item(key = "load_more_footer", contentType = "footer") {
                 LoadMoreFooter(error = uiState.loadMoreError, onRetry = onEndReached)
             }
         }
