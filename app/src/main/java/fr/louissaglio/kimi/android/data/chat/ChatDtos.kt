@@ -241,3 +241,25 @@ data class QuestionResolvedPayload(
 data class QuestionListData(
     val items: List<QuestionRequestedPayload> = emptyList(),
 )
+
+/** `subagent.spawned` payload (docs/server-api.md, Sub-agents): the only frame carrying
+ * a sub-agent's identity metadata. `parentToolCallUuid`/`swarmIndex` exist upstream but
+ * are not consumed. The frame itself is tagged `agentId:"main"`. */
+@Serializable
+data class SubagentSpawnedPayload(
+    val subagentId: String = "",
+    val subagentName: String = "",
+    val parentToolCallId: String = "",
+    val description: String = "",
+    val runInBackground: Boolean = false,
+)
+
+/** Shared shape of `subagent.started`/`completed`/`failed`/`suspended`: every variant
+ * carries [subagentId], plus only its own extra field (resultSummary, error, reason —
+ * the last one not consumed). */
+@Serializable
+data class SubagentLifecyclePayload(
+    val subagentId: String = "",
+    val resultSummary: String? = null,
+    val error: String? = null,
+)

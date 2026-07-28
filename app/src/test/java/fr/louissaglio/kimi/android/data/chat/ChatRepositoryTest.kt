@@ -1374,12 +1374,12 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun `sub-agent transcript frames emit no events`() = runBlocking {
+    fun `sub-agent transcript frames emit events tagged with their agentId`() = runBlocking {
         // Sub-agents stream over the same session channel tagged with their own agentId
         // (docs/server-api.md, Sub-agents; fixtures from the 2026-07-28 0.29.2 capture).
-        // None of them may reach the main chat; the two main frames (one with the tag,
-        // one without — absent means main) are the synchronization events, the settle
-        // wait proves nothing else comes.
+        // Since ticket 045 every frame emits its event carrying the emitting agentId —
+        // routing, not dropping, is what keeps them out of the main chat. The two main
+        // frames (one with the tag, one without — absent means main) read as "main".
         val emitted = runSocketEvents(
             """{"type":"turn.started","seq":20,"epoch":"ep_1","session_id":"session_1",""" +
                 """"timestamp":"2026-07-28T03:37:35.493Z","payload":{"type":"turn.started","turnId":0,""" +
@@ -1422,14 +1422,81 @@ class ChatRepositoryTest {
             """{"type":"assistant.delta","seq":27,"epoch":"ep_1","volatile":true,"offset":9,""" +
                 """"session_id":"session_1","timestamp":"2026-07-28T03:37:39.100Z",""" +
                 """"payload":{"type":"assistant.delta","turnId":1,"delta":" more"}}""",
-            eventCount = 2,
-            settleMillis = 200,
+            eventCount = 12,
         )
 
         assertEquals(
             listOf(
+                SocketEvent.Event(SessionEvent.TurnStarted("agent-12")),
+                SocketEvent.Event(
+                    SessionEvent.ContextSpliced(
+                        listOf(ChatMessage("msg_sub", ChatMessage.Role.User, listOf(ChatMessage.Part.Text("sub task")))),
+                        "agent-12",
+                    ),
+                ),
+                SocketEvent.Event(SessionEvent.ThinkingDelta("sub hmm", "agent-12")),
+                SocketEvent.Event(SessionEvent.AssistantDelta("sub text", "agent-12")),
+                SocketEvent.Event(SessionEvent.ToolCallDelta("tool_sub", "Bash", "agent-12")),
+                SocketEvent.Event(
+                    SessionEvent.ToolCallStarted(
+                        "tool_sub", "Bash", "ls", input = "{\n    \"command\": \"ls\"\n}", agentId = "agent-12",
+                    ),
+                ),
+                SocketEvent.Event(SessionEvent.ToolCallProgress("tool_sub", "sub out", "agent-12")),
+                SocketEvent.Event(SessionEvent.ToolCallResult("tool_sub", false, "sub result", "agent-12")),
+                SocketEvent.Event(SessionEvent.ContextUsageUpdated(ContextUsage(13967, 1048576), "agent-12")),
+                SocketEvent.Event(SessionEvent.TurnEnded("completed", "agent-12")),
                 SocketEvent.Event(SessionEvent.AssistantDelta("main text")),
                 SocketEvent.Event(SessionEvent.AssistantDelta(" more")),
+            ),
+            emitted.filterIsInstance<SocketEvent.Event>(),
+        )
+    }
+
+    @Test
+    fun `subagent lifecycle frames decode to their events`() = runBlocking {
+        // Verbatim subagent.spawned/completed payloads from the 2026-07-28 0.29.2
+        // capture (docs/server-api.md, Sub-agents); started/failed/suspended share the
+        // payload minus/plus their own field. All are tagged agentId "main" yet scoped
+        // to the sub-agent by the payload's subagentId.
+        val emitted = runSocketEvents(
+            """{"type":"subagent.spawned","seq":19,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-28T03:37:35.492Z","payload":{"type":"subagent.spawned",""" +
+                """"subagentId":"agent-12","subagentName":"explore",""" +
+                """"parentToolCallId":"tool_mhF8UXcf5QwvZbh5223tiIng","parentAgentId":"main",""" +
+                """"callerAgentId":"main","description":"doc-verify-subagent","runInBackground":false,""" +
+                """"agentId":"main","sessionId":"session_1"}}""",
+            """{"type":"subagent.started","seq":22,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-28T03:37:35.600Z","payload":{"type":"subagent.started",""" +
+                """"subagentId":"agent-12","agentId":"main","sessionId":"session_1"}}""",
+            """{"type":"subagent.completed","seq":33,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-28T03:37:51.951Z","payload":{"type":"subagent.completed",""" +
+                """"subagentId":"agent-12","resultSummary":"the sub-agent's result summary",""" +
+                """"usage":{"inputOther":6462,"output":359,"inputCacheRead":21504,"inputCacheCreation":0},""" +
+                """"contextTokens":14358,"agentId":"main","sessionId":"session_1"}}""",
+            """{"type":"subagent.failed","seq":34,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-28T03:37:52.000Z","payload":{"type":"subagent.failed",""" +
+                """"subagentId":"agent-13","error":"boom","agentId":"main","sessionId":"session_1"}}""",
+            """{"type":"subagent.suspended","seq":35,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-28T03:37:53.000Z","payload":{"type":"subagent.suspended",""" +
+                """"subagentId":"agent-13","reason":"waiting_on_input","agentId":"main","sessionId":"session_1"}}""",
+        )
+
+        assertEquals(
+            listOf(
+                SocketEvent.Event(
+                    SessionEvent.SubagentSpawned(
+                        subagentId = "agent-12",
+                        name = "explore",
+                        parentToolCallId = "tool_mhF8UXcf5QwvZbh5223tiIng",
+                        description = "doc-verify-subagent",
+                        runInBackground = false,
+                    ),
+                ),
+                SocketEvent.Event(SessionEvent.SubagentStarted("agent-12")),
+                SocketEvent.Event(SessionEvent.SubagentCompleted("agent-12", "the sub-agent's result summary")),
+                SocketEvent.Event(SessionEvent.SubagentFailed("agent-13", "boom")),
+                SocketEvent.Event(SessionEvent.SubagentSuspended("agent-13")),
             ),
             emitted.filterIsInstance<SocketEvent.Event>(),
         )

@@ -27,6 +27,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -66,6 +67,9 @@ class ChatViewModelTest {
     private lateinit var viewModel: ChatViewModel
     private lateinit var settingsRepository: SettingsRepository
     private lateinit var dataStore: FakePreferencesDataStore
+
+    /** 0 ms window: sub-agent frames apply on arrival, no flush timer involved. */
+    private val subagentStore = SubagentStreamStore(Json { ignoreUnknownKeys = true }, streamCoalesceWindowMillis = 0)
 
     @Volatile
     private var approvalsSucceed = true
@@ -285,6 +289,7 @@ class ChatViewModelTest {
             SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
             settingsRepository,
             FakeAttachmentStore(),
+            subagentStore,
             SavedStateHandle(mapOf("sessionId" to "session_1")),
             // The suite asserts per-event application: 0 publishes every delta on
             // arrival (the pre-conflation behavior), no timer involved.
@@ -393,6 +398,100 @@ class ChatViewModelTest {
         } finally {
             recorder.cancel()
         }
+    }
+
+    @Test
+    fun `sub-agent frames route to the store and never touch the main chat`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        // The main agent spawns a sub-agent (verbatim 0.29.2 shapes, docs/server-api.md):
+        // the Agent call row, then the spawned frame that links it to the sub-agent.
+        socket.send(
+            """{"type":"tool.call.started","seq":17,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-28T03:37:35.000Z","payload":{"type":"tool.call.started","turnId":0,""" +
+                """"toolCallId":"tool_agent","name":"Agent","args":{"subagent_type":"explore",""" +
+                """"description":"doc-verify","prompt":"Reply ok"},"agentId":"main","sessionId":"session_1"}}""",
+        )
+        socket.send(subagentSpawnedFrame())
+        awaitState(viewModel.uiState) { state ->
+            state.items?.filterIsInstance<ChatItem.ToolGroup>()
+                ?.flatMap { it.tools }
+                ?.any { it.id == "tool_agent" && it.subagentId == "agent-12" } == true
+        }
+
+        // The sub-agent's whole turn streams tagged with its own agentId.
+        socket.send(subagentStartedFrame())
+        socket.send(subTurnStartedFrame())
+        socket.send(subContextSplicedFrame())
+        socket.send(subAssistantDeltaFrame("sub reply"))
+        awaitCondition {
+            subagentEntry("agent-12")
+                ?.items?.filterIsInstance<ChatItem.AssistantMessage>()?.singleOrNull()?.text == "sub reply"
+        }
+
+        // Main chat: the linked Agent row only — no foreign bubble, no working-state flip.
+        val mainItems = viewModel.uiState.value.items.orEmpty()
+        assertEquals(1, mainItems.size)
+        assertTrue(mainItems.single() is ChatItem.ToolGroup)
+        assertFalse(viewModel.uiState.value.isWorking)
+
+        // The store accumulated the sub-agent's own stream, prompts as user bubbles.
+        val entry = subagentEntry("agent-12")!!
+        assertEquals("explore", entry.name)
+        assertEquals(SubagentStatus.Working, entry.status)
+        assertEquals(
+            listOf(
+                ChatItem.UserMessage("msg_sub", "sub task"),
+                ChatItem.AssistantMessage("live_0", "sub reply", thinking = ""),
+            ),
+            entry.items,
+        )
+
+        // Completion flips the store status and leaves the main chat untouched.
+        socket.send(subagentCompletedFrame())
+        awaitCondition { subagentEntry("agent-12")?.status == SubagentStatus.Completed }
+        assertEquals("done", subagentEntry("agent-12")!!.resultSummary)
+        assertEquals(1, viewModel.uiState.value.items.orEmpty().size)
+    }
+
+    /** Non-suspend read of a store entry, for awaitCondition's plain-lambda condition. */
+    private fun subagentEntry(subagentId: String): SubagentStreamStore.SubagentState? =
+        runBlocking { subagentStore.entry("session_1", subagentId).first() }
+
+    @Test
+    fun `a sub-agent that ran before the app connected is seeded from history`() = runBlocking {
+        // Louis's cold-open case: the app opens after the whole run — no subagent.*
+        // frame will ever arrive, but history carries the Agent call and its result
+        // (docs/server-api.md, Sub-agents). The page shows the seeded identity, status
+        // and summary instead of the empty state.
+        messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
+            """{"id":"msg_2","session_id":"session_1","role":"tool",""" +
+            """"content":[{"type":"tool_result","tool_call_id":"tool_1","is_error":false,""" +
+            """"output":"agent_id: agent-12\nactual_subagent_type: explore\nstatus: completed\n\n[summary]\nthe final report"}],""" +
+            """"created_at":"2026-07-28T03:37:52.000Z"},""" +
+            """{"id":"msg_1","session_id":"session_1","role":"assistant",""" +
+            """"content":[{"type":"tool_use","tool_call_id":"tool_1","tool_name":"Agent",""" +
+            """"input":{"subagent_type":"explore","description":"doc-verify","prompt":"Reply ok"}}],""" +
+            """"created_at":"2026-07-28T03:37:35.000Z"}""" +
+            """],"has_more":false},"request_id":"r"}"""
+
+        viewModel.onScreenStarted()
+
+        awaitCondition { subagentEntry("agent-12")?.status == SubagentStatus.Completed }
+        val entry = subagentEntry("agent-12")!!
+        assertEquals("explore", entry.name)
+        assertEquals("doc-verify", entry.description)
+        assertEquals("the final report", entry.resultSummary)
+        assertEquals(
+            listOf(
+                ChatItem.UserMessage("seeded_prompt", "Reply ok"),
+                ChatItem.AssistantMessage("seeded_summary", "the final report", thinking = ""),
+            ),
+            entry.items,
+        )
     }
 
     @Test
@@ -966,6 +1065,7 @@ class ChatViewModelTest {
             SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
             settingsRepository,
             FakeAttachmentStore(),
+            subagentStore,
             SavedStateHandle(
                 mapOf(
                     "sessionId" to "session_1",
@@ -986,6 +1086,7 @@ class ChatViewModelTest {
             SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
             settingsRepository,
             FakeAttachmentStore(),
+            subagentStore,
             SavedStateHandle(
                 mapOf("sessionId" to "session_1", "cwd" to "/home/ubuntu/kimi-android-client"),
             ),
@@ -1076,6 +1177,7 @@ class ChatViewModelTest {
             SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
             settingsRepository,
             FakeAttachmentStore(),
+            subagentStore,
             SavedStateHandle(mapOf("sessionId" to "session_1")),
         )
         recreated.onScreenStarted()
@@ -1104,6 +1206,7 @@ class ChatViewModelTest {
             SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
             settingsRepository,
             FakeAttachmentStore(),
+            subagentStore,
             SavedStateHandle(mapOf("sessionId" to "session_1")),
         )
         recreated.onScreenStarted()
@@ -1283,6 +1386,7 @@ class ChatViewModelTest {
         SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
         settingsRepository,
         FakeAttachmentStore(),
+        subagentStore,
         SavedStateHandle(mapOf("sessionId" to "session_1")),
         streamCoalesceWindowMillis = streamCoalesceWindowMillis,
     )
@@ -1409,4 +1513,41 @@ class ChatViewModelTest {
             """"payload":{"type":"agent.status.updated",""" +
             """"phase":{"kind":"running","turnId":0,"step":0,"stepId":"","since":1784777223312},""" +
             """"agentId":"main","sessionId":"session_1"}}"""
+
+    /** Verbatim 0.29.2 subagent.spawned (docs/server-api.md, Sub-agents). */
+    private fun subagentSpawnedFrame(): String =
+        """{"type":"subagent.spawned","seq":19,"epoch":"ep_1","session_id":"session_1",""" +
+            """"timestamp":"2026-07-28T03:37:35.492Z","payload":{"type":"subagent.spawned",""" +
+            """"subagentId":"agent-12","subagentName":"explore","parentToolCallId":"tool_agent",""" +
+            """"parentAgentId":"main","callerAgentId":"main","description":"doc-verify",""" +
+            """"runInBackground":false,"agentId":"main","sessionId":"session_1"}}"""
+
+    private fun subagentStartedFrame(): String =
+        """{"type":"subagent.started","seq":22,"epoch":"ep_1","session_id":"session_1",""" +
+            """"timestamp":"2026-07-28T03:37:35.600Z","payload":{"type":"subagent.started",""" +
+            """"subagentId":"agent-12","agentId":"main","sessionId":"session_1"}}"""
+
+    private fun subagentCompletedFrame(): String =
+        """{"type":"subagent.completed","seq":33,"epoch":"ep_1","session_id":"session_1",""" +
+            """"timestamp":"2026-07-28T03:37:51.951Z","payload":{"type":"subagent.completed",""" +
+            """"subagentId":"agent-12","resultSummary":"done","usage":{},"contextTokens":14358,""" +
+            """"agentId":"main","sessionId":"session_1"}}"""
+
+    private fun subTurnStartedFrame(): String =
+        """{"type":"turn.started","seq":20,"epoch":"ep_1","session_id":"session_1",""" +
+            """"timestamp":"2026-07-28T03:37:35.493Z","payload":{"type":"turn.started","turnId":0,""" +
+            """"origin":{"kind":"system_trigger","name":"subagent"},"agentId":"agent-12","sessionId":"session_1"}}"""
+
+    /** The sub-agent's first internal prompt, spliced as a user message (docs/server-api.md). */
+    private fun subContextSplicedFrame(): String =
+        """{"type":"context.spliced","seq":21,"epoch":"ep_1","session_id":"session_1",""" +
+            """"timestamp":"2026-07-28T03:37:35.494Z","payload":{"type":"context.spliced","start":0,""" +
+            """"deleteCount":0,"messages":[{"role":"user","content":[{"type":"text","text":"sub task"}],""" +
+            """"toolCalls":[],"origin":{"kind":"system_trigger","name":"subagent"},"id":"msg_sub"}],""" +
+            """"agentId":"agent-12","sessionId":"session_1"}}"""
+
+    private fun subAssistantDeltaFrame(delta: String): String =
+        """{"type":"assistant.delta","seq":23,"epoch":"ep_1","volatile":true,"offset":0,""" +
+            """"session_id":"session_1","timestamp":"2026-07-28T03:37:36.100Z",""" +
+            """"payload":{"type":"assistant.delta","turnId":0,"delta":"$delta","agentId":"agent-12","sessionId":"session_1"}}"""
 }

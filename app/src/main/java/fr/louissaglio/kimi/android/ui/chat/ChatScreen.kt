@@ -66,6 +66,7 @@ import java.time.Instant
 @Composable
 fun ChatScreen(
     onNavigateBack: () -> Unit,
+    onNavigateToSubagent: (sessionId: String, subagentId: String) -> Unit = { _, _ -> },
     viewModel: ChatViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -128,6 +129,11 @@ fun ChatScreen(
         remember(viewModel) { viewModel::onOpenAttachment }
     val loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray? =
         remember(viewModel) { viewModel::imageBytes }
+    // Linked `Agent` rows (ticket 045) open their sub-agent's page.
+    val sessionId = uiState.sessionId
+    val onOpenSubagent = remember(onNavigateToSubagent, sessionId) {
+        { subagentId: String -> onNavigateToSubagent(sessionId, subagentId) }
+    }
     ChatContent(
         uiState = uiState,
         snackbarHostState = snackbarHostState,
@@ -151,6 +157,7 @@ fun ChatScreen(
         onImageClick = onImageClick,
         onOpenAttachment = onOpenAttachment,
         loadImageBytes = loadImageBytes,
+        onOpenSubagent = onOpenSubagent,
     )
     fullScreenImage?.let { image ->
         FullScreenImageViewer(
@@ -198,6 +205,7 @@ private fun ChatContent(
     onImageClick: (ChatMessage.Part.Image) -> Unit,
     onOpenAttachment: (ChatMessage.Part.Attachment) -> Unit,
     loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray?,
+    onOpenSubagent: (String) -> Unit = {},
 ) {
     var showModelPicker by rememberSaveable { mutableStateOf(false) }
     var showTodos by rememberSaveable { mutableStateOf(false) }
@@ -350,6 +358,7 @@ private fun ChatContent(
                     onImageClick = onImageClick,
                     onOpenAttachment = onOpenAttachment,
                     loadImageBytes = loadImageBytes,
+                    onOpenSubagent = onOpenSubagent,
                 )
             }
         }

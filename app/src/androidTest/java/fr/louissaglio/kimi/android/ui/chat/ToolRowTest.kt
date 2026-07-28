@@ -7,6 +7,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
+import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -89,5 +90,51 @@ class ToolRowTest {
         toolRow(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Running, preview = "sleep 10"))
 
         composeTestRule.onNodeWithContentDescription("Expand tool details").assertDoesNotExist()
+    }
+
+    @Test
+    fun linkedRowKeepsExpansionAndOpensSubagentFromTrailingButton() {
+        var opened: String? = null
+        composeTestRule.setContent {
+            KimiTheme {
+                ToolRow(
+                    ChatItem.ToolActivity(
+                        "tool_1",
+                        "Agent",
+                        ToolStatus.Running,
+                        preview = "doc-verify",
+                        input = "{\n    \"prompt\": \"Reply ok\"\n}",
+                        subagentId = "agent-12",
+                    ),
+                    onOpenSubagent = { opened = it },
+                )
+            }
+        }
+
+        // The row tap keeps its expand/collapse behavior…
+        composeTestRule.onNodeWithText("Agent").performClick()
+        composeTestRule.onNodeWithText("{\n    \"prompt\": \"Reply ok\"\n}").assertIsDisplayed()
+        // …and the open affordance is its own button beside the expand chevron.
+        composeTestRule.onNodeWithContentDescription("Collapse tool details").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Open sub-agent").assertIsDisplayed()
+
+        composeTestRule.onNodeWithContentDescription("Open sub-agent").performClick()
+        assertEquals("agent-12", opened)
+    }
+
+    @Test
+    fun linkedRowWithoutDetailsNavigatesOnRowTap() {
+        var opened: String? = null
+        composeTestRule.setContent {
+            KimiTheme {
+                ToolRow(
+                    ChatItem.ToolActivity("tool_1", "Agent", ToolStatus.Running, preview = "doc-verify", subagentId = "agent-12"),
+                    onOpenSubagent = { opened = it },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("Agent").performClick()
+        assertEquals("agent-12", opened)
     }
 }

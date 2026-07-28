@@ -295,7 +295,7 @@ class ChatTimelineTest {
     @Test
     fun `tool call started fills the running row preview live`() {
         val timeline = ChatTimeline()
-        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.TurnStarted())
 
         timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "echo doc-verify"))
 
@@ -308,7 +308,7 @@ class ChatTimelineTest {
     @Test
     fun `a live stream appends new calls to the open group until a bubble splits it`() {
         val timeline = ChatTimeline()
-        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.TurnStarted())
 
         timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash"))
         timeline.apply(SessionEvent.ToolCallStarted("tool_2", "Read"))
@@ -336,7 +336,7 @@ class ChatTimelineTest {
     @Test
     fun `a row created by argument deltas picks up the started preview and keeps it on result`() {
         val timeline = ChatTimeline()
-        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.TurnStarted())
         // tool.call.delta arrives first (argument streaming), then the started frame.
         timeline.apply(SessionEvent.ToolCallDelta("tool_1", "Bash"))
 
@@ -352,7 +352,7 @@ class ChatTimelineTest {
     @Test
     fun `a live tool result fills the output of its running row`() {
         val timeline = ChatTimeline()
-        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.TurnStarted())
         timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "./gradlew test", input = "{\n    \"command\": \"./gradlew test\"\n}"))
 
         timeline.apply(SessionEvent.ToolCallResult("tool_1", true, "FAIL 3 tests\n"))
@@ -377,7 +377,7 @@ class ChatTimelineTest {
     @Test
     fun `progress chunks append to the matching running row only`() {
         val timeline = ChatTimeline()
-        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.TurnStarted())
         timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "build"))
         timeline.apply(SessionEvent.ToolCallStarted("tool_2", "Bash", "test"))
 
@@ -402,7 +402,7 @@ class ChatTimelineTest {
     @Test
     fun `progress for unknown or finished calls is ignored`() {
         val timeline = ChatTimeline()
-        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.TurnStarted())
         timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash"))
         timeline.apply(SessionEvent.ToolCallResult("tool_1", false, "final\n"))
 
@@ -420,7 +420,7 @@ class ChatTimelineTest {
     @Test
     fun `tool result replaces the accumulated progress wholesale`() {
         val timeline = ChatTimeline()
-        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.TurnStarted())
         timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "echo hi"))
         timeline.apply(SessionEvent.ToolCallProgress("tool_1", "h"))
         timeline.apply(SessionEvent.ToolCallProgress("tool_1", "i\n"))
@@ -436,7 +436,7 @@ class ChatTimelineTest {
     @Test
     fun `mid-turn refetch clears the volatile progress of committed rows`() {
         val timeline = ChatTimeline()
-        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.TurnStarted())
         timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "build"))
         timeline.apply(SessionEvent.ToolCallProgress("tool_1", "partial log\n"))
 
@@ -467,7 +467,7 @@ class ChatTimelineTest {
     @Test
     fun `mid-turn refetch keeps the uncommitted tail of a live group`() {
         val timeline = ChatTimeline()
-        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.TurnStarted())
         timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash"))
         timeline.apply(SessionEvent.ToolCallStarted("tool_2", "Read"))
 
@@ -497,7 +497,7 @@ class ChatTimelineTest {
     fun `deltas build the live bubble and tool rows update in place`() {
         val timeline = ChatTimeline()
 
-        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.TurnStarted())
         timeline.apply(SessionEvent.ThinkingDelta("thi"))
         timeline.apply(SessionEvent.ThinkingDelta("nking"))
         timeline.apply(SessionEvent.AssistantDelta("hel"))
@@ -520,7 +520,7 @@ class ChatTimelineTest {
     @Test
     fun `replaceHistory without keepLive clears live rows`() {
         val timeline = ChatTimeline()
-        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.TurnStarted())
         timeline.apply(SessionEvent.AssistantDelta("streamed"))
 
         timeline.replaceHistory(
@@ -537,7 +537,7 @@ class ChatTimelineTest {
     @Test
     fun `mid-turn refetch drops live rows the server has committed`() {
         val timeline = ChatTimeline()
-        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.TurnStarted())
         timeline.apply(SessionEvent.AssistantDelta("hello"))
         timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash"))
 
@@ -568,7 +568,7 @@ class ChatTimelineTest {
     @Test
     fun `mid-turn refetch keeps uncommitted live rows`() {
         val timeline = ChatTimeline()
-        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.TurnStarted())
         timeline.apply(SessionEvent.AssistantDelta("partial"))
 
         timeline.replaceHistory(listOf(userMessage("msg_1", "hi")), keepLive = true)
@@ -585,7 +585,7 @@ class ChatTimelineTest {
     @Test
     fun `context spliced commits the sent user message mid-turn`() {
         val timeline = ChatTimeline()
-        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.TurnStarted())
 
         timeline.apply(SessionEvent.ContextSpliced(listOf(userMessage("msg_1", "hello from the phone"))))
 
@@ -636,7 +636,7 @@ class ChatTimelineTest {
     @Test
     fun `id-less spliced steer echo commits once, deduped on the text`() {
         val timeline = ChatTimeline()
-        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.TurnStarted())
         // The steer echo splices the steered message without an id (docs/server-api.md).
         val steered = ChatMessage("", ChatMessage.Role.User, listOf(ChatMessage.Part.Text("stop counting")))
 
@@ -715,7 +715,7 @@ class ChatTimelineTest {
     @Test
     fun `a live todo call renders no rows and derives the widget state`() {
         val timeline = ChatTimeline()
-        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.TurnStarted())
 
         // Argument deltas carry the name only; the started frame carries the input.
         timeline.apply(SessionEvent.ToolCallDelta("tool_1", "TodoList"))
@@ -740,7 +740,7 @@ class ChatTimelineTest {
             ),
             keepLive = false,
         )
-        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.TurnStarted())
 
         timeline.apply(
             SessionEvent.ToolCallStarted(
@@ -756,7 +756,7 @@ class ChatTimelineTest {
     @Test
     fun `an empty todos array hides the widget again`() {
         val timeline = ChatTimeline()
-        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.TurnStarted())
         timeline.apply(SessionEvent.ToolCallStarted("tool_1", "TodoList", input = todoInput))
 
         timeline.apply(SessionEvent.ToolCallStarted("tool_2", "TodoList", input = """{"todos": []}"""))
@@ -767,7 +767,7 @@ class ChatTimelineTest {
     @Test
     fun `a mid-turn refetch keeps a live todo state the server has not committed yet`() {
         val timeline = ChatTimeline()
-        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.TurnStarted())
         timeline.apply(SessionEvent.ToolCallStarted("tool_1", "TodoList", input = todoInput))
 
         // The refetch predates the call: the live state is newer and must survive.
@@ -779,7 +779,7 @@ class ChatTimelineTest {
     @Test
     fun `the turn-end refetch re-derives the widget state from the canonical history`() {
         val timeline = ChatTimeline()
-        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.TurnStarted())
         timeline.apply(SessionEvent.ToolCallStarted("tool_1", "TodoList", input = todoInput))
 
         // History without any todo call: the live leftover is gone.
@@ -787,7 +787,7 @@ class ChatTimelineTest {
         assertEquals(null, timeline.todos())
 
         // History carrying the call (now committed): same state, derived from history.
-        timeline.apply(SessionEvent.TurnStarted)
+        timeline.apply(SessionEvent.TurnStarted())
         timeline.replaceHistory(
             listOf(
                 ChatMessage(
@@ -799,5 +799,145 @@ class ChatTimelineTest {
             keepLive = false,
         )
         assertEquals(expectedTodos, timeline.todos())
+    }
+
+    @Test
+    fun `an Agent tool row gains its subagentId from the live spawned linkage`() {
+        // subagent.spawned names the Agent call it answers (parentToolCallId); the
+        // ChatViewModel forwards the link here (ticket 045).
+        val timeline = ChatTimeline()
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Agent", "doc-verify"))
+
+        timeline.linkSubagentTool("tool_1", "agent-12")
+
+        assertEquals(
+            listOf(toolGroup(ChatItem.ToolActivity("tool_1", "Agent", ToolStatus.Running, "doc-verify", subagentId = "agent-12"))),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `the live spawned linkage also reaches an already-committed Agent row`() {
+        // A mid-turn refetch may commit the running Agent call before spawned arrives.
+        val timeline = ChatTimeline()
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage(
+                    "msg_1",
+                    ChatMessage.Role.Assistant,
+                    listOf(ChatMessage.Part.ToolUse("tool_1", "Agent", "doc-verify")),
+                ),
+            ),
+            keepLive = false,
+        )
+
+        timeline.linkSubagentTool("tool_1", "agent-12")
+
+        assertEquals("agent-12", (timeline.items().single() as ChatItem.ToolGroup).tools.single().subagentId)
+    }
+
+    @Test
+    fun `a committed Agent row gains its subagentId from the agent_id result line`() {
+        // Cold linkage (ticket 045): the spawn predates the subscription; the Agent
+        // result's `agent_id:` marker line is the only link left (version-pinned wire
+        // format — first line foreground, after the task fields background).
+        val timeline = ChatTimeline()
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage(
+                    "msg_1",
+                    ChatMessage.Role.Assistant,
+                    listOf(
+                        ChatMessage.Part.ToolUse("tool_1", "Agent", "fg"),
+                        ChatMessage.Part.ToolUse("tool_2", "Agent", "bg"),
+                    ),
+                ),
+                ChatMessage(
+                    "msg_2",
+                    ChatMessage.Role.Tool,
+                    listOf(
+                        ChatMessage.Part.ToolResult("tool_1", false, "agent_id: agent-12\nstatus: completed\n\n[summary]\nok"),
+                        ChatMessage.Part.ToolResult("tool_2", false, "task_id: agent-7noib8bb\nstatus: running\nagent_id: agent-13"),
+                    ),
+                ),
+            ),
+            keepLive = false,
+        )
+
+        val tools = timeline.items().flatMap { (it as ChatItem.ToolGroup).tools }
+        assertEquals("agent-12", tools.first { it.id == "tool_1" }.subagentId)
+        assertEquals("agent-13", tools.first { it.id == "tool_2" }.subagentId)
+    }
+
+    @Test
+    fun `a live Agent result links the row mid-run`() {
+        // A background sub-agent's result returns immediately (status: running) while
+        // its stream continues: the row must become tappable from the live result too.
+        val timeline = ChatTimeline()
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Agent", "bg"))
+        timeline.apply(SessionEvent.ToolCallResult("tool_1", false, "task_id: agent-7noib8bb\nstatus: running\nagent_id: agent-13"))
+
+        assertEquals(
+            "agent-13",
+            (timeline.items().single() as ChatItem.ToolGroup).tools.single().subagentId,
+        )
+    }
+
+    @Test
+    fun `the live spawned linkage survives a mid-turn refetch committing the Agent call`() {
+        // A reconnect refetches mid-run: history now commits the Agent call (without
+        // its result — still running), and the linked live row is dropped as a
+        // duplicate. The link must be re-applied from reducer state.
+        val timeline = ChatTimeline()
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Agent", "doc-verify"))
+        timeline.linkSubagentTool("tool_1", "agent-12")
+
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage(
+                    "msg_1",
+                    ChatMessage.Role.Assistant,
+                    listOf(ChatMessage.Part.ToolUse("tool_1", "Agent", "doc-verify")),
+                ),
+            ),
+            keepLive = true,
+        )
+
+        assertEquals(
+            "agent-12",
+            (timeline.items().single() as ChatItem.ToolGroup).tools.single().subagentId,
+        )
+    }
+
+    @Test
+    fun `a result without the agent_id marker leaves the row unlinked`() {
+        val timeline = ChatTimeline()
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage(
+                    "msg_1",
+                    ChatMessage.Role.Assistant,
+                    listOf(
+                        ChatMessage.Part.ToolUse("tool_1", "Agent", "old format"),
+                        // Not an Agent call: a shell output mentioning the marker must
+                        // not turn into a link either.
+                        ChatMessage.Part.ToolUse("tool_2", "Bash", "echo agent_id: agent-9"),
+                    ),
+                ),
+                ChatMessage(
+                    "msg_2",
+                    ChatMessage.Role.Tool,
+                    listOf(
+                        ChatMessage.Part.ToolResult("tool_1", false, "status: completed\n\n[summary]\nok"),
+                        ChatMessage.Part.ToolResult("tool_2", false, "agent_id: agent-9\n"),
+                    ),
+                ),
+            ),
+            keepLive = false,
+        )
+
+        val tools = timeline.items().flatMap { (it as ChatItem.ToolGroup).tools }
+        assertEquals(null, tools.first { it.id == "tool_1" }.subagentId)
+        assertEquals(null, tools.first { it.id == "tool_2" }.subagentId)
     }
 }

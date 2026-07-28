@@ -1,5 +1,6 @@
 package fr.louissaglio.kimi.android.ui.chat
 
+import fr.louissaglio.kimi.android.data.chat.AGENT_TOOL_NAME
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.Todo
@@ -13,10 +14,14 @@ import kotlinx.serialization.json.Json
  *
  * History (committed) and live (in-flight turn) rows are kept apart: a refetch replaces
  * committed rows wholesale, which is what makes reconnects gap- and duplicate-free.
+ * Sub-agent streams (ticket 045) have no history endpoint: with [historyBacked] = false
+ * the reducer never refetches and turn.started seals the finished internal turn's live
+ * rows into the committed list instead of clearing them.
  */
 class ChatTimeline(
     // Default mirrors the DI Json for direct construction in tests.
     private val todoParser: TodoParser = TodoParser(Json { ignoreUnknownKeys = true }),
+    private val historyBacked: Boolean = true,
 ) {
 
     private val committed = mutableListOf<ChatItem>()
@@ -37,6 +42,12 @@ class ChatTimeline(
     private var committedTodos: List<Todo>? = null
     private var liveTodos: List<Todo>? = null
 
+    /** Tool-call id → linked sub-agent (ticket 045), learned live (spawned, or a
+     * background run's early result). Kept as reducer state — never pruned — and
+     * re-applied after every refetch: a refetch rebuilds committed rows from history,
+     * where the `agent_id:` result marker only exists once the result is committed too. */
+    private val subagentLinks = mutableMapOf<String, String>()
+
     fun items(): List<ChatItem> = committed + live
 
     /** Live calls win over history (they are newer) until the turn-end refetch
@@ -53,6 +64,7 @@ class ChatTimeline(
         committed.clear()
         committedTodos = null
         messages.forEach(::flatten)
+        reapplySubagentLinks()
         if (!keepLive) {
             live.clear()
             liveTodos = null
@@ -86,12 +98,19 @@ class ChatTimeline(
 
     fun apply(event: SessionEvent) {
         when (event) {
-            // Defensive clear: a new turn must never inherit a previous turn's leftovers
-            // (possible only if the earlier turn.ended refetch failed).
-            SessionEvent.TurnStarted -> {
-                live.clear()
-                // Same defensive clear as the rows: the turn-end refetch has already
-                // committed the previous turn's calls.
+            is SessionEvent.TurnStarted -> {
+                if (historyBacked) {
+                    // Defensive clear: a new turn must never inherit a previous turn's
+                    // leftovers (possible only if the earlier turn.ended refetch failed).
+                    live.clear()
+                } else {
+                    // No refetch ever comes: seal the finished internal turn's rows so
+                    // they keep their place above the next turn's spliced prompts.
+                    committed += live
+                    live.clear()
+                }
+                // Same clear as the rows: the previous turn's todo calls are committed
+                // (history-backed) or irrelevant now (sub-agent page renders no widget).
                 liveTodos = null
             }
             is SessionEvent.AssistantDelta -> appendDelta(event.delta, thinking = false)
@@ -107,14 +126,17 @@ class ChatTimeline(
                 }
             is SessionEvent.ToolCallResult ->
                 if (event.toolCallId in todoCallIds) Unit
-                else upsertTool(
-                    event.toolCallId,
-                    "",
-                    if (event.isError) ToolStatus.Error else ToolStatus.Done,
-                    output = event.output,
-                    // The definitive result replaces any accumulated progress wholesale.
-                    replaceOutput = true,
-                )
+                else {
+                    upsertTool(
+                        event.toolCallId,
+                        "",
+                        if (event.isError) ToolStatus.Error else ToolStatus.Done,
+                        output = event.output,
+                        // The definitive result replaces any accumulated progress wholesale.
+                        replaceOutput = true,
+                    )
+                    linkSubagentFromResult(event.toolCallId, event.output)
+                }
             is SessionEvent.ToolCallProgress ->
                 if (event.toolCallId !in todoCallIds) appendToolProgress(event.toolCallId, event.chunk)
             is SessionEvent.ContextSpliced -> event.messages.forEach(::appendSpliced)
@@ -202,6 +224,49 @@ class ChatTimeline(
         if (!found) live.appendTool(ChatItem.ToolActivity(toolCallId, name, status, preview, input, output))
     }
 
+    /** Live row→sub-agent linkage (ticket 045): `subagent.spawned` names the `Agent`
+     * call it answers, so the row gains its open affordance. Both lists are searched —
+     * a mid-turn refetch may have committed the running row already. */
+    fun linkSubagentTool(toolCallId: String, subagentId: String) {
+        subagentLinks[toolCallId] = subagentId
+        live.updateTool(toolCallId) { row -> if (row.subagentId == null) row.copy(subagentId = subagentId) else row }
+        committed.updateTool(toolCallId) { row -> if (row.subagentId == null) row.copy(subagentId = subagentId) else row }
+    }
+
+    /** Cold row→sub-agent linkage (ticket 045): an `Agent` call's result text carries
+     * `agent_id: <id>` on its own line (the version-pinned wire format — first line for
+     * foreground runs, after the task fields for background ones). This is the only
+     * linkage available when the spawn happened before the app subscribed; a result
+     * without the marker leaves the row unlinked, hence non-tappable. */
+    private fun linkSubagentFromResult(toolCallId: String, output: String) {
+        live.updateTool(toolCallId) { row ->
+            val linked = row.subagentId ?: agentResultSubagentId(row.name, output)
+            if (linked != null) subagentLinks[toolCallId] = linked
+            row.copy(subagentId = linked)
+        }
+    }
+
+    /** Re-applies live-learned links after a refetch rebuilt the committed rows. */
+    private fun reapplySubagentLinks() {
+        for (index in committed.indices) {
+            val group = committed[index] as? ChatItem.ToolGroup ?: continue
+            if (group.tools.none { it.subagentId == null && it.id in subagentLinks }) continue
+            committed[index] = group.copy(
+                tools = group.tools.map { tool ->
+                    if (tool.subagentId == null) tool.copy(subagentId = subagentLinks[tool.id]) else tool
+                },
+            )
+        }
+    }
+
+    private fun agentResultSubagentId(name: String, output: String): String? =
+        if (name != AGENT_TOOL_NAME) null
+        else output.lineSequence()
+            .firstOrNull { it.startsWith(AGENT_ID_PREFIX) }
+            ?.removePrefix(AGENT_ID_PREFIX)
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+
     /** Records a call as the agent's todo tool (ticket 042): its row is suppressed and
      * later result/progress frames for the id are dropped too. */
     private fun isTodoCall(toolCallId: String, name: String): Boolean {
@@ -246,6 +311,7 @@ class ChatTimeline(
                         existing.copy(
                             status = status,
                             output = existing.output.ifBlank { result.output },
+                            subagentId = existing.subagentId ?: agentResultSubagentId(existing.name, result.output),
                         )
                     }
                     if (!found) {
@@ -286,5 +352,10 @@ class ChatTimeline(
             this[groupIndex] = group.copy(tools = tools)
             return
         }
+    }
+
+    private companion object {
+        /** Line prefix of the linkage marker in an `Agent` call's result text. */
+        const val AGENT_ID_PREFIX = "agent_id: "
     }
 }

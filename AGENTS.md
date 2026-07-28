@@ -41,6 +41,20 @@ stored in the app settings).
   `ui/chat/components/` (same package, `internal` — androidTests import them).
   `ui/common/` holds shared `StateViews` (loading/error/empty) and
   `Formatters` — reuse them instead of adding one-off copies.
+- Sub-agent streams (045): `SessionSocket` tags transcript events with the
+  emitting `agentId`; sub-agent-scoped events route to `SubagentStreamStore`
+  (ui/chat, session-scoped singleton keyed by session, one non-history-backed
+  `ChatTimeline` per sub-agent, same delta coalescing as ChatViewModel). The
+  chat's socket collection is the store's ONLY feeder: a socket gate in
+  ChatViewModel keeps it alive while a sub-agent page of the session is open
+  (SubagentViewModel registers via pageOpened/pageClosed) — never open a
+  second, page-owned socket (two cursors would double-feed on replay). The
+  read-only `SubagentScreen` reuses `MessageList`/`ToolRows`; linked `Agent`
+  rows carry `subagentId` — the row keeps its expand/collapse tap and a
+  trailing open button navigates to the page. Cold-open (spawn before
+  subscribe): linked rows seed their store entry from the call args/result
+  (identity, status, `prompt` user bubble + `[summary]` assistant bubble)
+  via `seedFromAgentRow`.
 - Streaming: `ChatViewModel` conflates assistant/thinking deltas (leading edge
   immediately, then one emission per ~100 ms window, flushed before any
   non-delta event) because `MarkdownBody` re-parses on every emission. The

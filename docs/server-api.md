@@ -845,8 +845,10 @@ subscription, tagged with `agentId:"<subagentId>"`: `turn.started` /
 the sub-agent's internal turns with internal prompt ids. **A client that
 renders only the main transcript must filter on `payload.agentId ==
 "main"`** — otherwise sub-agent deltas leak into the main chat. (The Android
-app filters these frame types in `SessionSocket` since ticket 044; sub-agent
-approvals/questions deliberately still surface there — they are actionable.)
+app tags these frames' events with the emitting agentId in `SessionSocket`
+and routes sub-agent events into a per-sub-agent stream store backing the
+sub-agent page — tickets 044/045; sub-agent approvals/questions deliberately
+still surface in the main chat — they are actionable.)
 
 ### Background lifecycle — WS sequence
 

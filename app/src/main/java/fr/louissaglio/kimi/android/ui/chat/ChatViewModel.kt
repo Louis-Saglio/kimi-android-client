@@ -19,6 +19,7 @@ import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.SocketEvent
 import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.TodoParser
+import fr.louissaglio.kimi.android.data.chat.isSubagentScoped
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
 import fr.louissaglio.kimi.android.data.sessions.displayName
 import fr.louissaglio.kimi.android.data.sessions.displayNameFor
@@ -33,6 +34,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -45,6 +49,7 @@ class ChatViewModel @Inject constructor(
     private val sessionsRepository: SessionsRepository,
     private val settingsRepository: SettingsRepository,
     private val attachmentStore: AttachmentStore,
+    private val subagentStore: SubagentStreamStore,
     savedStateHandle: SavedStateHandle,
     // Default mirrors the DI Json for direct construction in tests.
     private val todoParser: TodoParser = TodoParser(Json { ignoreUnknownKeys = true }),
@@ -235,8 +240,27 @@ class ChatViewModel @Inject constructor(
     val effects = _effects.receiveAsFlow()
 
     private val timeline = ChatTimeline(todoParser)
-    private var socketJob: Job? = null
     private var historyJob: Job? = null
+
+    /** Screen visibility as state — one input of the socket gate (see init). */
+    private val screenVisible = MutableStateFlow(false)
+
+    init {
+        // The socket gate (ticket 045): the session socket is collected while the chat
+        // is visible OR a sub-agent page of this session is open. The chat's collection
+        // is the store's only feeder, so it must outlive navigation to a page — a
+        // second, page-owned socket would double-feed the store on every cursor replay.
+        // Gate flips cancel/restart the collection (collectLatest), matching the old
+        // explicit start/cancel for the chat-only case.
+        viewModelScope.launch {
+            combine(screenVisible, subagentStore.openPageCount(sessionId)) { visible, openPages ->
+                visible || openPages > 0
+            }.distinctUntilChanged()
+                .collectLatest { holdSocket ->
+                    if (holdSocket) collectSessionSocket()
+                }
+        }
+    }
 
     /** Bumped on every turn.started/turn.ended event, so [seedSessionStatus] can drop a
      * response that a newer turn event has already overtaken. Only touched on Main. */
@@ -250,7 +274,7 @@ class ChatViewModel @Inject constructor(
      * /status snapshot a newer agent.status.updated frame has already overtaken. */
     private var contextUsageEventCount = 0
 
-    // --- Streaming-delta conflation (see startSocket's collect) -------------------
+    // --- Streaming-delta conflation (see collectSessionSocket) -----------------------
     // All three are confined to Main: the socket collect, the flush loop, and
     // onScreenStopped all run on viewModelScope's dispatcher (or are called from it).
 
@@ -262,22 +286,30 @@ class ChatViewModel @Inject constructor(
     /** The trailing-flush timer of an open burst; null when no burst is open. */
     private var deltaFlushJob: Job? = null
 
-    /** Wired to ON_START: (re)loads history and opens the socket. Also fires when the
-     * app returns to the foreground, which is the re-sync path after an OS-level drop. */
+    /** Wired to ON_START: (re)loads history; the socket gate opens the socket. Also
+     * fires when the app returns to the foreground — the re-sync path after an OS-level
+     * drop. */
     fun onScreenStarted() {
+        screenVisible.value = true
         refreshHistory(clearLive = false)
         seedPendingQuestions()
         refreshSessionInfo()
         seedSessionStatus()
         loadModels()
-        startSocket()
     }
 
-    /** Wired to ON_STOP: the socket is only held while the screen is visible. Coalesced
-     * deltas flush first, so no received text is ever held back (or lost with the timer). */
+    /** Wired to ON_STOP: the gate closes the socket unless a sub-agent page of this
+     * session is open. Coalesced deltas flush first, so no received text is ever held
+     * back (or lost with the timer). */
     fun onScreenStopped() {
         flushPendingDeltas()
-        socketJob?.cancel()
+        screenVisible.value = false
+    }
+
+    /** The session is being left for good (back to the session list): its sub-agent
+     * streams go with it. */
+    override fun onCleared() {
+        subagentStore.release(sessionId)
     }
 
     fun onRetry() {
@@ -512,7 +544,8 @@ class ChatViewModel @Inject constructor(
     }
 
     /**
-     * Collects the session socket. Streaming deltas (assistant/thinking) are conflated
+     * Collects the session socket (one run per socket-gate opening; cancelled when the
+     * gate closes). Streaming deltas (assistant/thinking) are conflated
      * here, at the ViewModel layer, so the UiState — and with it MarkdownBody, which
      * re-parses the whole streaming bubble per emission — updates at most once per
      * [streamCoalesceWindowMillis] during a burst instead of once per socket frame.
@@ -531,15 +564,21 @@ class ChatViewModel @Inject constructor(
      *
      * With window = 0 every delta publishes on arrival (the pre-conflation behavior).
      */
-    private fun startSocket() {
-        socketJob?.cancel()
-        socketJob = viewModelScope.launch {
-            chatRepository.observeSession(settingsRepository.current(), sessionId)
-                .collect { event ->
-                    val sessionEvent = (event as? SocketEvent.Event)?.event
-                    if (sessionEvent != null && sessionEvent.isStreamDelta()) {
+    private suspend fun collectSessionSocket() {
+        chatRepository.observeSession(settingsRepository.current(), sessionId)
+            .collect { event ->
+                val sessionEvent = (event as? SocketEvent.Event)?.event
+                when {
+                    // Sub-agent frames — transcript frames tagged with their own
+                    // agentId, and subagent.* lifecycle — route to the store
+                    // (ticket 045): they must never touch the main timeline, the
+                    // working state, or an open main delta burst (ticket 044).
+                    sessionEvent != null && sessionEvent.isSubagentScoped() ->
+                        onSubagentEvent(sessionEvent)
+                    sessionEvent != null && sessionEvent.isStreamDelta() -> {
                         onStreamDelta(sessionEvent)
-                    } else {
+                    }
+                    else -> {
                         flushPendingDeltas()
                         when (event) {
                             SocketEvent.Connected ->
@@ -560,7 +599,27 @@ class ChatViewModel @Inject constructor(
                         }
                     }
                 }
+            }
+    }
+
+    /** Routes one sub-agent-scoped event into the store; a spawn additionally links the
+     * spawning `Agent` tool row to its sub-agent's page (ticket 045). */
+    private fun onSubagentEvent(event: SessionEvent) {
+        if (event is SessionEvent.SubagentSpawned) {
+            timeline.linkSubagentTool(event.parentToolCallId, event.subagentId)
+            _uiState.update { it.copy(items = timeline.items()) }
         }
+        subagentStore.apply(sessionId, event)
+    }
+
+    /** Seeds store entries from linked `Agent` rows (cold-open, ticket 045): the row's
+     * args/result carry the identity, lifecycle status and result summary. Idempotent
+     * (the store never overwrites an existing entry) and cheap — linked rows are few. */
+    private fun seedSubagentStoreFromLinkedRows() {
+        timeline.items()
+            .flatMap { (it as? ChatItem.ToolGroup)?.tools.orEmpty() }
+            .filter { it.subagentId != null }
+            .forEach { subagentStore.seedFromAgentRow(sessionId, it) }
     }
 
     private fun SessionEvent.isStreamDelta(): Boolean =
@@ -628,16 +687,16 @@ class ChatViewModel @Inject constructor(
         val last = lastOrNull()
         when {
             last is SessionEvent.AssistantDelta && event is SessionEvent.AssistantDelta ->
-                set(lastIndex, SessionEvent.AssistantDelta(last.delta + event.delta))
+                set(lastIndex, last.copy(delta = last.delta + event.delta))
             last is SessionEvent.ThinkingDelta && event is SessionEvent.ThinkingDelta ->
-                set(lastIndex, SessionEvent.ThinkingDelta(last.delta + event.delta))
+                set(lastIndex, last.copy(delta = last.delta + event.delta))
             else -> add(event)
         }
     }
 
     private fun applySessionEvent(event: SessionEvent) {
         when (event) {
-            SessionEvent.TurnStarted -> {
+            is SessionEvent.TurnStarted -> {
                 turnEventCount++
                 timeline.apply(event)
                 _uiState.update { it.copy(isWorking = true, items = timeline.items(), todos = timeline.todos()) }
@@ -688,6 +747,12 @@ class ChatViewModel @Inject constructor(
                 contextUsageEventCount++
                 _uiState.update { it.copy(contextUsage = event.contextUsage) }
             }
+            is SessionEvent.ToolCallResult -> {
+                applyTimelineEvent(event)
+                // A background Agent result carries the agent_id marker mid-run: seed
+                // right away so the page can open and later frames stop dropping.
+                seedSubagentStoreFromLinkedRows()
+            }
             else -> applyTimelineEvent(event)
         }
     }
@@ -702,6 +767,9 @@ class ChatViewModel @Inject constructor(
                     _uiState.update {
                         it.copy(items = timeline.items(), todos = timeline.todos(), error = null)
                     }
+                    // History is where cold links come from (the app subscribed after
+                    // the spawn): seed the store from the linked Agent rows.
+                    seedSubagentStoreFromLinkedRows()
                 }
                 .onFailure { error ->
                     if (_uiState.value.items.isNullOrEmpty()) {

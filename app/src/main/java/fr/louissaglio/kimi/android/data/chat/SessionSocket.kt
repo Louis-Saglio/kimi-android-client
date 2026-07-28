@@ -180,14 +180,12 @@ internal class SessionSocket(
         // advancing the resume cursor on them could skip the substantive event on replay.
         if (frame.seq != null && frame.epoch != null && !frame.volatile) onCursor(Cursor(frame.seq, frame.epoch))
         // Sub-agents stream their whole turn over the same session channel, tagged with
-        // their own agentId (docs/server-api.md, Sub-agents); their transcript frames
-        // must never reach the main chat. Interaction families stay unfiltered: a
-        // sub-agent's approval/question is actionable whoever raised it.
+        // their own agentId (docs/server-api.md, Sub-agents). Transcript frames emit
+        // their events tagged with the emitting agent; the collector routes sub-agent
+        // events to the sub-agent stream store (SessionEvent.isSubagentScoped, ticket
+        // 045) so they never reach the main chat. Interaction families stay untagged:
+        // a sub-agent's approval/question is actionable whoever raised it.
         val agentId = frame.agentId()
-        if (agentId != MAIN_AGENT_ID && frame.type in MAIN_TRANSCRIPT_TYPES) {
-            Log.d(TAG, "Ignoring sub-agent frame '${frame.type}' from '$agentId'")
-            return
-        }
         when (frame.type) {
             // Legacy protocol: pre-v2 servers closed the connection when app-level pings
             // went unanswered; v2 sends none, answering stays harmless (docs/server-api.md).
@@ -199,23 +197,25 @@ internal class SessionSocket(
                 }
                 ?.let { webSocket.send(pongFrame(it.nonce)) }
             "assistant.delta" -> frame.decodePayload<DeltaPayload>()
-                ?.let { onEvent(SessionEvent.AssistantDelta(it.delta)) }
+                ?.let { onEvent(SessionEvent.AssistantDelta(it.delta, agentId)) }
             "thinking.delta" -> frame.decodePayload<DeltaPayload>()
-                ?.let { onEvent(SessionEvent.ThinkingDelta(it.delta)) }
+                ?.let { onEvent(SessionEvent.ThinkingDelta(it.delta, agentId)) }
             "tool.call.delta" -> frame.decodePayload<ToolCallPayload>()
-                ?.let { onEvent(SessionEvent.ToolCallDelta(it.toolCallId, it.name)) }
+                ?.let { onEvent(SessionEvent.ToolCallDelta(it.toolCallId, it.name, agentId)) }
             "tool.call.started" -> frame.decodePayload<ToolCallPayload>()
                 ?.let {
                     onEvent(
-                        SessionEvent.ToolCallStarted(it.toolCallId, it.name, mapper.preview(it), mapper.formatDetail(it.args)),
+                        SessionEvent.ToolCallStarted(
+                            it.toolCallId, it.name, mapper.preview(it), mapper.formatDetail(it.args), agentId,
+                        ),
                     )
                 }
             "tool.result" -> frame.decodePayload<ToolResultPayload>()
-                ?.let { onEvent(SessionEvent.ToolCallResult(it.toolCallId, it.isError, mapper.formatDetail(it.output))) }
+                ?.let { onEvent(SessionEvent.ToolCallResult(it.toolCallId, it.isError, mapper.formatDetail(it.output), agentId)) }
             // Volatile live stdout streaming (docs/server-api.md); the update kind is
             // passed through as-is — only its text is consumed.
             "tool.progress" -> frame.decodePayload<ToolProgressPayload>()
-                ?.let { onEvent(SessionEvent.ToolCallProgress(it.toolCallId, it.update?.text.orEmpty())) }
+                ?.let { onEvent(SessionEvent.ToolCallProgress(it.toolCallId, it.update?.text.orEmpty(), agentId)) }
             // Legacy approval family: the server ALSO emits the v2
             // `permission.approval.*` duplicates of these frames (docs/server-api.md,
             // Permissions), which are deliberately ignored here — handling both would
@@ -230,8 +230,8 @@ internal class SessionSocket(
             "event.question.answered", "event.question.dismissed" ->
                 frame.decodePayload<QuestionResolvedPayload>()
                     ?.let { onEvent(SessionEvent.QuestionResolved(it.questionId)) }
-            "turn.started" -> onEvent(SessionEvent.TurnStarted)
-            "turn.ended" -> onEvent(SessionEvent.TurnEnded(frame.decodePayload<TurnEndedPayload>()?.reason.orEmpty()))
+            "turn.started" -> onEvent(SessionEvent.TurnStarted(agentId))
+            "turn.ended" -> onEvent(SessionEvent.TurnEnded(frame.decodePayload<TurnEndedPayload>()?.reason.orEmpty(), agentId))
             // Volatile (docs/server-api.md): the model/usage variant carries the token
             // counts; the phase variant has them null and emits nothing (ticket 041).
             "agent.status.updated" -> frame.decodePayload<AgentStatusUpdatedPayload>()
@@ -239,11 +239,30 @@ internal class SessionSocket(
                     val used = payload.contextTokens
                     val max = payload.maxContextTokens
                     if (used != null && max != null) {
-                        onEvent(SessionEvent.ContextUsageUpdated(ContextUsage(used, max)))
+                        onEvent(SessionEvent.ContextUsageUpdated(ContextUsage(used, max), agentId))
                     }
                 }
             "context.spliced" -> frame.decodePayload<ContextSplicedPayload>()
-                ?.let { onEvent(SessionEvent.ContextSpliced(it.messages.map { msg -> mapper.toDomain(msg) })) }
+                ?.let { onEvent(SessionEvent.ContextSpliced(it.messages.map { msg -> mapper.toDomain(msg) }, agentId)) }
+            // subagent.* lifecycle (docs/server-api.md, Sub-agents): tagged agentId
+            // "main" but scoped to one sub-agent by the payload's subagentId; routed to
+            // the sub-agent stream store like the sub-agent's own frames.
+            "subagent.spawned" -> frame.decodePayload<SubagentSpawnedPayload>()
+                ?.let {
+                    onEvent(
+                        SessionEvent.SubagentSpawned(
+                            it.subagentId, it.subagentName, it.parentToolCallId, it.description, it.runInBackground,
+                        ),
+                    )
+                }
+            "subagent.started" -> frame.decodePayload<SubagentLifecyclePayload>()
+                ?.let { onEvent(SessionEvent.SubagentStarted(it.subagentId)) }
+            "subagent.completed" -> frame.decodePayload<SubagentLifecyclePayload>()
+                ?.let { onEvent(SessionEvent.SubagentCompleted(it.subagentId, it.resultSummary.orEmpty())) }
+            "subagent.failed" -> frame.decodePayload<SubagentLifecyclePayload>()
+                ?.let { onEvent(SessionEvent.SubagentFailed(it.subagentId, it.error.orEmpty())) }
+            "subagent.suspended" -> frame.decodePayload<SubagentLifecyclePayload>()
+                ?.let { onEvent(SessionEvent.SubagentSuspended(it.subagentId)) }
             // server_hello, ack, and events we don't render yet: ignore.
         }
     }
@@ -294,18 +313,6 @@ internal class SessionSocket(
     private companion object {
         const val TAG = "SessionSocket"
         const val MAX_BACKOFF_SHIFT = 5 // 1 s << 5 = 32 s, clamped to 30 s below
-
-        /** Payload tag of the main agent (docs/server-api.md, Sub-agents). */
-        const val MAIN_AGENT_ID = "main"
-
-        /** Frame types whose payload is scoped to one agent's transcript — filtered to
-         * the main agent. Everything else (interaction families, session/meta events)
-         * is session-scoped or actionable and passes whatever its agentId. */
-        val MAIN_TRANSCRIPT_TYPES = setOf(
-            "assistant.delta", "thinking.delta",
-            "tool.call.delta", "tool.call.started", "tool.result", "tool.progress",
-            "context.spliced", "turn.started", "turn.ended", "agent.status.updated",
-        )
 
         fun backoffMillis(attempt: Int): Long = (1_000L shl attempt).coerceAtMost(30_000L)
     }

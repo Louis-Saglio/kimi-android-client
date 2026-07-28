@@ -36,6 +36,8 @@ internal fun MessageList(
     onImageClick: (ChatMessage.Part.Image) -> Unit = {},
     onOpenAttachment: (ChatMessage.Part.Attachment) -> Unit = {},
     loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray? = { null },
+    /** Invoked with the subagentId when a linked `Agent` tool row is tapped (ticket 045). */
+    onOpenSubagent: (String) -> Unit = {},
 ) {
     // No reverseLayout: a top-anchored list keeps a growing row's header in place
     // and pushes the rows below down, so expanded tool details unfold downward
@@ -95,10 +97,10 @@ internal fun MessageList(
                         loadImageBytes = loadImageBytes,
                     )
                 is ChatItem.AssistantMessage -> AssistantBubble(item)
-                is ChatItem.ToolGroup -> ToolGroupCard(item)
+                is ChatItem.ToolGroup -> ToolGroupCard(item, onOpenSubagent)
                 // Bare rows are not produced by ChatTimeline anymore (ticket 037) but
                 // stay renderable for tests and previews.
-                is ChatItem.ToolActivity -> ToolRow(item)
+                is ChatItem.ToolActivity -> ToolRow(item, onOpenSubagent)
             }
         }
     }

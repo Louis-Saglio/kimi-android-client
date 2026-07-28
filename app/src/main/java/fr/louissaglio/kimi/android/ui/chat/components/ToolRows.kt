@@ -14,12 +14,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Surface
@@ -75,7 +77,7 @@ private fun ToolStatusIcon(status: ToolStatus, runningDescription: String, modif
  * `surfaceContainerLow` (a step above the chat background in both themes), the border
  * the default 1dp `outlineVariant` hairline — no elevation, the chat surface is flat. */
 @Composable
-internal fun ToolGroupCard(group: ChatItem.ToolGroup) {
+internal fun ToolGroupCard(group: ChatItem.ToolGroup, onOpenSubagent: (String) -> Unit = {}) {
     val status = when {
         group.tools.any { it.status == ToolStatus.Running } -> ToolStatus.Running
         group.tools.any { it.status == ToolStatus.Error } -> ToolStatus.Error
@@ -110,7 +112,7 @@ internal fun ToolGroupCard(group: ChatItem.ToolGroup) {
             group.tools.forEachIndexed { index, tool ->
                 // 1dp outlineVariant hairline between rows, like the web's row separators.
                 if (index > 0) HorizontalDivider()
-                ToolRow(tool)
+                ToolRow(tool, onOpenSubagent)
             }
         }
     }
@@ -125,11 +127,17 @@ internal fun ToolGroupCard(group: ChatItem.ToolGroup) {
  * preformatted, in a capped-height region that scrolls internally so a huge test
  * log does not tunnel the timeline. Error output sits on an error-tinted surface.
  * The top-anchored chat list keeps the tapped header in place, so the details
- * unfold downward. */
+ * unfold downward.
+ *
+ * An `Agent` row linked to its sub-agent (ticket 045) adds a trailing open button
+ * (chevron-right, own tap target) that navigates to the sub-agent page — the row
+ * keeps its expand/collapse behavior; when the row has no details, tapping the row
+ * itself navigates. */
 @Composable
-internal fun ToolRow(activity: ChatItem.ToolActivity) {
+internal fun ToolRow(activity: ChatItem.ToolActivity, onOpenSubagent: (String) -> Unit = {}) {
     val detailColor = MaterialTheme.colorScheme.onSurfaceVariant
     val expandable = activity.input.isNotBlank() || activity.output.isNotBlank()
+    val linkedSubagentId = activity.subagentId
     var expanded by rememberSaveable { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth()) {
         Row(
@@ -137,7 +145,9 @@ internal fun ToolRow(activity: ChatItem.ToolActivity) {
                 .fillMaxWidth()
                 // M3: the whole row is the tap target, at least 48dp tall.
                 .heightIn(min = 48.dp)
-                .clickable(enabled = expandable) { expanded = !expanded },
+                .clickable(enabled = expandable || linkedSubagentId != null) {
+                    if (expandable) expanded = !expanded else linkedSubagentId?.let(onOpenSubagent)
+                },
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
@@ -187,6 +197,19 @@ internal fun ToolRow(activity: ChatItem.ToolActivity) {
                         .rotate(chevronRotation),
                     tint = detailColor,
                 )
+            }
+            if (linkedSubagentId != null) {
+                IconButton(
+                    onClick = { onOpenSubagent(linkedSubagentId) },
+                    modifier = Modifier.size(40.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = "Open sub-agent",
+                        modifier = Modifier.size(16.dp),
+                        tint = detailColor,
+                    )
+                }
             }
         }
         if (expanded && expandable) {
