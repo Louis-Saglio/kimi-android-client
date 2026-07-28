@@ -18,8 +18,33 @@ stored in the app settings).
   0.26.0, the newest release built against Compose 1.6.8 / Kotlin 2.0.x — do
   not upgrade past it without also bumping the Compose BOM / Kotlin).
 - MVVM: one immutable `UiState` per screen as `StateFlow`, one-shot effects via
-  `Channel`.
-- minSdk 31, targetSdk 35.
+  `Channel`. ALL one-shots (snackbars, open-file intents) go through the effect
+  channel — composables never call `snackbarHostState` or do I/O directly.
+- minSdk 31, targetSdk 35, AGP 8.6.x.
+
+## Layout & conventions
+
+- `data/network/` — `ApiClient` is the shared HTTP scaffold (URL building,
+  401/HTTP/IO → `DataError`, envelope unwrap). Every REST call goes through it;
+  never hand-roll `Request.Builder` in a repository.
+- `data/chat/` — `ChatRepository` is a thin facade over `ChatApi` (REST verbs),
+  `SessionSocket` (WebSocket, reconnect, resume cursor), `ModelsRepository`,
+  `SessionPrefsStore` (per-session model/effort prefs), and `ChatMessageMapper`
+  (DTO→domain). New chat endpoints belong in a collaborator, not the facade.
+- `data/attachments/` — `AttachmentStore` owns all platform file I/O (content
+  resolver reads capped at 50 MiB, the server's own limit; cache writes;
+  FileProvider URIs). Composables never touch `ContentResolver`/`File`.
+- Errors: repositories return `Result` + sealed `DataError`; ViewModels map them
+  with `toUserMessage()` (kept next to `DataError`). Dropped WebSocket frames
+  get a `Log.w` — never swallow silently.
+- `ui/<screen>/` — screen composable + ViewModel. Chat building blocks live in
+  `ui/chat/components/` (same package, `internal` — androidTests import them).
+  `ui/common/` holds shared `StateViews` (loading/error/empty) and
+  `Formatters` — reuse them instead of adding one-off copies.
+- Streaming: `ChatViewModel` conflates assistant/thinking deltas (leading edge
+  immediately, then one emission per ~100 ms window, flushed before any
+  non-delta event) because `MarkdownBody` re-parses on every emission. The
+  window is injectable (`streamCoalesceWindowMillis`; 0 in unit tests).
 
 ## Distribution: put the release APK on the file server
 
@@ -36,9 +61,11 @@ It then appears in the listing at `https://agent.example.com` (basic auth,
 user `louis` — only the file server still uses basic auth, not the Kimi API).
 
 The release build is the distribution default (decided 2026-07-22): R8 +
-resource shrinking makes it ~4.5 MB vs ~28 MB debug, and it is signed with the
+resource shrinking makes it ~2.9 MB vs ~28 MB debug, and it is signed with the
 debug key so it installs over a debug build. Do not publish the debug APK
-unless Louis explicitly asks for it.
+unless Louis explicitly asks for it. App-level keep rules live in
+`app/proguard-rules.pro` (kotlinx.serialization needs none while only generated
+serializers are used).
 
 ## Server drift automation
 
