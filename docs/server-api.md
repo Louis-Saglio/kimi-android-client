@@ -2,10 +2,12 @@
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
 by Kimi Code Web. Documented and verified against the live server on 2026-07-27
-(server version `0.29.2`, `"backend": "v2"`, WS `protocol_version: 2`).
+(server version `0.29.2`, `"backend": "v2"`, WS `protocol_version: 2`; the
+Sub-agents section was added and verified on 2026-07-28, same server).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
-steer, questions, abort, permissions, WebSocket events, file attachments, plus
+steer, questions, abort, permissions, WebSocket events, file attachments,
+sub-agents (foreground lifecycle + background task store), plus
 the workspace list used by the mobile create-session flow. Explicitly skipped:
 `fs:*`, terminals, cron, goals, providers, skills.
 
@@ -721,6 +723,237 @@ The Android app implements this derivation in `TodoParser` + `ChatTimeline`
 (ticket 042) and hides `TodoList` tool rows from the timeline in favour of a
 summary widget.
 
+## Sub-agents
+
+How the server exposes the sub-agents the main agent spawns with its `Agent`
+(or `AgentSwarm`) tool. All shapes below verified live on `0.29.2`
+(2026-07-28, throwaway session in `/tmp/spike`, prompts with
+`permission_mode:"yolo"`); fields not captured live are marked as
+upstream-schema-only (`packages/kap-server/src/protocol/events-zod.ts`).
+
+There are **two exposure paths**, chosen by the `Agent` call's
+`run_in_background` argument:
+
+- **Foreground** (default): the sub-agent exists only on the WS event stream
+  and in the session-snapshot roster. It is **never** listed by REST `/tasks`
+  (verified: `{"items":[]}` right after a completed foreground run) and its
+  messages never enter history.
+- **Background** (`run_in_background: true`): registered in the main agent's
+  background-task store, so it gets the full REST `/tasks` lifecycle plus
+  `task.*` WS events, and its completion is pushed back into the main agent
+  as a spliced `<notification>` user message.
+
+Two id namespaces, both present in the frames:
+
+- payload `agentId` — the **emitting** agent: `"main"` for the main agent,
+  the sub-agent's server-assigned id (`agent-12`, `agent-13`, …) for the
+  sub-agent's own turn frames.
+- `subagentId` — a field inside the `subagent.*` lifecycle payloads (which
+  are themselves emitted with `agentId:"main"`).
+
+For background sub-agents the REST task id differs again (e.g.
+`agent-7noib8bb` vs `agentId:"agent-13"`); `task.started`'s `info.agentId`
+links the two.
+
+### The spawning tool call in the main transcript
+
+The spawn is an ordinary tool call named `Agent` (verbatim history part):
+
+```json
+{"type":"tool_use","tool_call_id":"tool_mhF8UXcf5QwvZbh5223tiIng","tool_name":"Agent",
+ "input":{"subagent_type":"explore","description":"doc-verify-subagent",
+          "prompt":"Reply with the single word: ok"}}
+```
+
+The tool result is plain text. Foreground (waits for completion):
+
+```
+agent_id: agent-12
+actual_subagent_type: explore
+status: completed
+
+[summary]
+<the sub-agent's result summary>
+```
+
+Background (returns immediately):
+
+```
+task_id: agent-7noib8bb
+status: running
+agent_id: agent-13
+actual_subagent_type: explore
+automatic_notification: true
+
+description: doc-verify-bg
+```
+
+`GET .../messages` history carries only the main agent's messages — the
+`Agent` tool_use/tool_result pair is the **only** trace of a sub-agent there
+(verified 2026-07-28).
+
+### Foreground lifecycle — WS sequence
+
+```
+seq 17  tool.call.started   name "Agent", args {subagent_type, description, prompt} (main)
+seq 18  agent.created       payload {"agentId": "agent-12", "sessionId": ...}
+seq 19  subagent.spawned    identity metadata (payload.agentId "main")
+seq 20  turn.started        agentId "agent-12"; origin {"kind":"system_trigger","name":"subagent"}
+seq 21  context.spliced     the sub-agent's first internal user message
+seq 22  subagent.started    {subagentId}
+seq 23+ turn.step.*, thinking/assistant deltas, ...   all agentId "agent-12"
+seq 25  turn.ended + prompt.completed   one pair per internal turn (the task
+                            turn, then a forced result-summary turn)
+seq 33  subagent.completed  resultSummary + usage + contextTokens
+seq 34  tool.result         the Agent call's result; the main turn resumes
+```
+
+`subagent.spawned` (verbatim; carries all the identity metadata — later
+`subagent.*` events carry only `subagentId`):
+
+```json
+{"type":"subagent.spawned","seq":19,
+ "payload":{"type":"subagent.spawned","subagentId":"agent-12","subagentName":"explore",
+            "parentToolCallId":"tool_mhF8UXcf5QwvZbh5223tiIng","parentAgentId":"main",
+            "callerAgentId":"main","description":"doc-verify-subagent",
+            "runInBackground":false,"agentId":"main","sessionId":"session_..."}}
+```
+
+`subagent.completed` (verbatim, `resultSummary` elided):
+
+```json
+{"type":"subagent.completed","seq":33,
+ "payload":{"type":"subagent.completed","subagentId":"agent-12",
+            "resultSummary":"<full result summary>",
+            "usage":{"inputOther":6462,"output":359,"inputCacheRead":21504,"inputCacheCreation":0},
+            "contextTokens":14358,"agentId":"main","sessionId":"session_..."}}
+```
+
+Upstream schema only (not captured live): `subagent.spawned` may also carry
+`parentToolCallUuid` and `swarmIndex` (the `AgentSwarm` member index);
+`subagent.started` re-fires when a suspended sub-agent resumes;
+`subagent.suspended` is `{subagentId, reason}` (not terminal);
+`subagent.failed` is `{subagentId, error}`.
+
+### Sub-agent turn frames share the session channel
+
+Everything the sub-agent does streams over the **same** session
+subscription, tagged with `agentId:"<subagentId>"`: `turn.started` /
+`turn.step.*` / `context.spliced` / `thinking.delta` / `assistant.delta` /
+`tool.call.*` / `tool.result` / `prompt.completed`. Turn ids are per-agent
+(main and sub-agent both number from 0), and `prompt.completed` fires for
+the sub-agent's internal turns with internal prompt ids. **A client that
+renders only the main transcript must filter on `payload.agentId ==
+"main"`** — otherwise sub-agent deltas leak into the main chat. (The Android
+DTOs currently ignore `agentId` — e.g. `DeltaPayload` in `ChatDtos.kt` — so
+the app needs this filter before sub-agents are used against it.)
+
+### Background lifecycle — WS sequence
+
+```
+seq 46  tool.call.started   name "Agent", args {..., "run_in_background":true}
+seq 48  subagent.spawned    "runInBackground":true
+seq 49+ sub-agent turn frames (agentId "agent-13"), as in the foreground path
+seq 51  subagent.started
+seq 52  task.started        task-store registration (REST-visible from here)
+seq 53  background.task.started     legacy alias — same payload as task.started
+seq 55  tool.result         "task_id: ... status: running ..." (immediate)
+seq 71  subagent.completed
+seq 72  task.terminated     info.status "completed", endedAt set
+seq 73  background.task.terminated  legacy alias
+seq 77  task.notified       completion notification
+seq 78  context.spliced     a `<notification ...>` user message spliced into the
+                            MAIN agent — how the main agent learns of it
+```
+
+`task.started` / `task.terminated` payload (verbatim, from the cancel run):
+
+```json
+{"type":"task.terminated","seq":109,
+ "payload":{"type":"task.terminated",
+            "info":{"taskId":"agent-lftjyr4o","description":"doc-verify-cancel",
+                    "status":"killed","detached":true,
+                    "startedAt":1785210101939,"endedAt":1785210118804,
+                    "stopReason":"Aborted by the user","timeoutMs":7200000,
+                    "kind":"agent","agentId":"agent-14","subagentType":"agent"},
+            "agentId":"main","sessionId":"session_..."}}
+```
+
+`info.status` uses the **core** vocabulary (`running` | `completed` |
+`failed` | `timed_out` | `killed` | `lost`), not the REST wire one (mapping
+below); `kind:"agent"` marks a sub-agent (`process` = background bash).
+`task.notified` (verbatim shape): `{"notificationType":"task.completed" |
+"task.killed","title":"...","body":"...","severity":"info" | "warning",
+"sourceKind":"background_task","sourceId":"<taskId>"}`.
+
+### REST `/tasks` — background tasks only
+
+All envelope-over-HTTP-200 (verified 2026-07-28):
+
+```bash
+curl -s -H "Authorization: Bearer <token>" \
+  'http://127.0.0.1:58627/api/v1/sessions/<sid>/tasks?status=completed'
+curl -s -H "Authorization: Bearer <token>" \
+  'http://127.0.0.1:58627/api/v1/sessions/<sid>/tasks/<task_id>?with_output=true&output_bytes=4096'
+curl -s -X POST -H "Authorization: Bearer <token>" \
+  'http://127.0.0.1:58627/api/v1/sessions/<sid>/tasks/<task_id>:cancel'
+```
+
+- **List** — `GET .../tasks` → `{"items":[...]}`; optional
+  `?status=running|completed|failed|cancelled` (other values → `40001`).
+  Serves the main agent's background-task store: background sub-agents
+  (`kind:"subagent"`), background bash (`kind:"bash"`), question flows
+  (`kind:"tool"`). Terminal tasks stay listed. Core→wire mappings: kind
+  `agent`→`subagent`, `process`→`bash`, `question`→`tool`; status
+  `killed`→`cancelled`, `timed_out`/`lost`→`failed`.
+- **Get** — `GET .../tasks/{task_id}`; `with_output=true` adds
+  `output_preview` (tail of the stored result, default cap 32768 bytes —
+  override with `output_bytes`) and `output_bytes` (byte length of the
+  returned preview). Unknown task → `40406`; unknown session → `40401`.
+- **Cancel** — `POST .../tasks/{task_id}:cancel` → `{"cancelled":true}` on a
+  running task; a terminal task answers `40904` with
+  `data:{"cancelled":false}` + `details.current_status`. Cancelling a
+  running background sub-agent emits `task.terminated` with
+  `status:"killed"` + `stopReason:"Aborted by the user"` — **no**
+  `subagent.failed`/`subagent.completed` — then `task.notified`
+  (`notificationType:"task.killed"`) and the notification splice; REST reads
+  `"cancelled"` afterwards.
+
+Task object (verbatim):
+
+```json
+{"id":"agent-7noib8bb","session_id":"session_...","kind":"subagent",
+ "description":"doc-verify-bg","status":"completed",
+ "created_at":"2026-07-28T03:40:08.039Z","started_at":"2026-07-28T03:40:08.039Z",
+ "completed_at":"2026-07-28T03:40:22.372Z"}
+```
+
+The REST shape is thinner than the WS/snapshot one: no `subagent_type`, no
+`parent_tool_call_id`, and `created_at` == `started_at`.
+
+### Session snapshot roster
+
+`GET /api/v1/sessions/{sid}/snapshot` carries an optional `subagents` array:
+the **foreground** roster at the watermark, so a reconnecting client can
+rebuild the identity metadata (cursor-resume replays nothing earlier than
+the cursor, and `subagent.spawned` is never replayed). Verified 2026-07-28
+right after the foreground run:
+
+```json
+{"id":"agent-12","session_id":"session_...","kind":"subagent",
+ "description":"doc-verify-subagent","status":"completed",
+ "subagent_phase":"completed","subagent_type":"explore",
+ "parent_tool_call_id":"tool_mhF8UXcf5QwvZbh5223tiIng","run_in_background":false,
+ "created_at":"2026-07-28T03:37:35.492Z","started_at":"2026-07-28T03:37:35.496Z",
+ "completed_at":"2026-07-28T03:37:51.951Z","output_preview":"<resultSummary>"}
+```
+
+- `subagent_phase`: `queued` | `working` | `suspended` | `completed` |
+  `failed`; `suspended_reason` and `swarm_index` optional.
+- Background sub-agents are excluded (REST serves them). The roster survives
+  the turn's end but is dropped when the main agent starts its **next** turn
+  (verified: `[]` after a follow-up prompt).
+
 ## WebSocket
 
 ### URL & handshake
@@ -1128,6 +1361,23 @@ selected option and free text both re-verified 2026-07-23:
 
 ## Verification log
 
+- 2026-07-28 sub-agent round-trips on `0.29.2` (throwaway session
+  `session_1525d049-...` in `/tmp/spike`; first prompt needed
+  `"model":"kimi-code/k3"` — a fresh session has no model and fails with
+  `model.not_configured`): foreground `Agent` spawn (full lifecycle —
+  `agent.created`, `subagent.spawned`/`started`/`completed`, two internal
+  turns of sub-agent-tagged frames, the Agent tool-result text), background
+  spawn with `run_in_background:true` (`task.started`/`task.terminated` plus
+  the `background.task.*` legacy aliases, `task.notified` +
+  `<notification>` splice), REST `/tasks` list + `?status=` filter (invalid
+  value → `40001`), get with `with_output`/`output_bytes`, unknown task
+  (`40406`), unknown session (`40401`), empty list for the foreground run,
+  `:cancel` on a running background sub-agent (`{"cancelled":true}`,
+  `task.terminated` `status:"killed"` + `stopReason:"Aborted by the user"`,
+  REST reads `"cancelled"`) and on a terminal one (`40904`), snapshot
+  `subagents` roster (present after the foreground run, `[]` once the main
+  agent started a new turn), history showing only the main transcript. All
+  captured with `websocat` 1.14.0 against `ws://127.0.0.1:58627/api/v1/ws`.
 - REST probes: `curl` against `http://127.0.0.1:58627/api/v1/...` (commands
   inline above), server `0.29.2` (`backend: v2`).
 - Auth (re-verified 2026-07-27): `/api/v1/meta` → `401` without a token or
