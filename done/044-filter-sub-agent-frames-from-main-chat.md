@@ -83,3 +83,24 @@ surfacing in the main chat exactly as today.
 - Sub-agent turn ids, prompt ids and tool-call ids are per-agent and can
   collide with the main agent's; routing by id alone is impossible — the
   `agentId` tag is the only reliable discriminator.
+
+## Completion notes (2026-07-28)
+
+- Filter lives in `SessionSocket.handleFrame`: a payload `agentId` peek
+  (`AgentIdPeek` in `ChatDtos.kt`, absent = `"main"`) plus a
+  `MAIN_TRANSCRIPT_TYPES` set (deltas, tool family, `context.spliced`,
+  `turn.started/ended`, `agent.status.updated`). Non-main frames of those
+  types are skipped with `Log.d`; everything else — approvals, questions,
+  session/meta events — passes whatever its agentId. `prompt.completed` needed
+  no entry: the app never consumed it (ignore fallthrough), which is also why
+  sub-agent `prompt.completed` never flipped the working state.
+- Tests: `ChatRepositoryTest` gained two socket-level tests with fixtures from
+  the 2026-07-28 live capture — the transcript-family batch emits nothing
+  (settle-window proof, main frames with and without the tag still emit) and
+  sub-agent approval/question frames still emit. The transcript test was
+  watched RED before the fix.
+- Full `:app:testDebugUnitTest` green, `:app:assembleRelease` green; release
+  APK published to the file server.
+- The "real session" manual check is covered at fixture level (verbatim
+  0.29.2 capture frames); not re-run on a physical device — no device
+  available on the VPS.
