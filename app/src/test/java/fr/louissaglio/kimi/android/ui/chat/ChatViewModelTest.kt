@@ -1,8 +1,6 @@
 package fr.louissaglio.kimi.android.ui.chat
 
 import android.net.Uri
-import androidx.datastore.core.DataStore
-import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.preferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -14,24 +12,25 @@ import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.data.chat.ServerModel
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
+import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
+import fr.louissaglio.kimi.android.testutil.awaitCondition
+import fr.louissaglio.kimi.android.testutil.awaitState
 import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
-import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okhttp3.Response
@@ -54,8 +53,9 @@ import org.junit.Test
  * frame parsing and the decision POST are covered end-to-end. The socket is real I/O, so
  * waits use real-time timeouts (same pattern as ChatRepositoryTest), not runTest's clock.
  * Determinism comes from the dispatcher, not from timing margins: the WS upgrade is
- * gated behind the six startup GETs ([servedStartupGets]), so a poll response can never
- * land after a socket event the test already sent.
+ * served only once the startup GET burst has gone quiet ([startupQuietNanos]), so a poll
+ * response can never reorder after a socket event the test already sent — whatever the
+ * exact set of startup GETs is.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class ChatViewModelTest {
@@ -115,11 +115,34 @@ class ChatViewModelTest {
     @Volatile
     private var serverSocket: WebSocket? = null
 
-    /** The WS upgrade waits behind the six startup GETs (messages/questions/session/
-     * status/models/config): when [awaitServerSocket] returns, every startup poll was
-     * served, so a poll response can never reorder after a socket event — the flake
-     * this removes. */
-    private val servedStartupGets = CountDownLatch(6)
+    /**
+     * Arrival time (System.nanoTime) of the latest non-WS GET the server dispatched —
+     * every path counts, unconditionally, so a new, moved, or suppressed startup GET
+     * needs no change here. Seeded in [setUp] so an upgrade arriving before any GET
+     * still waits out the quiet window.
+     */
+    private val lastGetArrivalNanos = AtomicLong()
+
+    /**
+     * Quiet window after the last startup GET before the WS upgrade is served: long
+     * enough that no straggler poll can still be in flight (the startup GETs arrive
+     * within a few ms of each other), short enough to keep every test well under a
+     * second.
+     */
+    private val startupQuietNanos = TimeUnit.MILLISECONDS.toNanos(150)
+
+    /** Blocks the WS upgrade until the startup GET burst has gone quiet for
+     * [startupQuietNanos] — the gate that keeps a poll response from reordering after a
+     * socket event. Capped so a stuck burst can never park the dispatcher thread for the
+     * whole test timeout. Runs on the WS connection's own dispatch thread, so parked
+     * responses elsewhere (the test gates below) do not hold it. */
+    private fun awaitStartupGetsQuiet() {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (System.nanoTime() < deadline) {
+            if (System.nanoTime() - lastGetArrivalNanos.get() >= startupQuietNanos) return
+            Thread.sleep(10)
+        }
+    }
 
     /** When set, the /status response is held back server-side until the test releases
      * it, so a test can make a socket event win over the in-flight seed on purpose. */
@@ -135,14 +158,6 @@ class ChatViewModelTest {
     @Volatile
     private var filesResponseGate: CountDownLatch? = null
 
-    private class FakePreferencesDataStore(prefs: Preferences) : DataStore<Preferences> {
-        private val state = MutableStateFlow(prefs)
-        override val data: Flow<Preferences> = state
-
-        override suspend fun updateData(transform: suspend (Preferences) -> Preferences): Preferences =
-            transform(state.value).also { state.value = it }
-    }
-
     /** The store's platform I/O never runs on the JVM: tests stage chips (and exercise
      * the failure effects) through [ChatViewModel.onAttachmentRead] directly. */
     private class FakeAttachmentStore : AttachmentStore {
@@ -154,18 +169,23 @@ class ChatViewModelTest {
     @Before
     fun setUp() {
         server.start()
+        lastGetArrivalNanos.set(System.nanoTime())
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 val path = request.path.orEmpty()
+                // Stamped at arrival, not at response time: the /status and /questions
+                // responses may be parked behind a test gate below, and the WS upgrade's
+                // quiet window must not wait for those. The WS path is itself a GET but
+                // is excluded — the window measures the poll burst only.
+                if (request.method == "GET" && !path.startsWith("/api/v1/ws")) {
+                    lastGetArrivalNanos.set(System.nanoTime())
+                }
                 return when {
                     path == "/api/v1/sessions/session_1" && request.method == "GET" ->
-                        MockResponse().setBody(sessionBody).also { servedStartupGets.countDown() }
+                        MockResponse().setBody(sessionBody)
                     path.startsWith("/api/v1/sessions/session_1/messages") ->
-                        MockResponse().setBody(messagesBody).also { servedStartupGets.countDown() }
+                        MockResponse().setBody(messagesBody)
                     path == "/api/v1/sessions/session_1/status" -> {
-                        // Counted at arrival: the response itself may be parked behind
-                        // the test's gate, and the socket must not wait for that.
-                        servedStartupGets.countDown()
                         statusResponseGate?.await(5, TimeUnit.SECONDS)
                         MockResponse().setBody(statusBody)
                     }
@@ -220,9 +240,6 @@ class ChatViewModelTest {
                                 )
                             }
                         else -> {
-                            // Counted at arrival: the response itself may be parked
-                            // behind the test's gate, like the /status one.
-                            servedStartupGets.countDown()
                             questionsResponseGate?.await(5, TimeUnit.SECONDS)
                             MockResponse().setBody(questionsBody)
                         }
@@ -241,12 +258,10 @@ class ChatViewModelTest {
                             )
                         }
                     }
-                    path == "/api/v1/models" ->
-                        MockResponse().setBody(modelsBody).also { servedStartupGets.countDown() }
-                    path == "/api/v1/config" ->
-                        MockResponse().setBody(configBody).also { servedStartupGets.countDown() }
+                    path == "/api/v1/models" -> MockResponse().setBody(modelsBody)
+                    path == "/api/v1/config" -> MockResponse().setBody(configBody)
                     path.startsWith("/api/v1/ws") -> {
-                        servedStartupGets.await(5, TimeUnit.SECONDS)
+                        awaitStartupGetsQuiet()
                         MockResponse().withWebSocketUpgrade(
                             object : WebSocketListener() {
                                 override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -286,7 +301,7 @@ class ChatViewModelTest {
         val socket = awaitServerSocket()
 
         socket.send(approvalRequestedFrame(id = "ap_1", tool = "Bash", action = "Running: echo hi", command = "echo hi"))
-        awaitState { it.pendingApprovals.isNotEmpty() }
+        awaitState(viewModel.uiState) { it.pendingApprovals.isNotEmpty() }
         assertEquals(
             listOf(ChatViewModel.PendingApproval("ap_1", "Bash", "echo hi")),
             viewModel.uiState.value.pendingApprovals,
@@ -294,7 +309,7 @@ class ChatViewModelTest {
 
         // Resolved from another client: the card clears without local action.
         socket.send(approvalResolvedFrame("ap_1"))
-        awaitState { it.pendingApprovals.isEmpty() }
+        awaitState(viewModel.uiState) { it.pendingApprovals.isEmpty() }
         assertEquals(emptyList<ChatViewModel.PendingApproval>(), viewModel.uiState.value.pendingApprovals)
     }
 
@@ -305,7 +320,7 @@ class ChatViewModelTest {
             """"max_context_tokens":1048576,"context_usage":0.0239},"request_id":"r"}"""
 
         viewModel.onScreenStarted()
-        awaitState { it.contextUsage != null }
+        awaitState(viewModel.uiState) { it.contextUsage != null }
 
         assertEquals(ContextUsage(25050, 1048576), viewModel.uiState.value.contextUsage)
     }
@@ -322,7 +337,7 @@ class ChatViewModelTest {
         assertNull(viewModel.uiState.value.contextUsage)
 
         socket.send(agentStatusUsageFrame(25050, 1048576))
-        awaitState { it.contextUsage != null }
+        awaitState(viewModel.uiState) { it.contextUsage != null }
         assertEquals(ContextUsage(25050, 1048576), viewModel.uiState.value.contextUsage)
 
         socket.send(agentStatusPhaseFrame())
@@ -337,7 +352,7 @@ class ChatViewModelTest {
 
         socket.send(approvalRequestedFrame(id = "ap_1", tool = "Bash", action = "Running: echo one", command = "echo one"))
         socket.send(approvalRequestedFrame(id = "ap_2", tool = "Write", action = "Writing /tmp/a.txt", command = ""))
-        awaitState { it.pendingApprovals.size == 2 }
+        awaitState(viewModel.uiState) { it.pendingApprovals.size == 2 }
 
         val queue = viewModel.uiState.value.pendingApprovals
         assertEquals(listOf("ap_1", "ap_2"), queue.map { it.approvalId })
@@ -345,7 +360,7 @@ class ChatViewModelTest {
         assertEquals("Writing /tmp/a.txt", queue[1].summary)
 
         socket.send(approvalResolvedFrame("ap_1"))
-        awaitState { it.pendingApprovals.size == 1 }
+        awaitState(viewModel.uiState) { it.pendingApprovals.size == 1 }
         assertEquals("ap_2", viewModel.uiState.value.pendingApprovals.single().approvalId)
     }
 
@@ -354,7 +369,7 @@ class ChatViewModelTest {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         socket.send(approvalRequestedFrame(id = "ap_1", tool = "Bash", action = "Running: echo hi", command = "echo hi"))
-        awaitState { it.pendingApprovals.isNotEmpty() }
+        awaitState(viewModel.uiState) { it.pendingApprovals.isNotEmpty() }
 
         viewModel.onAllow()
 
@@ -367,7 +382,7 @@ class ChatViewModelTest {
         delay(300)
         assertEquals(1, viewModel.uiState.value.pendingApprovals.size)
         socket.send(approvalResolvedFrame("ap_1"))
-        awaitState { it.pendingApprovals.isEmpty() }
+        awaitState(viewModel.uiState) { it.pendingApprovals.isEmpty() }
     }
 
     @Test
@@ -375,7 +390,7 @@ class ChatViewModelTest {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         socket.send(approvalRequestedFrame(id = "ap_1", tool = "Bash", action = "Running: rm -rf /", command = "rm -rf /"))
-        awaitState { it.pendingApprovals.isNotEmpty() }
+        awaitState(viewModel.uiState) { it.pendingApprovals.isNotEmpty() }
 
         viewModel.onDeny()
 
@@ -391,14 +406,14 @@ class ChatViewModelTest {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         socket.send(approvalRequestedFrame(id = "ap_1", tool = "Bash", action = "Running: echo hi", command = "echo hi"))
-        awaitState { it.pendingApprovals.isNotEmpty() }
+        awaitState(viewModel.uiState) { it.pendingApprovals.isNotEmpty() }
 
         val effects = CopyOnWriteArrayList<ChatViewModel.Effect>()
         val effectJob = launch { viewModel.effects.collect { effects += it } }
         try {
             viewModel.onAllow()
             awaitRequest("/approvals/")
-            withTimeout(5_000) { while (effects.isEmpty()) delay(10) }
+            awaitCondition { effects.isNotEmpty() }
 
             assertEquals(
                 ChatViewModel.Effect.ApprovalFailed("approval does not exist"),
@@ -416,7 +431,7 @@ class ChatViewModelTest {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         socket.send(turnStartedFrame())
-        awaitState { it.isWorking }
+        awaitState(viewModel.uiState) { it.isWorking }
 
         viewModel.onStop()
 
@@ -428,14 +443,14 @@ class ChatViewModelTest {
         // The ack alone must not clear the indicator — the server's turn.ended does.
         assertTrue(viewModel.uiState.value.isWorking)
         socket.send(turnEndedFrame(reason = "cancelled"))
-        awaitState { !it.isWorking }
+        awaitState(viewModel.uiState) { !it.isWorking }
     }
 
     @Test
     fun `stop without a running turn sends no request`() = runBlocking {
         viewModel.onScreenStarted()
         awaitServerSocket()
-        awaitState { it.items != null }
+        awaitState(viewModel.uiState) { it.items != null }
         // Drain the history/status/WS requests recorded so far.
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
@@ -451,14 +466,14 @@ class ChatViewModelTest {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         socket.send(turnStartedFrame())
-        awaitState { it.isWorking }
+        awaitState(viewModel.uiState) { it.isWorking }
 
         val effects = CopyOnWriteArrayList<ChatViewModel.Effect>()
         val effectJob = launch { viewModel.effects.collect { effects += it } }
         try {
             viewModel.onStop()
             awaitRequest(":abort")
-            withTimeout(5_000) { while (effects.isEmpty()) delay(10) }
+            awaitCondition { effects.isNotEmpty() }
 
             assertEquals(
                 ChatViewModel.Effect.AbortFailed("no running prompt"),
@@ -480,7 +495,7 @@ class ChatViewModelTest {
 
         // The /status response is parked server-side: turn.started lands first.
         socket.send(turnStartedFrame())
-        awaitState { it.isWorking }
+        awaitState(viewModel.uiState) { it.isWorking }
 
         // The stale busy:false snapshot arrives after the event and must be dropped.
         gate.countDown()
@@ -492,13 +507,13 @@ class ChatViewModelTest {
     fun `context spliced shows the sent prompt bubble without a history refetch`() = runBlocking {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
-        awaitState { it.items != null }
+        awaitState(viewModel.uiState) { it.items != null }
         // Drain the history/status/WS requests recorded so far.
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
         socket.send(contextSplicedFrame(id = "msg_1", text = "hello from the phone"))
 
-        awaitState { !it.items.isNullOrEmpty() }
+        awaitState(viewModel.uiState) { !it.items.isNullOrEmpty() }
         assertEquals(
             listOf(ChatItem.UserMessage("msg_1", "hello from the phone")),
             viewModel.uiState.value.items,
@@ -512,10 +527,10 @@ class ChatViewModelTest {
     fun `no duplicate user bubble after the turn ended refetch`() = runBlocking {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
-        awaitState { it.items != null }
+        awaitState(viewModel.uiState) { it.items != null }
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
         socket.send(contextSplicedFrame(id = "msg_1", text = "hello from the phone"))
-        awaitState { it.items?.size == 1 }
+        awaitState(viewModel.uiState) { it.items?.size == 1 }
 
         // The server committed the message; the turn.ended refetch returns it in history.
         messagesBody = """
@@ -548,7 +563,7 @@ class ChatViewModelTest {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         socket.send(turnStartedFrame())
-        awaitState { it.isWorking }
+        awaitState(viewModel.uiState) { it.isWorking }
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
         viewModel.onInputChange("Stop counting")
@@ -565,7 +580,7 @@ class ChatViewModelTest {
         assertEquals("/api/v1/sessions/session_1/prompts:steer", steer.path)
         assertEquals("""{"prompt_ids":["msg_1"]}""", steer.body.readUtf8())
 
-        awaitState { it.inputText.isEmpty() && !it.isSending }
+        awaitState(viewModel.uiState) { it.inputText.isEmpty() && !it.isSending }
         // The turn keeps running: the working state and Stop action stay up.
         assertTrue(viewModel.uiState.value.isWorking)
     }
@@ -574,7 +589,7 @@ class ChatViewModelTest {
     fun `sending while idle posts a plain prompt, not a steer`() = runBlocking {
         viewModel.onScreenStarted()
         awaitServerSocket()
-        awaitState { it.items != null }
+        awaitState(viewModel.uiState) { it.items != null }
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
         viewModel.onInputChange("hello")
@@ -585,7 +600,7 @@ class ChatViewModelTest {
         assertEquals("/api/v1/sessions/session_1/prompts", request.path)
         assertEquals("""{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/k3"}""", request.body.readUtf8())
         // A plain prompt marks the session busy; no steer call follows.
-        awaitState { it.isWorking }
+        awaitState(viewModel.uiState) { it.isWorking }
         assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
     }
 
@@ -594,12 +609,12 @@ class ChatViewModelTest {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         socket.send(turnStartedFrame())
-        awaitState { it.isWorking }
+        awaitState(viewModel.uiState) { it.isWorking }
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
         socket.send(steerEchoSplicedFrame(text = "Stop counting"))
 
-        awaitState { !it.items.isNullOrEmpty() }
+        awaitState(viewModel.uiState) { !it.items.isNullOrEmpty() }
         val items = viewModel.uiState.value.items.orEmpty()
         assertEquals(1, items.size)
         assertEquals("Stop counting", (items.single() as ChatItem.UserMessage).text)
@@ -615,7 +630,7 @@ class ChatViewModelTest {
         val socket = awaitServerSocket()
 
         socket.send(questionRequestedFrame(id = "tool_q1"))
-        awaitState { it.pendingQuestions.isNotEmpty() }
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
         assertEquals(
             listOf(
                 PendingQuestion(
@@ -639,7 +654,7 @@ class ChatViewModelTest {
 
         // Answered from another client: the card clears without local action.
         socket.send(questionAnsweredFrame("tool_q1"))
-        awaitState { it.pendingQuestions.isEmpty() }
+        awaitState(viewModel.uiState) { it.pendingQuestions.isEmpty() }
     }
 
     @Test
@@ -651,7 +666,7 @@ class ChatViewModelTest {
 
         // The /questions response is parked server-side: the event lands first.
         socket.send(questionRequestedFrame(id = "tool_q1"))
-        awaitState { it.pendingQuestions.isNotEmpty() }
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
 
         // The stale empty snapshot arrives after the event and must be dropped.
         gate.countDown()
@@ -664,7 +679,7 @@ class ChatViewModelTest {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         socket.send(questionRequestedFrame(id = "tool_q1"))
-        awaitState { it.pendingQuestions.isNotEmpty() }
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
 
         viewModel.onQuestionOptionPicked("q_0", "opt_0_1")
         viewModel.onSubmitQuestion()
@@ -678,7 +693,7 @@ class ChatViewModelTest {
         delay(300)
         assertEquals(1, viewModel.uiState.value.pendingQuestions.size)
         socket.send(questionAnsweredFrame("tool_q1"))
-        awaitState { it.pendingQuestions.isEmpty() }
+        awaitState(viewModel.uiState) { it.pendingQuestions.isEmpty() }
     }
 
     @Test
@@ -686,7 +701,7 @@ class ChatViewModelTest {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         socket.send(questionRequestedFrame(id = "tool_q1"))
-        awaitState { it.pendingQuestions.isNotEmpty() }
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
 
         viewModel.onQuestionOtherTextChange("q_0", "green")
         viewModel.onSubmitQuestion()
@@ -700,7 +715,7 @@ class ChatViewModelTest {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         socket.send(questionRequestedFrame(id = "tool_q1"))
-        awaitState { it.pendingQuestions.isNotEmpty() }
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
         // Drain the history/status/questions/WS requests recorded so far.
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
@@ -716,7 +731,7 @@ class ChatViewModelTest {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         socket.send(multiItemQuestionRequestedFrame(id = "tool_q1"))
-        awaitState { it.pendingQuestions.isNotEmpty() }
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
 
         assertEquals(0, viewModel.uiState.value.questionStep)
         assertFalse(viewModel.uiState.value.isQuestionStepAnswered)
@@ -736,7 +751,7 @@ class ChatViewModelTest {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         socket.send(multiItemQuestionRequestedFrame(id = "tool_q1"))
-        awaitState { it.pendingQuestions.isNotEmpty() }
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
 
         viewModel.onQuestionOptionPicked("q_0", "opt_0_1")
         viewModel.onQuestionNext()
@@ -754,7 +769,7 @@ class ChatViewModelTest {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         socket.send(multiItemQuestionRequestedFrame(id = "tool_q1"))
-        awaitState { it.pendingQuestions.isNotEmpty() }
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
 
         viewModel.onQuestionOptionPicked("q_0", "opt_0_1")
         viewModel.onQuestionNext()
@@ -775,14 +790,14 @@ class ChatViewModelTest {
         val socket = awaitServerSocket()
         socket.send(multiItemQuestionRequestedFrame(id = "tool_q1"))
         socket.send(questionRequestedFrame(id = "tool_q2"))
-        awaitState { it.pendingQuestions.size == 2 }
+        awaitState(viewModel.uiState) { it.pendingQuestions.size == 2 }
 
         viewModel.onQuestionOptionPicked("q_0", "opt_0_1")
         viewModel.onQuestionNext()
         assertEquals(1, viewModel.uiState.value.questionStep)
 
         socket.send(questionAnsweredFrame("tool_q1"))
-        awaitState { it.pendingQuestions.map { q -> q.questionId } == listOf("tool_q2") }
+        awaitState(viewModel.uiState) { it.pendingQuestions.map { q -> q.questionId } == listOf("tool_q2") }
         assertEquals(0, viewModel.uiState.value.questionStep)
     }
 
@@ -791,7 +806,7 @@ class ChatViewModelTest {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         socket.send(questionRequestedFrame(id = "tool_q1"))
-        awaitState { it.pendingQuestions.isNotEmpty() }
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
 
         viewModel.onDismissQuestion()
 
@@ -801,7 +816,7 @@ class ChatViewModelTest {
         assertEquals("{}", request.body.readUtf8())
 
         socket.send(questionDismissedFrame("tool_q1"))
-        awaitState { it.pendingQuestions.isEmpty() }
+        awaitState(viewModel.uiState) { it.pendingQuestions.isEmpty() }
     }
 
     @Test
@@ -810,7 +825,7 @@ class ChatViewModelTest {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         socket.send(questionRequestedFrame(id = "tool_q1"))
-        awaitState { it.pendingQuestions.isNotEmpty() }
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
 
         val effects = CopyOnWriteArrayList<ChatViewModel.Effect>()
         val effectJob = launch { viewModel.effects.collect { effects += it } }
@@ -818,7 +833,7 @@ class ChatViewModelTest {
             viewModel.onQuestionOptionPicked("q_0", "opt_0_1")
             viewModel.onSubmitQuestion()
             awaitRequest("/questions/")
-            withTimeout(5_000) { while (effects.isEmpty()) delay(10) }
+            awaitCondition { effects.isNotEmpty() }
 
             assertEquals(
                 ChatViewModel.Effect.QuestionFailed("question tool_q1 not found"),
@@ -848,9 +863,9 @@ class ChatViewModelTest {
         """.trimIndent()
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
-        awaitState { it.pendingQuestions.isNotEmpty() }
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
         socket.send(turnStartedFrame())
-        awaitState { it.isWorking }
+        awaitState(viewModel.uiState) { it.isWorking }
         // Drain the history/status/questions/WS requests recorded so far so the next
         // questions poll observed is the one turn.ended triggers.
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
@@ -901,7 +916,7 @@ class ChatViewModelTest {
     fun `session title and cwd load into the top bar state`() = runBlocking {
         viewModel.onScreenStarted()
 
-        awaitState { it.sessionTitle != null }
+        awaitState(viewModel.uiState) { it.sessionTitle != null }
         assertEquals("Fix the bug", viewModel.uiState.value.sessionTitle)
         assertEquals("/home/ubuntu/kimi-android-client", viewModel.uiState.value.sessionCwd)
     }
@@ -914,7 +929,7 @@ class ChatViewModelTest {
                 """"metadata":{"cwd":"/home/ubuntu/kimi-android-client"}},"request_id":"r"}"""
         viewModel.onScreenStarted()
 
-        awaitState { it.sessionTitle != null }
+        awaitState(viewModel.uiState) { it.sessionTitle != null }
         assertEquals("kimi-android-client", viewModel.uiState.value.sessionTitle)
     }
 
@@ -938,7 +953,7 @@ class ChatViewModelTest {
     fun `models load into state and the server default drives the chip label`() = runBlocking {
         viewModel.onScreenStarted()
 
-        awaitState { it.modelsAvailable }
+        awaitState(viewModel.uiState) { it.modelsAvailable }
         val state = viewModel.uiState.value
         assertEquals(3, state.availableModels.size)
         assertEquals("kimi-code/k3", state.serverDefaultModel)
@@ -966,11 +981,11 @@ class ChatViewModelTest {
     @Test
     fun `selected model persists and survives ViewModel recreation`() = runBlocking {
         viewModel.onScreenStarted()
-        awaitState { it.modelsAvailable }
+        awaitState(viewModel.uiState) { it.modelsAvailable }
 
         viewModel.onModelSelected("kimi-code/kimi-for-coding-highspeed")
 
-        awaitState { it.sessionModel == "kimi-code/kimi-for-coding-highspeed" }
+        awaitState(viewModel.uiState) { it.sessionModel == "kimi-code/kimi-for-coding-highspeed" }
         assertEquals("K2.7 Coding Highspeed", viewModel.uiState.value.currentModelLabel)
 
         // Recreation over the same DataStore: the choice is reloaded, not lost.
@@ -982,12 +997,7 @@ class ChatViewModelTest {
             SavedStateHandle(mapOf("sessionId" to "session_1")),
         )
         recreated.onScreenStarted()
-        val deadline = System.currentTimeMillis() + 5_000
-        while (System.currentTimeMillis() < deadline) {
-            val state = recreated.uiState.value
-            if (state.modelsAvailable && state.sessionModel != null) break
-            delay(10)
-        }
+        awaitState(recreated.uiState) { it.modelsAvailable && it.sessionModel != null }
         assertEquals("kimi-code/kimi-for-coding-highspeed", recreated.uiState.value.sessionModel)
         assertEquals("K2.7 Coding Highspeed", recreated.uiState.value.currentModelLabel)
     }
@@ -995,11 +1005,11 @@ class ChatViewModelTest {
     @Test
     fun `selected effort persists and survives ViewModel recreation`() = runBlocking {
         viewModel.onScreenStarted()
-        awaitState { it.modelsAvailable }
+        awaitState(viewModel.uiState) { it.modelsAvailable }
 
         viewModel.onEffortSelected("low")
 
-        awaitState { it.sessionEffort == "low" }
+        awaitState(viewModel.uiState) { it.sessionEffort == "low" }
         val state = viewModel.uiState.value
         // K3 (the effective model) offers its efforts; the stored one is selected.
         assertEquals(listOf("low", "high", "max"), state.supportedEfforts)
@@ -1015,12 +1025,7 @@ class ChatViewModelTest {
             SavedStateHandle(mapOf("sessionId" to "session_1")),
         )
         recreated.onScreenStarted()
-        val deadline = System.currentTimeMillis() + 5_000
-        while (System.currentTimeMillis() < deadline) {
-            val current = recreated.uiState.value
-            if (current.modelsAvailable && current.sessionEffort != null) break
-            delay(10)
-        }
+        awaitState(recreated.uiState) { it.modelsAvailable && it.sessionEffort != null }
         assertEquals("low", recreated.uiState.value.sessionEffort)
         assertEquals("low", recreated.uiState.value.selectedEffort)
     }
@@ -1034,7 +1039,7 @@ class ChatViewModelTest {
             it[stringPreferencesKey("model_for_session_session_1")] = "kimi-code/kimi-for-coding"
         }
         viewModel.onScreenStarted()
-        awaitState { it.modelsAvailable && it.sessionModel != null }
+        awaitState(viewModel.uiState) { it.modelsAvailable && it.sessionModel != null }
 
         val state = viewModel.uiState.value
         assertEquals("low", state.sessionEffort)
@@ -1047,7 +1052,7 @@ class ChatViewModelTest {
     fun `attachment send uploads the file then posts the prompt with its content item`() = runBlocking {
         viewModel.onScreenStarted()
         awaitServerSocket()
-        awaitState { it.items != null }
+        awaitState(viewModel.uiState) { it.items != null }
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
         stagePicked("a.txt", 5, "text/plain", "hello".toByteArray())
@@ -1066,7 +1071,7 @@ class ChatViewModelTest {
             prompt.body.readUtf8(),
         )
         // Chips and text clear on success, like a text-only send.
-        awaitState { it.attachments.isEmpty() && it.inputText.isEmpty() && !it.isSending }
+        awaitState(viewModel.uiState) { it.attachments.isEmpty() && it.inputText.isEmpty() && !it.isSending }
     }
 
     @Test
@@ -1075,12 +1080,12 @@ class ChatViewModelTest {
         filesResponseGate = gate
         viewModel.onScreenStarted()
         awaitServerSocket()
-        awaitState { it.items != null }
+        awaitState(viewModel.uiState) { it.items != null }
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
         stagePicked("a.txt", 5, "text/plain", "hello".toByteArray())
         viewModel.onSend()
-        awaitState {
+        awaitState(viewModel.uiState) {
             it.isSending && it.attachments.single().status == ChatViewModel.PendingAttachment.Status.Uploading
         }
 
@@ -1096,7 +1101,7 @@ class ChatViewModelTest {
                 """"model":"kimi-code/k3"}""",
             prompt.body.readUtf8(),
         )
-        awaitState { it.attachments.isEmpty() && !it.isSending }
+        awaitState(viewModel.uiState) { it.attachments.isEmpty() && !it.isSending }
         // Exactly one upload and one prompt: the second tap sent nothing.
         assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
     }
@@ -1106,7 +1111,7 @@ class ChatViewModelTest {
         uploadsSucceed = false
         viewModel.onScreenStarted()
         awaitServerSocket()
-        awaitState { it.items != null }
+        awaitState(viewModel.uiState) { it.items != null }
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
         val effects = CopyOnWriteArrayList<ChatViewModel.Effect>()
@@ -1115,7 +1120,7 @@ class ChatViewModelTest {
             stagePicked("a.txt", 5, "text/plain", "hello".toByteArray())
             viewModel.onSend()
             awaitRequest("/api/v1/files")
-            withTimeout(5_000) { while (effects.isEmpty()) delay(10) }
+            awaitCondition { effects.isNotEmpty() }
 
             assertEquals(
                 ChatViewModel.Effect.SendFailed("file exceeds the 50 MiB limit"),
@@ -1135,7 +1140,7 @@ class ChatViewModelTest {
     fun `removing a chip excludes the file from the send`() = runBlocking {
         viewModel.onScreenStarted()
         awaitServerSocket()
-        awaitState { it.items != null }
+        awaitState(viewModel.uiState) { it.items != null }
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
         stagePicked("a.txt", 5, "text/plain", "hello".toByteArray())
@@ -1162,7 +1167,7 @@ class ChatViewModelTest {
         try {
             viewModel.onAttachmentRead(AttachmentStore.ReadResult.TooLarge("big.bin"))
             viewModel.onAttachmentRead(AttachmentStore.ReadResult.Unreadable("broken.bin"))
-            withTimeout(5_000) { while (effects.size < 2) delay(10) }
+            awaitCondition { effects.size >= 2 }
 
             assertEquals(
                 listOf(
@@ -1182,13 +1187,10 @@ class ChatViewModelTest {
     private suspend fun stagePicked(name: String, sizeBytes: Long, mimeType: String, bytes: ByteArray) =
         viewModel.onAttachmentRead(AttachmentStore.ReadResult.Ok(AttachmentStore.Picked(name, sizeBytes, mimeType, bytes)))
 
-    private suspend fun awaitServerSocket(): WebSocket = withTimeout(5_000) {
-        while (serverSocket == null) delay(10)
-        serverSocket!!
+    private suspend fun awaitServerSocket(): WebSocket {
+        awaitCondition { serverSocket != null }
+        return serverSocket!!
     }
-
-    private suspend fun awaitState(predicate: (ChatViewModel.UiState) -> Boolean) =
-        withTimeout(5_000) { while (!predicate(viewModel.uiState.value)) delay(10) }
 
     /** Drains recorded requests until the approvals POST arrives (history/status/WS came first). */
     private fun awaitRequest(pathSubstring: String): RecordedRequest {

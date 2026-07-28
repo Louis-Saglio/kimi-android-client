@@ -1,11 +1,12 @@
 package fr.louissaglio.kimi.android.ui.sessions
 
-import androidx.datastore.core.DataStore
-import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.preferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
+import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
+import fr.louissaglio.kimi.android.testutil.awaitCondition
+import fr.louissaglio.kimi.android.testutil.awaitState
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
@@ -14,14 +15,11 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
-import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
@@ -45,14 +43,6 @@ class SessionListViewModelTest {
     private val server = MockWebServer()
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
     private lateinit var viewModel: SessionListViewModel
-
-    private class FakePreferencesDataStore(prefs: Preferences) : DataStore<Preferences> {
-        private val state = MutableStateFlow(prefs)
-        override val data: Flow<Preferences> = state
-
-        override suspend fun updateData(transform: suspend (Preferences) -> Preferences): Preferences =
-            transform(state.value).also { state.value = it }
-    }
 
     @Before
     fun setUp() {
@@ -157,8 +147,8 @@ class SessionListViewModelTest {
             // The path is trimmed before sending.
             assertEquals("""{"metadata":{"cwd":"/tmp/spike-008"},"title":"My session"}""", request.body.readUtf8())
 
-            awaitState { !it.showCreateDialog && !it.isCreating }
-            withTimeout(5_000) { while (effects.isEmpty()) delay(10) }
+            awaitState(viewModel.uiState) { !it.showCreateDialog && !it.isCreating }
+            awaitCondition { effects.isNotEmpty() }
             val created = effects.single() as SessionListViewModel.Effect.SessionCreated
             assertEquals("session_new", created.session.id)
             assertEquals("My session", created.session.title)
@@ -186,7 +176,7 @@ class SessionListViewModelTest {
             server.takeRequest(5, TimeUnit.SECONDS)
             viewModel.onCreateSessionConfirm()
 
-            withTimeout(5_000) { while (effects.isEmpty()) delay(10) }
+            awaitCondition { effects.isNotEmpty() }
             assertEquals(
                 SessionListViewModel.Effect.CreateFailed("workspace root /tmp/nope does not exist"),
                 effects.single(),
@@ -206,7 +196,7 @@ class SessionListViewModelTest {
 
         viewModel.onNewSessionClick()
 
-        awaitState { it.workspaces != null }
+        awaitState(viewModel.uiState) { it.workspaces != null }
         val state = viewModel.uiState.value
         assertEquals("/api/v1/workspaces", server.takeRequest(5, TimeUnit.SECONDS)!!.path)
         // Sorted client-side by last_opened_at desc; the newest root becomes the default.
@@ -251,7 +241,7 @@ class SessionListViewModelTest {
         viewModel.onNewSessionClick()
         viewModel.onNewSessionCwdChange("/tmp/custom")
 
-        awaitState { it.workspaces != null }
+        awaitState(viewModel.uiState) { it.workspaces != null }
         assertEquals("/tmp/custom", viewModel.uiState.value.newSessionCwd)
     }
 
@@ -266,7 +256,7 @@ class SessionListViewModelTest {
             ),
         )
         viewModel.onNewSessionClick()
-        awaitState { it.workspaces != null }
+        awaitState(viewModel.uiState) { it.workspaces != null }
 
         // Selecting the second workspace from the dropdown sets its root.
         viewModel.onNewSessionCwdChange(viewModel.uiState.value.workspaces!![1].root)
@@ -282,13 +272,13 @@ class SessionListViewModelTest {
     fun `onEndReached appends the next page deduplicated and stops when has_more is false`() = runBlocking {
         server.enqueue(MockResponse().setBody(pageBody(hasMore = true, "session_1", "session_2")))
         viewModel.onScreenStarted()
-        awaitState { it.sessions != null }
+        awaitState(viewModel.uiState) { it.sessions != null }
         // Page 2 overlaps page 1 by one row; the duplicate must not appear twice.
         server.enqueue(MockResponse().setBody(pageBody(hasMore = false, "session_2", "session_3")))
 
         viewModel.onEndReached()
 
-        awaitState { it.sessions?.size == 3 }
+        awaitState(viewModel.uiState) { it.sessions?.size == 3 }
         val state = viewModel.uiState.value
         assertEquals(listOf("session_1", "session_2", "session_3"), state.sessions!!.map { it.id })
         assertFalse(state.hasMore)
@@ -302,12 +292,12 @@ class SessionListViewModelTest {
     fun `failed next page keeps the loaded list and exposes a footer error`() = runBlocking {
         server.enqueue(MockResponse().setBody(pageBody(hasMore = true, "session_1", "session_2")))
         viewModel.onScreenStarted()
-        awaitState { it.sessions != null }
+        awaitState(viewModel.uiState) { it.sessions != null }
         server.enqueue(MockResponse().setResponseCode(500))
 
         viewModel.onEndReached()
 
-        awaitState { it.loadMoreError != null }
+        awaitState(viewModel.uiState) { it.loadMoreError != null }
         val state = viewModel.uiState.value
         assertEquals(listOf("session_1", "session_2"), state.sessions!!.map { it.id })
         assertEquals("Unexpected server response (HTTP 500)", state.loadMoreError)
@@ -320,7 +310,7 @@ class SessionListViewModelTest {
     fun `onEndReached is a no-op when the server reported no more pages`() = runBlocking {
         server.enqueue(MockResponse().setBody(pageBody(hasMore = false, "session_1")))
         viewModel.onScreenStarted()
-        awaitState { it.sessions != null }
+        awaitState(viewModel.uiState) { it.sessions != null }
 
         viewModel.onEndReached()
 
@@ -331,15 +321,15 @@ class SessionListViewModelTest {
     fun `refresh after paging resets to the first page`() = runBlocking {
         server.enqueue(MockResponse().setBody(pageBody(hasMore = true, "session_1", "session_2")))
         viewModel.onScreenStarted()
-        awaitState { it.sessions != null }
+        awaitState(viewModel.uiState) { it.sessions != null }
         server.enqueue(MockResponse().setBody(pageBody(hasMore = false, "session_3")))
         viewModel.onEndReached()
-        awaitState { it.sessions?.size == 3 }
+        awaitState(viewModel.uiState) { it.sessions?.size == 3 }
         server.enqueue(MockResponse().setBody(pageBody(hasMore = true, "session_9")))
 
         viewModel.onPullToRefresh()
 
-        awaitState { it.sessions?.map { s -> s.id } == listOf("session_9") }
+        awaitState(viewModel.uiState) { it.sessions?.map { s -> s.id } == listOf("session_9") }
         val state = viewModel.uiState.value
         assertTrue(state.hasMore)
         assertNull(state.loadMoreError)
@@ -364,7 +354,7 @@ class SessionListViewModelTest {
         )
         viewModel.onScreenStarted()
 
-        awaitState { it.sessions != null }
+        awaitState(viewModel.uiState) { it.sessions != null }
         assertTrue(viewModel.uiState.value.sessions!![0].isAwaitingApproval)
         assertFalse(viewModel.uiState.value.sessions!![1].isAwaitingApproval)
 
@@ -373,7 +363,7 @@ class SessionListViewModelTest {
         server.enqueue(MockResponse().setBody(pageBody(hasMore = false, "session_1", "session_2")))
         viewModel.onPullToRefresh()
 
-        awaitState { it.sessions?.none { s -> s.isAwaitingApproval } == true }
+        awaitState(viewModel.uiState) { it.sessions?.none { s -> s.isAwaitingApproval } == true }
         assertFalse(viewModel.uiState.value.sessions!![0].isAwaitingApproval)
     }
 
@@ -395,7 +385,4 @@ class SessionListViewModelTest {
             ]},"request_id":"r"}
         """
     }
-
-    private suspend fun awaitState(predicate: (SessionListViewModel.UiState) -> Boolean) =
-        withTimeout(5_000) { while (!predicate(viewModel.uiState.value)) delay(10) }
 }

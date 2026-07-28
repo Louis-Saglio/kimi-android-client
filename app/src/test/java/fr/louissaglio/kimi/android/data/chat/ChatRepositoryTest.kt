@@ -1,23 +1,21 @@
 package fr.louissaglio.kimi.android.data.chat
 
-import androidx.datastore.core.DataStore
-import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.emptyPreferences
 import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
+import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
+import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.ui.chat.ChatItem
 import fr.louissaglio.kimi.android.ui.chat.ChatTimeline
 import fr.louissaglio.kimi.android.ui.chat.ToolStatus
 import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okhttp3.Response
@@ -33,14 +31,6 @@ import org.junit.Before
 import org.junit.Test
 
 class ChatRepositoryTest {
-
-    private class FakePreferencesDataStore(prefs: Preferences) : DataStore<Preferences> {
-        private val state = MutableStateFlow(prefs)
-        override val data: Flow<Preferences> = state
-
-        override suspend fun updateData(transform: suspend (Preferences) -> Preferences): Preferences =
-            transform(state.value).also { state.value = it }
-    }
 
     private val server = MockWebServer()
     private val repository = ChatRepository(
@@ -64,6 +54,38 @@ class ChatRepositoryTest {
             """{"code":0,"msg":"success","data":{"default_permission_mode":"yolo"},"request_id":"01KX"}""",
         ),
     )
+
+    /**
+     * Collects what one socket receives after the server sends [frames] on upgrade:
+     * collects until [eventCount] substantive events arrived (server_hello, pings, and
+     * phase-only agent.status frames emit none), then waits [settleMillis] longer as
+     * proof that nothing more comes, and cancels. Returns every emitted [SocketEvent],
+     * Connected first; callers assert on the [SocketEvent.Event] subset.
+     */
+    private suspend fun runSocketEvents(
+        vararg frames: String,
+        eventCount: Int = frames.size,
+        settleMillis: Long = 0,
+    ): List<SocketEvent> = coroutineScope {
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(
+                object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: Response) {
+                        frames.forEach(webSocket::send)
+                    }
+                },
+            ),
+        )
+        val emitted = CopyOnWriteArrayList<SocketEvent>()
+        val job = launch { repository.observeSession(settings(), "session_1").collect { emitted += it } }
+        try {
+            awaitCondition { emitted.count { it is SocketEvent.Event } >= eventCount }
+            if (settleMillis > 0) delay(settleMillis)
+        } finally {
+            job.cancel()
+        }
+        emitted
+    }
 
     @Test
     fun `history envelope maps to domain messages oldest-first`() = runBlocking {
@@ -388,12 +410,7 @@ class ChatRepositoryTest {
     @Test
     fun `steer maps a non-zero steer envelope code to Api error`() = runBlocking {
         enqueueConfigWithoutDefaultModel()
-        server.enqueue(
-            MockResponse().setBody(
-                """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
-                    """"status":"queued","created_at":"2026-07-20T00:00:00.000Z"},"request_id":"01KX"}""",
-            ),
-        )
+        server.enqueue(MockResponse().setBody(PROMPT_ACK_BODY))
         server.enqueue(
             MockResponse().setBody("""{"code":40402,"msg":"no active prompt to steer into","data":null,"request_id":"01KX"}"""),
         )
@@ -425,12 +442,7 @@ class ChatRepositoryTest {
                 """{"code":0,"msg":"success","data":{"default_model":"kimi-code/k3"},"request_id":"01KX"}""",
             ),
         )
-        server.enqueue(
-            MockResponse().setBody(
-                """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
-                    """"status":"running","created_at":"2026-07-21T00:00:00.000Z"},"request_id":"01KX"}""",
-            ),
-        )
+        server.enqueue(MockResponse().setBody(PROMPT_ACK_BODY))
 
         val result = repository.sendPrompt(settings(), "session_1", "hello")
 
@@ -450,12 +462,7 @@ class ChatRepositoryTest {
                 """{"code":0,"msg":"success","data":{"default_model":"kimi-code/k3"},"request_id":"01KX"}""",
             ),
         )
-        server.enqueue(
-            MockResponse().setBody(
-                """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
-                    """"status":"queued","created_at":"2026-07-21T00:00:00.000Z"},"request_id":"01KX"}""",
-            ),
-        )
+        server.enqueue(MockResponse().setBody(PROMPT_ACK_BODY))
         server.enqueue(
             MockResponse().setBody(
                 """{"code":0,"msg":"success","data":{"steered":true,"prompt_ids":["msg_1"]},"request_id":"01KX"}""",
@@ -475,10 +482,7 @@ class ChatRepositoryTest {
 
     @Test
     fun `default model is fetched once per server URL`() = runBlocking {
-        val promptAck = MockResponse().setBody(
-            """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
-                """"status":"running","created_at":"2026-07-21T00:00:00.000Z"},"request_id":"01KX"}""",
-        )
+        val promptAck = MockResponse().setBody(PROMPT_ACK_BODY)
         server.enqueue(
             MockResponse().setBody(
                 """{"code":0,"msg":"success","data":{"default_model":"kimi-code/k3"},"request_id":"01KX"}""",
@@ -519,10 +523,7 @@ class ChatRepositoryTest {
 
     @Test
     fun `prompt goes out without a model when the config fetch fails and config is retried next send`() = runBlocking {
-        val promptAck = MockResponse().setBody(
-            """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
-                """"status":"running","created_at":"2026-07-21T00:00:00.000Z"},"request_id":"01KX"}""",
-        )
+        val promptAck = MockResponse().setBody(PROMPT_ACK_BODY)
         server.enqueue(MockResponse().setResponseCode(500))
         server.enqueue(promptAck)
         server.enqueue(MockResponse().setResponseCode(500))
@@ -624,12 +625,7 @@ class ChatRepositoryTest {
                 """{"code":0,"msg":"success","data":{"default_model":"kimi-code/k3"},"request_id":"01KX"}""",
             ),
         )
-        server.enqueue(
-            MockResponse().setBody(
-                """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
-                    """"status":"running","created_at":"2026-07-24T00:00:00.000Z"},"request_id":"01KX"}""",
-            ),
-        )
+        server.enqueue(MockResponse().setBody(PROMPT_ACK_BODY))
 
         val result = repository.sendPrompt(settings(), "session_1", "hello")
 
@@ -647,12 +643,7 @@ class ChatRepositoryTest {
     @Test
     fun `steer sends the session's chosen model in the prompt body`() = runBlocking {
         repository.setSessionModel("session_1", "kimi-code/kimi-for-coding-highspeed")
-        server.enqueue(
-            MockResponse().setBody(
-                """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
-                    """"status":"queued","created_at":"2026-07-24T00:00:00.000Z"},"request_id":"01KX"}""",
-            ),
-        )
+        server.enqueue(MockResponse().setBody(PROMPT_ACK_BODY))
         server.enqueue(
             MockResponse().setBody(
                 """{"code":0,"msg":"success","data":{"steered":true,"prompt_ids":["msg_1"]},"request_id":"01KX"}""",
@@ -691,12 +682,7 @@ class ChatRepositoryTest {
         assertEquals("/api/v1/models", server.takeRequest().path)
     }
 
-    private fun enqueuePromptAck() = server.enqueue(
-        MockResponse().setBody(
-            """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
-                """"status":"running","created_at":"2026-07-24T00:00:00.000Z"},"request_id":"01KX"}""",
-        ),
-    )
+    private fun enqueuePromptAck() = server.enqueue(MockResponse().setBody(PROMPT_ACK_BODY))
 
     @Test
     fun `sendPrompt sends the session's stored effort in the prompt body`() = runBlocking {
@@ -828,40 +814,22 @@ class ChatRepositoryTest {
 
     @Test
     fun `agent status usage frame emits the context usage, phase frame emits nothing`() = runBlocking {
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(
-                object : WebSocketListener() {
-                    override fun onOpen(webSocket: WebSocket, response: Response) {
-                        // Verbatim 0.29.0 shapes (docs/server-api.md, Agent status).
-                        webSocket.send(
-                            """{"type":"agent.status.updated","seq":2,"epoch":"ep_1","volatile":true,""" +
-                                """"session_id":"session_1","timestamp":"2026-07-26T00:00:00.000Z",""" +
-                                """"payload":{"type":"agent.status.updated","model":"kimi-code/k3",""" +
-                                """"thinkingEffort":"high","maxContextTokens":1048576,"usage":{},""" +
-                                """"contextTokens":25050,"agentId":"main","sessionId":"session_1"}}""",
-                        )
-                        webSocket.send(
-                            """{"type":"agent.status.updated","seq":5,"epoch":"ep_1","volatile":true,""" +
-                                """"session_id":"session_1","timestamp":"2026-07-26T00:00:01.000Z",""" +
-                                """"payload":{"type":"agent.status.updated",""" +
-                                """"phase":{"kind":"running","turnId":0,"step":0,"stepId":"",""" +
-                                """"since":1784777223312},"agentId":"main","sessionId":"session_1"}}""",
-                        )
-                    }
-                },
-            ),
+        // Verbatim 0.29.0 shapes (docs/server-api.md, Agent status). The settle wait
+        // covers the phase frame: it must arrive and still produce no event.
+        val emitted = runSocketEvents(
+            """{"type":"agent.status.updated","seq":2,"epoch":"ep_1","volatile":true,""" +
+                """"session_id":"session_1","timestamp":"2026-07-26T00:00:00.000Z",""" +
+                """"payload":{"type":"agent.status.updated","model":"kimi-code/k3",""" +
+                """"thinkingEffort":"high","maxContextTokens":1048576,"usage":{},""" +
+                """"contextTokens":25050,"agentId":"main","sessionId":"session_1"}}""",
+            """{"type":"agent.status.updated","seq":5,"epoch":"ep_1","volatile":true,""" +
+                """"session_id":"session_1","timestamp":"2026-07-26T00:00:01.000Z",""" +
+                """"payload":{"type":"agent.status.updated",""" +
+                """"phase":{"kind":"running","turnId":0,"step":0,"stepId":"",""" +
+                """"since":1784777223312},"agentId":"main","sessionId":"session_1"}}""",
+            eventCount = 1,
+            settleMillis = 200,
         )
-
-        val emitted = CopyOnWriteArrayList<SocketEvent>()
-        val job = launch { repository.observeSession(settings(), "session_1").collect { emitted += it } }
-        try {
-            // Wait past the phase frame: give the stream a moment to deliver both, then
-            // assert only the usage one produced an event.
-            withTimeout(5_000) { while (emitted.none { it is SocketEvent.Event }) delay(10) }
-            delay(200)
-        } finally {
-            job.cancel()
-        }
 
         assertEquals(
             listOf(SocketEvent.Event(SessionEvent.ContextUsageUpdated(ContextUsage(25050, 1048576)))),
@@ -895,8 +863,8 @@ class ChatRepositoryTest {
         val emitted = CopyOnWriteArrayList<SocketEvent>()
         val job = launch { repository.observeSession(settings(), "session_1").collect { emitted += it } }
         try {
-            withTimeout(5_000) { while (clientFrames.none { "\"pong\"" in it }) delay(10) }
-            withTimeout(5_000) { while (emitted.none { it is SocketEvent.Event }) delay(10) }
+            awaitCondition { clientFrames.any { "\"pong\"" in it } }
+            awaitCondition { emitted.any { it is SocketEvent.Event } }
         } finally {
             job.cancel()
         }
@@ -956,7 +924,7 @@ class ChatRepositoryTest {
             // The reconnect goes through the 1 s first backoff step; only the resume
             // subscribe carries a cursor (the first one may race the server's close and
             // never reach the MockWebServer listener — it is not what is asserted).
-            withTimeout(10_000) { while (clientFrames.none { "\"cursors\"" in it }) delay(10) }
+            awaitCondition(10_000) { clientFrames.any { "\"cursors\"" in it } }
         } finally {
             job.cancel()
         }
@@ -969,40 +937,22 @@ class ChatRepositoryTest {
 
     @Test
     fun `tool call started frame emits the command preview`() = runBlocking {
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(
-                object : WebSocketListener() {
-                    override fun onOpen(webSocket: WebSocket, response: Response) {
-                        // Verbatim tool.call.started shape (docs/server-api.md: args and
-                        // display on start, unchanged from 0.23.3).
-                        webSocket.send(
-                            """{"type":"tool.call.started","seq":9,"epoch":"ep_1","session_id":"session_1",""" +
-                                """"timestamp":"2026-07-19T15:07:43.000Z","payload":{"type":"tool.call.started",""" +
-                                """"turnId":0,"toolCallId":"tool_3oZjtQUGzDwUwQwfkXioAtne","name":"Bash",""" +
-                                """"args":{"command":"echo hello-from-spike"},""" +
-                                """"description":"Running: echo hello-from-spike",""" +
-                                """"display":{"kind":"command","command":"echo hello-from-spike",""" +
-                                """"cwd":"/tmp/spike","language":"bash"},"agentId":"main","sessionId":"session_1"}}""",
-                        )
-                        // No display object: the preview is derived from args instead.
-                        webSocket.send(
-                            """{"type":"tool.call.started","seq":10,"epoch":"ep_1","session_id":"session_1",""" +
-                                """"timestamp":"2026-07-19T15:07:44.000Z","payload":{"type":"tool.call.started",""" +
-                                """"turnId":0,"toolCallId":"tool_2","name":"Read",""" +
-                                """"args":{"path":"/tmp/spike/a.txt"},"agentId":"main","sessionId":"session_1"}}""",
-                        )
-                    }
-                },
-            ),
+        val emitted = runSocketEvents(
+            // Verbatim tool.call.started shape (docs/server-api.md: args and display on
+            // start, unchanged from 0.23.3).
+            """{"type":"tool.call.started","seq":9,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-19T15:07:43.000Z","payload":{"type":"tool.call.started",""" +
+                """"turnId":0,"toolCallId":"tool_3oZjtQUGzDwUwQwfkXioAtne","name":"Bash",""" +
+                """"args":{"command":"echo hello-from-spike"},""" +
+                """"description":"Running: echo hello-from-spike",""" +
+                """"display":{"kind":"command","command":"echo hello-from-spike",""" +
+                """"cwd":"/tmp/spike","language":"bash"},"agentId":"main","sessionId":"session_1"}}""",
+            // No display object: the preview is derived from args instead.
+            """{"type":"tool.call.started","seq":10,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-19T15:07:44.000Z","payload":{"type":"tool.call.started",""" +
+                """"turnId":0,"toolCallId":"tool_2","name":"Read",""" +
+                """"args":{"path":"/tmp/spike/a.txt"},"agentId":"main","sessionId":"session_1"}}""",
         )
-
-        val emitted = CopyOnWriteArrayList<SocketEvent>()
-        val job = launch { repository.observeSession(settings(), "session_1").collect { emitted += it } }
-        try {
-            withTimeout(5_000) { while (emitted.count { it is SocketEvent.Event } < 2) delay(10) }
-        } finally {
-            job.cancel()
-        }
 
         val events = emitted.filterIsInstance<SocketEvent.Event>().map { it.event }
         assertEquals(
@@ -1022,36 +972,18 @@ class ChatRepositoryTest {
 
     @Test
     fun `tool result frame emits the full output and the error flag`() = runBlocking {
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(
-                object : WebSocketListener() {
-                    override fun onOpen(webSocket: WebSocket, response: Response) {
-                        // tool.result shape (docs/server-api.md): toolCallId + output; the
-                        // output is a plain string for shell tools (ticket 023).
-                        webSocket.send(
-                            """{"type":"tool.result","seq":14,"epoch":"ep_1","session_id":"session_1",""" +
-                                """"timestamp":"2026-07-19T15:07:50.000Z","payload":{"type":"tool.result",""" +
-                                """"turnId":0,"toolCallId":"tool_1","output":"ok\n","agentId":"main","sessionId":"session_1"}}""",
-                        )
-                        // Structured tools (AskUserQuestion) carry a JSON object output.
-                        webSocket.send(
-                            """{"type":"tool.result","seq":15,"epoch":"ep_1","session_id":"session_1",""" +
-                                """"timestamp":"2026-07-19T15:07:51.000Z","payload":{"type":"tool.result",""" +
-                                """"turnId":0,"toolCallId":"tool_2","is_error":true,""" +
-                                """"output":{"answers":{"Color?":"blue"}},"agentId":"main","sessionId":"session_1"}}""",
-                        )
-                    }
-                },
-            ),
+        val emitted = runSocketEvents(
+            // tool.result shape (docs/server-api.md): toolCallId + output; the output is
+            // a plain string for shell tools (ticket 023).
+            """{"type":"tool.result","seq":14,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-19T15:07:50.000Z","payload":{"type":"tool.result",""" +
+                """"turnId":0,"toolCallId":"tool_1","output":"ok\n","agentId":"main","sessionId":"session_1"}}""",
+            // Structured tools (AskUserQuestion) carry a JSON object output.
+            """{"type":"tool.result","seq":15,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-19T15:07:51.000Z","payload":{"type":"tool.result",""" +
+                """"turnId":0,"toolCallId":"tool_2","is_error":true,""" +
+                """"output":{"answers":{"Color?":"blue"}},"agentId":"main","sessionId":"session_1"}}""",
         )
-
-        val emitted = CopyOnWriteArrayList<SocketEvent>()
-        val job = launch { repository.observeSession(settings(), "session_1").collect { emitted += it } }
-        try {
-            withTimeout(5_000) { while (emitted.count { it is SocketEvent.Event } < 2) delay(10) }
-        } finally {
-            job.cancel()
-        }
 
         val events = emitted.filterIsInstance<SocketEvent.Event>().map { it.event }
         assertEquals(SessionEvent.ToolCallResult("tool_1", false, "ok\n"), events[0])
@@ -1063,32 +995,16 @@ class ChatRepositoryTest {
 
     @Test
     fun `tool progress frame emits the output chunk`() = runBlocking {
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(
-                object : WebSocketListener() {
-                    override fun onOpen(webSocket: WebSocket, response: Response) {
-                        // Verbatim tool.progress shape (docs/server-api.md, 0.29.0): a
-                        // volatile frame whose update carries one live output chunk.
-                        webSocket.send(
-                            """{"type":"tool.progress","seq":14,"epoch":"ep_1","volatile":true,""" +
-                                """"session_id":"session_1","timestamp":"2026-07-23T03:28:40.000Z",""" +
-                                """"payload":{"type":"tool.progress","turnId":0,""" +
-                                """"toolCallId":"tool_RMgBIy1asIorg1eV8P3ZhHiL",""" +
-                                """"update":{"kind":"stdout","text":"doc-verify-0290\n"},""" +
-                                """"agentId":"main","sessionId":"session_1"}}""",
-                        )
-                    }
-                },
-            ),
+        // Verbatim tool.progress shape (docs/server-api.md, 0.29.0): a volatile frame
+        // whose update carries one live output chunk.
+        val emitted = runSocketEvents(
+            """{"type":"tool.progress","seq":14,"epoch":"ep_1","volatile":true,""" +
+                """"session_id":"session_1","timestamp":"2026-07-23T03:28:40.000Z",""" +
+                """"payload":{"type":"tool.progress","turnId":0,""" +
+                """"toolCallId":"tool_RMgBIy1asIorg1eV8P3ZhHiL",""" +
+                """"update":{"kind":"stdout","text":"doc-verify-0290\n"},""" +
+                """"agentId":"main","sessionId":"session_1"}}""",
         )
-
-        val emitted = CopyOnWriteArrayList<SocketEvent>()
-        val job = launch { repository.observeSession(settings(), "session_1").collect { emitted += it } }
-        try {
-            withTimeout(5_000) { while (emitted.none { it is SocketEvent.Event }) delay(10) }
-        } finally {
-            job.cancel()
-        }
 
         val events = emitted.filterIsInstance<SocketEvent.Event>().map { it.event }
         assertEquals(
@@ -1099,30 +1015,14 @@ class ChatRepositoryTest {
 
     @Test
     fun `context spliced frame emits the spliced user message`() = runBlocking {
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(
-                object : WebSocketListener() {
-                    override fun onOpen(webSocket: WebSocket, response: Response) {
-                        // Verbatim 0.27.0 shape (docs/server-api.md, "Core event payloads").
-                        webSocket.send(
-                            """{"type":"context.spliced","seq":5,"epoch":"ep_1","session_id":"session_1",""" +
-                                """"timestamp":"2026-07-19T00:00:00.500Z","payload":{"type":"context.spliced",""" +
-                                """"start":0,"deleteCount":0,"messages":[{"role":"user",""" +
-                                """"content":[{"type":"text","text":"hello from the phone"}],"toolCalls":[],""" +
-                                """"origin":{"kind":"user"},"id":"msg_1"}],"agentId":"main","sessionId":"session_1"}}""",
-                        )
-                    }
-                },
-            ),
+        // Verbatim 0.27.0 shape (docs/server-api.md, "Core event payloads").
+        val emitted = runSocketEvents(
+            """{"type":"context.spliced","seq":5,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-19T00:00:00.500Z","payload":{"type":"context.spliced",""" +
+                """"start":0,"deleteCount":0,"messages":[{"role":"user",""" +
+                """"content":[{"type":"text","text":"hello from the phone"}],"toolCalls":[],""" +
+                """"origin":{"kind":"user"},"id":"msg_1"}],"agentId":"main","sessionId":"session_1"}}""",
         )
-
-        val emitted = CopyOnWriteArrayList<SocketEvent>()
-        val job = launch { repository.observeSession(settings(), "session_1").collect { emitted += it } }
-        try {
-            withTimeout(5_000) { while (emitted.none { it is SocketEvent.Event }) delay(10) }
-        } finally {
-            job.cancel()
-        }
 
         assertEquals(
             SocketEvent.Event(
@@ -1142,31 +1042,15 @@ class ChatRepositoryTest {
 
     @Test
     fun `context spliced frame without a message id emits the steered user message`() = runBlocking {
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(
-                object : WebSocketListener() {
-                    override fun onOpen(webSocket: WebSocket, response: Response) {
-                        // Steer echo shape (docs/server-api.md, steer round-trip): the
-                        // spliced steered message carries no id.
-                        webSocket.send(
-                            """{"type":"context.spliced","seq":12,"epoch":"ep_1","session_id":"session_1",""" +
-                                """"timestamp":"2026-07-20T00:00:01.000Z","payload":{"type":"context.spliced",""" +
-                                """"start":1,"deleteCount":0,"messages":[{"role":"user",""" +
-                                """"content":[{"type":"text","text":"Stop counting. Reply with exactly: steered-ok"}],""" +
-                                """"toolCalls":[],"origin":{"kind":"user"}}],"agentId":"main","sessionId":"session_1"}}""",
-                        )
-                    }
-                },
-            ),
+        // Steer echo shape (docs/server-api.md, steer round-trip): the spliced steered
+        // message carries no id.
+        val emitted = runSocketEvents(
+            """{"type":"context.spliced","seq":12,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-20T00:00:01.000Z","payload":{"type":"context.spliced",""" +
+                """"start":1,"deleteCount":0,"messages":[{"role":"user",""" +
+                """"content":[{"type":"text","text":"Stop counting. Reply with exactly: steered-ok"}],""" +
+                """"toolCalls":[],"origin":{"kind":"user"}}],"agentId":"main","sessionId":"session_1"}}""",
         )
-
-        val emitted = CopyOnWriteArrayList<SocketEvent>()
-        val job = launch { repository.observeSession(settings(), "session_1").collect { emitted += it } }
-        try {
-            withTimeout(5_000) { while (emitted.none { it is SocketEvent.Event }) delay(10) }
-        } finally {
-            job.cancel()
-        }
 
         assertEquals(
             SocketEvent.Event(
@@ -1212,30 +1096,14 @@ class ChatRepositoryTest {
 
     @Test
     fun `context spliced filters internal envelopes from the echoed user message`() = runBlocking {
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(
-                object : WebSocketListener() {
-                    override fun onOpen(webSocket: WebSocket, response: Response) {
-                        webSocket.send(
-                            """{"type":"context.spliced","seq":5,"epoch":"ep_1","session_id":"session_1",""" +
-                                """"timestamp":"2026-07-21T00:00:00.000Z","payload":{"type":"context.spliced",""" +
-                                """"start":0,"deleteCount":0,"messages":[{"role":"user",""" +
-                                """"content":[{"type":"text","text":"<system-reminder>\ninternal\n</system-reminder>"}],""" +
-                                """"toolCalls":[],"origin":{"kind":"injection"},"id":"msg_9"}],""" +
-                                """"agentId":"main","sessionId":"session_1"}}""",
-                        )
-                    }
-                },
-            ),
+        val emitted = runSocketEvents(
+            """{"type":"context.spliced","seq":5,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-21T00:00:00.000Z","payload":{"type":"context.spliced",""" +
+                """"start":0,"deleteCount":0,"messages":[{"role":"user",""" +
+                """"content":[{"type":"text","text":"<system-reminder>\ninternal\n</system-reminder>"}],""" +
+                """"toolCalls":[],"origin":{"kind":"injection"},"id":"msg_9"}],""" +
+                """"agentId":"main","sessionId":"session_1"}}""",
         )
-
-        val emitted = CopyOnWriteArrayList<SocketEvent>()
-        val job = launch { repository.observeSession(settings(), "session_1").collect { emitted += it } }
-        try {
-            withTimeout(5_000) { while (emitted.none { it is SocketEvent.Event }) delay(10) }
-        } finally {
-            job.cancel()
-        }
 
         val timeline = ChatTimeline()
         timeline.apply((emitted.first { it is SocketEvent.Event } as SocketEvent.Event).event)
@@ -1245,45 +1113,25 @@ class ChatRepositoryTest {
 
     @Test
     fun `question frames emit the requested question then the resolved id`() = runBlocking {
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(
-                object : WebSocketListener() {
-                    override fun onOpen(webSocket: WebSocket, response: Response) {
-                        // Verbatim 0.27.0 shapes (docs/server-api.md, "Core event payloads").
-                        webSocket.send(
-                            """{"type":"event.question.requested","seq":9,"epoch":"ep_1","session_id":"session_1",""" +
-                                """"timestamp":"2026-07-20T06:06:49.808Z","payload":{"type":"event.question.requested",""" +
-                                """"question_id":"tool_mU6ITagcpKjwSyiUKLHPZYWw","session_id":"session_1","turn_id":0,""" +
-                                """"tool_call_id":"tool_mU6ITagcpKjwSyiUKLHPZYWw",""" +
-                                """"questions":[{"id":"q_0","question":"Red or blue?","header":"Color",""" +
-                                """"options":[{"id":"opt_0_0","label":"red","description":"warm color"},""" +
-                                """{"id":"opt_0_1","label":"blue","description":"cool color"}],"allow_other":true}],""" +
-                                """"created_at":"2026-07-20T06:06:49.808Z","agentId":"main","sessionId":"session_1"}}""",
-                        )
-                        webSocket.send(
-                            """{"type":"event.question.answered","seq":11,"epoch":"ep_1","session_id":"session_1",""" +
-                                """"timestamp":"2026-07-20T06:08:12.548Z","payload":{"type":"event.question.answered",""" +
-                                """"question_id":"tool_mU6ITagcpKjwSyiUKLHPZYWw","answers":{"Red or blue?":"blue"},""" +
-                                """"resolved_at":"2026-07-20T06:08:12.548Z","agentId":"main","sessionId":"session_1"}}""",
-                        )
-                        webSocket.send(
-                            """{"type":"event.question.dismissed","seq":28,"epoch":"ep_1","session_id":"session_1",""" +
-                                """"timestamp":"2026-07-20T06:12:37.844Z","payload":{"type":"event.question.dismissed",""" +
-                                """"question_id":"tool_TThzzORvQB8tHTKyLhIL5bQt","dismissed_at":"2026-07-20T06:12:37.844Z",""" +
-                                """"agentId":"main","sessionId":"session_1"}}""",
-                        )
-                    }
-                },
-            ),
+        // Verbatim 0.27.0 shapes (docs/server-api.md, "Core event payloads").
+        val emitted = runSocketEvents(
+            """{"type":"event.question.requested","seq":9,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-20T06:06:49.808Z","payload":{"type":"event.question.requested",""" +
+                """"question_id":"tool_mU6ITagcpKjwSyiUKLHPZYWw","session_id":"session_1","turn_id":0,""" +
+                """"tool_call_id":"tool_mU6ITagcpKjwSyiUKLHPZYWw",""" +
+                """"questions":[{"id":"q_0","question":"Red or blue?","header":"Color",""" +
+                """"options":[{"id":"opt_0_0","label":"red","description":"warm color"},""" +
+                """{"id":"opt_0_1","label":"blue","description":"cool color"}],"allow_other":true}],""" +
+                """"created_at":"2026-07-20T06:06:49.808Z","agentId":"main","sessionId":"session_1"}}""",
+            """{"type":"event.question.answered","seq":11,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-20T06:08:12.548Z","payload":{"type":"event.question.answered",""" +
+                """"question_id":"tool_mU6ITagcpKjwSyiUKLHPZYWw","answers":{"Red or blue?":"blue"},""" +
+                """"resolved_at":"2026-07-20T06:08:12.548Z","agentId":"main","sessionId":"session_1"}}""",
+            """{"type":"event.question.dismissed","seq":28,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-20T06:12:37.844Z","payload":{"type":"event.question.dismissed",""" +
+                """"question_id":"tool_TThzzORvQB8tHTKyLhIL5bQt","dismissed_at":"2026-07-20T06:12:37.844Z",""" +
+                """"agentId":"main","sessionId":"session_1"}}""",
         )
-
-        val emitted = CopyOnWriteArrayList<SocketEvent>()
-        val job = launch { repository.observeSession(settings(), "session_1").collect { emitted += it } }
-        try {
-            withTimeout(5_000) { while (emitted.count { it is SocketEvent.Event } < 3) delay(10) }
-        } finally {
-            job.cancel()
-        }
 
         val events = emitted.filterIsInstance<SocketEvent.Event>().map { it.event }
         assertEquals(
@@ -1523,5 +1371,14 @@ class ChatRepositoryTest {
             """{"content":[{"type":"text","text":"hello"}]}""",
             server.takeRequest().body.readUtf8(),
         )
+    }
+
+    private companion object {
+        /** The generic prompts POST ack (docs/server-api.md): the client only reads
+         * data.prompt_id back (to steer it in, or to ignore it) — status/created_at go
+         * unparsed, so one literal serves every plain-ack test. */
+        const val PROMPT_ACK_BODY =
+            """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
+                """"status":"running","created_at":"2026-07-24T00:00:00.000Z"},"request_id":"01KX"}"""
     }
 }
