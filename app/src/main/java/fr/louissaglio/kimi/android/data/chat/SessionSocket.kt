@@ -179,6 +179,15 @@ internal class SessionSocket(
         // Volatile frames share the seq of the event they piggyback on (docs/server-api.md):
         // advancing the resume cursor on them could skip the substantive event on replay.
         if (frame.seq != null && frame.epoch != null && !frame.volatile) onCursor(Cursor(frame.seq, frame.epoch))
+        // Sub-agents stream their whole turn over the same session channel, tagged with
+        // their own agentId (docs/server-api.md, Sub-agents); their transcript frames
+        // must never reach the main chat. Interaction families stay unfiltered: a
+        // sub-agent's approval/question is actionable whoever raised it.
+        val agentId = frame.agentId()
+        if (agentId != MAIN_AGENT_ID && frame.type in MAIN_TRANSCRIPT_TYPES) {
+            Log.d(TAG, "Ignoring sub-agent frame '${frame.type}' from '$agentId'")
+            return
+        }
         when (frame.type) {
             // Legacy protocol: pre-v2 servers closed the connection when app-level pings
             // went unanswered; v2 sends none, answering stays harmless (docs/server-api.md).
@@ -246,6 +255,14 @@ internal class SessionSocket(
                 .getOrNull()
         }
 
+    /** The emitting agent of a frame; absent or undecodable reads as the main agent. */
+    private fun WsFrame.agentId(): String =
+        payload?.let {
+            runCatching { json.decodeFromJsonElement<AgentIdPeek>(it) }
+                .onFailure { e -> Log.w(TAG, "Dropping undecodable '$type' payload agentId", e) }
+                .getOrNull()
+        }?.agentId ?: MAIN_AGENT_ID
+
     private fun buildWsUrl(settings: ServerSettings): HttpUrl? =
         // OkHttp's HttpUrl holds only http/https; newWebSocket derives ws/wss itself.
         settings.serverUrl.trim().trimEnd('/').toHttpUrlOrNull()
@@ -277,6 +294,18 @@ internal class SessionSocket(
     private companion object {
         const val TAG = "SessionSocket"
         const val MAX_BACKOFF_SHIFT = 5 // 1 s << 5 = 32 s, clamped to 30 s below
+
+        /** Payload tag of the main agent (docs/server-api.md, Sub-agents). */
+        const val MAIN_AGENT_ID = "main"
+
+        /** Frame types whose payload is scoped to one agent's transcript — filtered to
+         * the main agent. Everything else (interaction families, session/meta events)
+         * is session-scoped or actionable and passes whatever its agentId. */
+        val MAIN_TRANSCRIPT_TYPES = setOf(
+            "assistant.delta", "thinking.delta",
+            "tool.call.delta", "tool.call.started", "tool.result", "tool.progress",
+            "context.spliced", "turn.started", "turn.ended", "agent.status.updated",
+        )
 
         fun backoffMillis(attempt: Int): Long = (1_000L shl attempt).coerceAtMost(30_000L)
     }

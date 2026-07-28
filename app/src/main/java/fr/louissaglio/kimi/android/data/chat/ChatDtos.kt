@@ -131,6 +131,12 @@ data class WsFrame(
 @Serializable
 data class PingPayload(val nonce: String = "")
 
+/** Peek at the emitter tag every event payload carries (docs/server-api.md,
+ * Sub-agents): `"main"` for the main agent, the sub-agent's id for its own frames.
+ * Absent on older captures — reads as main. */
+@Serializable
+data class AgentIdPeek(val agentId: String = "main")
+
 @Serializable
 data class DeltaPayload(val delta: String = "")
 

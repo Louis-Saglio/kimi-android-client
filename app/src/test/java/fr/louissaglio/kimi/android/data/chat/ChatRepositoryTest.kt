@@ -1373,6 +1373,105 @@ class ChatRepositoryTest {
         )
     }
 
+    @Test
+    fun `sub-agent transcript frames emit no events`() = runBlocking {
+        // Sub-agents stream over the same session channel tagged with their own agentId
+        // (docs/server-api.md, Sub-agents; fixtures from the 2026-07-28 0.29.2 capture).
+        // None of them may reach the main chat; the two main frames (one with the tag,
+        // one without — absent means main) are the synchronization events, the settle
+        // wait proves nothing else comes.
+        val emitted = runSocketEvents(
+            """{"type":"turn.started","seq":20,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-28T03:37:35.493Z","payload":{"type":"turn.started","turnId":0,""" +
+                """"origin":{"kind":"system_trigger","name":"subagent"},"agentId":"agent-12","sessionId":"session_1"}}""",
+            """{"type":"context.spliced","seq":21,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-28T03:37:35.494Z","payload":{"type":"context.spliced","start":0,""" +
+                """"deleteCount":0,"messages":[{"role":"user","content":[{"type":"text","text":"sub task"}],""" +
+                """"toolCalls":[],"origin":{"kind":"system_trigger","name":"subagent"},"id":"msg_sub"}],""" +
+                """"agentId":"agent-12","sessionId":"session_1"}}""",
+            """{"type":"thinking.delta","seq":23,"epoch":"ep_1","volatile":true,"offset":0,""" +
+                """"session_id":"session_1","timestamp":"2026-07-28T03:37:36.000Z",""" +
+                """"payload":{"type":"thinking.delta","turnId":0,"delta":"sub hmm","agentId":"agent-12","sessionId":"session_1"}}""",
+            """{"type":"assistant.delta","seq":23,"epoch":"ep_1","volatile":true,"offset":0,""" +
+                """"session_id":"session_1","timestamp":"2026-07-28T03:37:36.100Z",""" +
+                """"payload":{"type":"assistant.delta","turnId":0,"delta":"sub text","agentId":"agent-12","sessionId":"session_1"}}""",
+            """{"type":"tool.call.delta","seq":23,"epoch":"ep_1","volatile":true,""" +
+                """"session_id":"session_1","timestamp":"2026-07-28T03:37:36.200Z",""" +
+                """"payload":{"type":"tool.call.delta","turnId":0,"toolCallId":"tool_sub","name":"Bash",""" +
+                """"agentId":"agent-12","sessionId":"session_1"}}""",
+            """{"type":"tool.call.started","seq":24,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-28T03:37:36.300Z","payload":{"type":"tool.call.started","turnId":0,""" +
+                """"toolCallId":"tool_sub","name":"Bash","args":{"command":"ls"},"agentId":"agent-12","sessionId":"session_1"}}""",
+            """{"type":"tool.progress","seq":24,"epoch":"ep_1","volatile":true,""" +
+                """"session_id":"session_1","timestamp":"2026-07-28T03:37:36.400Z",""" +
+                """"payload":{"type":"tool.progress","toolCallId":"tool_sub",""" +
+                """"update":{"kind":"stdout","text":"sub out"},"agentId":"agent-12","sessionId":"session_1"}}""",
+            """{"type":"tool.result","seq":25,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-28T03:37:36.500Z","payload":{"type":"tool.result","turnId":0,""" +
+                """"toolCallId":"tool_sub","output":"sub result","agentId":"agent-12","sessionId":"session_1"}}""",
+            """{"type":"agent.status.updated","seq":25,"epoch":"ep_1","volatile":true,""" +
+                """"session_id":"session_1","timestamp":"2026-07-28T03:37:36.600Z",""" +
+                """"payload":{"type":"agent.status.updated","contextTokens":13967,"maxContextTokens":1048576,""" +
+                """"agentId":"agent-12","sessionId":"session_1"}}""",
+            """{"type":"turn.ended","seq":26,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-28T03:37:38.980Z","payload":{"type":"turn.ended","turnId":0,""" +
+                """"reason":"completed","durationMs":3487,"agentId":"agent-12","sessionId":"session_1"}}""",
+            """{"type":"assistant.delta","seq":27,"epoch":"ep_1","volatile":true,"offset":0,""" +
+                """"session_id":"session_1","timestamp":"2026-07-28T03:37:39.000Z",""" +
+                """"payload":{"type":"assistant.delta","turnId":1,"delta":"main text","agentId":"main","sessionId":"session_1"}}""",
+            """{"type":"assistant.delta","seq":27,"epoch":"ep_1","volatile":true,"offset":9,""" +
+                """"session_id":"session_1","timestamp":"2026-07-28T03:37:39.100Z",""" +
+                """"payload":{"type":"assistant.delta","turnId":1,"delta":" more"}}""",
+            eventCount = 2,
+            settleMillis = 200,
+        )
+
+        assertEquals(
+            listOf(
+                SocketEvent.Event(SessionEvent.AssistantDelta("main text")),
+                SocketEvent.Event(SessionEvent.AssistantDelta(" more")),
+            ),
+            emitted.filterIsInstance<SocketEvent.Event>(),
+        )
+    }
+
+    @Test
+    fun `sub-agent approval and question frames still emit`() = runBlocking {
+        // Interaction events are actionable whoever raised them (todo/044): a filtered
+        // sub-agent approval would hang the session on an answer nobody can give.
+        val emitted = runSocketEvents(
+            """{"type":"event.approval.requested","seq":30,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-28T03:37:40.000Z","payload":{"type":"event.approval.requested",""" +
+                """"session_id":"session_1","approval_id":"tool_sub_bash","turn_id":0,""" +
+                """"tool_call_id":"tool_sub_bash","tool_name":"Bash","action":"Running: ls",""" +
+                """"tool_input_display":{"kind":"command","command":"ls","cwd":"/tmp/spike","language":"bash"},""" +
+                """"created_at":"2026-07-28T03:37:40.000Z","expires_at":"2026-07-29T03:37:40.000Z",""" +
+                """"agentId":"agent-12","sessionId":"session_1"}}""",
+            """{"type":"event.question.requested","seq":31,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-28T03:37:41.000Z","payload":{"type":"event.question.requested",""" +
+                """"question_id":"tool_sub_q","session_id":"session_1","turn_id":0,"tool_call_id":"tool_sub_q",""" +
+                """"questions":[{"id":"q_0","question":"Red or blue?","options":[],"allow_other":true}],""" +
+                """"created_at":"2026-07-28T03:37:41.000Z","agentId":"agent-12","sessionId":"session_1"}}""",
+        )
+
+        val events = emitted.filterIsInstance<SocketEvent.Event>().map { it.event }
+        assertEquals(
+            SessionEvent.ApprovalRequested("tool_sub_bash", "Bash", "ls"),
+            events[0],
+        )
+        assertEquals(
+            SessionEvent.QuestionRequested(
+                PendingQuestion(
+                    questionId = "tool_sub_q",
+                    items = listOf(
+                        PendingQuestion.Item(id = "q_0", header = "", text = "Red or blue?", options = emptyList(), allowOther = true),
+                    ),
+                ),
+            ),
+            events[1],
+        )
+    }
+
     private companion object {
         /** The generic prompts POST ack (docs/server-api.md): the client only reads
          * data.prompt_id back (to steer it in, or to ignore it) — status/created_at go
