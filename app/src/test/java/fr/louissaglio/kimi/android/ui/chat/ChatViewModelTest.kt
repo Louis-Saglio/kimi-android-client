@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.preferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.viewModelScope
 import fr.louissaglio.kimi.android.data.attachments.AttachmentStore
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
@@ -26,8 +27,10 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -124,6 +127,15 @@ class ChatViewModelTest {
 
     @Volatile
     private var serverSocket: WebSocket? = null
+
+    /** Every ViewModel whose screen was started in this test. Their viewModelScopes
+     * (socket collect + reconnect backoff, gate collector, flush timer) must be
+     * cancelled in [tearDown]: left running, a leaked socket coroutine outlives the
+     * test and touches Main after [Dispatchers.resetMain] — observed as
+     * "Dispatchers.Main is used concurrently with setting it", and as a
+     * "Module with the Main dispatcher had failed to initialize" crash on an OkHttp
+     * thread when a leaked connection failure resumed between tests (ticket 049). */
+    private val startedViewModels = CopyOnWriteArrayList<ChatViewModel>()
 
     /** Every frame the client sent over any WS connection of the test (ticket 048
      * asserts the resume subscribe carries the stored cursor after a gate cycle). */
@@ -308,10 +320,18 @@ class ChatViewModelTest {
             // arrival (the pre-conflation behavior), no timer involved.
             streamCoalesceWindowMillis = 0,
         )
+        startedViewModels += viewModel
     }
 
     @After
     fun tearDown() {
+        // Cancel the ViewModels' coroutines AND wait for them to die while Main is
+        // still set and the server still up: an in-flight REST call's OkHttp execute()
+        // is not cancellable and resumes its parent on Main when the response comes
+        // back — joining after resetMain would crash it on the dispatcher thread
+        // ("Module with the Main dispatcher had failed to initialize"). See
+        // startedViewModels (ticket 049).
+        runBlocking { startedViewModels.forEach { it.viewModelScope.coroutineContext.job.cancelAndJoin() } }
         Dispatchers.resetMain()
         appScope.cancel()
         server.shutdown()
@@ -357,7 +377,9 @@ class ChatViewModelTest {
             awaitState(vm.uiState) { it.pendingApprovals.isNotEmpty() }
 
             // The two trailing deltas became ONE emission, published before the approval.
-            assertEquals(listOf("Hello", "Hello world!"), texts)
+            // Awaited (not read at an arbitrary instant): the recorder's append races the
+            // reader thread's queue drain — see assistantTextRecorder (ticket 049).
+            awaitCondition { texts == listOf("Hello", "Hello world!") }
         } finally {
             recorder.cancel()
         }
@@ -385,7 +407,9 @@ class ChatViewModelTest {
             awaitRequest("/messages")
             awaitState(vm.uiState) { !it.isWorking }
 
-            assertEquals(listOf("Hello", "Hello world!"), texts)
+            // Awaited (not read at an arbitrary instant): the recorder's append races the
+            // reader thread's queue drain — see assistantTextRecorder (ticket 049).
+            awaitCondition { texts == listOf("Hello", "Hello world!") }
         } finally {
             recorder.cancel()
         }
@@ -403,11 +427,11 @@ class ChatViewModelTest {
             socket.send(assistantDeltaFrame("H", seq = 5))
             socket.send(assistantDeltaFrame("e", seq = 6))
             socket.send(assistantDeltaFrame("llo", seq = 7))
-            awaitCondition { texts.lastOrNull() == "Hello" }
-
             // One emission per delta — the pre-conflation behavior the rest of the
-            // suite asserts.
-            assertEquals(listOf("H", "He", "Hello"), texts)
+            // suite asserts. Awaited (not read at an arbitrary instant): the recorder's
+            // append races the reader thread's queue drain — see assistantTextRecorder
+            // (ticket 049).
+            awaitCondition { texts == listOf("H", "He", "Hello") }
         } finally {
             recorder.cancel()
         }
@@ -1437,6 +1461,7 @@ class ChatViewModelTest {
             subagentStore,
             SavedStateHandle(mapOf("sessionId" to "session_1")),
         )
+        startedViewModels += recreated
         recreated.onScreenStarted()
         awaitState(recreated.uiState) { it.modelsAvailable && it.sessionModel != null }
         assertEquals("kimi-code/kimi-for-coding-highspeed", recreated.uiState.value.sessionModel)
@@ -1466,6 +1491,7 @@ class ChatViewModelTest {
             subagentStore,
             SavedStateHandle(mapOf("sessionId" to "session_1")),
         )
+        startedViewModels += recreated
         recreated.onScreenStarted()
         awaitState(recreated.uiState) { it.modelsAvailable && it.sessionEffort != null }
         assertEquals("low", recreated.uiState.value.sessionEffort)
@@ -1646,11 +1672,21 @@ class ChatViewModelTest {
         subagentStore,
         SavedStateHandle(mapOf("sessionId" to "session_1")),
         streamCoalesceWindowMillis = streamCoalesceWindowMillis,
-    )
+    ).also { startedViewModels += it }
 
     /** Records the distinct last-assistant-bubble texts published to the UiState, in
-     * order — the observable trace of the delta conflation. The collector never
-     * suspends on work, so no emission is conflated away. Cancel the job in finally. */
+     * order — the observable trace of the delta conflation. Cancel the job in finally.
+     *
+     * The recorder LAGS the StateFlow by design (ticket 049): its Unconfined collector
+     * is resumed from `_uiState.update` calls that themselves run inside the socket
+     * collect's inline resume on the OkHttp reader thread; `executeUnconfined` then
+     * ENQUEUES the collector to that thread's unconfined queue (stack-overflow
+     * avoidance) instead of running it inline, so the append lands only when the frame
+     * processing unwinds and the queue drains. The append always lands — the latest
+     * state at drain time carries the accumulated text — but never synchronously with
+     * the emission. Callers must therefore AWAIT the expected sequence
+     * (`awaitCondition { texts == ... }`, hard timeout) instead of asserting the list
+     * at an arbitrary instant; a genuinely lost emission still fails the test. */
     private fun CoroutineScope.assistantTextRecorder(
         viewModel: ChatViewModel,
     ): Pair<CopyOnWriteArrayList<String>, Job> {
