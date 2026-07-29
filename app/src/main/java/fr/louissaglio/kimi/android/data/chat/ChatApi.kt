@@ -29,17 +29,22 @@ internal class ChatApi(
 ) {
     /**
      * Fetches one page of history from `GET /api/v1/sessions/{id}/messages`, mapped to
-     * domain messages oldest-first (the wire order is newest-first). The hardcoded
-     * page_size=100 caps history at 100 messages; `has_more` is parsed into
-     * [MessageListData] but not acted on yet (pagination: todo/043).
+     * domain messages oldest-first (the wire order is newest-first — paged responses
+     * too). [beforeId] is sent as the `before_id` cursor to page backwards (ticket
+     * 043); null fetches the newest page.
      */
-    suspend fun messages(settings: ServerSettings, sessionId: String): Result<List<ChatMessage>> =
-        api.get(settings, "/api/v1/sessions/$sessionId/messages?page_size=100") { body ->
+    suspend fun messages(settings: ServerSettings, sessionId: String, beforeId: String? = null): Result<MessagePage> {
+        val cursor = beforeId?.let { "&before_id=$it" }.orEmpty()
+        return api.get(settings, "/api/v1/sessions/$sessionId/messages?page_size=100$cursor") { body ->
             api.json.decodeFromString<Envelope<MessageListData>>(body).toResult().map { data ->
-                // Wire order is newest-first; domain messages are oldest-first.
-                data.items.asReversed().map { mapper.toDomain(it) }
+                MessagePage(
+                    // Wire order is newest-first; domain messages are oldest-first.
+                    items = data.items.asReversed().map { mapper.toDomain(it) },
+                    hasMore = data.hasMore,
+                )
             }
         }
+    }
 
     /**
      * Fetches one page of an agent's turn-granular transcript

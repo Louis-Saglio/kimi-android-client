@@ -5,7 +5,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -46,7 +45,7 @@ internal fun MessageList(
     /** Invoked with the subagentId when a linked `Agent` tool row is tapped (ticket 045). */
     onOpenSubagent: (String) -> Unit = {},
     /** Top-anchored history pagination (ticket 046 on the sub-agent page; the 043
-     * mechanics): a small header spinner shows while an older page loads and
+     * mechanics): a small overlay spinner shows while an older page loads and
      * [onHistoryTopReached] fires when the scroll position nears the top. Prepending
      * keeps the scroll position — LazyColumn re-anchors on the first visible item's
      * stable key. */
@@ -101,36 +100,44 @@ internal fun MessageList(
     LaunchedEffect(nearTop) {
         if (nearTop) onHistoryTopReached()
     }
-    LazyColumn(
-        modifier = modifier.fillMaxSize(),
-        state = listState,
-        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        if (isLoadingMoreHistory) {
-            item(key = "history_loading", contentType = "history_loading") {
-                Box(Modifier.fillMaxWidth().padding(4.dp), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+    // The loading spinner is an OVERLAY, never a list row (Louis's on-device report,
+    // 2026-07-29): a removable header row becomes the first visible row when a top
+    // fling overshoots into it, and LazyColumn anchors the scroll position on the
+    // first visible row's key — removing the header in the same update that prepends
+    // the page destroyed the anchor and reset the scroll to the top of the new page.
+    // With no removable rows, the native key anchoring pins the message being read
+    // across every prepend.
+    Box(modifier.fillMaxSize()) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            state = listState,
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            // Heterogeneous rows: the content type lets LazyColumn reuse composition
+            // only across rows of the same bubble/card type.
+            items(items, key = ChatItem::id, contentType = { it::class }) { item ->
+                when (item) {
+                    is ChatItem.UserMessage ->
+                        UserBubble(
+                            item,
+                            onImageClick = onImageClick,
+                            onOpenAttachment = onOpenAttachment,
+                            loadImageBytes = loadImageBytes,
+                        )
+                    is ChatItem.AssistantMessage -> AssistantBubble(item)
+                    is ChatItem.ToolGroup -> ToolGroupCard(item, onOpenSubagent)
+                    // Bare rows are not produced by ChatTimeline anymore (ticket 037) but
+                    // stay renderable for tests and previews.
+                    is ChatItem.ToolActivity -> ToolRow(item, onOpenSubagent)
                 }
             }
         }
-        // Heterogeneous rows: the content type lets LazyColumn reuse composition
-        // only across rows of the same bubble/card type.
-        items(items, key = ChatItem::id, contentType = { it::class }) { item ->
-            when (item) {
-                is ChatItem.UserMessage ->
-                    UserBubble(
-                        item,
-                        onImageClick = onImageClick,
-                        onOpenAttachment = onOpenAttachment,
-                        loadImageBytes = loadImageBytes,
-                    )
-                is ChatItem.AssistantMessage -> AssistantBubble(item)
-                is ChatItem.ToolGroup -> ToolGroupCard(item, onOpenSubagent)
-                // Bare rows are not produced by ChatTimeline anymore (ticket 037) but
-                // stay renderable for tests and previews.
-                is ChatItem.ToolActivity -> ToolRow(item, onOpenSubagent)
-            }
+        if (isLoadingMoreHistory) {
+            CircularProgressIndicator(
+                Modifier.align(Alignment.TopCenter).padding(4.dp).size(20.dp),
+                strokeWidth = 2.dp,
+            )
         }
     }
 }

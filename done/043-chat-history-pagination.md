@@ -58,17 +58,36 @@ Agreed: cursor-based "load older messages" using the server's `before_id` /
 
 ## Acceptance criteria
 
-- [ ] Unit test (MockWebServer): a next-page call sends
+- [x] Unit test (MockWebServer): a next-page call sends
   `before_id=<oldest loaded message id>` and parses `has_more`; the first
   call sends no cursor.
-- [ ] Unit test: prepending appends older messages before the existing ones,
+  *(`ChatRepositoryTest.messages next page sends before_id and parses has_more`
+  asserts the paths `/api/v1/sessions/session_1/messages?page_size=100` (no
+  cursor, `hasMore == true`) and `…&before_id=msg_2` (`hasMore == false`,
+  wire order reversed to oldest-first).)*
+- [x] Unit test: prepending appends older messages before the existing ones,
   deduplicated by message id, and stops when `has_more` is false.
+  *(`ChatViewModelTest.onHistoryTopReached prepends the next page deduplicated
+  and stops when has_more is false` (one-id overlap, no duplicate row, second
+  trigger is a no-op) + `ChatTimelineTest.an older history page prepends
+  deduplicated by message id` (id-less rows kept) and
+  `a full refetch after a prepend resets the dedup to the newest page`.)*
 - [ ] On-device: scrolling to the top of a >100-message session loads older
   messages until the server reports `has_more: false`, without the scroll
   position jumping.
+  *(Mechanics unit-tested; LazyColumn re-anchors on the first visible row's
+  stable key (same as 046). Release APK published to the file server —
+  on-device verification is Louis's.)*
 - [ ] On-device: a turn-end refetch resets history to the newest page without
   duplicated rows.
-- [ ] `./gradlew :app:assembleDebug` succeeds, unit tests green.
+  *(Unit-tested: `ChatViewModelTest.a turn-end refetch after paging resets to
+  the newest page` (prepended page dropped, cursor reset to the fresh page's
+  oldest) — on-device verification is Louis's.)*
+- [x] `./gradlew :app:assembleDebug` succeeds, unit tests green.
+  *(2026-07-29: 157 unit tests green across the three touched suites — 7 new
+  (1 in `ChatRepositoryTest`, 3 in `ChatViewModelTest`, 3 in
+  `ChatTimelineTest`); Firebase Test Lab robo passed on MediumPhone.arm-34;
+  release APK published to the file server.)*
 
 ## Out of scope
 
@@ -87,3 +106,22 @@ Agreed: cursor-based "load older messages" using the server's `before_id` /
 - The steer/splice echoes carry messages without ids (docs/server-api.md);
   the prepend dedup must tolerate id-less live rows — they never come from
   history pages, so dedup by id is still sound.
+- 2026-07-29 scroll-jump fix (Louis's on-device report): the loading spinner
+  shipped as a removable header row; a top fling overshooting into it made it
+  the first visible row, LazyColumn anchored the scroll position on its key,
+  and removing it in the same update that prepended the page destroyed the
+  anchor — the scroll reset to the top of the new page. The spinner is now an
+  overlay above the list (`MessageList`), never a row, so no removable row
+  can ever become the anchor. The same latent bug in 046's sub-agent page is
+  fixed by the same shared component.
+- 2026-07-29 page-boundary crash fix (Louis's on-device report: sessions
+  "ticket 043"/"ticket 047" crashed seconds after the older page loaded): a
+  tool call at the end of the older page with its result at the start of the
+  newer page (105 such split pairs in the 043 session alone) left an orphan
+  result row in the newer page, keyed by the tool-call id; the prepend added
+  the call's row with the SAME key — duplicate LazyColumn key, hard crash.
+  `ChatTimeline.prependHistory` now adopts the orphan result into the
+  incoming call row (`adoptOrphanResults`), re-keying survivor groups like
+  `pruneCommittedLive` does. Regression tests: `ChatTimelineTest.an older
+  page completing a boundary-split tool pair merges the orphan result` and
+  `adopting one row of a committed tool group re-keys the survivors`.

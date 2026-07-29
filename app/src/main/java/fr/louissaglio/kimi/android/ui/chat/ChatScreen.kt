@@ -134,6 +134,8 @@ fun ChatScreen(
     val onOpenSubagent = remember(onNavigateToSubagent, sessionId) {
         { subagentId: String -> onNavigateToSubagent(sessionId, subagentId) }
     }
+    // Scroll-to-top loads the next older history page (ticket 043).
+    val onHistoryTopReached = remember(viewModel) { viewModel::onHistoryTopReached }
     ChatContent(
         uiState = uiState,
         snackbarHostState = snackbarHostState,
@@ -158,6 +160,7 @@ fun ChatScreen(
         onOpenAttachment = onOpenAttachment,
         loadImageBytes = loadImageBytes,
         onOpenSubagent = onOpenSubagent,
+        onHistoryTopReached = onHistoryTopReached,
     )
     fullScreenImage?.let { image ->
         FullScreenImageViewer(
@@ -206,6 +209,7 @@ private fun ChatContent(
     onOpenAttachment: (ChatMessage.Part.Attachment) -> Unit,
     loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray?,
     onOpenSubagent: (String) -> Unit = {},
+    onHistoryTopReached: () -> Unit = {},
 ) {
     var showModelPicker by rememberSaveable { mutableStateOf(false) }
     var showTodos by rememberSaveable { mutableStateOf(false) }
@@ -359,6 +363,8 @@ private fun ChatContent(
                     onOpenAttachment = onOpenAttachment,
                     loadImageBytes = loadImageBytes,
                     onOpenSubagent = onOpenSubagent,
+                    isLoadingMoreHistory = uiState.isLoadingMoreHistory,
+                    onHistoryTopReached = onHistoryTopReached,
                 )
             }
         }

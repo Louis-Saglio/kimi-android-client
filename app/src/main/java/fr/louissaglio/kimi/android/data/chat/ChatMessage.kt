@@ -52,3 +52,9 @@ data class ChatMessage(
         ) : Part
     }
 }
+
+/** One page of the message history; [hasMore] mirrors the envelope's `has_more` flag. */
+data class MessagePage(
+    val items: List<ChatMessage>,
+    val hasMore: Boolean,
+)

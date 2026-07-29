@@ -146,6 +146,10 @@ class ChatViewModel @Inject constructor(
         /** The agent's latest todo list, mirrored from its TodoList tool calls
          * (ticket 042); null or empty hides the widget above the composer. */
         val todos: List<Todo>? = null,
+        /** True while older history exists (scroll-to-top loads it, ticket 043). */
+        val hasMoreHistory: Boolean = false,
+        /** True while an older history page loads; the list shows a header spinner. */
+        val isLoadingMoreHistory: Boolean = false,
     ) {
         /** Top-bar label: the loaded title (or cwd basename), falling back to the raw
          * session id — the single source of truth for the fallback, so the screen no
@@ -241,6 +245,16 @@ class ChatViewModel @Inject constructor(
 
     private val timeline = ChatTimeline(todoParser)
     private var historyJob: Job? = null
+
+    /** In-flight guard of the older-page load (ticket 010's pattern): the Job, not a
+     * state flag. */
+    private var olderHistoryJob: Job? = null
+
+    /** The `before_id` cursor of the next older page (ticket 043): the oldest loaded
+     * history message's id, tracked ViewModel-side like ticket 010 — the timeline rows
+     * can't provide it (tool rows carry tool-call ids, and a message can flatten to no
+     * row). Reset by every newest-page refetch. */
+    private var oldestHistoryId: String? = null
 
     /** Screen visibility as state — one input of the socket gate (see init). */
     private val screenVisible = MutableStateFlow(false)
@@ -760,12 +774,24 @@ class ChatViewModel @Inject constructor(
     private fun refreshHistory(clearLive: Boolean) {
         // Latest fetch wins: a stale response must not overwrite a newer one.
         historyJob?.cancel()
+        // A full refetch resets history to the newest page (ticket 043): an in-flight
+        // older-page load must not prepend a stale page — contiguous with the OLD
+        // committed list, not the fresh one — onto the replacement (010's
+        // reload-cancels-loadMore trap, backwards).
+        olderHistoryJob?.cancel()
+        _uiState.update { it.copy(isLoadingMoreHistory = false) }
         historyJob = viewModelScope.launch {
             chatRepository.getMessages(settingsRepository.current(), sessionId)
-                .onSuccess { messages ->
-                    timeline.replaceHistory(messages, keepLive = !clearLive)
+                .onSuccess { page ->
+                    oldestHistoryId = page.items.firstOrNull()?.id
+                    timeline.replaceHistory(page.items, keepLive = !clearLive)
                     _uiState.update {
-                        it.copy(items = timeline.items(), todos = timeline.todos(), error = null)
+                        it.copy(
+                            items = timeline.items(),
+                            todos = timeline.todos(),
+                            error = null,
+                            hasMoreHistory = page.hasMore,
+                        )
                     }
                     // History is where cold links come from (the app subscribed after
                     // the spawn): seed the store from the linked Agent rows.
@@ -777,6 +803,40 @@ class ChatViewModel @Inject constructor(
                     } else {
                         _effects.send(Effect.RefreshFailed(error.toUserMessage()))
                     }
+                }
+        }
+    }
+
+    /**
+     * Scroll-to-top trigger (ticket 043): no-op while any history load is in flight or
+     * once the server reported `has_more: false`; otherwise fetches the next older page
+     * (`before_id` = oldest loaded message) and PREPENDS it, deduplicated by message id
+     * in the timeline. The newest-page guard ([historyJob]) is the same trap as the
+     * in-flight guard: a page fetched against the stale cursor would land on a refetch's
+     * fresh page with a hole in between. A failure keeps the loaded history visible and
+     * retries on the next trigger.
+     */
+    fun onHistoryTopReached() {
+        if (olderHistoryJob?.isActive == true) return
+        if (historyJob?.isActive == true) return
+        if (!_uiState.value.hasMoreHistory) return
+        val beforeId = oldestHistoryId ?: return
+        olderHistoryJob = viewModelScope.launch {
+            _uiState.update { it.copy(isLoadingMoreHistory = true) }
+            chatRepository.getMessages(settingsRepository.current(), sessionId, beforeId = beforeId)
+                .onSuccess { page ->
+                    oldestHistoryId = page.items.firstOrNull()?.id ?: oldestHistoryId
+                    timeline.prependHistory(page.items)
+                    _uiState.update {
+                        it.copy(
+                            items = timeline.items(),
+                            hasMoreHistory = page.hasMore,
+                            isLoadingMoreHistory = false,
+                        )
+                    }
+                }
+                .onFailure {
+                    _uiState.update { it.copy(isLoadingMoreHistory = false) }
                 }
         }
     }

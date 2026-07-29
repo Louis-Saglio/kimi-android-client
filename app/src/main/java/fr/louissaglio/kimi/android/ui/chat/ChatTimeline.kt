@@ -36,6 +36,10 @@ class ChatTimeline(
      * Rebuilt by [replaceTranscript], grown by [prependTranscript]. */
     private val committedTurnIds = mutableSetOf<String>()
 
+    /** Message ids of the committed history rows (ticket 043): the prepend dedup unit.
+     * Rebuilt by [replaceHistory], grown by [prependHistory]. */
+    private val committedMessageIds = mutableSetOf<String>()
+
     /** Todo tool calls seen so far (ticket 042): their rows are suppressed — the
      * widget replaces them — and their results must not surface as orphan rows. Ids
      * are globally unique per session, so the set is never pruned. */
@@ -69,8 +73,12 @@ class ChatTimeline(
      */
     fun replaceHistory(messages: List<ChatMessage>, keepLive: Boolean) {
         committed.clear()
+        committedMessageIds.clear()
         committedTodos = null
-        messages.forEach(::flatten)
+        messages.forEach { message ->
+            committedMessageIds += message.id
+            flatten(message)
+        }
         reapplySubagentLinks()
         if (!keepLive) {
             live.clear()
@@ -78,6 +86,62 @@ class ChatTimeline(
             return
         }
         pruneCommittedLive()
+    }
+
+    /**
+     * Ticket 043 pagination: an older history page prepends its rows before the loaded
+     * ones, deduplicated by message id ([committedMessageIds]) — a racing
+     * [replaceHistory] can never make a page apply twice. Id-less messages are always
+     * kept: they never come from history pages (the steer/splice echoes, which carry no
+     * id, stay live-end only), so dedup by id is sound. Live rows are untouched: they
+     * only ever grow at the newest end. The todo widget is untouched too — it mirrors
+     * the newest page's latest call, and an older page's call must not regress it.
+     * Tool pairs split by the page boundary are re-joined by [adoptOrphanResults].
+     */
+    fun prependHistory(messages: List<ChatMessage>) {
+        val fresh = messages.filter { it.id.isBlank() || committedMessageIds.add(it.id) }
+        if (fresh.isEmpty()) return
+        val head = mutableListOf<ChatItem>()
+        fresh.forEach { flatten(head, it, updateTodos = false) }
+        adoptOrphanResults(head)
+        committed.addAll(0, head)
+    }
+
+    /**
+     * A tool call in the older page whose result landed in the newer page (page
+     * boundary) left an ORPHAN result row in [committed] (result without a call — the
+     * flatten's "show it anyway" path). Prepending the call would add a second row
+     * with the same tool-call id — a duplicate LazyColumn key (crash verified
+     * on-device 2026-07-29, sessions "ticket 043"/"ticket 047"). Adopt the orphan's
+     * result into the call's row and drop the orphan; a group losing rows is re-keyed
+     * to its new first row (same rule as [pruneCommittedLive]). Committed rows matching
+     * a head tool id can only be such orphans: the call's message exists in exactly
+     * one page, so a complete committed row never collides.
+     */
+    private fun adoptOrphanResults(head: MutableList<ChatItem>) {
+        val headToolIds = head.filterIsInstance<ChatItem.ToolGroup>()
+            .flatMap { group -> group.tools.map { it.id } }
+            .toSet()
+        if (headToolIds.isEmpty()) return
+        for (index in committed.indices.reversed()) {
+            val group = committed[index] as? ChatItem.ToolGroup ?: continue
+            val (adopted, kept) = group.tools.partition { it.id in headToolIds }
+            if (adopted.isEmpty()) continue
+            for (orphan in adopted) {
+                head.updateTool(orphan.id) { call ->
+                    call.copy(
+                        status = orphan.status,
+                        output = call.output.ifBlank { orphan.output },
+                        subagentId = call.subagentId ?: agentResultSubagentId(call.name, orphan.output),
+                    )
+                }
+            }
+            if (kept.isEmpty()) {
+                committed.removeAt(index)
+            } else {
+                committed[index] = ChatItem.ToolGroup(kept.first().id, kept)
+            }
+        }
     }
 
     /**
@@ -326,27 +390,37 @@ class ChatTimeline(
         return true
     }
 
-    private fun flatten(message: ChatMessage) {
+    private fun flatten(message: ChatMessage) = flatten(committed, message, updateTodos = true)
+
+    /**
+     * Flattens one history message into [target] rows. [updateTodos] gates the
+     * [committedTodos] write: [replaceHistory] re-derives the widget from the newest
+     * page, while [prependHistory] must not let an older page's call regress it. Todo
+     * row suppression itself is unconditional — todo calls never become rows.
+     */
+    private fun flatten(target: MutableList<ChatItem>, message: ChatMessage, updateTodos: Boolean) {
         when (message.role) {
             ChatMessage.Role.User -> {
                 val text = message.parts.filterIsInstance<ChatMessage.Part.Text>().joinToString("\n") { it.text }
                 val attachments = message.parts.filterIsInstance<ChatMessage.Part.Attachment>()
                 val images = message.parts.filterIsInstance<ChatMessage.Part.Image>()
                 if (text.isNotBlank() || attachments.isNotEmpty() || images.isNotEmpty()) {
-                    committed += ChatItem.UserMessage(message.id, text, attachments, images, message.createdAt)
+                    target += ChatItem.UserMessage(message.id, text, attachments, images, message.createdAt)
                 }
             }
             ChatMessage.Role.Assistant -> {
                 val text = message.parts.filterIsInstance<ChatMessage.Part.Text>().joinToString("\n") { it.text }
                 val thinking = message.parts.filterIsInstance<ChatMessage.Part.Thinking>().joinToString("\n") { it.text }
                 if (text.isNotBlank() || thinking.isNotBlank()) {
-                    committed += ChatItem.AssistantMessage(message.id, text, thinking)
+                    target += ChatItem.AssistantMessage(message.id, text, thinking)
                 }
                 message.parts.filterIsInstance<ChatMessage.Part.ToolUse>().forEach {
                     if (isTodoCall(it.toolCallId, it.toolName)) {
-                        todoParser.of(it.toolName, it.input)?.let { parsed -> committedTodos = parsed }
+                        if (updateTodos) {
+                            todoParser.of(it.toolName, it.input)?.let { parsed -> committedTodos = parsed }
+                        }
                     } else {
-                        committed.appendTool(
+                        target.appendTool(
                             ChatItem.ToolActivity(it.toolCallId, it.toolName, ToolStatus.Running, it.preview, it.input),
                         )
                     }
@@ -357,7 +431,7 @@ class ChatTimeline(
                     if (result.toolCallId in todoCallIds) return@forEach
                     val status = if (result.isError) ToolStatus.Error else ToolStatus.Done
                     var found = false
-                    committed.updateTool(result.toolCallId) { existing ->
+                    target.updateTool(result.toolCallId) { existing ->
                         found = true
                         existing.copy(
                             status = status,
@@ -367,7 +441,7 @@ class ChatTimeline(
                     }
                     if (!found) {
                         // Result without a matching call (e.g. page boundary): show it anyway.
-                        committed.appendTool(ChatItem.ToolActivity(result.toolCallId, "", status, output = result.output))
+                        target.appendTool(ChatItem.ToolActivity(result.toolCallId, "", status, output = result.output))
                     }
                 }
             ChatMessage.Role.Other -> Unit

@@ -25,6 +25,7 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -105,16 +106,18 @@ class ChatRepositoryTest {
                   {"id":"msg_1","session_id":"session_1","role":"user",
                    "content":[{"type":"text","text":"run echo hi"}],
                    "created_at":"2026-07-17T04:12:10.000Z"}
-                ],"has_more":false},"request_id":"01KX"}
+                ],"has_more":true},"request_id":"01KX"}
                 """.trimIndent(),
             ),
         )
 
         val result = repository.getMessages(settings(), "session_1")
 
-        val messages = result.getOrThrow()
+        val page = result.getOrThrow()
         assertEquals("/api/v1/sessions/session_1/messages?page_size=100", server.takeRequest().path)
+        assertTrue(page.hasMore)
         // Wire order is newest-first; domain order is oldest-first.
+        val messages = page.items
         assertEquals(3, messages.size)
         assertEquals(
             ChatMessage(
@@ -155,6 +158,41 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun `messages next page sends before_id and parses has_more`() = runBlocking {
+        // First page (no cursor): has_more true — paging backwards continues (ticket 043).
+        server.enqueue(
+            MockResponse().setBody(
+                """
+                {"code":0,"msg":"success","data":{"items":[
+                  {"id":"msg_3","role":"user","content":[{"type":"text","text":"third"}]},
+                  {"id":"msg_2","role":"user","content":[{"type":"text","text":"second"}]}
+                ],"has_more":true},"request_id":"01KX"}
+                """.trimIndent(),
+            ),
+        )
+        // Older page (before_id = oldest loaded message): has_more false — stop.
+        server.enqueue(
+            MockResponse().setBody(
+                """
+                {"code":0,"msg":"success","data":{"items":[
+                  {"id":"msg_1","role":"user","content":[{"type":"text","text":"first"}]}
+                ],"has_more":false},"request_id":"01KX"}
+                """.trimIndent(),
+            ),
+        )
+
+        val first = repository.getMessages(settings(), "session_1")
+        val second = repository.getMessages(settings(), "session_1", beforeId = "msg_2")
+
+        assertEquals("/api/v1/sessions/session_1/messages?page_size=100", server.takeRequest().path)
+        assertEquals("/api/v1/sessions/session_1/messages?page_size=100&before_id=msg_2", server.takeRequest().path)
+        assertTrue(first.getOrThrow().hasMore)
+        // Wire order is newest-first on paged responses too; domain stays oldest-first.
+        assertEquals(listOf("msg_1"), second.getOrThrow().items.map { it.id })
+        assertFalse(second.getOrThrow().hasMore)
+    }
+
+    @Test
     fun `a malformed created_at is dropped instead of failing the message`() = runBlocking {
         server.enqueue(
             MockResponse().setBody(
@@ -168,7 +206,7 @@ class ChatRepositoryTest {
             ),
         )
 
-        val messages = repository.getMessages(settings(), "session_1").getOrThrow()
+        val messages = repository.getMessages(settings(), "session_1").getOrThrow().items
 
         assertEquals(
             ChatMessage("msg_1", ChatMessage.Role.User, listOf(ChatMessage.Part.Text("hi")), createdAt = null),
@@ -199,7 +237,7 @@ class ChatRepositoryTest {
             ),
         )
 
-        val messages = repository.getMessages(settings(), "session_1").getOrThrow()
+        val messages = repository.getMessages(settings(), "session_1").getOrThrow().items
 
         assertEquals(
             ChatMessage(
@@ -252,7 +290,7 @@ class ChatRepositoryTest {
         )
 
         val timeline = ChatTimeline()
-        timeline.replaceHistory(repository.getMessages(settings(), "session_1").getOrThrow(), keepLive = false)
+        timeline.replaceHistory(repository.getMessages(settings(), "session_1").getOrThrow().items, keepLive = false)
 
         assertEquals(
             listOf(
@@ -289,7 +327,7 @@ class ChatRepositoryTest {
         )
 
         val timeline = ChatTimeline()
-        timeline.replaceHistory(repository.getMessages(settings(), "session_1").getOrThrow(), keepLive = false)
+        timeline.replaceHistory(repository.getMessages(settings(), "session_1").getOrThrow().items, keepLive = false)
 
         assertEquals(
             listOf(
@@ -1088,7 +1126,7 @@ class ChatRepositoryTest {
         )
 
         val timeline = ChatTimeline()
-        timeline.replaceHistory(repository.getMessages(settings(), "session_1").getOrThrow(), keepLive = false)
+        timeline.replaceHistory(repository.getMessages(settings(), "session_1").getOrThrow().items, keepLive = false)
 
         // The envelope-only messages produce no row; the mixed one keeps its genuine text.
         assertEquals(listOf(ChatItem.UserMessage("msg_3", "deploy the app")), timeline.items())

@@ -91,6 +91,11 @@ class ChatViewModelTest {
     private var messagesBody =
         """{"code":0,"msg":"success","data":{"items":[],"has_more":false},"request_id":"r"}"""
 
+    /** Served for /messages requests carrying a `before_id` cursor (ticket 043). */
+    @Volatile
+    private var olderMessagesBody =
+        """{"code":0,"msg":"success","data":{"items":[],"has_more":false},"request_id":"r"}"""
+
     @Volatile
     private var sessionBody =
         """{"code":0,"msg":"success","data":{"id":"session_1","title":"Fix the bug",""" +
@@ -189,7 +194,7 @@ class ChatViewModelTest {
                     path == "/api/v1/sessions/session_1" && request.method == "GET" ->
                         MockResponse().setBody(sessionBody)
                     path.startsWith("/api/v1/sessions/session_1/messages") ->
-                        MockResponse().setBody(messagesBody)
+                        MockResponse().setBody(if ("before_id" in path) olderMessagesBody else messagesBody)
                     path == "/api/v1/sessions/session_1/status" -> {
                         statusResponseGate?.await(5, TimeUnit.SECONDS)
                         MockResponse().setBody(statusBody)
@@ -492,6 +497,105 @@ class ChatViewModelTest {
             ),
             entry.items,
         )
+    }
+
+    @Test
+    fun `onHistoryTopReached prepends the next page deduplicated and stops when has_more is false`() = runBlocking {
+        // Newest page (wire order newest-first): msg_2 is the oldest loaded — the cursor.
+        messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
+            """{"id":"msg_4","role":"user","content":[{"type":"text","text":"fourth"}]},""" +
+            """{"id":"msg_3","role":"user","content":[{"type":"text","text":"third"}]},""" +
+            """{"id":"msg_2","role":"user","content":[{"type":"text","text":"second"}]}""" +
+            """],"has_more":true},"request_id":"r"}"""
+        // Older page: msg_2 overlaps the loaded page (boundary race) and must not
+        // produce a second row; has_more false stops the paging (ticket 043).
+        olderMessagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
+            """{"id":"msg_2","role":"user","content":[{"type":"text","text":"second"}]},""" +
+            """{"id":"msg_1","role":"user","content":[{"type":"text","text":"first"}]}""" +
+            """],"has_more":false},"request_id":"r"}"""
+
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.items?.map(ChatItem::id) == listOf("msg_2", "msg_3", "msg_4") }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+        assertTrue(viewModel.uiState.value.hasMoreHistory)
+
+        viewModel.onHistoryTopReached()
+
+        val request = awaitRequest("before_id")
+        assertEquals("/api/v1/sessions/session_1/messages?page_size=100&before_id=msg_2", request.path)
+        awaitState(viewModel.uiState) { it.items?.map(ChatItem::id) == listOf("msg_1", "msg_2", "msg_3", "msg_4") }
+        assertFalse(viewModel.uiState.value.hasMoreHistory)
+        assertFalse(viewModel.uiState.value.isLoadingMoreHistory)
+
+        // has_more was false: the next trigger is a no-op.
+        viewModel.onHistoryTopReached()
+        assertNull(server.takeRequest(200, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun `a failed older-page load keeps the loaded history and retries on the next trigger`() = runBlocking {
+        messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
+            """{"id":"msg_2","role":"user","content":[{"type":"text","text":"second"}]}""" +
+            """],"has_more":true},"request_id":"r"}"""
+        olderMessagesBody = """{"code":50000,"msg":"boom","data":null,"request_id":"r"}"""
+
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.items?.map(ChatItem::id) == listOf("msg_2") }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        viewModel.onHistoryTopReached()
+
+        awaitRequest("before_id")
+        // The load failed: the spinner clears, the loaded history stays, and the
+        // session is still pageable — no error UI, the next trigger retries (043).
+        awaitState(viewModel.uiState) { !it.isLoadingMoreHistory }
+        assertEquals(listOf("msg_2"), viewModel.uiState.value.items?.map(ChatItem::id))
+        assertTrue(viewModel.uiState.value.hasMoreHistory)
+
+        olderMessagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
+            """{"id":"msg_1","role":"user","content":[{"type":"text","text":"first"}]}""" +
+            """],"has_more":false},"request_id":"r"}"""
+        viewModel.onHistoryTopReached()
+
+        val retry = awaitRequest("before_id")
+        assertEquals("/api/v1/sessions/session_1/messages?page_size=100&before_id=msg_2", retry.path)
+        awaitState(viewModel.uiState) { it.items?.map(ChatItem::id) == listOf("msg_1", "msg_2") }
+    }
+
+    @Test
+    fun `a turn-end refetch after paging resets to the newest page`() = runBlocking {
+        messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
+            """{"id":"msg_2","role":"user","content":[{"type":"text","text":"second"}]}""" +
+            """],"has_more":true},"request_id":"r"}"""
+        olderMessagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
+            """{"id":"msg_1","role":"user","content":[{"type":"text","text":"first"}]}""" +
+            """],"has_more":true},"request_id":"r"}"""
+
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items?.map(ChatItem::id) == listOf("msg_2") }
+        viewModel.onHistoryTopReached()
+        awaitState(viewModel.uiState) { it.items?.map(ChatItem::id) == listOf("msg_1", "msg_2") }
+
+        // The turn ends: the refetch replaces history with the newest page only —
+        // the prepended page is dropped, no row is duplicated (ticket 043).
+        messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
+            """{"id":"msg_4","role":"user","content":[{"type":"text","text":"fourth"}]},""" +
+            """{"id":"msg_3","role":"user","content":[{"type":"text","text":"third"}]}""" +
+            """],"has_more":true},"request_id":"r"}"""
+        socket.send(turnEndedFrame(reason = "completed"))
+        awaitState(viewModel.uiState) { it.items?.map(ChatItem::id) == listOf("msg_3", "msg_4") }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        // The next top trigger pages from the NEW oldest message, not the stale cursor.
+        olderMessagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
+            """{"id":"msg_2","role":"user","content":[{"type":"text","text":"second"}]}""" +
+            """],"has_more":false},"request_id":"r"}"""
+        viewModel.onHistoryTopReached()
+        val request = awaitRequest("before_id")
+        assertEquals("/api/v1/sessions/session_1/messages?page_size=100&before_id=msg_3", request.path)
+        awaitState(viewModel.uiState) { it.items?.map(ChatItem::id) == listOf("msg_2", "msg_3", "msg_4") }
+        assertFalse(viewModel.uiState.value.hasMoreHistory)
     }
 
     @Test

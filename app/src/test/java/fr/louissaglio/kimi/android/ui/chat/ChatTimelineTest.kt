@@ -945,6 +945,139 @@ class ChatTimelineTest {
         assertEquals(null, tools.first { it.id == "tool_2" }.subagentId)
     }
 
+    // --- History pagination (ticket 043) --------------------------------------------
+
+    @Test
+    fun `an older history page prepends deduplicated by message id`() {
+        val timeline = ChatTimeline()
+        timeline.replaceHistory(
+            listOf(userMessage("msg_2", "second"), userMessage("msg_3", "third")),
+            keepLive = false,
+        )
+
+        // The older page overlaps by one id (a racing refetch can never make it apply
+        // twice) and carries a blank-id row: the duplicate is dropped, the id-less row
+        // is kept — splice echoes carry no id and never come from history pages.
+        timeline.prependHistory(
+            listOf(
+                userMessage("msg_0", "zeroth"),
+                userMessage("", "id-less"),
+                userMessage("msg_2", "second"),
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                ChatItem.UserMessage("msg_0", "zeroth"),
+                ChatItem.UserMessage("", "id-less"),
+                ChatItem.UserMessage("msg_2", "second"),
+                ChatItem.UserMessage("msg_3", "third"),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `prependHistory leaves the live rows and the todo widget untouched`() {
+        val timeline = ChatTimeline()
+        timeline.replaceHistory(listOf(userMessage("msg_2", "second")), keepLive = true)
+        timeline.apply(SessionEvent.TurnStarted())
+        timeline.apply(SessionEvent.AssistantDelta("streaming"))
+
+        timeline.prependHistory(listOf(userMessage("msg_1", "first")))
+
+        assertEquals(
+            listOf(
+                ChatItem.UserMessage("msg_1", "first"),
+                ChatItem.UserMessage("msg_2", "second"),
+                ChatItem.AssistantMessage("live_0", "streaming", thinking = ""),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `a full refetch after a prepend resets the dedup to the newest page`() {
+        val timeline = ChatTimeline()
+        timeline.replaceHistory(listOf(userMessage("msg_2", "second")), keepLive = false)
+        timeline.prependHistory(listOf(userMessage("msg_1", "first")))
+
+        // The refetch is canonical: previously prepended rows are dropped, and a page
+        // overlapping the OLD loaded range dedups against the fresh page only.
+        timeline.replaceHistory(listOf(userMessage("msg_3", "third")), keepLive = false)
+        timeline.prependHistory(listOf(userMessage("msg_2", "second"), userMessage("msg_3", "third")))
+
+        assertEquals(
+            listOf(
+                ChatItem.UserMessage("msg_2", "second"),
+                ChatItem.UserMessage("msg_3", "third"),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `an older page completing a boundary-split tool pair merges the orphan result`() {
+        val timeline = ChatTimeline()
+        // The newer page starts with an orphan result (its call is in the older page):
+        // it renders as a nameless row ("result without a matching call: show it anyway").
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage("msg_2", ChatMessage.Role.Tool, listOf(ChatMessage.Part.ToolResult("tool_1", false, "ok\n"))),
+            ),
+            keepLive = false,
+        )
+
+        // The older page brings the call: it must ADOPT the orphan's result — a second
+        // row with the same tool-call id is a duplicate LazyColumn key (the 047 crash).
+        timeline.prependHistory(
+            listOf(
+                ChatMessage("msg_1", ChatMessage.Role.Assistant, listOf(ChatMessage.Part.ToolUse("tool_1", "Bash", "echo hi"))),
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                ChatItem.ToolGroup(
+                    ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, "echo hi", output = "ok\n"),
+                ),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `adopting one row of a committed tool group re-keys the survivors`() {
+        val timeline = ChatTimeline()
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage(
+                    "msg_3",
+                    ChatMessage.Role.Tool,
+                    listOf(
+                        ChatMessage.Part.ToolResult("tool_1", false, "one"),
+                        ChatMessage.Part.ToolResult("tool_2", false, "two"),
+                    ),
+                ),
+            ),
+            keepLive = false,
+        )
+
+        timeline.prependHistory(
+            listOf(ChatMessage("msg_1", ChatMessage.Role.Assistant, listOf(ChatMessage.Part.ToolUse("tool_1", "Bash", "one")))),
+        )
+
+        // The surviving orphan keeps its own group under a fresh key — keeping the
+        // adopted row's id as the group key would duplicate the prepended row's key.
+        assertEquals(
+            listOf(
+                ChatItem.ToolGroup(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, "one", output = "one")),
+                ChatItem.ToolGroup("tool_2", listOf(ChatItem.ToolActivity("tool_2", "", ToolStatus.Done, output = "two"))),
+            ),
+            timeline.items(),
+        )
+    }
+
     // --- Transcript-backed sub-agent history (ticket 046) ----------------------------
 
     private fun transcriptTurn(id: String, ordinal: Int, vararg steps: TranscriptStep) =

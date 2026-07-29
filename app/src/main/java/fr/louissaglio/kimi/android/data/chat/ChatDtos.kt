@@ -12,8 +12,7 @@ import kotlinx.serialization.json.JsonObject
 @Serializable
 data class MessageListData(
     val items: List<MessageDto> = emptyList(),
-    // Parsed so the hardcoded page_size=100 cap in ChatApi.messages is detectable;
-    // not acted on yet (pagination: todo/043).
+    // Surfaced as MessagePage.hasMore — the cursor of ticket 043's backwards paging.
     @SerialName("has_more") val hasMore: Boolean = false,
 )
 

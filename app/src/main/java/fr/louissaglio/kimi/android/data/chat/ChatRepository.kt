@@ -32,12 +32,12 @@ class ChatRepository @Inject constructor(
     private val socket = SessionSocket(client, json, mapper)
 
     /**
-     * Fetches one page of history from `GET /api/v1/sessions/{id}/messages` (the
-     * hardcoded page cap is tracked in todo/043), mapped to domain messages
-     * oldest-first (the wire order is newest-first).
+     * Fetches one page of history from `GET /api/v1/sessions/{id}/messages`, mapped to
+     * domain messages oldest-first (the wire order is newest-first). [beforeId] is the
+     * `before_id` cursor for paging backwards (ticket 043); null fetches the newest page.
      */
-    suspend fun getMessages(settings: ServerSettings, sessionId: String): Result<List<ChatMessage>> =
-        chatApi.messages(settings, sessionId)
+    suspend fun getMessages(settings: ServerSettings, sessionId: String, beforeId: String? = null): Result<MessagePage> =
+        chatApi.messages(settings, sessionId, beforeId)
 
     /** One page of an agent's turn-granular transcript — the sub-agent page's history
      * backing (ticket 046). [beforeTurn] = null fetches the newest page. */
