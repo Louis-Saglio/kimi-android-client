@@ -7,6 +7,7 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
@@ -38,10 +39,10 @@ class ChatAutoScrollTest {
     private fun toolCall(id: String) =
         ChatItem.ToolActivity(id, "Bash", ToolStatus.Running, preview = "ls")
 
-    private fun messageList(items: State<List<ChatItem>>, listState: LazyListState) {
+    private fun messageList(items: State<List<ChatItem>>, listState: LazyListState, height: State<Dp>) {
         composeTestRule.setContent {
             KimiTheme {
-                Box(Modifier.height(300.dp)) {
+                Box(Modifier.height(height.value)) {
                     MessageList(items.value, listState = listState)
                 }
             }
@@ -63,7 +64,7 @@ class ChatAutoScrollTest {
     fun pinnedAtBottomStaysPinnedWhenItemsAreAppended() {
         val items = mutableStateOf(messages(20))
         val listState = LazyListState()
-        messageList(items, listState)
+        messageList(items, listState, mutableStateOf(300.dp))
         composeTestRule.waitForIdle()
         assertPinnedAtBottom(listState, 20)
 
@@ -79,13 +80,49 @@ class ChatAutoScrollTest {
     fun scrolledUpReaderIsNotYankedWhenItemsAreAppended() {
         val items = mutableStateOf(messages(20))
         val listState = LazyListState()
-        messageList(items, listState)
+        messageList(items, listState, mutableStateOf(300.dp))
         composeTestRule.waitForIdle()
         composeTestRule.runOnIdle { runBlocking { listState.scrollToItem(5) } }
         composeTestRule.waitForIdle()
         val anchorKey = listState.layoutInfo.visibleItemsInfo.first().key
 
         items.value = items.value + toolCall("tool_1")
+        composeTestRule.waitForIdle()
+
+        assertEquals(anchorKey, listState.layoutInfo.visibleItemsInfo.first().key)
+    }
+
+    @Test
+    fun pinnedAtBottomStaysPinnedWhenViewportShrinks() {
+        val items = mutableStateOf(messages(20))
+        val height = mutableStateOf(300.dp)
+        val listState = LazyListState()
+        messageList(items, listState, height)
+        composeTestRule.waitForIdle()
+        assertPinnedAtBottom(listState, 20)
+
+        // IME opening under adjustResize: the weighted list keeps its scroll
+        // offset while the viewport end jumps up by the IME height.
+        height.value = 180.dp
+        composeTestRule.waitForIdle()
+
+        // Pre-fix (ticket 050), the tail slid below the shrunken viewport end
+        // and the follow silently detached, so this assertion was RED.
+        assertPinnedAtBottom(listState, 20)
+    }
+
+    @Test
+    fun scrolledUpReaderIsNotYankedWhenViewportShrinks() {
+        val items = mutableStateOf(messages(20))
+        val height = mutableStateOf(300.dp)
+        val listState = LazyListState()
+        messageList(items, listState, height)
+        composeTestRule.waitForIdle()
+        composeTestRule.runOnIdle { runBlocking { listState.scrollToItem(5) } }
+        composeTestRule.waitForIdle()
+        val anchorKey = listState.layoutInfo.visibleItemsInfo.first().key
+
+        height.value = 180.dp
         composeTestRule.waitForIdle()
 
         assertEquals(anchorKey, listState.layoutInfo.visibleItemsInfo.first().key)

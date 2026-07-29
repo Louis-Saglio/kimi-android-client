@@ -65,15 +65,33 @@ internal fun MessageList(
     val thresholdPx = with(LocalDensity.current) { AutoScrollThreshold.toPx() }
     var isAtBottom by remember { mutableStateOf(true) }
     LaunchedEffect(listState) {
+        // The viewport end is tracked alongside at-bottom: a shrink (IME opening
+        // under adjustResize, approval card growing the bottom bar) moves the
+        // viewport end up while the key anchor holds the scroll offset, so the
+        // tail slides out of view and the positional at-bottom flips false —
+        // silently detaching the follow (ticket 050).
+        var previousViewportEnd: Int? = null
         snapshotFlow {
             val info = listState.layoutInfo
             val last = info.visibleItemsInfo.lastOrNull()
             // At the bottom when the final row is visible and its tail overshoots
             // the viewport end by no more than the slop (or the list is empty).
-            last == null ||
+            val atBottom = last == null ||
                 (last.index == info.totalItemsCount - 1 &&
                     last.offset + last.size - info.viewportEndOffset <= thresholdPx)
-        }.collect { isAtBottom = it }
+            atBottom to info.viewportEndOffset
+        }.collect { (atBottom, viewportEnd) ->
+            // Re-pin on shrink only, using the PRE-shrink at-bottom (the fresh
+            // value is already false); growth keeps the pin by itself. The IME
+            // inset animates over several frames, so one scrollBy per frame
+            // slides the conversation up with the keyboard for free.
+            val previousEnd = previousViewportEnd
+            if (previousEnd != null && viewportEnd < previousEnd && isAtBottom) {
+                listState.scrollBy((previousEnd - viewportEnd).toFloat())
+            }
+            previousViewportEnd = viewportEnd
+            isAtBottom = atBottom
+        }
     }
     LaunchedEffect(items) {
         // Reads the pre-emission value: this effect runs after composition apply,
