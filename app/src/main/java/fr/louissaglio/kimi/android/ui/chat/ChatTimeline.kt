@@ -96,50 +96,68 @@ class ChatTimeline(
      * id, stay live-end only), so dedup by id is sound. Live rows are untouched: they
      * only ever grow at the newest end. The todo widget is untouched too — it mirrors
      * the newest page's latest call, and an older page's call must not regress it.
-     * Tool pairs split by the page boundary are re-joined by [adoptOrphanResults].
+     * Tool pairs split by the page boundary are re-joined by [completeOrphanResults].
      */
     fun prependHistory(messages: List<ChatMessage>) {
         val fresh = messages.filter { it.id.isBlank() || committedMessageIds.add(it.id) }
         if (fresh.isEmpty()) return
         val head = mutableListOf<ChatItem>()
         fresh.forEach { flatten(head, it, updateTodos = false) }
-        adoptOrphanResults(head)
+        completeOrphanResults(head)
         committed.addAll(0, head)
     }
 
     /**
-     * A tool call in the older page whose result landed in the newer page (page
-     * boundary) left an ORPHAN result row in [committed] (result without a call — the
-     * flatten's "show it anyway" path). Prepending the call would add a second row
+     * A tool result at the top of the newer page whose call ended the older page (page
+     * boundary) flattened to an ORPHAN row in [committed] (result without a call — the
+     * flatten's "show it anyway" path). Prepending the call must not add a second row
      * with the same tool-call id — a duplicate LazyColumn key (crash verified
-     * on-device 2026-07-29, sessions "ticket 043"/"ticket 047"). Adopt the orphan's
-     * result into the call's row and drop the orphan; a group losing rows is re-keyed
-     * to its new first row (same rule as [pruneCommittedLive]). Committed rows matching
-     * a head tool id can only be such orphans: the call's message exists in exactly
-     * one page, so a complete committed row never collides.
+     * on-device 2026-07-29, sessions "ticket 043"/"ticket 047") — but it must not
+     * re-key or remove the orphan row either: the orphan is the scroll anchor while
+     * the user reads the page top, and LazyColumn pins the viewport to the first
+     * visible row's key, so losing that key reset the scroll to the top of the new
+     * page (Louis's report 2026-07-29, session "Sub-agents documentation" — the older
+     * page's trailing group kept its own first call's key). The orphan is therefore
+     * completed IN PLACE with the call's name/preview/input (key, position and group
+     * untouched), and the call is dropped from [head]; a head group left short re-keys
+     * to its new first row or is removed when emptied — head rows are all new, so no
+     * anchor can point at them, and their ids are unique per session. Committed rows
+     * matching a head tool id can only be such orphans: the call's message exists in
+     * exactly one page, so a complete committed row never collides.
      */
-    private fun adoptOrphanResults(head: MutableList<ChatItem>) {
-        val headToolIds = head.filterIsInstance<ChatItem.ToolGroup>()
-            .flatMap { group -> group.tools.map { it.id } }
-            .toSet()
-        if (headToolIds.isEmpty()) return
-        for (index in committed.indices.reversed()) {
+    private fun completeOrphanResults(head: MutableList<ChatItem>) {
+        val headCalls = mutableMapOf<String, ChatItem.ToolActivity>()
+        head.filterIsInstance<ChatItem.ToolGroup>().forEach { group ->
+            group.tools.forEach { headCalls[it.id] = it }
+        }
+        if (headCalls.isEmpty()) return
+        val adopted = mutableSetOf<String>()
+        for (index in committed.indices) {
             val group = committed[index] as? ChatItem.ToolGroup ?: continue
-            val (adopted, kept) = group.tools.partition { it.id in headToolIds }
-            if (adopted.isEmpty()) continue
-            for (orphan in adopted) {
-                head.updateTool(orphan.id) { call ->
-                    call.copy(
-                        status = orphan.status,
-                        output = call.output.ifBlank { orphan.output },
-                        subagentId = call.subagentId ?: agentResultSubagentId(call.name, orphan.output),
+            if (group.tools.none { it.id in headCalls }) continue
+            committed[index] = group.copy(
+                tools = group.tools.map { tool ->
+                    val call = headCalls[tool.id] ?: return@map tool
+                    adopted += tool.id
+                    tool.copy(
+                        name = call.name,
+                        preview = call.preview,
+                        input = call.input,
+                        output = tool.output.ifBlank { call.output },
+                        subagentId = tool.subagentId ?: agentResultSubagentId(call.name, tool.output),
                     )
-                }
-            }
+                },
+            )
+        }
+        if (adopted.isEmpty()) return
+        for (index in head.indices.reversed()) {
+            val group = head[index] as? ChatItem.ToolGroup ?: continue
+            val kept = group.tools.filterNot { it.id in adopted }
+            if (kept.size == group.tools.size) continue
             if (kept.isEmpty()) {
-                committed.removeAt(index)
+                head.removeAt(index)
             } else {
-                committed[index] = ChatItem.ToolGroup(kept.first().id, kept)
+                head[index] = ChatItem.ToolGroup(kept.first().id, kept)
             }
         }
     }

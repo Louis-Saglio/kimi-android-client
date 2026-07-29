@@ -1028,8 +1028,10 @@ class ChatTimelineTest {
             keepLive = false,
         )
 
-        // The older page brings the call: it must ADOPT the orphan's result — a second
-        // row with the same tool-call id is a duplicate LazyColumn key (the 047 crash).
+        // The older page brings the call: it must COMPLETE the orphan in place — a
+        // second row with the same tool-call id is a duplicate LazyColumn key (the
+        // 047 crash), and moving the orphan into the head page would lose the scroll
+        // anchor's key (the "Sub-agents documentation" jump).
         timeline.prependHistory(
             listOf(
                 ChatMessage("msg_1", ChatMessage.Role.Assistant, listOf(ChatMessage.Part.ToolUse("tool_1", "Bash", "echo hi"))),
@@ -1047,7 +1049,7 @@ class ChatTimelineTest {
     }
 
     @Test
-    fun `adopting one row of a committed tool group re-keys the survivors`() {
+    fun `an older page completing one row of a committed tool group keeps the group key and survivors in place`() {
         val timeline = ChatTimeline()
         timeline.replaceHistory(
             listOf(
@@ -1067,15 +1069,59 @@ class ChatTimelineTest {
             listOf(ChatMessage("msg_1", ChatMessage.Role.Assistant, listOf(ChatMessage.Part.ToolUse("tool_1", "Bash", "one")))),
         )
 
-        // The surviving orphan keeps its own group under a fresh key — keeping the
-        // adopted row's id as the group key would duplicate the prepended row's key.
+        // The completed row keeps the orphan's key, position and group — LazyColumn
+        // anchors the scroll position on the first visible row's key across the
+        // prepend, so the group must not be re-keyed or split.
         assertEquals(
             listOf(
-                ChatItem.ToolGroup(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, "one", output = "one")),
-                ChatItem.ToolGroup("tool_2", listOf(ChatItem.ToolActivity("tool_2", "", ToolStatus.Done, output = "two"))),
+                ChatItem.ToolGroup(
+                    "tool_1",
+                    listOf(
+                        ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, "one", output = "one"),
+                        ChatItem.ToolActivity("tool_2", "", ToolStatus.Done, output = "two"),
+                    ),
+                ),
             ),
             timeline.items(),
         )
+    }
+
+    @Test
+    fun `a boundary-split pair trailing another call keeps the orphan row anchored at the page top`() {
+        val timeline = ChatTimeline()
+        // The newer page starts with the orphan result of tool_2 (its call is in the
+        // older page) — the exact "Sub-agents documentation" page boundary.
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage("msg_3", ChatMessage.Role.Tool, listOf(ChatMessage.Part.ToolResult("tool_2", false, "two"))),
+                userMessage("msg_4", "later"),
+            ),
+            keepLive = false,
+        )
+
+        // The older page ends with consecutive calls tool_1, tool_2: they flatten to
+        // one group keyed tool_1, so completing the pair by moving the orphan would
+        // delete the anchor key tool_2 — the scroll jumped to the new page's top.
+        timeline.prependHistory(
+            listOf(
+                ChatMessage("msg_1", ChatMessage.Role.Assistant, listOf(ChatMessage.Part.ToolUse("tool_1", "Bash", "one"))),
+                ChatMessage("msg_2", ChatMessage.Role.Tool, listOf(ChatMessage.Part.ToolResult("tool_1", false, "one out"))),
+                ChatMessage("msg_2b", ChatMessage.Role.Assistant, listOf(ChatMessage.Part.ToolUse("tool_2", "Write", "two"))),
+            ),
+        )
+
+        // The orphan row is completed in place (key tool_2, still the first row of the
+        // page); the head group keeps its surviving call under its own key.
+        assertEquals(
+            listOf(
+                ChatItem.ToolGroup(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, "one", output = "one out")),
+                ChatItem.ToolGroup("tool_2", listOf(ChatItem.ToolActivity("tool_2", "Write", ToolStatus.Done, "two", output = "two"))),
+                ChatItem.UserMessage("msg_4", "later"),
+            ),
+            timeline.items(),
+        )
+        // No duplicate LazyColumn keys (the 047 crash).
+        assertEquals(timeline.items().size, timeline.items().map { it.id }.distinct().size)
     }
 
     // --- Transcript-backed sub-agent history (ticket 046) ----------------------------

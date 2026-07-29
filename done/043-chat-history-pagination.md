@@ -120,8 +120,20 @@ Agreed: cursor-based "load older messages" using the server's `before_id` /
   newer page (105 such split pairs in the 043 session alone) left an orphan
   result row in the newer page, keyed by the tool-call id; the prepend added
   the call's row with the SAME key — duplicate LazyColumn key, hard crash.
-  `ChatTimeline.prependHistory` now adopts the orphan result into the
-  incoming call row (`adoptOrphanResults`), re-keying survivor groups like
-  `pruneCommittedLive` does. Regression tests: `ChatTimelineTest.an older
-  page completing a boundary-split tool pair merges the orphan result` and
-  `adopting one row of a committed tool group re-keys the survivors`.
+  `ChatTimeline.prependHistory` now merges the pair (`completeOrphanResults`).
+  Regression tests: `ChatTimelineTest.an older page completing a boundary-split
+  tool pair merges the orphan result` and `a boundary-split pair trailing
+  another call keeps the orphan row anchored at the page top`.
+- 2026-07-29 anchor-loss fix, second half (Louis's on-device report: session
+  "Sub-agents documentation" jumped to the new page's top on prepend): the
+  crash fix above first moved the orphan INTO the older page's group and
+  re-keyed/removed the committed row — but that row is the scroll anchor at
+  the page top, and LazyColumn pins the viewport to its key, so the key's
+  disappearance reset the scroll (the older page's trailing group kept its own
+  first call's key when several calls ended the page). The merge now runs the
+  other way: the orphan is completed IN PLACE with the call's name/preview/
+  input (key, position and group untouched) and the call is dropped from the
+  prepended head; only head groups re-key, and no anchor can point at rows
+  that were not on screen yet. Verified against the live server: the session's
+  page boundary splits `Write tool_7KW9…` (call last in the older page behind
+  `Write tool_MRRj…`, result first in the newer page).
