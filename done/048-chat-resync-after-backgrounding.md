@@ -144,8 +144,9 @@ gap replay cannot cover.
   *(2026-07-29: full unit suite green — 6 new tests (2 in
   `ChatRepositoryTest`, 4 in `ChatViewModelTest`), each re-run 15x to prove
   the resync dedup fixed the racing-guard flake; the suite's only remaining
-  flake is the pre-existing recorder race noted below. Release APK published
-  to the file server.)*
+  flake is the pre-existing recorder race noted below. Firebase Test Lab
+  robo passed on MediumPhone.arm-34; release APK published to the file
+  server.)*
 
 ## Out of scope
 
