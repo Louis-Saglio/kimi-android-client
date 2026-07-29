@@ -38,6 +38,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -213,6 +214,11 @@ private fun ChatContent(
 ) {
     var showModelPicker by rememberSaveable { mutableStateOf(false) }
     var showTodos by rememberSaveable { mutableStateOf(false) }
+    // Explicit "go to the newest" intent (ticket 051): the send wrapper below
+    // bumps the tick that MessageList watches. Bumping is a plain state write —
+    // the scroll itself runs inside MessageList, which owns the LazyListState
+    // (keeping its open-at-the-newest-row initial index intact).
+    var scrollToBottomTick by remember { mutableIntStateOf(0) }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -329,7 +335,9 @@ private fun ChatContent(
                     },
                     onModelClick = { showModelPicker = true },
                     onTextChange = onInputChange,
-                    onSend = onSend,
+                    // Send/Steer both funnel here; bump first so the jump rides
+                    // the same recomposition as the ViewModel's echo append.
+                    onSend = { scrollToBottomTick++; onSend() },
                     onAttach = onAttach,
                     onAttachmentRemoved = onAttachmentRemoved,
                 )
@@ -365,6 +373,7 @@ private fun ChatContent(
                     onOpenSubagent = onOpenSubagent,
                     isLoadingMoreHistory = uiState.isLoadingMoreHistory,
                     onHistoryTopReached = onHistoryTopReached,
+                    scrollToBottomTick = scrollToBottomTick,
                 )
             }
         }

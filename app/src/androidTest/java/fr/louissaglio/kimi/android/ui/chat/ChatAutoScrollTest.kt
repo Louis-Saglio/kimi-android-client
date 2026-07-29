@@ -39,11 +39,16 @@ class ChatAutoScrollTest {
     private fun toolCall(id: String) =
         ChatItem.ToolActivity(id, "Bash", ToolStatus.Running, preview = "ls")
 
-    private fun messageList(items: State<List<ChatItem>>, listState: LazyListState, height: State<Dp>) {
+    private fun messageList(
+        items: State<List<ChatItem>>,
+        listState: LazyListState,
+        height: State<Dp>,
+        tick: State<Int> = mutableStateOf(0),
+    ) {
         composeTestRule.setContent {
             KimiTheme {
                 Box(Modifier.height(height.value)) {
-                    MessageList(items.value, listState = listState)
+                    MessageList(items.value, listState = listState, scrollToBottomTick = tick.value)
                 }
             }
         }
@@ -126,5 +131,29 @@ class ChatAutoScrollTest {
         composeTestRule.waitForIdle()
 
         assertEquals(anchorKey, listState.layoutInfo.visibleItemsInfo.first().key)
+    }
+
+    @Test
+    fun scrolledUpSendScrollsToBottomAndStaysPinned() {
+        val items = mutableStateOf(messages(20))
+        val tick = mutableStateOf(0)
+        val listState = LazyListState()
+        messageList(items, listState, mutableStateOf(300.dp), tick)
+        composeTestRule.waitForIdle()
+        composeTestRule.runOnIdle { runBlocking { listState.scrollToItem(5) } }
+        composeTestRule.waitForIdle()
+
+        // ChatScreen's send wrapper bumps the tick (ticket 051); the user echo
+        // append lands right after, like the ViewModel's splice.
+        tick.value = 1
+        composeTestRule.waitForIdle()
+        assertPinnedAtBottom(listState, 20)
+
+        items.value = items.value + ChatItem.UserMessage("echo_1", "Follow-up sent while scrolled up.")
+        composeTestRule.waitForIdle()
+
+        // Pre-fix (ticket 051), nothing scrolled on send: the reader stayed on
+        // the old row and the echo pinned nothing, so both assertions were RED.
+        assertPinnedAtBottom(listState, 21)
     }
 }

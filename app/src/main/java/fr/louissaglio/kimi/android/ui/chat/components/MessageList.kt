@@ -30,6 +30,22 @@ import fr.louissaglio.kimi.android.data.chat.ChatMessage
  * as "at the bottom" for auto-scroll purposes (ticket 030). */
 private val AutoScrollThreshold = 32.dp
 
+/** Pins the viewport to the very end of the list: [scrollToItem] tops the row
+ * at the viewport start, so a last row taller than the viewport (long streaming
+ * bubble) still hides its tail — the overshoot scrollBy lands the tail exactly
+ * at the viewport end. Shared by the at-bottom re-pin and the explicit
+ * send-intent jump (ticket 051) so the overshoot math lives in one place. */
+internal suspend fun LazyListState.scrollToBottom(itemCount: Int) {
+    if (itemCount <= 0) return
+    scrollToItem(itemCount - 1)
+    val info = layoutInfo
+    val last = info.visibleItemsInfo.lastOrNull { it.index == itemCount - 1 }
+    if (last != null) {
+        val overshoot = (last.offset + last.size - info.viewportEndOffset).toFloat()
+        if (overshoot > 0f) scrollBy(overshoot)
+    }
+}
+
 @Composable
 internal fun MessageList(
     items: List<ChatItem>,
@@ -51,6 +67,12 @@ internal fun MessageList(
      * stable key. */
     isLoadingMoreHistory: Boolean = false,
     onHistoryTopReached: () -> Unit = {},
+    /** Explicit "go to the newest" intent (ticket 051): ChatScreen's send wrapper
+     * bumps this tick; the jump to the tail fires regardless of the current
+     * at-bottom — a scrolled-up reader who sends wants the newest. Once the tail
+     * is visible `isAtBottom` flips true, so the echo and the streaming reply
+     * re-pin through the items effect below with no extra machinery. */
+    scrollToBottomTick: Int = 0,
 ) {
     // No reverseLayout: a top-anchored list keeps a growing row's header in place
     // and pushes the rows below down, so expanded tool details unfold downward
@@ -99,16 +121,11 @@ internal fun MessageList(
         // end. Keyed on `items`, not `items.size`: streaming growth of the last
         // bubble changes the content without changing the count.
         if (isAtBottom && items.isNotEmpty()) {
-            listState.scrollToItem(items.lastIndex)
-            // scrollToItem tops the row at the viewport start; a last row taller
-            // than the viewport (long streaming bubble) still hides its tail.
-            val info = listState.layoutInfo
-            val last = info.visibleItemsInfo.lastOrNull { it.index == items.lastIndex }
-            if (last != null) {
-                val overshoot = (last.offset + last.size - info.viewportEndOffset).toFloat()
-                if (overshoot > 0f) listState.scrollBy(overshoot)
-            }
+            listState.scrollToBottom(items.size)
         }
+    }
+    LaunchedEffect(scrollToBottomTick) {
+        if (scrollToBottomTick > 0) listState.scrollToBottom(items.size)
     }
     // History pagination trigger: near the top means the first (or second) row is
     // visible. The ViewModel guards re-triggers (in-flight Job, has_more), so the
