@@ -50,8 +50,8 @@ stored in the app settings).
   (SubagentViewModel registers via pageOpened/pageClosed) — never open a
   second, page-owned socket (two cursors would double-feed on replay). The
   read-only `SubagentScreen` reuses `MessageList`/`ToolRows`; linked `Agent`
-  rows carry `subagentId` — the row keeps its expand/collapse tap and a
-  trailing open button navigates to the page. Cold-open (spawn before
+  rows carry `subagentId` — linked rows never expand (the page has all the
+  details); tapping the row or its trailing open button navigates to the page. Cold-open (spawn before
   subscribe): linked rows seed their store entry from the call args/result
   (identity, status, `prompt` user bubble + `[summary]` assistant bubble)
   via `seedFromAgentRow`. Transcript backing (046): the page's history comes

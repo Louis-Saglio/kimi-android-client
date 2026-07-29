@@ -93,7 +93,7 @@ class ToolRowTest {
     }
 
     @Test
-    fun linkedRowKeepsExpansionAndOpensSubagentFromTrailingButton() {
+    fun linkedRowNeverExpandsAndNavigatesOnRowTap() {
         var opened: String? = null
         composeTestRule.setContent {
             KimiTheme {
@@ -111,19 +111,18 @@ class ToolRowTest {
             }
         }
 
-        // The row tap keeps its expand/collapse behavior…
-        composeTestRule.onNodeWithText("Agent").performClick()
-        composeTestRule.onNodeWithText("{\n    \"prompt\": \"Reply ok\"\n}").assertIsDisplayed()
-        // …and the open affordance is its own button beside the expand chevron.
-        composeTestRule.onNodeWithContentDescription("Collapse tool details").assertIsDisplayed()
+        // Even with call details available, a linked row shows no expand affordance…
+        composeTestRule.onNodeWithContentDescription("Expand tool details").assertDoesNotExist()
         composeTestRule.onNodeWithContentDescription("Open sub-agent").assertIsDisplayed()
 
-        composeTestRule.onNodeWithContentDescription("Open sub-agent").performClick()
+        // …and tapping the row itself navigates to the sub-agent page.
+        composeTestRule.onNodeWithText("Agent").performClick()
+        composeTestRule.onNodeWithText("{\n    \"prompt\": \"Reply ok\"\n}").assertDoesNotExist()
         assertEquals("agent-12", opened)
     }
 
     @Test
-    fun linkedRowWithoutDetailsNavigatesOnRowTap() {
+    fun linkedRowOpensSubagentFromTrailingButton() {
         var opened: String? = null
         composeTestRule.setContent {
             KimiTheme {
@@ -134,7 +133,7 @@ class ToolRowTest {
             }
         }
 
-        composeTestRule.onNodeWithText("Agent").performClick()
+        composeTestRule.onNodeWithContentDescription("Open sub-agent").performClick()
         assertEquals("agent-12", opened)
     }
 }

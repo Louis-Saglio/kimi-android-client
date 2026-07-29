@@ -129,15 +129,14 @@ internal fun ToolGroupCard(group: ChatItem.ToolGroup, onOpenSubagent: (String) -
  * The top-anchored chat list keeps the tapped header in place, so the details
  * unfold downward.
  *
- * An `Agent` row linked to its sub-agent (ticket 045) adds a trailing open button
- * (chevron-right, own tap target) that navigates to the sub-agent page — the row
- * keeps its expand/collapse behavior; when the row has no details, tapping the row
- * itself navigates. */
+ * An `Agent` row linked to its sub-agent (ticket 045) never expands: the sub-agent
+ * page already shows everything the details would, so tapping the row navigates to
+ * that page, as does the trailing open button (chevron-right, own tap target). */
 @Composable
 internal fun ToolRow(activity: ChatItem.ToolActivity, onOpenSubagent: (String) -> Unit = {}) {
     val detailColor = MaterialTheme.colorScheme.onSurfaceVariant
-    val expandable = activity.input.isNotBlank() || activity.output.isNotBlank()
     val linkedSubagentId = activity.subagentId
+    val expandable = linkedSubagentId == null && (activity.input.isNotBlank() || activity.output.isNotBlank())
     var expanded by rememberSaveable { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth()) {
         Row(
