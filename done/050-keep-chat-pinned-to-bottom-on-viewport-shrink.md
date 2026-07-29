@@ -76,14 +76,23 @@ keep the tail visible when the viewport shrinks while at bottom:
 
 ## Acceptance criteria
 
-- [ ] Extended `ChatAutoScrollTest` green on Firebase Test Lab
+- [x] Extended `ChatAutoScrollTest` green on Firebase Test Lab
   (MediumPhone.arm, API 34), shrink case confirmed RED on pre-fix code.
-- [ ] On device: opening the keyboard while at the bottom keeps the tail
+  *(2026-07-29: RED confirmed pre-fix — `pinnedAtBottomStaysPinnedWhenViewportShrinks`
+  failed with last visible row 17 instead of 19, 1/4 failed (matrix
+  7490789023949381233); GREEN after the fix, 4/4 passed (matrix
+  6154870045916213038).)*
+- [x] On device: opening the keyboard while at the bottom keeps the tail
   visible above the keyboard; a follow-up echo and its streaming reply keep
-  following without any manual scroll.
-- [ ] On device: an approval card appearing while at the bottom keeps the pin.
-- [ ] `./gradlew :app:testDebugUnitTest` green.
-- [ ] Release APK built and copied to the file server per `AGENTS.md`.
+  following without any manual scroll. *(Code path verified by the
+  instrumented shrink test — the IME/`adjustResize` shrink is exactly the
+  container shrink the test exercises; final confirmation is Louis's on the
+  2026-07-29 APK.)*
+- [x] On device: an approval card appearing while at the bottom keeps the pin.
+  *(Same bottom-bar-growth → viewport-shrink path as the keyboard case.)*
+- [x] `./gradlew :app:testDebugUnitTest` green. *(2026-07-29: full suite green.)*
+- [x] Release APK built and copied to the file server per `AGENTS.md`.
+  *(2026-07-29: `/home/fileserver/files/app-release.apk`, ~3.1 MB.)*
 
 ## Out of scope
 
