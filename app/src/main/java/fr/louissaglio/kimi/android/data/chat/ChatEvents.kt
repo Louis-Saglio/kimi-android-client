@@ -141,8 +141,13 @@ sealed interface SocketEvent {
     /** First connection of this collection. */
     data object Connected : SocketEvent
 
-    /** Re-connected after a drop; the server replays events newer than the resume cursor. */
+    /** Re-connected after a drop — or a fresh collection resuming with the stored
+     * cursor (ticket 048); the server replays events newer than the resume cursor. */
     data object Reconnected : SocketEvent
+
+    /** The server refused the resume cursor (subscribe ack's `resync_required`,
+     * ticket 048): no replay will come — the collector must re-sync from REST. */
+    data object ResyncRequired : SocketEvent
 
     /** Connection lost (or never established); a retry with backoff is scheduled. */
     data object Disconnected : SocketEvent

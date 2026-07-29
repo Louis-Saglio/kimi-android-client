@@ -185,9 +185,12 @@ class ChatRepository @Inject constructor(
     /**
      * Streams [SocketEvent]s for [sessionId]. One collection = one socket owned here
      * (not by the UI); cancelling the collection closes it. On a drop the stream
-     * retries with exponential backoff and re-subscribes with the last seen cursor, so
-     * the server replays missed events; the collector is told via
-     * [SocketEvent.Reconnected] so it can also refetch history.
+     * retries with exponential backoff and re-subscribes with the last seen cursor —
+     * which survives the collection itself (ticket 048), so a later collection
+     * resumes too — and the server replays missed events. The collector is told via
+     * [SocketEvent.Reconnected] (any subscribe carrying a cursor) so it can also
+     * refetch history, and via [SocketEvent.ResyncRequired] when the server refuses
+     * the cursor and no replay will come.
      */
     fun observeSession(settings: ServerSettings, sessionId: String): Flow<SocketEvent> =
         socket.observe(settings, sessionId)

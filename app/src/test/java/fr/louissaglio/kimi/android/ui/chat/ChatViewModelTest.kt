@@ -125,6 +125,10 @@ class ChatViewModelTest {
     @Volatile
     private var serverSocket: WebSocket? = null
 
+    /** Every frame the client sent over any WS connection of the test (ticket 048
+     * asserts the resume subscribe carries the stored cursor after a gate cycle). */
+    private val clientFrames = CopyOnWriteArrayList<String>()
+
     /**
      * Arrival time (System.nanoTime) of the latest non-WS GET the server dispatched —
      * every path counts, unconditionally, so a new, moved, or suppressed startup GET
@@ -277,6 +281,10 @@ class ChatViewModelTest {
                                 override fun onOpen(webSocket: WebSocket, response: Response) {
                                     serverSocket = webSocket
                                 }
+
+                                override fun onMessage(webSocket: WebSocket, text: String) {
+                                    clientFrames += text
+                                }
                             },
                         )
                     }
@@ -403,6 +411,151 @@ class ChatViewModelTest {
         } finally {
             recorder.cancel()
         }
+    }
+
+    @Test
+    fun `a turn that ended while the screen was away leaves no ghost live rows`() = runBlocking {
+        // Louis's report (ticket 048): the stream is watched, the app backgrounds
+        // mid-turn, the agent finishes while away, the app comes back.
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        socket.send(turnStartedFrame())
+        socket.send(assistantDeltaFrame("partial", seq = 6))
+        awaitState(viewModel.uiState) { state ->
+            state.items?.filterIsInstance<ChatItem.AssistantMessage>()?.singleOrNull()?.text == "partial"
+        }
+        viewModel.onScreenStopped()
+
+        // While away, the turn ends: history now carries the complete message.
+        messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
+            """{"id":"msg_1","session_id":"session_1","role":"assistant",""" +
+            """"content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"partial plus the rest"}],""" +
+            """"created_at":"2026-07-29T00:00:01.000Z"}""" +
+            """],"has_more":false},"request_id":"r"}"""
+        serverSocket = null
+        viewModel.onScreenStarted()
+
+        // The re-subscribe resumes with the cursor stored before backgrounding
+        // (turnStarted's seq 20 — the volatile delta must not move it): the missed
+        // window replays instead of being lost.
+        awaitCondition { clientFrames.any { "\"cursors\"" in it } }
+        val resume = clientFrames.first { "\"cursors\"" in it }
+        assertTrue(resume, resume.contains("\"seq\":20"))
+        assertTrue(resume, resume.contains("\"epoch\":\"ep_1\""))
+
+        // A finished turn can have no live rows: the status-aware resync clears the
+        // truncated ghost bubble and the canonical message renders exactly once.
+        awaitState(viewModel.uiState) { state ->
+            state.items?.filterIsInstance<ChatItem.AssistantMessage>()
+                ?.singleOrNull()?.let { it.id == "msg_1" && it.text == "partial plus the rest" } == true
+        }
+        assertEquals(
+            listOf("msg_1"),
+            viewModel.uiState.value.items.orEmpty().map { it.id },
+        )
+    }
+
+    @Test
+    fun `a turn still running on return keeps its live rows`() = runBlocking {
+        statusBody = """{"code":0,"msg":"success","data":{"busy":true},"request_id":"r"}"""
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        socket.send(turnStartedFrame())
+        socket.send(assistantDeltaFrame("still streaming", seq = 6))
+        awaitState(viewModel.uiState) { state ->
+            state.items?.filterIsInstance<ChatItem.AssistantMessage>()?.singleOrNull()?.text == "still streaming"
+        }
+        viewModel.onScreenStopped()
+
+        // The turn is still running: history carries only the user's prompt so far.
+        messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
+            """{"id":"msg_u","session_id":"session_1","role":"user",""" +
+            """"content":[{"type":"text","text":"do the thing"}],""" +
+            """"created_at":"2026-07-29T00:00:00.000Z"}""" +
+            """],"has_more":false},"request_id":"r"}"""
+        serverSocket = null
+        viewModel.onScreenStarted()
+
+        // busy:true → keep-live refetch: the committed prompt lands and the
+        // in-flight bubble survives (the resumed replay keeps feeding it).
+        awaitState(viewModel.uiState) { state ->
+            state.items?.any { it is ChatItem.UserMessage } == true
+        }
+        val bubbles = viewModel.uiState.value.items.orEmpty().filterIsInstance<ChatItem.AssistantMessage>()
+        assertEquals(1, bubbles.size)
+        assertEquals("still streaming", bubbles.single().text)
+    }
+
+    @Test
+    fun `a turn event racing the resync status fetch downgrades the clear`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+        socket.send(turnStartedFrame())
+        socket.send(assistantDeltaFrame("partial", seq = 6))
+        awaitState(viewModel.uiState) { state ->
+            state.items?.filterIsInstance<ChatItem.AssistantMessage>()?.singleOrNull()?.text == "partial"
+        }
+        viewModel.onScreenStopped()
+
+        // The first turn ended while away (history carries its full message), but
+        // the idle /status snapshot the resync is about to read is overtaken by a
+        // NEW turn starting on the resumed socket.
+        messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
+            """{"id":"msg_1","session_id":"session_1","role":"assistant",""" +
+            """"content":[{"type":"text","text":"partial plus the rest"}],""" +
+            """"created_at":"2026-07-29T00:00:01.000Z"}""" +
+            """],"has_more":false},"request_id":"r"}"""
+        statusResponseGate = CountDownLatch(1)
+        serverSocket = null
+        viewModel.onScreenStarted()
+
+        // The resync's /status GET is parked server-side; the new turn starts and
+        // streams its first text — strictly newer than the parked snapshot.
+        val socket2 = awaitServerSocket()
+        socket2.send(turnStartedFrame())
+        awaitState(viewModel.uiState) { it.isWorking }
+        socket2.send(assistantDeltaFrame("new turn text", seq = 7))
+        awaitState(viewModel.uiState) { state ->
+            state.items?.filterIsInstance<ChatItem.AssistantMessage>()?.singleOrNull()?.text == "new turn text"
+        }
+
+        // Releasing the idle snapshot must NOT clear the new turn's live rows.
+        statusResponseGate!!.countDown()
+        awaitState(viewModel.uiState) { state ->
+            state.items?.filterIsInstance<ChatItem.AssistantMessage>()?.any { it.id == "msg_1" } == true
+        }
+        assertEquals(
+            listOf("partial plus the rest", "new turn text"),
+            viewModel.uiState.value.items.orEmpty().filterIsInstance<ChatItem.AssistantMessage>().map { it.text },
+        )
+    }
+
+    @Test
+    fun `a resync_required ack re-syncs from REST`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        // The subscribe ack refuses the resume (replay buffer overrun,
+        // docs/server-api.md): the missed window heals from REST — a fresh
+        // /status-driven resync refetch.
+        socket.send(
+            """{"type":"ack","id":"c_1","code":0,"msg":"success","payload":{"accepted":[],""" +
+                """"not_found":[],"resync_required":["session_1"],"cursors":{}}}""",
+        )
+
+        awaitRequest("/status")
+        awaitRequest("/messages")
+        Unit
     }
 
     @Test

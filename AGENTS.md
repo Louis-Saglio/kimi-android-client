@@ -28,7 +28,10 @@ stored in the app settings).
   401/HTTP/IO → `DataError`, envelope unwrap). Every REST call goes through it;
   never hand-roll `Request.Builder` in a repository.
 - `data/chat/` — `ChatRepository` is a thin facade over `ChatApi` (REST verbs),
-  `SessionSocket` (WebSocket, reconnect, resume cursor), `ModelsRepository`,
+  `SessionSocket` (WebSocket, reconnect, per-session resume cursor held at
+  instance level so it survives the ON_STOP/ON_START collection restarts —
+  ticket 048; a refused cursor acks as `resync_required` → REST re-sync),
+  `ModelsRepository`,
   `SessionPrefsStore` (per-session model/effort prefs), and `ChatMessageMapper`
   (DTO→domain). New chat endpoints belong in a collaborator, not the facade.
 - `data/attachments/` — `AttachmentStore` owns all platform file I/O (content

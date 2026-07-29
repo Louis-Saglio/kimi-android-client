@@ -88,6 +88,22 @@ class ChatRepositoryTest {
         emitted
     }
 
+    /** A WS upgrade that records every client frame into [clientFrames] and runs
+     * [onOpen] on connect — the ticket 048 cursor tests drive two sequential
+     * connections (two `observe()` collections) against one repository. */
+    private fun wsUpgrade(
+        clientFrames: CopyOnWriteArrayList<String>,
+        onOpen: (WebSocket) -> Unit = {},
+    ): MockResponse = MockResponse().withWebSocketUpgrade(
+        object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) = onOpen(webSocket)
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                clientFrames += text
+            }
+        },
+    )
+
     @Test
     fun `history envelope maps to domain messages oldest-first`() = runBlocking {
         server.enqueue(
@@ -971,6 +987,94 @@ class ChatRepositoryTest {
         assertTrue(resubscribe, resubscribe.contains("\"seq\":5"))
         assertTrue(resubscribe, resubscribe.contains("\"epoch\":\"ep_1\""))
         Unit
+    }
+
+    @Test
+    fun `a fresh collection resumes with the stored cursor and emits Reconnected`() = runBlocking {
+        // The chat screen's ON_STOP/ON_START gate cycle (ticket 048): cancelling one
+        // observe() collection must not lose the resume cursor — the next collection
+        // re-subscribes with it and the missed window replays.
+        val clientFrames = CopyOnWriteArrayList<String>()
+        server.enqueue(
+            wsUpgrade(clientFrames) { ws ->
+                ws.send(
+                    """{"type":"turn.started","seq":5,"epoch":"ep_1","session_id":"session_1",""" +
+                        """"timestamp":"2026-07-29T00:00:00.000Z","payload":{"type":"turn.started","turnId":0}}""",
+                )
+            },
+        )
+        server.enqueue(wsUpgrade(clientFrames))
+
+        val first = CopyOnWriteArrayList<SocketEvent>()
+        val job1 = launch { repository.observeSession(settings(), "session_1").collect { first += it } }
+        awaitCondition { first.any { it is SocketEvent.Event } }
+        job1.cancel()
+
+        val second = CopyOnWriteArrayList<SocketEvent>()
+        val job2 = launch { repository.observeSession(settings(), "session_1").collect { second += it } }
+        try {
+            awaitCondition { second.isNotEmpty() && clientFrames.any { "\"cursors\"" in it } }
+        } finally {
+            job2.cancel()
+        }
+
+        assertEquals(SocketEvent.Connected, first.first())
+        // A subscribe carrying a stored cursor IS a resume, even as the collection's
+        // first connection — the collector heals via the Reconnected path.
+        assertEquals(SocketEvent.Reconnected, second.first())
+        val resubscribe = clientFrames.first { "\"cursors\"" in it }
+        assertTrue(resubscribe, resubscribe.contains("\"seq\":5"))
+        assertTrue(resubscribe, resubscribe.contains("\"epoch\":\"ep_1\""))
+        Unit
+    }
+
+    @Test
+    fun `a resync_required ack drops the stored cursor and emits ResyncRequired`() = runBlocking {
+        val clientFrames = CopyOnWriteArrayList<String>()
+        server.enqueue(
+            wsUpgrade(clientFrames) { ws ->
+                // A cursor-worthy frame first, then the ack refusing the resume
+                // (docs/server-api.md, subscribe ack): no replay will come.
+                ws.send(
+                    """{"type":"turn.started","seq":5,"epoch":"ep_1","session_id":"session_1",""" +
+                        """"timestamp":"2026-07-29T00:00:00.000Z","payload":{"type":"turn.started","turnId":0}}""",
+                )
+                ws.send(
+                    """{"type":"ack","id":"c_1","code":0,"msg":"success","payload":{"accepted":[],""" +
+                        """"not_found":[],"resync_required":["session_1"],"cursors":{}}}""",
+                )
+            },
+        )
+        server.enqueue(wsUpgrade(clientFrames))
+
+        val first = CopyOnWriteArrayList<SocketEvent>()
+        val job1 = launch { repository.observeSession(settings(), "session_1").collect { first += it } }
+        try {
+            awaitCondition { first.any { it is SocketEvent.ResyncRequired } }
+        } finally {
+            job1.cancel()
+        }
+
+        assertEquals(
+            listOf(
+                SocketEvent.Connected,
+                SocketEvent.Event(SessionEvent.TurnStarted()),
+                SocketEvent.ResyncRequired,
+            ),
+            first,
+        )
+
+        // The refused cursor is gone: the next collection starts blind again.
+        val second = CopyOnWriteArrayList<SocketEvent>()
+        val job2 = launch { repository.observeSession(settings(), "session_1").collect { second += it } }
+        try {
+            awaitCondition { second.isNotEmpty() && clientFrames.count { "\"subscribe\"" in it } >= 2 }
+        } finally {
+            job2.cancel()
+        }
+
+        assertEquals(SocketEvent.Connected, second.first())
+        assertFalse(clientFrames.last { "\"subscribe\"" in it }.contains("\"cursors\""))
     }
 
     @Test

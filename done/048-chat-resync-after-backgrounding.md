@@ -98,30 +98,54 @@ gap replay cannot cover.
 
 ## Acceptance criteria
 
-- [ ] Unit test (MockWebServer, data/chat suite — a new `SessionSocketTest`
+- [x] Unit test (MockWebServer, data/chat suite — a new `SessionSocketTest`
   if cleaner): after a first `observe()` collection saw seq N and was
   cancelled, a second collection's subscribe frame carries
   `cursors: {<sid>: {seq: N, epoch: <same>}}` and the flow emits
   `Reconnected`, not `Connected`.
-- [ ] Unit test (`ChatViewModelTest`): live rows seeded by deltas, screen
+  *(`ChatRepositoryTest.a fresh collection resumes with the stored cursor and
+  emits Reconnected` — two sequential collections, the resume subscribe
+  carries `"seq":5`/`"epoch":"ep_1"` and the second collection's first
+  emission is `Reconnected`. Lives in `ChatRepositoryTest` next to the other
+  socket tests rather than a new file.)*
+- [x] Unit test (`ChatViewModelTest`): live rows seeded by deltas, screen
   stopped, turn ends while "away" (history now holds the full message,
   `/status` answers `busy: false`); `onScreenStarted()` leaves
   `items == canonical history` — no ghost bubble.
-- [ ] Unit test (`ChatViewModelTest`): same setup but `/status` answers
+  *(`a turn that ended while the screen was away leaves no ghost live rows`
+  — also asserts the re-subscribe carries the stored cursor; Louis's exact
+  scenario.)*
+- [x] Unit test (`ChatViewModelTest`): same setup but `/status` answers
   `busy: true` → live rows are kept (no clear-live), stream state intact.
-- [ ] Unit test (`ChatViewModelTest`): `/status` says not-busy but a
+  *(`a turn still running on return keeps its live rows`.)*
+- [x] Unit test (`ChatViewModelTest`): `/status` says not-busy but a
   `turn.started` lands before the resync refetch applies → live rows kept
   (turnEventCount guard).
-- [ ] Unit test: a subscribe ack listing the session in `resync_required`
+  *(`a turn event racing the resync status fetch downgrades the clear` — the
+  /status response is parked server-side behind a latch so the turn event
+  deterministically overtakes the snapshot.)*
+- [x] Unit test: a subscribe ack listing the session in `resync_required`
   drops the stored cursor (next subscribe carries none) and triggers the
   status-aware resync.
+  *(`ChatRepositoryTest.a resync_required ack drops the stored cursor and
+  emits ResyncRequired` (cursor gone, event emitted) +
+  `ChatViewModelTest.a resync_required ack re-syncs from REST` (a fresh
+  /status + /messages pair follows the ack).)*
 - [ ] On-device (Louis's scenario): send a prompt, background mid-stream,
   wait for the turn to finish, foreground → the final message renders once,
   complete, no truncated/thinking-mixed tail.
+  *(Mechanics unit-tested above; release APK published to the file server —
+  on-device verification is Louis's.)*
 - [ ] On-device: background mid-turn, foreground while still running → the
   stream resumes without a hole and finishes cleanly.
-- [ ] `./gradlew :app:assembleDebug` succeeds, unit tests green; release APK
+  *(Same — Louis's.)*
+- [x] `./gradlew :app:assembleDebug` succeeds, unit tests green; release APK
   published to the file server per AGENTS.md.
+  *(2026-07-29: full unit suite green — 6 new tests (2 in
+  `ChatRepositoryTest`, 4 in `ChatViewModelTest`), each re-run 15x to prove
+  the resync dedup fixed the racing-guard flake; the suite's only remaining
+  flake is the pre-existing recorder race noted below. Release APK published
+  to the file server.)*
 
 ## Out of scope
 
@@ -153,3 +177,29 @@ gap replay cannot cover.
   must survive; unit-test it as two sequential `observe()` collections.
 - Repro of the original report is the first on-device criterion; keep the
   scenario steps verbatim when verifying.
+- 2026-07-29 implementation notes (two deliberate refinements of the
+  Description above):
+  - The `Reconnected` branch ALSO runs the status-aware resync (the ticket
+    text had it staying keep-live): `refreshHistory` is latest-fetch-wins,
+    and the socket's `Reconnected` fires after `onScreenStarted()`'s resync
+    launch, so a keep-live refetch from that branch could clobber the
+    ON_START resync's clear-live decision. One unified path removes the
+    race; mid-turn reconnects are unchanged (busy → keep-live).
+  - Resyncs are latest-wins (`resyncJob` cancels the superseded one):
+    ON_START and the resumed socket's `Reconnected` fire together and would
+    otherwise run duplicate /status + /messages round trips. Under the unit
+    tests' `UnconfinedTestDispatcher` those duplicate refetches resumed
+    their `onSuccess` blocks concurrently on two OkHttp threads and
+    interleaved `ChatTimeline.committed` mutations (message committed
+    twice) — production serializes on Main, but the dedup removes the
+    smell, not only the flake.
+  - `everConnected` is gone: a subscribe carrying a stored cursor emits
+    `Reconnected` by definition, which covers both in-collection reconnects
+    and gate-cycle resumes.
+- Pre-existing flake, NOT from this ticket (verified at the pre-change
+  baseline, ~1 in 3-6 full-suite runs): `ChatViewModelTest.stream deltas
+  publish the leading edge then coalesce…` — the assistant-text recorder's
+  `CopyOnWriteArrayList` races concurrent StateFlow emissions under
+  `UnconfinedTestDispatcher` (symptoms: missing trailing flush emission, or
+  a same-contents list-type equals mismatch). Worth its own ticket if it
+  gets noisier.

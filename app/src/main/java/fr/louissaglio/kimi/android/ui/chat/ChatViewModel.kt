@@ -300,12 +300,13 @@ class ChatViewModel @Inject constructor(
     /** The trailing-flush timer of an open burst; null when no burst is open. */
     private var deltaFlushJob: Job? = null
 
-    /** Wired to ON_START: (re)loads history; the socket gate opens the socket. Also
-     * fires when the app returns to the foreground — the re-sync path after an OS-level
-     * drop. */
+    /** Wired to ON_START: re-syncs history (status-aware — a turn that ended while
+     * the app was away takes its ghost live rows with it, ticket 048); the socket
+     * gate opens the socket. Also fires when the app returns to the foreground —
+     * the re-sync path after an OS-level drop. */
     fun onScreenStarted() {
         screenVisible.value = true
-        refreshHistory(clearLive = false)
+        resyncHistoryAfterDrop()
         seedPendingQuestions()
         refreshSessionInfo()
         seedSessionStatus()
@@ -599,9 +600,18 @@ class ChatViewModel @Inject constructor(
                                 _uiState.update { it.copy(isReconnecting = false) }
                             SocketEvent.Reconnected -> {
                                 _uiState.update { it.copy(isReconnecting = false) }
-                                // The cursor resume replays missed events; the refetch
-                                // heals anything beyond the server's replay buffer.
-                                refreshHistory(clearLive = false)
+                                // The cursor resume replays missed events; the
+                                // status-aware resync heals whatever the replay cannot
+                                // cover (ticket 048). It also runs here — not only on
+                                // ON_START — so a keep-live refetch can never race and
+                                // clobber the ON_START resync's clear-live decision.
+                                resyncHistoryAfterDrop()
+                                refreshPendingQuestions()
+                            }
+                            SocketEvent.ResyncRequired -> {
+                                // No replay will come: the missed window (a turn.ended
+                                // above all) heals from REST only (ticket 048).
+                                resyncHistoryAfterDrop()
                                 refreshPendingQuestions()
                             }
                             SocketEvent.Disconnected ->
@@ -768,6 +778,30 @@ class ChatViewModel @Inject constructor(
                 seedSubagentStoreFromLinkedRows()
             }
             else -> applyTimelineEvent(event)
+        }
+    }
+
+    /**
+     * Re-sync after a connection gap (ON_START gate reopen, [SocketEvent.Reconnected],
+     * [SocketEvent.ResyncRequired] — ticket 048): a turn may have ENDED while the
+     * stream was away, and nothing says so when the replay cannot cover the gap (no
+     * cursor, or a refused one). A finished turn can have no legitimate live rows, so
+     * the history refetch clears them; a running turn keeps the keep-live refetch and
+     * the replay fills the gap. A turn event landing while the /status GET is in
+     * flight is newer than its snapshot (the [seedSessionStatus] pattern) and
+     * downgrades the clear; a failed /status keeps the live rows too. ON_START and
+     * the resumed socket's Reconnected fire together, so resyncs are latest-wins:
+     * the newer call has the newer connection state (and the newer turn-event guard)
+     * and cancels the superseded one before it spends a /status round trip.
+     */
+    private var resyncJob: Job? = null
+
+    private fun resyncHistoryAfterDrop() {
+        val turnEventsAtStart = turnEventCount
+        resyncJob?.cancel()
+        resyncJob = viewModelScope.launch {
+            val busy = chatRepository.getSessionStatus(settingsRepository.current(), sessionId).getOrNull()?.busy
+            refreshHistory(clearLive = busy == false && turnEventCount == turnEventsAtStart)
         }
     }
 

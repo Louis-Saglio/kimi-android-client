@@ -5,6 +5,7 @@ import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import java.io.IOException
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
@@ -49,11 +50,24 @@ internal class SessionSocket(
         .build()
 
     /**
+     * Resume cursors, per session, at INSTANCE level (ticket 048): the chat screen's
+     * socket gate cancels a collection on ON_STOP and starts a fresh one on ON_START;
+     * a flow-local cursor would die with it and the missed window (turn.ended above
+     * all) would never replay. In-memory only — process death drops the live rows a
+     * cursor could resume into anyway, so there is nothing to persist.
+     */
+    private val cursors = ConcurrentHashMap<String, Cursor>()
+
+    /**
      * Streams [SocketEvent]s for [sessionId]. One collection = one socket owned here
      * (not by the UI); cancelling the collection closes it. On a drop the loop retries
      * with exponential backoff (1 s doubling to 30 s) and re-subscribes with the last
-     * seen cursor, so the server replays missed events; the collector is told via
-     * [SocketEvent.Reconnected] so it can also refetch history.
+     * seen cursor, so the server replays missed events; the cursor survives the
+     * collection itself (see [cursors]), so a later collection resumes too — any
+     * subscribe carrying a cursor emits [SocketEvent.Reconnected], even on its first
+     * connection of the collection. When the server refuses the cursor (subscribe
+     * ack's `resync_required`), it is dropped and the collector is told via
+     * [SocketEvent.ResyncRequired] so it can re-sync from REST.
      */
     fun observe(settings: ServerSettings, sessionId: String): Flow<SocketEvent> = flow {
         val wsUrl = buildWsUrl(settings)
@@ -64,21 +78,25 @@ internal class SessionSocket(
             return@flow
         }
         val clientId = "android_${UUID.randomUUID()}"
-        var cursor: Cursor? = null
-        var everConnected = false
         var attempt = 0
         while (currentCoroutineContext().isActive) {
             try {
                 runConnection(
                     url = wsUrl.newBuilder().setQueryParameter("client_id", clientId).build(),
                     sessionId = sessionId,
-                    cursor = cursor,
+                    cursor = cursors[sessionId],
                     onOpen = {
                         attempt = 0
-                        emit(if (everConnected) SocketEvent.Reconnected else SocketEvent.Connected)
-                        everConnected = true
+                        // A subscribe carrying a stored cursor IS a resume — including
+                        // the first connection of a collection after a gate reopen
+                        // (ticket 048): the collector heals via the Reconnected path.
+                        emit(if (cursors.containsKey(sessionId)) SocketEvent.Reconnected else SocketEvent.Connected)
                     },
-                    onCursor = { cursor = it },
+                    onCursor = { cursors[sessionId] = it },
+                    onResyncRequired = {
+                        cursors.remove(sessionId)
+                        emit(SocketEvent.ResyncRequired)
+                    },
                     onEvent = { emit(SocketEvent.Event(it)) },
                 )
             } catch (e: CancellationException) {
@@ -113,6 +131,7 @@ internal class SessionSocket(
         cursor: Cursor?,
         onOpen: suspend () -> Unit,
         onCursor: (Cursor) -> Unit,
+        onResyncRequired: suspend () -> Unit,
         onEvent: suspend (SessionEvent) -> Unit,
     ) {
         // UNLIMITED is not a backpressure risk worth bounding: the collector
@@ -152,7 +171,8 @@ internal class SessionSocket(
                         onOpen()
                         webSocket.send(subscribeFrame(sessionId, cursor))
                     }
-                    is Signal.Text -> handleFrame(signal.text, webSocket, onCursor, onEvent)
+                    is Signal.Text ->
+                        handleFrame(signal.text, webSocket, sessionId, onCursor, onResyncRequired, onEvent)
                     Signal.Closed -> return
                     is Signal.Failed -> throw IOException("WebSocket failed", signal.cause)
                 }
@@ -167,7 +187,9 @@ internal class SessionSocket(
     private suspend fun handleFrame(
         text: String,
         webSocket: WebSocket,
+        sessionId: String,
         onCursor: (Cursor) -> Unit,
+        onResyncRequired: suspend () -> Unit,
         onEvent: suspend (SessionEvent) -> Unit,
     ) {
         val frame = try {
@@ -263,7 +285,14 @@ internal class SessionSocket(
                 ?.let { onEvent(SessionEvent.SubagentFailed(it.subagentId, it.error.orEmpty())) }
             "subagent.suspended" -> frame.decodePayload<SubagentLifecyclePayload>()
                 ?.let { onEvent(SessionEvent.SubagentSuspended(it.subagentId)) }
-            // server_hello, ack, and events we don't render yet: ignore.
+            // The subscribe ack (docs/server-api.md): a refused resume cursor
+            // (resync_required — replay buffer overrun) means no replay will come;
+            // the cursor is dropped and the collector re-syncs from REST (ticket 048).
+            // accepted/not_found need no handling.
+            "ack" -> frame.decodePayload<AckPayload>()
+                ?.takeIf { sessionId in it.resyncRequired }
+                ?.let { onResyncRequired() }
+            // server_hello and events we don't render yet: ignore.
         }
     }
 

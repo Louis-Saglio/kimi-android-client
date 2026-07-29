@@ -136,6 +136,17 @@ data class PingPayload(val nonce: String = "")
 @Serializable
 data class AgentIdPeek(val agentId: String = "main")
 
+/**
+ * `payload` of a subscribe/unsubscribe `ack` frame (docs/server-api.md); only
+ * `resync_required` is consumed — the sessions whose resume cursor the server
+ * could not honor (replay buffer overrun). No replay will come for them: the
+ * collector must re-sync from REST (ticket 048).
+ */
+@Serializable
+data class AckPayload(
+    @SerialName("resync_required") val resyncRequired: List<String> = emptyList(),
+)
+
 @Serializable
 data class DeltaPayload(val delta: String = "")
 
