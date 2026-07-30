@@ -72,21 +72,49 @@ the result must satisfy:
 
 ## Acceptance criteria
 
-- [ ] New unit test reproducing the reported race **fails before the fix and
+- [x] New unit test reproducing the reported race **fails before the fix and
   passes after**: `replaceHistory(keepLive = true)` commits a tool call, then
   a replayed `ToolCallStarted`/`ToolCallResult` for the same id arrives →
   `items()` contains exactly one row with that id, holding the result's
   status/output.
-- [ ] An invariant test asserts `items()` never contains duplicate ids after
+  *(`ChatTimelineTest.a replayed tool event after a keep-live refetch heals the
+  committed row` — verified RED on the pre-fix reducer (duplicate row), GREEN
+  after.)*
+- [x] An invariant test asserts `items()` never contains duplicate ids after
   scripted interleavings of refetch + replayed events covering the other
   merge paths (turn-end refetch with `keepLive = false` followed by a late
   tool event; prepend vs. live; `TurnStarted` sealing on the sub-agent path).
-- [ ] `./gradlew :app:testDebugUnitTest` green, including all existing chat
+  *(`ChatTimelineTest.items never contains duplicate row ids across refetch
+  and replay interleavings` — five scripts, including transcript refetch vs
+  replay; RED on the pre-fix reducer. Plus
+  `a late tool event heals the committed row in place, preserving its
+  position`.)*
+- [x] `./gradlew :app:testDebugUnitTest` green, including all existing chat
   timeline/autoscroll tests unmodified in behavior.
 - [ ] Post-release verification: no new `Key ... was already used` events in
   Crashlytics for the next app version (queryable via the
   `firebasecrashlytics.googleapis.com` v1alpha `reports/topIssues` API,
   project `kimi-code-android-client`).
+
+## Implementation notes (2026-07-30)
+
+Chosen shape: **one ordered row list + a boundary**. `ChatTimeline` now holds a
+single `rows` list; committed vs live is a *position* (`liveStart`), not a list
+membership. All structural mutations go through boundary helpers
+(`replaceCommitted`, `prependCommitted`, `appendCommitted`, `appendLiveTool`).
+Tool rows have a single insertion choke point: `upsertTool` → `healTool`
+searches the WHOLE timeline tail-first, so a late/replayed event for an
+already-committed call heals that row in place (position and group preserved);
+only an unknown id appends a new live row at the tail. The one remaining
+live-vs-committed merge is `pruneCoveredLiveRows`, the replace-time rule that
+drops live rows a refetch has since committed (it replaces
+`pruneCommittedLive`); `completeOrphanResults` stays as the page-boundary
+in-place heal. Bubble audit: assistant/user bubbles are NOT id-covered — live
+bubbles carry synthetic `live_N` keys and deltas/splices carry no stable id, so
+an id-keyed structure has nothing to match on; they keep content dedup at the
+replace choke point. The id-uniqueness invariant still holds for them by
+construction (`live_N` counter, unique message ids per refetch), which is what
+the LazyColumn crash actually required.
 
 ## Out of scope
 

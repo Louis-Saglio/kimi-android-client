@@ -1281,4 +1281,154 @@ class ChatTimelineTest {
             timeline.items(),
         )
     }
+
+    // --- Single key space (ticket 055) -------------------------------------------------
+
+    @Test
+    fun `a replayed tool event after a keep-live refetch heals the committed row`() {
+        // The 2026-07-30 crash: on reconnect the refetch commits the in-flight call,
+        // then the cursor replay re-delivers its events. The replay must heal the
+        // committed row in place — a second row with the same id is a duplicate
+        // LazyColumn key.
+        val timeline = ChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted())
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "AskUserQuestion", "approve?"))
+
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage(
+                    "msg_1",
+                    ChatMessage.Role.Assistant,
+                    listOf(ChatMessage.Part.ToolUse("tool_1", "AskUserQuestion", "approve?")),
+                ),
+            ),
+            keepLive = true,
+        )
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "AskUserQuestion", "approve?"))
+        timeline.apply(SessionEvent.ToolCallResult("tool_1", false, "answered"))
+
+        assertEquals(
+            listOf(
+                toolGroup(
+                    ChatItem.ToolActivity("tool_1", "AskUserQuestion", ToolStatus.Done, "approve?", output = "answered"),
+                ),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `a late tool event heals the committed row in place, preserving its position`() {
+        val timeline = ChatTimeline()
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage("msg_1", ChatMessage.Role.Assistant, listOf(ChatMessage.Part.ToolUse("tool_1", "Bash", "one"))),
+                ChatMessage("msg_2", ChatMessage.Role.Tool, listOf(ChatMessage.Part.ToolResult("tool_1", false, "done\n"))),
+                userMessage("msg_3", "next"),
+            ),
+            keepLive = false,
+        )
+
+        // A replayed started/result pair for the already-committed call updates that
+        // row's fields but must not move or duplicate it.
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "one"))
+        timeline.apply(SessionEvent.ToolCallResult("tool_1", false, "done\n"))
+
+        assertEquals(
+            listOf(
+                toolGroup(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, "one", output = "done\n")),
+                ChatItem.UserMessage("msg_3", "next"),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `items never contains duplicate row ids across refetch and replay interleavings`() {
+        val historyWithCall = listOf(
+            ChatMessage("msg_1", ChatMessage.Role.Assistant, listOf(ChatMessage.Part.ToolUse("tool_1", "Bash", "run"))),
+        )
+        val historyWithResult = historyWithCall +
+            ChatMessage("msg_2", ChatMessage.Role.Tool, listOf(ChatMessage.Part.ToolResult("tool_1", false, "out\n")))
+        val started = SessionEvent.ToolCallStarted("tool_1", "Bash", "run")
+        val result = SessionEvent.ToolCallResult("tool_1", false, "out\n")
+
+        // Every merge path that used to dedup two parallel lists against each other by
+        // hand: mid-turn refetch (keepLive) vs replay, turn-end refetch (live cleared)
+        // vs a late event, prepend vs a live event, turn sealing vs a late event,
+        // transcript refetch vs replay.
+        val scripts: List<Triple<Boolean, String, ChatTimeline.() -> Unit>> = listOf(
+            Triple(
+                true,
+                "mid-turn refetch then replay",
+                {
+                    apply(SessionEvent.TurnStarted())
+                    apply(started)
+                    replaceHistory(historyWithCall, keepLive = true)
+                    apply(started)
+                    apply(result)
+                },
+            ),
+            Triple(
+                true,
+                "turn-end refetch then late result",
+                {
+                    apply(SessionEvent.TurnStarted())
+                    apply(started)
+                    replaceHistory(historyWithResult, keepLive = false)
+                    apply(result)
+                },
+            ),
+            Triple(
+                true,
+                "prepend then live result",
+                {
+                    replaceHistory(listOf(userMessage("msg_9", "tail")), keepLive = false)
+                    prependHistory(historyWithCall)
+                    apply(result)
+                },
+            ),
+            Triple(
+                false,
+                "sealed turn then late result",
+                {
+                    apply(SessionEvent.TurnStarted())
+                    apply(started)
+                    apply(SessionEvent.TurnStarted())
+                    apply(result)
+                },
+            ),
+            Triple(
+                false,
+                "transcript refetch then replay",
+                {
+                    apply(started)
+                    replaceTranscript(
+                        listOf(
+                            transcriptTurn(
+                                "t0", 0,
+                                transcriptStep(
+                                    "t0.1",
+                                    TranscriptFrame.Tool(
+                                        "t0.1.tool_1", "tool_1", "Bash", running = false,
+                                        preview = "run", input = "", output = "out\n",
+                                    ),
+                                ),
+                            ),
+                        ),
+                        keepLive = true,
+                    )
+                    apply(started)
+                    apply(result)
+                },
+            ),
+        )
+
+        scripts.forEach { (historyBacked, name, script) ->
+            val timeline = ChatTimeline(historyBacked = historyBacked)
+            timeline.script()
+            val ids = timeline.items().map { it.id }
+            assertEquals("$name: duplicate row ids: $ids", ids.distinct().size, ids.size)
+        }
+    }
 }
