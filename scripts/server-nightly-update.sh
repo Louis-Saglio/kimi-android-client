@@ -166,7 +166,7 @@ if [ -n "$last" ]; then
 else
     rm -f "$CHANGELOG_FILE"
 fi
-if (cd "$REPO" && timeout 2700 "$KIMI" -p "$(cat "$REPO/scripts/protocol-update-prompt.md")"); then
+if (cd "$REPO" && timeout 10800 "$KIMI" -p "$(cat "$REPO/scripts/protocol-update-prompt.md")"); then
     echo "$version" > "$STATE_FILE"
     rm -f "$CHANGELOG_FILE"
     echo "kimi-nightly-update: re-verification for $version completed"
