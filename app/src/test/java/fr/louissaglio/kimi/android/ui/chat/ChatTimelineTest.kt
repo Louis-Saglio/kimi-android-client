@@ -1,6 +1,7 @@
 package fr.louissaglio.kimi.android.ui.chat
 
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
+import fr.louissaglio.kimi.android.data.chat.ORIGIN_KIND_COMPACTION_SUMMARY
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.TranscriptFrame
@@ -1430,5 +1431,192 @@ class ChatTimelineTest {
             val ids = timeline.items().map { it.id }
             assertEquals("$name: duplicate row ids: $ids", ids.distinct().size, ids.size)
         }
+    }
+
+    // --- Compaction dividers (ticket 056) ---------------------------------------------
+
+    private fun compactionSummaryMessage(id: String, summary: String) =
+        ChatMessage(
+            id,
+            ChatMessage.Role.User,
+            listOf(ChatMessage.Part.Text(summary)),
+            originKind = ORIGIN_KIND_COMPACTION_SUMMARY,
+        )
+
+    @Test
+    fun `a compaction_summary history message renders as a done divider, never a bubble`() {
+        val timeline = ChatTimeline()
+
+        timeline.replaceHistory(
+            listOf(
+                userMessage("msg_1", "run echo hi"),
+                compactionSummaryMessage("msg_2", "Working summary of the task."),
+            ),
+            keepLive = false,
+        )
+
+        assertEquals(
+            listOf(
+                ChatItem.UserMessage("msg_1", "run echo hi"),
+                // History-sourced: the bare summary, no token numbers (not persisted).
+                ChatItem.CompactionDivider("msg_2", pending = false, summary = "Working summary of the task."),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `an older history page prepends its compaction divider, deduplicated by id`() {
+        val timeline = ChatTimeline()
+        timeline.replaceHistory(listOf(compactionSummaryMessage("msg_2", "summary")), keepLive = false)
+
+        // A racing refetch already committed msg_1: the page applies once (ticket 043).
+        timeline.prependHistory(listOf(userMessage("msg_1", "older"), compactionSummaryMessage("msg_2", "summary")))
+        timeline.prependHistory(listOf(userMessage("msg_1", "older")))
+
+        assertEquals(
+            listOf(
+                ChatItem.UserMessage("msg_1", "older"),
+                ChatItem.CompactionDivider("msg_2", pending = false, summary = "summary"),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `compaction started, completed and failed drive the live divider`() {
+        val timeline = ChatTimeline()
+        timeline.replaceHistory(listOf(userMessage("msg_1", "hi")), keepLive = false)
+
+        timeline.compactionStarted()
+        // Idempotent: a cursor replay of the started frame stacks no second row.
+        timeline.compactionStarted()
+        assertEquals(
+            listOf(
+                ChatItem.UserMessage("msg_1", "hi"),
+                ChatItem.CompactionDivider(LIVE_COMPACTION_DIVIDER_ID, pending = true),
+            ),
+            timeline.items(),
+        )
+
+        timeline.compactionCompleted("the summary", tokensBefore = 26_500, tokensAfter = 386)
+        assertEquals(
+            listOf(
+                ChatItem.UserMessage("msg_1", "hi"),
+                ChatItem.CompactionDivider(
+                    LIVE_COMPACTION_DIVIDER_ID,
+                    pending = false,
+                    tokensBefore = 26_500,
+                    tokensAfter = 386,
+                    summary = "the summary",
+                ),
+            ),
+            timeline.items(),
+        )
+
+        // A second run resets the done row to pending; when it FAILS the divider is
+        // removed (the error snackbar carries the feedback) — the next resync restores
+        // the first run's trace from the persisted summary in history.
+        timeline.compactionStarted()
+        assertEquals(
+            ChatItem.CompactionDivider(LIVE_COMPACTION_DIVIDER_ID, pending = true),
+            timeline.items().last(),
+        )
+        timeline.compactionFailed()
+        assertEquals(listOf(ChatItem.UserMessage("msg_1", "hi")), timeline.items())
+    }
+
+    @Test
+    fun `a completion without a pending divider appends the done row`() {
+        // The app subscribed mid-run (cold open during a web-triggered compaction):
+        // the compaction still gets its timeline trace.
+        val timeline = ChatTimeline()
+        timeline.replaceHistory(listOf(userMessage("msg_1", "hi")), keepLive = false)
+
+        timeline.compactionCompleted("the summary", tokensBefore = 850, tokensAfter = 275)
+
+        assertEquals(
+            listOf(
+                ChatItem.UserMessage("msg_1", "hi"),
+                ChatItem.CompactionDivider(
+                    LIVE_COMPACTION_DIVIDER_ID,
+                    pending = false,
+                    tokensBefore = 850,
+                    tokensAfter = 275,
+                    summary = "the summary",
+                ),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `a mid-compaction keep-live refetch preserves the pending divider, an idle one replaces it with history`() {
+        val timeline = ChatTimeline()
+        timeline.replaceHistory(listOf(userMessage("msg_1", "hi")), keepLive = false)
+        timeline.compactionStarted()
+
+        // Mid-compaction resync (busy=true → keepLive): history has no summary yet,
+        // the pending divider must survive.
+        timeline.replaceHistory(listOf(userMessage("msg_1", "hi")), keepLive = true)
+        assertEquals(
+            listOf(
+                ChatItem.UserMessage("msg_1", "hi"),
+                ChatItem.CompactionDivider(LIVE_COMPACTION_DIVIDER_ID, pending = true),
+            ),
+            timeline.items(),
+        )
+
+        // Post-completion idle resync (clearLive): the live row goes, the refetched
+        // history carries the canonical divider flattened from the persisted summary.
+        timeline.replaceHistory(
+            listOf(userMessage("msg_1", "hi"), compactionSummaryMessage("msg_2", "the summary")),
+            keepLive = false,
+        )
+        assertEquals(
+            listOf(
+                ChatItem.UserMessage("msg_1", "hi"),
+                ChatItem.CompactionDivider("msg_2", pending = false, summary = "the summary"),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `the spliced compaction summary is dropped and kept messages dedup by id`() {
+        val timeline = ChatTimeline()
+        timeline.replaceHistory(listOf(userMessage("msg_1", "kept")), keepLive = false)
+
+        timeline.apply(
+            SessionEvent.ContextSpliced(
+                listOf(
+                    // Kept user messages come back verbatim with their original ids.
+                    userMessage("msg_1", "kept"),
+                    // The summary: id-less, model-facing prefix text — internal content.
+                    compactionSummaryMessage("", "The conversation so far has been compacted…"),
+                ),
+            ),
+        )
+
+        // No bubble for the summary, no duplicate of the kept message, no divider either
+        // (the live pending divider from compaction.started owns the trace).
+        assertEquals(listOf(ChatItem.UserMessage("msg_1", "kept")), timeline.items())
+    }
+
+    @Test
+    fun `the id-less steer echo still appends after a compaction summary was dropped`() {
+        // The summary is id-less too: the steer-echo text dedup must not misfire on it.
+        val timeline = ChatTimeline()
+        timeline.apply(
+            SessionEvent.ContextSpliced(listOf(compactionSummaryMessage("", "prefixed summary text"))),
+        )
+        timeline.apply(
+            SessionEvent.ContextSpliced(listOf(userMessage("", "steered text"))),
+        )
+
+        assertEquals(
+            listOf(ChatItem.UserMessage("spliced_0", "steered text")),
+            timeline.items(),
+        )
     }
 }

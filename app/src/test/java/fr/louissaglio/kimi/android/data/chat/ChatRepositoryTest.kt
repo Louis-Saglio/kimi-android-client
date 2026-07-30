@@ -1174,6 +1174,7 @@ class ChatRepositoryTest {
                             "msg_1",
                             ChatMessage.Role.User,
                             listOf(ChatMessage.Part.Text("hello from the phone")),
+                            originKind = "user",
                         ),
                     ),
                 ),
@@ -1202,6 +1203,7 @@ class ChatRepositoryTest {
                             "",
                             ChatMessage.Role.User,
                             listOf(ChatMessage.Part.Text("Stop counting. Reply with exactly: steered-ok")),
+                            originKind = "user",
                         ),
                     ),
                 ),
@@ -1572,7 +1574,14 @@ class ChatRepositoryTest {
                 SocketEvent.Event(SessionEvent.TurnStarted("agent-12")),
                 SocketEvent.Event(
                     SessionEvent.ContextSpliced(
-                        listOf(ChatMessage("msg_sub", ChatMessage.Role.User, listOf(ChatMessage.Part.Text("sub task")))),
+                        listOf(
+                            ChatMessage(
+                                "msg_sub",
+                                ChatMessage.Role.User,
+                                listOf(ChatMessage.Part.Text("sub task")),
+                                originKind = "system_trigger",
+                            ),
+                        ),
                         "agent-12",
                     ),
                 ),
@@ -1763,6 +1772,157 @@ class ChatRepositoryTest {
             .getOrThrow()
         assertEquals("Do it again with normal Agent calls.", user.turns[0].prompt)
         assertEquals(true, user.hasMore)
+    }
+
+    @Test
+    fun `compact posts an empty body to the compact endpoint`() = runBlocking {
+        server.enqueue(
+            MockResponse().setBody("""{"code":0,"msg":"success","data":{},"request_id":"01KX"}"""),
+        )
+
+        val result = repository.compact(settings(), "session_1")
+
+        assertTrue(result.isSuccess)
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/sessions/session_1:compact", request.path)
+        assertEquals("{}", request.body.readUtf8())
+    }
+
+    @Test
+    fun `compact maps the 40910 envelope to an Api error carrying the server message`() = runBlocking {
+        // docs/server-api.md, Compact errors: the snackbar shows the server's sentence.
+        server.enqueue(
+            MockResponse().setBody(
+                """{"code":40910,"msg":"No messages to compact in current history.","data":null,"request_id":"01KX"}""",
+            ),
+        )
+
+        val result = repository.compact(settings(), "session_1")
+
+        assertEquals(
+            DataError.Api(40910, "No messages to compact in current history."),
+            result.exceptionOrNull(),
+        )
+    }
+
+    @Test
+    fun `history maps metadata origin kind onto the message`() = runBlocking {
+        // The persisted compaction summary (docs/server-api.md, Compact): a user-role
+        // message with metadata.origin.kind "compaction_summary" and the bare summary.
+        server.enqueue(
+            MockResponse().setBody(
+                """
+                {"code":0,"msg":"success","data":{"items":[
+                  {"id":"msg_2","session_id":"session_1","role":"user",
+                   "content":[{"type":"text","text":"Working summary of the task so far."}],
+                   "created_at":"2026-07-30T05:44:56.660Z","metadata":{"origin":{"kind":"compaction_summary"}}},
+                  {"id":"msg_1","session_id":"session_1","role":"user",
+                   "content":[{"type":"text","text":"run echo hi"}],
+                   "created_at":"2026-07-17T04:12:10.000Z","metadata":{"origin":{"kind":"user"}}}
+                ],"has_more":false},"request_id":"01KX"}
+                """.trimIndent(),
+            ),
+        )
+
+        val messages = repository.getMessages(settings(), "session_1").getOrThrow().items
+
+        assertEquals(
+            ChatMessage(
+                "msg_1",
+                ChatMessage.Role.User,
+                listOf(ChatMessage.Part.Text("run echo hi")),
+                createdAt = Instant.parse("2026-07-17T04:12:10.000Z"),
+                originKind = "user",
+            ),
+            messages[0],
+        )
+        assertEquals(
+            ChatMessage(
+                "msg_2",
+                ChatMessage.Role.User,
+                listOf(ChatMessage.Part.Text("Working summary of the task so far.")),
+                createdAt = Instant.parse("2026-07-30T05:44:56.660Z"),
+                originKind = ORIGIN_KIND_COMPACTION_SUMMARY,
+            ),
+            messages[1],
+        )
+    }
+
+    @Test
+    fun `socket parses the compaction lifecycle frames`() = runBlocking {
+        // Verbatim 0.30.0 shapes (docs/server-api.md, Compact), started with an
+        // instruction, then completed with its result.
+        val emitted = runSocketEvents(
+            """{"type":"compaction.started","seq":25,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-30T05:48:54.194Z","payload":{"type":"compaction.started",""" +
+                """"trigger":"manual","instruction":"Keep the marker verbatim.",""" +
+                """"agentId":"main","sessionId":"session_1"}}""",
+            """{"type":"compaction.completed","seq":37,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-30T05:44:56.676Z","payload":{"type":"compaction.completed",""" +
+                """"result":{"summary":"Completed spike, nothing pending.",""" +
+                """"compactedCount":8,"tokensBefore":850,"tokensAfter":386,"keptUserMessageCount":3},""" +
+                """"agentId":"main","sessionId":"session_1"}}""",
+        )
+
+        assertEquals(
+            listOf(
+                SocketEvent.Event(SessionEvent.CompactionStarted("manual", "Keep the marker verbatim.")),
+                SocketEvent.Event(
+                    SessionEvent.CompactionCompleted(
+                        summary = "Completed spike, nothing pending.",
+                        compactedCount = 8,
+                        tokensBefore = 850,
+                        tokensAfter = 386,
+                        keptUserMessageCount = 3,
+                    ),
+                ),
+            ),
+            emitted.filterIsInstance<SocketEvent.Event>(),
+        )
+    }
+
+    @Test
+    fun `socket decodes the compaction failure family permissively, payload or not`() = runBlocking {
+        // failed/cancelled/blocked were never observed on this server (protocol-bundle
+        // schemas only): any shape — including no payload at all — must still emit, so
+        // the compacting state always ends (ticket 056).
+        val emitted = runSocketEvents(
+            """{"type":"compaction.failed","seq":40,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-30T05:50:00.000Z","payload":{"type":"compaction.failed",""" +
+                """"message":"summarizer unreachable","agentId":"main","sessionId":"session_1"}}""",
+            """{"type":"compaction.cancelled","seq":41,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-30T05:50:01.000Z"}""",
+        )
+
+        assertEquals(
+            listOf(
+                SocketEvent.Event(SessionEvent.CompactionFailed("compaction.failed", "summarizer unreachable")),
+                SocketEvent.Event(SessionEvent.CompactionFailed("compaction.cancelled", null)),
+            ),
+            emitted.filterIsInstance<SocketEvent.Event>(),
+        )
+    }
+
+    @Test
+    fun `a splice frame decodes the top-level origin kind`() = runBlocking {
+        // The compaction context rewrite (docs/server-api.md, Compact): the summary is
+        // an id-less user message with origin.kind "compaction_summary" at the
+        // message's TOP level (history keeps it under metadata.origin).
+        val emitted = runSocketEvents(
+            """{"type":"context.spliced","seq":36,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-30T05:44:56.600Z","payload":{"type":"context.spliced",""" +
+                """"start":0,"deleteCount":8,"messages":[""" +
+                """{"role":"user","content":[{"type":"text","text":"kept message"}],""" +
+                """"origin":{"kind":"user"},"id":"msg_1"},""" +
+                """{"role":"user","content":[{"type":"text","text":"The conversation so far has been compacted…"}],""" +
+                """"origin":{"kind":"compaction_summary"},"id":null}],""" +
+                """"agentId":"main","sessionId":"session_1"}}""",
+        )
+
+        val splice = emitted.filterIsInstance<SocketEvent.Event>().single().event as SessionEvent.ContextSpliced
+        assertEquals(listOf("user", ORIGIN_KIND_COMPACTION_SUMMARY), splice.messages.map { it.originKind })
+        assertEquals(listOf("msg_1", ""), splice.messages.map { it.id })
     }
 
     private companion object {

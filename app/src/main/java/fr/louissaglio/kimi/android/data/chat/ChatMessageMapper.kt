@@ -58,11 +58,12 @@ internal class ChatMessageMapper(json: Json) {
             else -> ChatMessage.Role.Other
         }
         return ChatMessage(
-            id = dto.id,
+            id = dto.id.orEmpty(),
             role = domainRole,
             parts = dto.content.mapNotNull { toDomain(it, stripEnvelopes = domainRole == ChatMessage.Role.User) },
             // A malformed timestamp must not fail the whole message: drop it, keep the rest.
             createdAt = dto.createdAt?.let { runCatching { Instant.parse(it) }.getOrNull() },
+            originKind = dto.originKind,
         )
     }
 

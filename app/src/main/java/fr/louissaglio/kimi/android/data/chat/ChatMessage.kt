@@ -13,6 +13,10 @@ data class ChatMessage(
     val role: Role,
     val parts: List<Part>,
     val createdAt: Instant? = null,
+    /** The message's `origin.kind` (docs/server-api.md); null for regular user/assistant
+     * messages on older servers. [ORIGIN_KIND_COMPACTION_SUMMARY] marks the persisted
+     * compaction summary (ticket 056): it renders as a divider, never a user bubble. */
+    val originKind: String? = null,
 ) {
     enum class Role { User, Assistant, Tool, Other }
 
@@ -58,3 +62,8 @@ data class MessagePage(
     val items: List<ChatMessage>,
     val hasMore: Boolean,
 )
+
+/** `origin.kind` of the user message a compaction appends to history (bare summary,
+ * docs/server-api.md, Compact) — and of the id-less summary in the `context.spliced`
+ * rewrite (prefixed text there; both are kept out of the user-bubble path). */
+const val ORIGIN_KIND_COMPACTION_SUMMARY = "compaction_summary"

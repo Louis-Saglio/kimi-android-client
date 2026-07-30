@@ -11,12 +11,16 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -96,6 +100,10 @@ fun ChatScreen(
                     snackbarHostState.showSnackbar(effect.message)
                 is ChatViewModel.Effect.OpenAttachmentFailed ->
                     snackbarHostState.showSnackbar(effect.message)
+                is ChatViewModel.Effect.CompactionFinished ->
+                    snackbarHostState.showSnackbar(effect.message)
+                is ChatViewModel.Effect.CompactionFailed ->
+                    snackbarHostState.showSnackbar(effect.message)
                 is ChatViewModel.Effect.OpenFile ->
                     if (!openWithOtherApp(context, effect.contentUri, effect.mimeType)) {
                         viewModel.onOpenAttachmentFailed(effect.name)
@@ -154,6 +162,7 @@ fun ChatScreen(
         loadImageBytes = loadImageBytes,
         onOpenSubagent = onOpenSubagent,
         onHistoryTopReached = onHistoryTopReached,
+        onCompact = viewModel::onCompact,
     )
     fullScreenImage?.let { image ->
         FullScreenImageViewer(
@@ -203,6 +212,7 @@ private fun ChatContent(
     loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray?,
     onOpenSubagent: (String) -> Unit = {},
     onHistoryTopReached: () -> Unit = {},
+    onCompact: () -> Unit = {},
 ) {
     var showModelPicker by rememberSaveable { mutableStateOf(false) }
     var showTodos by rememberSaveable { mutableStateOf(false) }
@@ -237,8 +247,34 @@ private fun ChatContent(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
-                // No actions (ticket 053): the context ring, working spinner and stop
-                // button moved into the composer — the top bar is navigation-only.
+                actions = {
+                    // Session-level actions (ticket 056): the overflow menu hosts
+                    // infrequent session management — "Compact session" first, built
+                    // to grow (rename/delete/export… later). The context ring, working
+                    // spinner and stop button stay in the composer (ticket 053).
+                    var menuExpanded by remember { mutableStateOf(false) }
+                    Box {
+                        IconButton(onClick = { menuExpanded = true }) {
+                            Icon(Icons.Filled.MoreVert, contentDescription = "Session options")
+                        }
+                        DropdownMenu(
+                            expanded = menuExpanded,
+                            onDismissRequest = { menuExpanded = false },
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Compact session") },
+                                // A turn active (40910 server-side) or a compaction
+                                // already running (silent no-op server-side) must not
+                                // be triggerable from here.
+                                enabled = !uiState.isWorking && !uiState.isCompacting,
+                                onClick = {
+                                    menuExpanded = false
+                                    onCompact()
+                                },
+                            )
+                        }
+                    }
+                },
             )
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -401,6 +437,14 @@ private fun ChatContentPreview() {
                             ChatItem.ToolActivity("tool_4", "Bash", ToolStatus.Error, preview = "./gradlew lint"),
                         ),
                     ),
+                    ChatItem.CompactionDivider(
+                        "msg_compact",
+                        pending = false,
+                        tokensBefore = 26_500,
+                        tokensAfter = 386,
+                        summary = "The session pinned the retry fix and verified it with the test suite.",
+                    ),
+                    ChatItem.CompactionDivider(LIVE_COMPACTION_DIVIDER_ID, pending = true),
                     ChatItem.AssistantMessage("live_0", "Streaming reply…", thinking = ""),
                     ChatItem.ToolGroup(
                         "tool_5",
@@ -498,6 +542,7 @@ private fun ChatContentPreview() {
             onImageClick = {},
             onOpenAttachment = {},
             loadImageBytes = { null },
+            onCompact = {},
         )
     }
 }

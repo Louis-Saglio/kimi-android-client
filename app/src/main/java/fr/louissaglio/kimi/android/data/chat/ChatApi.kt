@@ -271,6 +271,19 @@ internal class ChatApi(
             }
         }
 
+    /**
+     * Starts a compaction (`POST /api/v1/sessions/{id}:compact`, docs/server-api.md,
+     * Compact — ticket 056). Fire-and-forget: the ack only confirms the request; the
+     * progress (`compaction.started` → `compaction.completed`) arrives over the
+     * WebSocket, so success carries no payload. The non-zero envelope `msg` (40910
+     * empty session / turn active, 40401 unknown session) rides DataError.Api's
+     * serverMessage to the snackbar unchanged.
+     */
+    suspend fun compact(settings: ServerSettings, sessionId: String): Result<Unit> =
+        api.post(settings, "/api/v1/sessions/$sessionId:compact", api.jsonBody {}) { body ->
+            api.json.decodeFromString<Envelope<JsonObject>>(body).toAckResult()
+        }
+
     /** Lightweight live status (`GET /api/v1/sessions/{id}/status`): the mid-turn flag
      * plus the context window fill when the server sends token counts (ticket 041). */
     suspend fun sessionStatus(settings: ServerSettings, sessionId: String): Result<SessionStatus> =

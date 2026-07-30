@@ -56,4 +56,23 @@ sealed interface ChatItem {
     ) : ChatItem {
         constructor(tool: ToolActivity) : this(tool.id, listOf(tool))
     }
+
+    /** A compaction divider (ticket 056), the timeline trace of a `/compact`: [pending]
+     * while the server summarizes ("Compacting context…"), done afterwards. Done rows
+     * carry the token delta when the completion event reported it (live); history-sourced
+     * rows have none — the numbers are not persisted. [summary] (null only while pending)
+     * opens the "Compaction summary" dialog on tap. The live row's [id] is the synthetic
+     * [LIVE_COMPACTION_DIVIDER_ID]; a history-sourced row keys on the summary message id. */
+    data class CompactionDivider(
+        override val id: String,
+        val pending: Boolean,
+        val tokensBefore: Long? = null,
+        val tokensAfter: Long? = null,
+        val summary: String? = null,
+    ) : ChatItem
 }
+
+/** LazyColumn key of the live compaction divider (ticket 056): one constant — the
+ * server runs one compaction per session at a time, and a new run resets the previous
+ * run's done row in place instead of stacking a second key (ChatTimeline). */
+const val LIVE_COMPACTION_DIVIDER_ID = "compaction_live"

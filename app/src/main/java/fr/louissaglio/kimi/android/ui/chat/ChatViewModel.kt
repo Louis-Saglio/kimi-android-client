@@ -150,6 +150,10 @@ class ChatViewModel @Inject constructor(
         val hasMoreHistory: Boolean = false,
         /** True while an older history page loads; the list shows a header spinner. */
         val isLoadingMoreHistory: Boolean = false,
+        /** True while a compaction runs (ticket 056): set optimistically on the POST
+         * ack, cleared by compaction.completed/failed. Gates the menu item — a second
+         * compact is a silent no-op server-side, so the client must prevent it. */
+        val isCompacting: Boolean = false,
     ) {
         /** Top-bar label: the loaded title (or cwd basename), falling back to the raw
          * session id — the single source of truth for the fallback, so the screen no
@@ -225,6 +229,13 @@ class ChatViewModel @Inject constructor(
 
         /** The download or cache-write of a history attachment failed, or no app could open it. */
         data class OpenAttachmentFailed(val message: String) : Effect
+
+        /** Confirmation of a finished compaction (ticket 056): the token delta label. */
+        data class CompactionFinished(val message: String) : Effect
+
+        /** The compact POST failed (e.g. the empty-session 40910 — the server's own
+         * message) or a compaction ended with failed/cancelled/blocked. */
+        data class CompactionFailed(val message: String) : Effect
     }
 
     private val _uiState = MutableStateFlow(
@@ -484,6 +495,24 @@ class ChatViewModel @Inject constructor(
         }
     }
 
+    /**
+     * POSTs `:compact` (ticket 056). No-ops while a turn runs or a compaction is in
+     * progress — the server rejects the former (40910) and silently no-ops the latter,
+     * so the guard is the only feedback; the menu item is disabled in both states too.
+     * On the ack the compacting state is set optimistically; the socket's
+     * compaction.started/completed frames drive the divider and clear it. A failure
+     * (empty session, web-started turn) surfaces the server's own message.
+     */
+    fun onCompact() {
+        val state = _uiState.value
+        if (state.isWorking || state.isCompacting) return
+        viewModelScope.launch {
+            chatRepository.compact(settingsRepository.current(), sessionId)
+                .onSuccess { _uiState.update { it.copy(isCompacting = true) } }
+                .onFailure { error -> _effects.send(Effect.CompactionFailed(error.toUserMessage())) }
+        }
+    }
+
     fun onAllow() = postDecision(approved = true)
 
     fun onDeny() = postDecision(approved = false)
@@ -718,7 +747,7 @@ class ChatViewModel @Inject constructor(
         }
     }
 
-    private fun applySessionEvent(event: SessionEvent) {
+    private suspend fun applySessionEvent(event: SessionEvent) {
         when (event) {
             is SessionEvent.TurnStarted -> {
                 turnEventCount++
@@ -770,6 +799,29 @@ class ChatViewModel @Inject constructor(
             is SessionEvent.ContextUsageUpdated -> {
                 contextUsageEventCount++
                 _uiState.update { it.copy(contextUsage = event.contextUsage) }
+            }
+            // Compaction (ticket 056): no turn events fire for it — these frames alone
+            // drive the divider and the compacting state. Started also arrives for
+            // compactions triggered from another client (the TUI's /compact), so it —
+            // not only our POST ack — sets isCompacting.
+            is SessionEvent.CompactionStarted -> {
+                timeline.compactionStarted()
+                _uiState.update { it.copy(isCompacting = true, items = timeline.items()) }
+            }
+            is SessionEvent.CompactionCompleted -> {
+                timeline.compactionCompleted(event.summary, event.tokensBefore, event.tokensAfter)
+                _uiState.update { it.copy(isCompacting = false, items = timeline.items()) }
+                _effects.send(
+                    Effect.CompactionFinished(
+                        "Context compacted: ${formatTokenCount(event.tokensBefore)} → " +
+                            "${formatTokenCount(event.tokensAfter)} tokens",
+                    ),
+                )
+            }
+            is SessionEvent.CompactionFailed -> {
+                timeline.compactionFailed()
+                _uiState.update { it.copy(isCompacting = false, items = timeline.items()) }
+                _effects.send(Effect.CompactionFailed(event.cause ?: "Compaction failed"))
             }
             is SessionEvent.ToolCallResult -> {
                 applyTimelineEvent(event)

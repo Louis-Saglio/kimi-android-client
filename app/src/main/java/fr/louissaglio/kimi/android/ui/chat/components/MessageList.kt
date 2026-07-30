@@ -162,6 +162,7 @@ internal fun MessageList(
                         )
                     is ChatItem.AssistantMessage -> AssistantBubble(item)
                     is ChatItem.ToolGroup -> ToolGroupCard(item, onOpenSubagent)
+                    is ChatItem.CompactionDivider -> CompactionDividerRow(item)
                     // Bare rows are not produced by ChatTimeline anymore (ticket 037) but
                     // stay renderable for tests and previews.
                     is ChatItem.ToolActivity -> ToolRow(item, onOpenSubagent)
