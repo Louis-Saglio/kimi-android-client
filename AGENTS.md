@@ -55,6 +55,20 @@ curl -s -G -H "Authorization: Bearer $TOKEN" "$BASE/$APP/events:batchGet" \
   --data-urlencode "names=projects/-/apps/<appId>/events/<eventId>"
 ```
 
+Close an issue once its fix has shipped (`projects.apps.issues.patch`; the
+enum value is `CLOSED` — `RESOLVED` is rejected with INVALID_ARGUMENT):
+
+```bash
+curl -s -X PATCH -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  "$BASE/$APP/issues/<issueId>?updateMask=state" \
+  -d '{"state":"CLOSED"}'
+```
+
+Crashlytics reopens a closed issue automatically if the crash reappears on a
+newer app version, so a premature close resurfaces on its own — closing is
+also the regression signal for "verified fixed" tickets.
+
 ## Layout & conventions
 
 - `data/network/` — `ApiClient` is the shared HTTP scaffold (URL building,

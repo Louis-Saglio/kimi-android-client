@@ -14,12 +14,19 @@ import kotlinx.serialization.json.Json
  * and applies live socket events. Holds no coroutine state, which keeps it trivially
  * unit-testable; the ViewModel publishes [items] into its UiState after each call.
  *
- * History (committed) and live (in-flight turn) rows are kept apart: a refetch replaces
- * committed rows wholesale, which is what makes reconnects gap- and duplicate-free.
- * Sub-agent streams (ticket 045) use [historyBacked] = false: turn.started seals the
- * finished internal turn's live rows into the committed list instead of clearing them.
- * Ticket 046 backs them with the per-agent transcript endpoint: [replaceTranscript] /
- * [prependTranscript] feed turn pages into the same committed/live split.
+ * The timeline is ONE ordered row list: committed (history-backed) vs live (in-flight
+ * turn) is a position — [liveStart] — not a list membership (ticket 055). The previous
+ * pair of parallel lists in the same id space let one tool-call id exist twice: a
+ * reconnect refetch committed the in-flight call while the cursor replay re-created
+ * its row live, and LazyColumn crashed on the duplicate key. Now every tool event
+ * upserts across the WHOLE timeline in place — a late/replayed event for an
+ * already-committed call heals that row instead of appending a twin — and a refetch
+ * replaces the committed prefix wholesale, dropping the live rows it covers: the
+ * single live-vs-committed merge. Sub-agent streams (ticket 045) use
+ * [historyBacked] = false: turn.started seals the live tail into the committed prefix
+ * (the boundary moves to the end) instead of clearing it. Ticket 046 backs them with
+ * the per-agent transcript endpoint: [replaceTranscript] / [prependTranscript] feed
+ * turn pages into the same prefix/tail split.
  */
 class ChatTimeline(
     // Default mirrors the DI Json for direct construction in tests.
@@ -27,8 +34,13 @@ class ChatTimeline(
     private val historyBacked: Boolean = true,
 ) {
 
-    private val committed = mutableListOf<ChatItem>()
-    private val live = mutableListOf<ChatItem>()
+    /** The whole timeline, oldest first: rows before [liveStart] are committed
+     * (backed by fetched history/transcript pages), the rest are the live tail of the
+     * in-flight turn. All structural mutations go through the boundary helpers
+     * ([replaceCommitted], [prependCommitted], [appendCommitted], [appendLiveTool]) so
+     * the split can never drift. */
+    private val rows = mutableListOf<ChatItem>()
+    private var liveStart = 0
     private var liveBubbleCount = 0
     private var syntheticSpliceCount = 0
 
@@ -45,11 +57,10 @@ class ChatTimeline(
      * are globally unique per session, so the set is never pruned. */
     private val todoCallIds = mutableSetOf<String>()
 
-    // The widget mirrors the latest TodoList call (ticket 042). History and live calls
-    // are tracked apart for the same reason as the row lists: a mid-turn refetch
-    // re-derives the committed value while a live call not yet committed stays the
-    // latest. null = no call seen, empty = the last call cleared the list; both hide
-    // the widget.
+    // The widget mirrors the latest TodoList call (ticket 042). Committed and live
+    // states are tracked apart: a mid-turn refetch re-derives the committed value
+    // while a live call not yet committed stays the latest. null = no call seen,
+    // empty = the last call cleared the list; both hide the widget.
     private var committedTodos: List<Todo>? = null
     private var liveTodos: List<Todo>? = null
 
@@ -59,7 +70,7 @@ class ChatTimeline(
      * where the `agent_id:` result marker only exists once the result is committed too. */
     private val subagentLinks = mutableMapOf<String, String>()
 
-    fun items(): List<ChatItem> = committed + live
+    fun items(): List<ChatItem> = rows.toList()
 
     /** Live calls win over history (they are newer) until the turn-end refetch
      * commits them. */
@@ -67,25 +78,19 @@ class ChatTimeline(
 
     /**
      * Replaces committed rows from a fresh history fetch. With [keepLive] (mid-turn
-     * refetch), live rows survive — minus any the server has since committed, dropped
-     * here to avoid duplicates. Without it (turn ended), live state is cleared: history
-     * is the canonical rendering of the finished turn.
+     * refetch), the live tail survives — minus the rows the server has since committed.
+     * Without it (turn ended), the live tail is cleared: history is the canonical
+     * rendering of the finished turn.
      */
     fun replaceHistory(messages: List<ChatMessage>, keepLive: Boolean) {
-        committed.clear()
         committedMessageIds.clear()
         committedTodos = null
+        val fresh = mutableListOf<ChatItem>()
         messages.forEach { message ->
             committedMessageIds += message.id
-            flatten(message)
+            flatten(fresh, message, updateTodos = true)
         }
-        reapplySubagentLinks()
-        if (!keepLive) {
-            live.clear()
-            liveTodos = null
-            return
-        }
-        pruneCommittedLive()
+        replaceCommitted(fresh, keepLive)
     }
 
     /**
@@ -93,8 +98,8 @@ class ChatTimeline(
      * ones, deduplicated by message id ([committedMessageIds]) — a racing
      * [replaceHistory] can never make a page apply twice. Id-less messages are always
      * kept: they never come from history pages (the steer/splice echoes, which carry no
-     * id, stay live-end only), so dedup by id is sound. Live rows are untouched: they
-     * only ever grow at the newest end. The todo widget is untouched too — it mirrors
+     * id, stay live-end only), so dedup by id is sound. The live tail is untouched: it
+     * only ever grows at the newest end. The todo widget is untouched too — it mirrors
      * the newest page's latest call, and an older page's call must not regress it.
      * Tool pairs split by the page boundary are re-joined by [completeOrphanResults].
      */
@@ -104,14 +109,14 @@ class ChatTimeline(
         val head = mutableListOf<ChatItem>()
         fresh.forEach { flatten(head, it, updateTodos = false) }
         completeOrphanResults(head)
-        committed.addAll(0, head)
+        prependCommitted(head)
     }
 
     /**
      * A tool result at the top of the newer page whose call ended the older page (page
-     * boundary) flattened to an ORPHAN row in [committed] (result without a call — the
-     * flatten's "show it anyway" path). Prepending the call must not add a second row
-     * with the same tool-call id — a duplicate LazyColumn key (crash verified
+     * boundary) flattened to an ORPHAN row in the committed prefix (result without a
+     * call — the flatten's "show it anyway" path). Prepending the call must not add a
+     * second row with the same tool-call id — a duplicate LazyColumn key (crash verified
      * on-device 2026-07-29, sessions "ticket 043"/"ticket 047") — but it must not
      * re-key or remove the orphan row either: the orphan is the scroll anchor while
      * the user reads the page top, and LazyColumn pins the viewport to the first
@@ -132,10 +137,10 @@ class ChatTimeline(
         }
         if (headCalls.isEmpty()) return
         val adopted = mutableSetOf<String>()
-        for (index in committed.indices) {
-            val group = committed[index] as? ChatItem.ToolGroup ?: continue
+        for (index in 0 until liveStart) {
+            val group = rows[index] as? ChatItem.ToolGroup ?: continue
             if (group.tools.none { it.id in headCalls }) continue
-            committed[index] = group.copy(
+            rows[index] = group.copy(
                 tools = group.tools.map { tool ->
                     val call = headCalls[tool.id] ?: return@map tool
                     adopted += tool.id
@@ -171,58 +176,89 @@ class ChatTimeline(
      * resetting message pagination (ticket 043 semantics).
      */
     fun replaceTranscript(turns: List<TranscriptTurn>, keepLive: Boolean) {
-        committed.clear()
         committedTurnIds.clear()
         committedTodos = null
+        val fresh = mutableListOf<ChatItem>()
         turns.forEach { turn ->
-            flatten(committed, turn)
+            flatten(fresh, turn)
             committedTurnIds += turn.id
         }
-        reapplySubagentLinks()
-        if (!keepLive) {
-            live.clear()
-            liveTodos = null
-            return
-        }
-        pruneCommittedLive()
+        replaceCommitted(fresh, keepLive)
     }
 
     /**
      * Ticket 046 pagination: an older transcript page prepends its rows before the
      * loaded ones, deduplicated by turn id ([committedTurnIds]) — a racing
-     * [replaceTranscript] can never make a page apply twice. Live rows are untouched:
-     * they only ever grow at the newest end.
+     * [replaceTranscript] can never make a page apply twice. The live tail is
+     * untouched: it only ever grows at the newest end.
      */
     fun prependTranscript(turns: List<TranscriptTurn>) {
         val fresh = turns.filter { committedTurnIds.add(it.id) }
         if (fresh.isEmpty()) return
         val head = mutableListOf<ChatItem>()
         fresh.forEach { flatten(head, it) }
-        committed.addAll(0, head)
+        prependCommitted(head)
+    }
+
+    // --- The committed/live boundary ---------------------------------------------------
+
+    /** A refetch replaces the committed prefix wholesale: [fresh] is canonical. With
+     * [keepLive] the live tail survives minus the rows the server has since committed
+     * ([pruneCoveredLiveRows] — the ONE live-vs-committed merge); without it the tail
+     * is cleared: history is the canonical rendering of the finished turn. */
+    private fun replaceCommitted(fresh: List<ChatItem>, keepLive: Boolean) {
+        rows.subList(0, liveStart).clear()
+        rows.addAll(0, fresh)
+        liveStart = fresh.size
+        reapplySubagentLinks()
+        if (!keepLive) {
+            rows.subList(liveStart, rows.size).clear()
+            liveTodos = null
+            return
+        }
+        pruneCoveredLiveRows()
+    }
+
+    /** Older pages insert before the loaded rows; the boundary shifts with them. */
+    private fun prependCommitted(head: List<ChatItem>) {
+        rows.addAll(0, head)
+        liveStart += head.size
+    }
+
+    /** Mid-turn commits (splice echoes) land at the committed tail, above the live
+     * tail. */
+    private fun appendCommitted(item: ChatItem) {
+        rows.add(liveStart, item)
+        liveStart++
     }
 
     /** Drops the live rows a refetch has since committed, so [keepLive]-style replaces
      * never show a row twice: tool rows dedup by call id (a half-committed group keeps
      * its survivors under the first one's id), assistant bubbles by exact content. */
-    private fun pruneCommittedLive() {
-        val committedToolIds = committed.filterIsInstance<ChatItem.ToolGroup>()
-            .flatMap { group -> group.tools.map { it.id } }
-            .toSet()
-        for (index in live.indices.reversed()) {
-            when (val item = live[index]) {
+    private fun pruneCoveredLiveRows() {
+        val committedToolIds = mutableSetOf<String>()
+        val committedBubbles = mutableListOf<ChatItem.AssistantMessage>()
+        for (index in 0 until liveStart) {
+            when (val item = rows[index]) {
+                is ChatItem.ToolGroup -> item.tools.forEach { committedToolIds += it.id }
+                is ChatItem.AssistantMessage -> committedBubbles += item
+                else -> Unit
+            }
+        }
+        for (index in rows.indices.reversed()) {
+            if (index < liveStart) break
+            when (val item = rows[index]) {
                 is ChatItem.ToolGroup -> {
                     val survivors = item.tools.filterNot { it.id in committedToolIds }
                     if (survivors.isEmpty()) {
-                        live.removeAt(index)
+                        rows.removeAt(index)
                     } else if (survivors.size < item.tools.size) {
-                        live[index] = ChatItem.ToolGroup(survivors.first().id, survivors)
+                        rows[index] = ChatItem.ToolGroup(survivors.first().id, survivors)
                     }
                 }
                 is ChatItem.AssistantMessage ->
-                    if (committed.filterIsInstance<ChatItem.AssistantMessage>()
-                            .any { it.text == item.text && it.thinking == item.thinking }
-                    ) {
-                        live.removeAt(index)
+                    if (committedBubbles.any { it.text == item.text && it.thinking == item.thinking }) {
+                        rows.removeAt(index)
                     }
                 else -> Unit
             }
@@ -235,12 +271,11 @@ class ChatTimeline(
                 if (historyBacked) {
                     // Defensive clear: a new turn must never inherit a previous turn's
                     // leftovers (possible only if the earlier turn.ended refetch failed).
-                    live.clear()
+                    rows.subList(liveStart, rows.size).clear()
                 } else {
                     // No refetch ever comes: seal the finished internal turn's rows so
                     // they keep their place above the next turn's spliced prompts.
-                    committed += live
-                    live.clear()
+                    liveStart = rows.size
                 }
                 // Same clear as the rows: the previous turn's todo calls are committed
                 // (history-backed) or irrelevant now (sub-agent page renders no widget).
@@ -255,7 +290,8 @@ class ChatTimeline(
                 if (isTodoCall(event.toolCallId, event.name)) {
                     // The todo state comes from the call's input, not its result.
                     todoParser.of(event.name, event.input)?.let { liveTodos = it }
-                } else {                    upsertTool(event.toolCallId, event.name, ToolStatus.Running, event.preview, input = event.input)
+                } else {
+                    upsertTool(event.toolCallId, event.name, ToolStatus.Running, event.preview, input = event.input)
                 }
             is SessionEvent.ToolCallResult ->
                 if (event.toolCallId in todoCallIds) Unit
@@ -291,32 +327,35 @@ class ChatTimeline(
     private fun appendSpliced(message: ChatMessage) {
         if (message.role != ChatMessage.Role.User) return
         if (message.id.isNotBlank()) {
-            if (committed.any { it.id == message.id }) return
-            flatten(message)
+            if ((0 until liveStart).any { rows[it].id == message.id }) return
+            val fresh = mutableListOf<ChatItem>()
+            flatten(fresh, message, updateTodos = true)
+            fresh.forEach(::appendCommitted)
             return
         }
         val text = message.parts.filterIsInstance<ChatMessage.Part.Text>().joinToString("\n") { it.text }
         val attachments = message.parts.filterIsInstance<ChatMessage.Part.Attachment>()
         val images = message.parts.filterIsInstance<ChatMessage.Part.Image>()
         if (text.isBlank() && attachments.isEmpty() && images.isEmpty()) return
-        if (committed.filterIsInstance<ChatItem.UserMessage>().any {
+        if ((0 until liveStart).asSequence().map { rows[it] }.filterIsInstance<ChatItem.UserMessage>().any {
                 it.text == text && it.attachments == attachments && it.images == images
             }
         ) {
             return
         }
-        committed += ChatItem.UserMessage("spliced_${syntheticSpliceCount++}", text, attachments, images, message.createdAt)
+        appendCommitted(ChatItem.UserMessage("spliced_${syntheticSpliceCount++}", text, attachments, images, message.createdAt))
     }
 
-    /** Deltas extend the last live bubble; after a tool row a new bubble starts, so a
-     * multi-step turn reads text → tool → text like the web client. */
+    /** Deltas extend the last LIVE bubble; after a tool row a new bubble starts, so a
+     * multi-step turn reads text → tool → text like the web client. A committed bubble
+     * never absorbs late deltas — they open a fresh live bubble instead. */
     private fun appendDelta(delta: String, thinking: Boolean) {
-        val last = live.lastOrNull()
-        if (last is ChatItem.AssistantMessage) {
-            live[live.lastIndex] =
+        val last = rows.lastOrNull()
+        if (rows.size > liveStart && last is ChatItem.AssistantMessage) {
+            rows[rows.lastIndex] =
                 if (thinking) last.copy(thinking = last.thinking + delta) else last.copy(text = last.text + delta)
         } else {
-            live += ChatItem.AssistantMessage(
+            rows += ChatItem.AssistantMessage(
                 id = "live_${liveBubbleCount++}",
                 text = if (thinking) "" else delta,
                 thinking = if (thinking) delta else "",
@@ -325,15 +364,20 @@ class ChatTimeline(
     }
 
     /** Live output streaming (ticket 025): chunks append to the matching *running* row
-     * only. Progress is volatile — it never creates a row (unknown ids are dropped),
-     * a finished call keeps its definitive result, and a history refetch replaces the
-     * rows wholesale, clearing whatever accumulated. */
+     * wherever it lives — a reconnect replay can lag the refetch that committed the
+     * call (ticket 055). Progress is volatile — it never creates a row (unknown ids
+     * are dropped), a finished call keeps its definitive result, and a history refetch
+     * replaces the rows wholesale, clearing whatever accumulated. */
     private fun appendToolProgress(toolCallId: String, chunk: String) {
-        live.updateTool(toolCallId) { existing ->
+        healTool(toolCallId) { existing ->
             if (existing.status == ToolStatus.Running) existing.copy(output = existing.output + chunk) else existing
         }
     }
 
+    /** The tool-row insertion choke point (ticket 055): [healTool] updates the row
+     * wherever it lives — committed prefix included, so a replayed event for a call a
+     * refetch just committed updates that row's status/output in place instead of
+     * appending a duplicate — and only an unknown id opens a new live row at the tail. */
     private fun upsertTool(
         toolCallId: String,
         name: String,
@@ -344,7 +388,7 @@ class ChatTimeline(
         replaceOutput: Boolean = false,
     ) {
         var found = false
-        live.updateTool(toolCallId) { existing ->
+        healTool(toolCallId) { existing ->
             found = true
             existing.copy(
                 name = existing.name.ifBlank { name },
@@ -354,16 +398,15 @@ class ChatTimeline(
                 status = status,
             )
         }
-        if (!found) live.appendTool(ChatItem.ToolActivity(toolCallId, name, status, preview, input, output))
+        if (!found) appendLiveTool(ChatItem.ToolActivity(toolCallId, name, status, preview, input, output))
     }
 
     /** Live row→sub-agent linkage (ticket 045): `subagent.spawned` names the `Agent`
-     * call it answers, so the row gains its open affordance. Both lists are searched —
-     * a mid-turn refetch may have committed the running row already. */
+     * call it answers, so the row gains its open affordance. The whole timeline is
+     * searched — a mid-turn refetch may have committed the running row already. */
     fun linkSubagentTool(toolCallId: String, subagentId: String) {
         subagentLinks[toolCallId] = subagentId
-        live.updateTool(toolCallId) { row -> if (row.subagentId == null) row.copy(subagentId = subagentId) else row }
-        committed.updateTool(toolCallId) { row -> if (row.subagentId == null) row.copy(subagentId = subagentId) else row }
+        healTool(toolCallId) { row -> if (row.subagentId == null) row.copy(subagentId = subagentId) else row }
     }
 
     /** Cold row→sub-agent linkage (ticket 045): an `Agent` call's result text carries
@@ -372,7 +415,7 @@ class ChatTimeline(
      * linkage available when the spawn happened before the app subscribed; a result
      * without the marker leaves the row unlinked, hence non-tappable. */
     private fun linkSubagentFromResult(toolCallId: String, output: String) {
-        live.updateTool(toolCallId) { row ->
+        healTool(toolCallId) { row ->
             val linked = row.subagentId ?: agentResultSubagentId(row.name, output)
             if (linked != null) subagentLinks[toolCallId] = linked
             row.copy(subagentId = linked)
@@ -381,10 +424,10 @@ class ChatTimeline(
 
     /** Re-applies live-learned links after a refetch rebuilt the committed rows. */
     private fun reapplySubagentLinks() {
-        for (index in committed.indices) {
-            val group = committed[index] as? ChatItem.ToolGroup ?: continue
+        for (index in 0 until liveStart) {
+            val group = rows[index] as? ChatItem.ToolGroup ?: continue
             if (group.tools.none { it.subagentId == null && it.id in subagentLinks }) continue
-            committed[index] = group.copy(
+            rows[index] = group.copy(
                 tools = group.tools.map { tool ->
                     if (tool.subagentId == null) tool.copy(subagentId = subagentLinks[tool.id]) else tool
                 },
@@ -407,8 +450,6 @@ class ChatTimeline(
         todoCallIds += toolCallId
         return true
     }
-
-    private fun flatten(message: ChatMessage) = flatten(committed, message, updateTodos = true)
 
     /**
      * Flattens one history message into [target] rows. [updateTodos] gates the
@@ -530,10 +571,43 @@ class ChatTimeline(
         }
     }
 
-    /** Appends [tool] to the trailing group, or opens a new one when the last row is
-     * not a tool run — a non-tool row between two calls splits them into two groups
-     * (ticket 037). The group id stays the first call's id, so a growing live group
-     * keeps its LazyColumn key. */
+    /** Appends [tool] to the trailing LIVE group, or opens a new one when the tail is
+     * not a live tool run — a non-tool row between two calls splits them into two
+     * groups (ticket 037), and a committed group never absorbs a new live call (one
+     * row must not span the boundary, ticket 055). The group id stays the first call's
+     * id, so a growing live group keeps its LazyColumn key. */
+    private fun appendLiveTool(tool: ChatItem.ToolActivity) {
+        val last = rows.lastOrNull()
+        if (rows.size > liveStart && last is ChatItem.ToolGroup) {
+            rows[rows.lastIndex] = last.copy(tools = last.tools + tool)
+        } else {
+            rows += ChatItem.ToolGroup(tool)
+        }
+    }
+
+    /** In-place update of the row [toolCallId] inside whichever group holds it,
+     * searched from the tail across the WHOLE timeline (a result matches its most
+     * recent call). The one tool-row lookup (ticket 055): committed rows heal too, so
+     * a late/replayed event never appends a twin of an already-committed row. No-op
+     * when the id is unknown. */
+    private fun healTool(
+        toolCallId: String,
+        update: (ChatItem.ToolActivity) -> ChatItem.ToolActivity,
+    ) {
+        for (groupIndex in rows.indices.reversed()) {
+            val group = rows[groupIndex] as? ChatItem.ToolGroup ?: continue
+            val toolIndex = group.tools.indexOfFirst { it.id == toolCallId }
+            if (toolIndex < 0) continue
+            val tools = group.tools.toMutableList()
+            tools[toolIndex] = update(tools[toolIndex])
+            rows[groupIndex] = group.copy(tools = tools)
+            return
+        }
+    }
+
+    /** Appends [tool] to the trailing group of a fresh page being flattened, or opens
+     * a new one — a non-tool row between two calls splits them into two groups
+     * (ticket 037). The group id stays the first call's id. */
     private fun MutableList<ChatItem>.appendTool(tool: ChatItem.ToolActivity) {
         val last = lastOrNull()
         if (last is ChatItem.ToolGroup) {
@@ -543,7 +617,7 @@ class ChatTimeline(
         }
     }
 
-    /** In-place update of the row [toolCallId] inside whichever group holds it,
+    /** In-place update of the row [toolCallId] inside a fresh page being flattened,
      * searched from the tail (a result matches its most recent call). No-op when the
      * id is unknown. */
     private fun MutableList<ChatItem>.updateTool(
