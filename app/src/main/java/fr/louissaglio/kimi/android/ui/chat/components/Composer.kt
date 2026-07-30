@@ -59,6 +59,8 @@ internal fun ChatInputBar(
     attachments: List<ChatViewModel.PendingAttachment>,
     modelLabel: String?,
     contextUsage: ContextUsage?,
+    compactEnabled: Boolean,
+    onCompact: () -> Unit,
     onModelClick: () -> Unit,
     onTextChange: (String) -> Unit,
     onSend: () -> Unit,
@@ -130,8 +132,11 @@ internal fun ChatInputBar(
                         }
                         modelLabel?.let { label -> ModelChip(label = label, onClick = onModelClick) }
                         // Context usage right of the model chip (ticket 053): model-scoped
-                        // info next to the model it belongs to; hidden until known.
-                        contextUsage?.let { ContextUsageRing(it) }
+                        // info next to the model it belongs to; hidden until known. The
+                        // ring's dialog carries the compact affordance at ≥80% (057).
+                        contextUsage?.let {
+                            ContextUsageRing(it, compactEnabled = compactEnabled, onCompact = onCompact)
+                        }
                         Spacer(Modifier.weight(1f))
                         if (isWorking) {
                             // Stop sits with the turn controls (ticket 053), for app- and

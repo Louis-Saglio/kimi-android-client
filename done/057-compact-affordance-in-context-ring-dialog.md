@@ -38,13 +38,13 @@ In `ContextUsageRing`'s exact-numbers dialog (`ui/chat/`):
 
 ## Acceptance criteria
 
-- [ ] At ≥80% context usage the ring dialog shows "Compact session"; below
+- [x] At ≥80% context usage the ring dialog shows "Compact session"; below
       80% it does not (threshold logic unit-tested, boundary at 80%).
-- [ ] Tapping the button triggers the same compact flow as the overflow menu
+- [x] Tapping the button triggers the same compact flow as the overflow menu
       (ViewModel test: one shared entry point) and dismisses the dialog.
-- [ ] The button is disabled while a turn runs or a compaction is in
+- [x] The button is disabled while a turn runs or a compaction is in
       progress.
-- [ ] `./gradlew :app:testDebugUnitTest` passes; release APK built and copied
+- [x] `./gradlew :app:testDebugUnitTest` passes; release APK built and copied
       to the file server per AGENTS.md.
 
 ## Out of scope

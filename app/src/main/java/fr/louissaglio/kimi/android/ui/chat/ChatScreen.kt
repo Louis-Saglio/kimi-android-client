@@ -221,6 +221,10 @@ private fun ChatContent(
     // the scroll itself runs inside MessageList, which owns the LazyListState
     // (keeping its open-at-the-newest-row initial index intact).
     var scrollToBottomTick by remember { mutableIntStateOf(0) }
+    // The one compact enabled rule (056/057): a running turn (40910 server-side) or a
+    // compaction in progress (silent server no-op) disables every compact affordance —
+    // the overflow menu item and the context ring's dialog button share this flag.
+    val canCompact = !uiState.isWorking && !uiState.isCompacting
     Scaffold(
         topBar = {
             TopAppBar(
@@ -263,10 +267,7 @@ private fun ChatContent(
                         ) {
                             DropdownMenuItem(
                                 text = { Text("Compact session") },
-                                // A turn active (40910 server-side) or a compaction
-                                // already running (silent no-op server-side) must not
-                                // be triggerable from here.
-                                enabled = !uiState.isWorking && !uiState.isCompacting,
+                                enabled = canCompact,
                                 onClick = {
                                     menuExpanded = false
                                     onCompact()
@@ -334,6 +335,8 @@ private fun ChatContent(
                         if (effort != null) "$label · $effort" else label
                     },
                     contextUsage = uiState.contextUsage,
+                    compactEnabled = canCompact,
+                    onCompact = onCompact,
                     onModelClick = { showModelPicker = true },
                     onTextChange = onInputChange,
                     // Send/Steer both funnel here; bump first so the jump rides

@@ -3,10 +3,12 @@ package fr.louissaglio.kimi.android.ui.chat
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -32,18 +34,25 @@ import fr.louissaglio.kimi.android.data.chat.ContextUsage
  * The chat composer's context-usage indicator (ticket 041, moved from the top bar into
  * the composer in 053): a small ring, filled proportionally to
  * [ContextUsage.usedTokens] / [ContextUsage.maxTokens], with no text — a tap opens the
- * exact numbers in a dialog. At ≥80% the arc (and the dialog percentage) shifts to the
- * error color. The caller hides it entirely while the usage is still unknown (no fake
- * empty ring).
+ * exact numbers in a dialog. At ≥80% ([HIGH_CONTEXT_USAGE_PERCENT]) the arc (and the
+ * dialog percentage) shifts to the error color and the dialog gains a "Compact session"
+ * button (ticket 057) — the action sits next to the numbers that motivate it, sharing
+ * the overflow menu's entry point and enabled rules (056). The caller hides the ring
+ * entirely while the usage is still unknown (no fake empty ring).
  */
 @Composable
-internal fun ContextUsageRing(usage: ContextUsage, modifier: Modifier = Modifier) {
+internal fun ContextUsageRing(
+    usage: ContextUsage,
+    compactEnabled: Boolean,
+    onCompact: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val pct = contextUsagePercent(usage.usedTokens, usage.maxTokens)
     val details = "${formatTokenCount(usage.usedTokens)} / ${formatTokenCount(usage.maxTokens)} tokens · $pct%"
     val description =
         "Context usage: ${formatTokenCount(usage.usedTokens)} of ${formatTokenCount(usage.maxTokens)} tokens, $pct%"
     var showDetails by rememberSaveable { mutableStateOf(false) }
-    val isHigh = pct >= 80
+    val isHigh = isHighContextUsage(pct)
     val arcColor = if (isHigh) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
     val trackColor = MaterialTheme.colorScheme.outlineVariant
     Box(
@@ -86,14 +95,40 @@ internal fun ContextUsageRing(usage: ContextUsage, modifier: Modifier = Modifier
             },
             title = { Text("Context usage") },
             text = {
-                Text(
-                    text = details,
-                    color = if (isHigh) MaterialTheme.colorScheme.error else Color.Unspecified,
-                )
+                Column {
+                    Text(
+                        text = details,
+                        color = if (isHigh) MaterialTheme.colorScheme.error else Color.Unspecified,
+                    )
+                    // Ticket 057: at high usage the dialog itself carries the compact
+                    // action, right under the numbers that motivate it — same entry
+                    // point and enabled rules as the 056 overflow menu item. The tap
+                    // dismisses; the timeline's compacting divider takes over the
+                    // feedback, so no extra snackbar from here.
+                    if (isHigh) {
+                        Button(
+                            onClick = {
+                                showDetails = false
+                                onCompact()
+                            },
+                            enabled = compactEnabled,
+                            modifier = Modifier.padding(top = 12.dp),
+                        ) {
+                            Text("Compact session")
+                        }
+                    }
+                }
             },
         )
     }
 }
+
+/** Usage percentage at which the ring shifts to the error color (041) and the details
+ * dialog offers "Compact session" (057) — one shared constant so the two rules cannot
+ * drift apart. */
+internal const val HIGH_CONTEXT_USAGE_PERCENT = 80
+
+internal fun isHighContextUsage(pct: Int): Boolean = pct >= HIGH_CONTEXT_USAGE_PERCENT
 
 /** Fill percentage, web parity (ticket 041): ceil, so sub-0.5% usage still shows a
  * sliver, clamped to 0–100 so momentary over-estimates don't break the arc. */
