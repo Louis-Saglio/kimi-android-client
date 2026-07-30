@@ -21,6 +21,13 @@ stored in the app settings).
   `Channel`. ALL one-shots (snackbars, open-file intents) go through the effect
   channel — composables never call `snackbarHostState` or do I/O directly.
 - minSdk 31, targetSdk 35, AGP 8.6.x.
+- Crash reporting: Firebase Crashlytics in the default VPS project
+  (`kimi-code-android-client`, Android app `fr.louissaglio.kimi.android`,
+  `app/google-services.json` committed). The SDK auto-initializes — no app
+  code. Reports land at
+  https://console.firebase.google.com/project/kimi-code-android-client/crashlytics
+  and are deobfuscated because the Crashlytics Gradle plugin uploads the R8
+  mapping on every release build.
 
 ## Layout & conventions
 

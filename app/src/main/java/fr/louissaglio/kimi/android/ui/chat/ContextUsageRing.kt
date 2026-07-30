@@ -3,6 +3,7 @@ package fr.louissaglio.kimi.android.ui.chat
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
@@ -28,11 +29,12 @@ import androidx.compose.ui.unit.dp
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
 
 /**
- * The chat top bar's context-usage indicator (ticket 041): a small ring, filled
- * proportionally to [ContextUsage.usedTokens] / [ContextUsage.maxTokens], with no text
- * in the bar — a tap opens the exact numbers in a dialog. At ≥80% the arc (and the
- * dialog percentage) shifts to the error color. The caller hides it entirely while the
- * usage is still unknown (no fake empty ring).
+ * The chat composer's context-usage indicator (ticket 041, moved from the top bar into
+ * the composer in 052): a small ring, filled proportionally to
+ * [ContextUsage.usedTokens] / [ContextUsage.maxTokens], with no text — a tap opens the
+ * exact numbers in a dialog. At ≥80% the arc (and the dialog percentage) shifts to the
+ * error color. The caller hides it entirely while the usage is still unknown (no fake
+ * empty ring).
  */
 @Composable
 internal fun ContextUsageRing(usage: ContextUsage, modifier: Modifier = Modifier) {
@@ -45,15 +47,17 @@ internal fun ContextUsageRing(usage: ContextUsage, modifier: Modifier = Modifier
     val arcColor = if (isHigh) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
     val trackColor = MaterialTheme.colorScheme.outlineVariant
     Box(
-        // A 20dp arc inside the standard 48dp touch target.
+        // A 20dp arc inside the standard 48dp touch target, pinned to the start so it
+        // visually attaches to the model chip it trails (ticket 052) instead of floating
+        // ~26dp away from it; the tap target stays the full box.
         modifier = modifier
             .size(48.dp)
             .clip(CircleShape)
             .clickable { showDetails = true }
             .semantics { contentDescription = description },
-        contentAlignment = Alignment.Center,
+        contentAlignment = Alignment.CenterStart,
     ) {
-        Canvas(Modifier.size(20.dp)) {
+        Canvas(Modifier.padding(start = 2.dp).size(20.dp)) {
             val stroke = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
             val inset = stroke.width / 2
             drawCircle(
