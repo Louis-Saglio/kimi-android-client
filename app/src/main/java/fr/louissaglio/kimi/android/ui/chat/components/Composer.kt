@@ -88,7 +88,7 @@ internal fun ChatInputBar(
             }
             // One rounded container echoes the web composer pill (ticket 038): the field
             // spans the full width on top, an action row below holds attach, the model
-            // chip, the context ring and stop/send (ticket 052). The field carries no
+            // chip, the context ring and stop/send (ticket 053). The field carries no
             // outline or fill of its own — the container is the boundary.
             Surface(
                 shape = MaterialTheme.shapes.extraLarge,
@@ -129,12 +129,12 @@ internal fun ChatInputBar(
                             Icon(Icons.Filled.Add, contentDescription = null)
                         }
                         modelLabel?.let { label -> ModelChip(label = label, onClick = onModelClick) }
-                        // Context usage right of the model chip (ticket 052): model-scoped
+                        // Context usage right of the model chip (ticket 053): model-scoped
                         // info next to the model it belongs to; hidden until known.
                         contextUsage?.let { ContextUsageRing(it) }
                         Spacer(Modifier.weight(1f))
                         if (isWorking) {
-                            // Stop sits with the turn controls (ticket 052), for app- and
+                            // Stop sits with the turn controls (ticket 053), for app- and
                             // web-started turns alike. The filled M3 error/onError pair —
                             // not the tonal errorContainer/error one, which inverts in dark
                             // theme (dark circle, pale glyph): here the glyph stays darker

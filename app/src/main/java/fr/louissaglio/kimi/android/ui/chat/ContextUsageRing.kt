@@ -30,7 +30,7 @@ import fr.louissaglio.kimi.android.data.chat.ContextUsage
 
 /**
  * The chat composer's context-usage indicator (ticket 041, moved from the top bar into
- * the composer in 052): a small ring, filled proportionally to
+ * the composer in 053): a small ring, filled proportionally to
  * [ContextUsage.usedTokens] / [ContextUsage.maxTokens], with no text — a tap opens the
  * exact numbers in a dialog. At ≥80% the arc (and the dialog percentage) shifts to the
  * error color. The caller hides it entirely while the usage is still unknown (no fake
@@ -48,7 +48,7 @@ internal fun ContextUsageRing(usage: ContextUsage, modifier: Modifier = Modifier
     val trackColor = MaterialTheme.colorScheme.outlineVariant
     Box(
         // A 20dp arc inside the standard 48dp touch target, pinned to the start so it
-        // visually attaches to the model chip it trails (ticket 052) instead of floating
+        // visually attaches to the model chip it trails (ticket 053) instead of floating
         // ~26dp away from it; the tap target stays the full box.
         modifier = modifier
             .size(48.dp)

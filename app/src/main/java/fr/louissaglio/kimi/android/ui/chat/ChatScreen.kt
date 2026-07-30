@@ -237,7 +237,7 @@ private fun ChatContent(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
-                // No actions (ticket 052): the context ring, working spinner and stop
+                // No actions (ticket 053): the context ring, working spinner and stop
                 // button moved into the composer — the top bar is navigation-only.
             )
         },

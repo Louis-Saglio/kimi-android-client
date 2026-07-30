@@ -1,6 +1,6 @@
 # Move stop button and context usage ring into the composer
 
-- **ID:** 052
+- **ID:** 053
 - **Created:** 2026-07-30
 - **Depends on:** none
 
