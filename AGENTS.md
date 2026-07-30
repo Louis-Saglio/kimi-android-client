@@ -121,12 +121,18 @@ also the regression signal for "verified fixed" tickets.
 ## Distribution: put the release APK on the file server
 
 After every build Louis is meant to try, the **release** APK **must** be copied
-to the file server so he can download and install it on his phone:
+to the file server so he can download and install it on his phone. The file
+name on the file server must be `kimi-android-client-<branch-name>.apk`, where
+`<branch-name>` is the current git branch with `/` replaced by `-` (e.g.
+`kimi-android-client-main.apk`, `kimi-android-client-agent-fix-auth.apk`).
+This avoids name conflicts with other apps and prevents parallel sessions on
+different branches from overwriting each other's APK:
 
 ```bash
 ./gradlew :app:assembleRelease
-sudo cp app/build/outputs/apk/release/app-release.apk /home/fileserver/files/
-sudo chown fileserver:fileserver /home/fileserver/files/app-release.apk
+BRANCH=$(git branch --show-current | tr '/' '-')
+sudo cp app/build/outputs/apk/release/app-release.apk "/home/fileserver/files/kimi-android-client-${BRANCH}.apk"
+sudo chown fileserver:fileserver "/home/fileserver/files/kimi-android-client-${BRANCH}.apk"
 ```
 
 It then appears in the listing at `https://agent.example.com` (basic auth,
