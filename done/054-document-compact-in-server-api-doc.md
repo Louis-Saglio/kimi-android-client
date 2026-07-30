@@ -72,17 +72,17 @@ it enumerates sections.
 
 ## Acceptance criteria
 
-- [ ] `docs/server-api.md` has a `## Compact` section with a live-verified
+- [x] `docs/server-api.md` has a `## Compact` section with a live-verified
       `POST :compact` request/response example (token redacted, server version
       noted).
-- [ ] The section shows real captured WebSocket frames emitted by a
+- [x] The section shows real captured WebSocket frames emitted by a
       compaction, including `event.session.history_compacted` with all payload
       fields explained.
-- [ ] Post-compaction `GET .../messages` and `GET .../status` behaviour is
+- [x] Post-compaction `GET .../messages` and `GET .../status` behaviour is
       documented from live observations.
-- [ ] At least the busy-session and empty-session cases are probed live and
+- [x] At least the busy-session and empty-session cases are probed live and
       their outcomes recorded.
-- [ ] The `## Verification log` section gains an entry for this verification.
+- [x] The `## Verification log` section gains an entry for this verification.
 
 ## Out of scope
 

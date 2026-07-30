@@ -681,6 +681,159 @@ WS then emits `turn.step.interrupted` (`reason: "aborted"`) → `turn.ended`
 (`reason: "cancelled"`) → `event.session.work_changed` (idle) →
 `prompt.aborted`.
 
+## Compact
+
+Compacting summarizes a session's history to free up context window (the wire
+equivalent of the TUI's `/compact`). Documented and verified live on server
+`0.30.0` (2026-07-30, ticket 054). **Beware, web-bundle recon is misleading
+here: the `event.session.history_compacted` event the web client maps
+(`before_seq` / `reason` / `summary_message_id`) was never emitted by this
+server — a manual compact produces `compaction.started` /
+`compaction.completed` instead (captures below).**
+
+### Compact a session — `POST /api/v1/sessions/{id}:compact`
+
+Body: `{}` or `{"instruction": "..."}` (the body may also be omitted
+entirely — same as `{}`). The endpoint is **fire-and-forget**: it ACKs in
+milliseconds with an empty data object and the compaction runs in the
+background (a summarization model call — observed ~8–46 s depending on
+history size).
+
+```bash
+curl -s -X POST 'http://127.0.0.1:58627/api/v1/sessions/session_647d8a6d-...:compact' \
+  -H "Authorization: Bearer <token>" \
+  -H 'Content-Type: application/json; charset=utf-8' -d '{}'
+# {"code":0,"msg":"success","data":{},"request_id":"01KYRRVG0A03KKCRD4K27R2E73"}
+
+curl -s -X POST 'http://127.0.0.1:58627/api/v1/sessions/session_abf63a9c-...:compact' \
+  -H "Authorization: Bearer <token>" \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  -d '{"instruction":"Keep the echoed marker string verbatim in the summary."}'
+# {"code":0,"msg":"success","data":{},"request_id":"01KYRS33HGG01FKRGKM3GXNXG8"}
+```
+
+- `instruction` is a free-text hint for the summarizer; it is echoed back in
+  the `compaction.started` WS event.
+- Posting a second compact while a compaction is already running is a
+  **silent no-op** (verified live): same instant `{"code":0,...,"data":{}}`
+  ACK, but no second `compaction.started` fires — one compaction per
+  session at a time.
+
+### WebSocket sequence
+
+Captured 2026-07-30 on 0.30.0 (session with 8 messages / 3 completed turns,
+compacted with an empty body):
+
+```
+seq 34  compaction.started         {"trigger":"manual"} — plus "instruction" when one was sent
+seq 35  event.session.work_changed busy=true (main_turn_active stays false)
+seq 35  agent.status.updated       usage variant; a second one drops contextTokens to the compacted size
+seq 36  context.spliced            start=0, deleteCount=<whole context>, messages = kept user
+                                   messages + the summary (see below)
+seq 37  compaction.completed       {"result":{summary, compactedCount, tokensBefore, tokensAfter,
+                                   keptUserMessageCount}}
+seq 38  event.session.work_changed busy=false
+```
+
+`agent.status.updated` frames piggyback on the same seqs as usual. The
+session reads `busy: true` for the whole compaction (`GET .../status`
+verified mid-run), but **no turn events fire** (`turn.started`, `prompt.*`)
+— compaction is not a turn.
+
+Verbatim `compaction.started` (the instruction variant, session
+`session_abf63a9c-...`):
+
+```json
+{"type":"compaction.started","seq":25,"session_id":"session_abf63a9c-...","timestamp":"2026-07-30T05:48:54.194Z",
+ "payload":{"type":"compaction.started","trigger":"manual",
+            "instruction":"Keep the echoed marker string verbatim in the summary.",
+            "agentId":"main","sessionId":"session_abf63a9c-..."},
+ "epoch":"ep_01KYRS1R9FV9PCACAS87ZMN54Q"}
+```
+
+Verbatim `compaction.completed` (summary trimmed):
+
+```json
+{"type":"compaction.completed","seq":37,"session_id":"session_647d8a6d-...","timestamp":"2026-07-30T05:44:56.676Z",
+ "payload":{"type":"compaction.completed",
+  "result":{"summary":"Nothing is actually pending — this conversation is a completed spike ...",
+            "compactedCount":8,"tokensBefore":850,"tokensAfter":386,"keptUserMessageCount":3},
+  "agentId":"main","sessionId":"session_647d8a6d-..."},
+ "epoch":"ep_01KYRRQHYHCXDT5NY3Z9VERZR4"}
+```
+
+- `result.summary` — the generated summary text; also persisted in history
+  (see below).
+- `result.compactedCount` — how many history messages were folded into the
+  summary (all 8 in this run).
+- `result.tokensBefore` / `result.tokensAfter` — token estimates of the
+  compacted span before/after. `tokensBefore` covers the history span only
+  (850 here), not the full context — `GET .../status` `context_tokens` was
+  26518 before the same run. `tokensAfter` equalled the post-compaction
+  `context_tokens` in both observed runs (386 and 275).
+- `result.keptUserMessageCount` — how many real user messages survive
+  verbatim in the compacted context.
+
+The `context.spliced` frame rewrites the model context wholesale:
+`start: 0`, `deleteCount: <previous context size>` (8 in the capture), and
+`messages` is the new context: the kept user messages (verbatim, original
+`msg_...` ids, `origin.kind: "user"`) followed by the summary as a user
+message with `origin.kind: "compaction_summary"` and **`id: null`**. The
+spliced summary text is prefixed with model-facing instructions that are
+**not** persisted — history stores the bare summary (verified, see below).
+The prefix (verbatim):
+
+> The conversation so far has been compacted to free up context. What
+> follows is your own working summary of this task — use it to continue
+> your train of thought rather than starting over. Treat it as notes, not
+> proof: where it says a step was done, tests passed, or a fix worked,
+> verify that yourself before relying on it. Any user messages earlier in
+> this context are preserved verbatim from the compacted conversation;
+> where a system-reminder note among them marks an omitted middle section,
+> the user messages it replaced are covered by this summary.
+
+### Effect on history and status
+
+- `GET .../messages` still returns the **full pre-compaction transcript** —
+  nothing is deleted. Compaction **appends one message** at the end:
+  `role: "user"`, a single text part with the bare summary (no prefix),
+  `metadata.origin.kind: "compaction_summary"`, under a normal sequential
+  id (verified):
+
+  ```json
+  {"id":"msg_session_647d8a6d-..._000008","session_id":"session_647d8a6d-...","role":"user",
+   "content":[{"type":"text","text":"Nothing is actually pending — this conversation is a completed spike ..."}],
+   "created_at":"2026-07-30T05:44:56.660Z","metadata":{"origin":{"kind":"compaction_summary"}}}
+  ```
+
+  So after compaction, history ≠ model context: history keeps every message
+  plus the summary; the context is only the kept user messages + summary
+  (per the splice). Pagination and the `role` filter behave as before —
+  summaries match `role=user` (a session compacted twice shows two
+  `compaction_summary` user messages in the normal order; `before_id`
+  paging walks past them unchanged — both verified).
+- `GET .../status`: `busy` is true while the compaction runs;
+  `context_tokens` / `context_usage` drop to the compacted size when it
+  completes (26518 → 386 and 25851 → 275 in the two captures).
+
+### Errors
+
+All verified live 2026-07-30 on 0.30.0 (HTTP 200 envelopes; server-side
+`stack` strings omitted):
+
+- Empty/fresh session (also when the body is omitted entirely):
+  `{"code":40910,"msg":"No messages to compact in current history.","data":null,...}`
+- Turn running (`busy: true`):
+  `{"code":40910,"msg":"Cannot compact while a turn is active. Wait for it to finish, then retry.","data":null,...}`
+- Approval pending (`permission_mode: "manual"`, tool call awaiting a
+  decision): the same `40910` — a pending interaction means the turn is
+  still active.
+- Unknown session:
+  `{"code":40401,"msg":"session session_... does not exist","data":null,...}`.
+- Wrong `instruction` type (`{"instruction":123}`):
+  `{"code":40001,"msg":"instruction: Invalid input: expected string, received number","data":null,...}`
+  with a `details` array.
+
 ## Permissions
 
 A permission request surfaces as **WebSocket events**; there is no polling
@@ -1457,6 +1610,31 @@ selected option and free text both re-verified 2026-07-23:
 
 ## Verification log
 
+- 2026-07-30 compact round-trips on `0.30.0` (ticket 054; throwaway
+  sessions `session_647d8a6d-...` / `session_abf63a9c-...` /
+  `session_e658daa5-...` in `/home/ubuntu/spike-compact-054`): `POST
+  :compact` with `{}`, with `{"instruction":"..."}`, and with no body —
+  instant `{"code":0,"data":{}}` ACK, compaction runs in the background; WS
+  sequence `compaction.started` (`trigger:"manual"`, instruction echoed) →
+  busy `event.session.work_changed` → `context.spliced` (`deleteCount` =
+  whole context; kept user messages + summary with
+  `origin.kind:"compaction_summary"` and `id:null`, wrapper prefix present
+  only here) → `compaction.completed` (`result.summary` / `compactedCount`
+  / `tokensBefore` / `tokensAfter` / `keptUserMessageCount`) → idle
+  `work_changed`; `GET .../status` busy mid-compaction, `context_tokens`
+  26518→386 and 25851→275 after; `GET .../messages` keeps the full
+  transcript and appends the bare summary as a `role:"user"`
+  `compaction_summary` message (pagination + `role=user` filter unchanged,
+  two summaries after two compactions); double-compact silently no-ops (one
+  `compaction.started` for two POSTs); errors: empty session `40910` "No
+  messages to compact in current history.", busy session `40910` "Cannot
+  compact while a turn is active...", approval pending same `40910`,
+  unknown session `40401`, numeric `instruction` `40001` with `details`.
+  **`event.session.history_compacted` never fired** — the web-bundle recon
+  (`before_seq` / `reason` / `summary_message_id`) does not match this
+  server. All captured with `websocat` 1.14.0 against
+  `ws://127.0.0.1:58627/api/v1/ws` and `curl` against
+  `http://127.0.0.1:58627/api/v1/...`.
 - 2026-07-28 transcript round-trips on `0.29.2` (ticket 046): finished
   sub-agent (`agent-15`, cold rebuild), running then finished sub-agent
   (`agent-23`, throwaway session `session_59566ec0-...` — first prompt needed
