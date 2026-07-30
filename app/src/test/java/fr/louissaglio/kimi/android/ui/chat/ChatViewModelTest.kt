@@ -87,6 +87,9 @@ class ChatViewModelTest {
     private var uploadsSucceed = true
 
     @Volatile
+    private var compactsSucceed = true
+
+    @Volatile
     private var questionsBody =
         """{"code":0,"msg":"success","data":{"items":[]},"request_id":"r"}"""
 
@@ -222,6 +225,17 @@ class ChatViewModelTest {
                     path == "/api/v1/sessions/session_1/prompts:steer" -> MockResponse().setBody(
                         """{"code":0,"msg":"success","data":{"steered":true,"prompt_ids":["msg_1"]},"request_id":"r"}""",
                     )
+                    path == "/api/v1/sessions/session_1:compact" ->
+                        if (compactsSucceed) {
+                            MockResponse().setBody(
+                                """{"code":0,"msg":"success","data":{},"request_id":"r"}""",
+                            )
+                        } else {
+                            MockResponse().setBody(
+                                """{"code":40910,"msg":"No messages to compact in current history.",""" +
+                                    """"data":null,"request_id":"r"}""",
+                            )
+                        }
                     path == "/api/v1/sessions/session_1:abort" ->
                         if (abortsSucceed) {
                             MockResponse().setBody(
@@ -1650,6 +1664,185 @@ class ChatViewModelTest {
         }
     }
 
+    // --- Compact session (ticket 056) ---------------------------------------------------
+
+    @Test
+    fun `onCompact posts to the compact endpoint and sets the compacting state`() = runBlocking {
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.items != null }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        viewModel.onCompact()
+
+        val request = awaitRequest(":compact")
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/sessions/session_1:compact", request.path)
+        assertEquals("{}", request.body.readUtf8())
+        awaitState(viewModel.uiState) { it.isCompacting }
+    }
+
+    @Test
+    fun `onCompact is a no-op while a turn runs or a compaction is in progress`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        // A running turn disables compact (the server would 40910 it anyway).
+        socket.send(turnStartedFrame())
+        awaitState(viewModel.uiState) { it.isWorking }
+        viewModel.onCompact()
+        assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
+        assertFalse(viewModel.uiState.value.isCompacting)
+
+        // A compaction in progress too (a second compact is a silent server no-op).
+        socket.send(turnEndedFrame(reason = "completed"))
+        awaitState(viewModel.uiState) { !it.isWorking }
+        socket.send(compactionStartedFrame())
+        awaitState(viewModel.uiState) { it.isCompacting }
+        // Drain the turn-end refetch so only a compact POST could arrive next.
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+        viewModel.onCompact()
+        assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun `a compact POST failure surfaces the server's 40910 message and leaves the state`() = runBlocking {
+        // Compacting an empty session: the snackbar shows the server's own sentence.
+        compactsSucceed = false
+        val effects = CopyOnWriteArrayList<ChatViewModel.Effect>()
+        val effectJob = launch { viewModel.effects.collect { effects += it } }
+        try {
+            viewModel.onScreenStarted()
+            awaitState(viewModel.uiState) { it.items != null }
+            while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+            viewModel.onCompact()
+
+            awaitCondition { effects.isNotEmpty() }
+            assertEquals(
+                ChatViewModel.Effect.CompactionFailed("No messages to compact in current history."),
+                effects.single(),
+            )
+            assertFalse(viewModel.uiState.value.isCompacting)
+        } finally {
+            effectJob.cancel()
+        }
+    }
+
+    @Test
+    fun `compaction frames drive the divider, the state and the snackbars`() = runBlocking {
+        messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
+            """{"id":"msg_1","session_id":"session_1","role":"user",""" +
+            """"content":[{"type":"text","text":"run echo hi"}],""" +
+            """"created_at":"2026-07-30T05:44:56.000Z","metadata":{"origin":{"kind":"user"}}}""" +
+            """],"has_more":false},"request_id":"r"}"""
+        val effects = CopyOnWriteArrayList<ChatViewModel.Effect>()
+        val effectJob = launch { viewModel.effects.collect { effects += it } }
+        try {
+            viewModel.onScreenStarted()
+            val socket = awaitServerSocket()
+            awaitState(viewModel.uiState) { state -> state.items?.singleOrNull() is ChatItem.UserMessage }
+
+            // Triggered from anywhere (the app, the TUI's /compact): the started frame
+            // sets the state and inserts the pending divider at the tail.
+            socket.send(compactionStartedFrame())
+            awaitState(viewModel.uiState) { state ->
+                state.isCompacting &&
+                    state.items?.last() == ChatItem.CompactionDivider(LIVE_COMPACTION_DIVIDER_ID, pending = true)
+            }
+
+            // The context rewrite, then completion. The frames are processed in order,
+            // so once the completion applies, the splice was processed too: the full
+            // row list below proves the summary never became a bubble and the kept
+            // user message did not duplicate.
+            socket.send(compactionSpliceFrame())
+            socket.send(compactionCompletedFrame())
+            awaitState(viewModel.uiState) { state ->
+                !state.isCompacting &&
+                    state.items == listOf(
+                        ChatItem.UserMessage(
+                            "msg_1",
+                            "run echo hi",
+                            createdAt = Instant.parse("2026-07-30T05:44:56.000Z"),
+                        ),
+                        ChatItem.CompactionDivider(
+                            LIVE_COMPACTION_DIVIDER_ID,
+                            pending = false,
+                            tokensBefore = 850,
+                            tokensAfter = 386,
+                            summary = "Completed spike, nothing pending.",
+                        ),
+                    )
+            }
+            // The divider flipped to done with the token delta, the snackbar confirms.
+            awaitCondition { effects.isNotEmpty() }
+            assertEquals(
+                ChatViewModel.Effect.CompactionFinished("Context compacted: 850 → 386 tokens"),
+                effects.single(),
+            )
+        } finally {
+            effectJob.cancel()
+        }
+    }
+
+    @Test
+    fun `a compaction failure removes the pending divider and emits the error snackbar`() = runBlocking {
+        val effects = CopyOnWriteArrayList<ChatViewModel.Effect>()
+        val effectJob = launch { viewModel.effects.collect { effects += it } }
+        try {
+            viewModel.onScreenStarted()
+            val socket = awaitServerSocket()
+            awaitState(viewModel.uiState) { it.items != null }
+
+            socket.send(compactionStartedFrame())
+            awaitState(viewModel.uiState) { it.isCompacting }
+            socket.send(compactionFailedFrame())
+
+            // The handler updates the state before sending the effect: once the
+            // snackbar arrives, the divider removal is necessarily applied too.
+            awaitCondition { effects.isNotEmpty() }
+            assertEquals(
+                ChatViewModel.Effect.CompactionFailed("summarizer unreachable"),
+                effects.single(),
+            )
+            assertFalse(viewModel.uiState.value.isCompacting)
+            assertEquals(
+                emptyList<ChatItem.CompactionDivider>(),
+                viewModel.uiState.value.items.orEmpty().filterIsInstance<ChatItem.CompactionDivider>(),
+            )
+        } finally {
+            effectJob.cancel()
+        }
+    }
+
+    @Test
+    fun `a compaction_summary history message renders as a divider on cold open`() {
+        runBlocking {
+            // After killing and reopening the app: the persisted summary (bare text, no
+            // token numbers) is a done divider holding the dialog's summary — and the
+            // compacting state stays off (no live compaction).
+            messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
+                """{"id":"msg_2","session_id":"session_1","role":"user",""" +
+                """"content":[{"type":"text","text":"Working summary of the task."}],""" +
+                """"created_at":"2026-07-30T05:44:56.660Z","metadata":{"origin":{"kind":"compaction_summary"}}},""" +
+                """{"id":"msg_1","session_id":"session_1","role":"user",""" +
+                """"content":[{"type":"text","text":"run echo hi"}],""" +
+                """"created_at":"2026-07-17T04:12:10.000Z","metadata":{"origin":{"kind":"user"}}}""" +
+                """],"has_more":false},"request_id":"r"}"""
+
+            viewModel.onScreenStarted()
+
+            awaitState(viewModel.uiState) { state ->
+                state.items == listOf(
+                    ChatItem.UserMessage("msg_1", "run echo hi", createdAt = Instant.parse("2026-07-17T04:12:10.000Z")),
+                    ChatItem.CompactionDivider("msg_2", pending = false, summary = "Working summary of the task."),
+                )
+            }
+            assertFalse(viewModel.uiState.value.isCompacting)
+        }
+    }
+
     /** Stages a composer chip the way the pick flow does, without an android.net.Uri
      * (unavailable on JVM unit tests). */
     private suspend fun stagePicked(name: String, sizeBytes: Long, mimeType: String, bytes: ByteArray) =
@@ -1843,4 +2036,36 @@ class ChatViewModelTest {
         """{"type":"assistant.delta","seq":23,"epoch":"ep_1","volatile":true,"offset":0,""" +
             """"session_id":"session_1","timestamp":"2026-07-28T03:37:36.100Z",""" +
             """"payload":{"type":"assistant.delta","turnId":0,"delta":"$delta","agentId":"agent-12","sessionId":"session_1"}}"""
+
+    /** Verbatim 0.30.0 compaction.started (docs/server-api.md, Compact — ticket 056). */
+    private fun compactionStartedFrame(): String =
+        """{"type":"compaction.started","seq":25,"epoch":"ep_1","session_id":"session_1",""" +
+            """"timestamp":"2026-07-30T05:48:54.194Z","payload":{"type":"compaction.started",""" +
+            """"trigger":"manual","agentId":"main","sessionId":"session_1"}}"""
+
+    /** Verbatim 0.30.0 compaction.completed (docs/server-api.md, Compact — ticket 056). */
+    private fun compactionCompletedFrame(): String =
+        """{"type":"compaction.completed","seq":37,"epoch":"ep_1","session_id":"session_1",""" +
+            """"timestamp":"2026-07-30T05:44:56.676Z","payload":{"type":"compaction.completed",""" +
+            """"result":{"summary":"Completed spike, nothing pending.",""" +
+            """"compactedCount":8,"tokensBefore":850,"tokensAfter":386,"keptUserMessageCount":3},""" +
+            """"agentId":"main","sessionId":"session_1"}}"""
+
+    /** Unverified shape (protocol bundle only): the permissive decode must still emit. */
+    private fun compactionFailedFrame(): String =
+        """{"type":"compaction.failed","seq":40,"epoch":"ep_1","session_id":"session_1",""" +
+            """"timestamp":"2026-07-30T05:50:00.000Z","payload":{"type":"compaction.failed",""" +
+            """"message":"summarizer unreachable","agentId":"main","sessionId":"session_1"}}"""
+
+    /** The compaction context rewrite (docs/server-api.md, Compact): the kept user
+     * message verbatim with its original id, then the id-less prefixed summary. */
+    private fun compactionSpliceFrame(): String =
+        """{"type":"context.spliced","seq":36,"epoch":"ep_1","session_id":"session_1",""" +
+            """"timestamp":"2026-07-30T05:44:56.600Z","payload":{"type":"context.spliced",""" +
+            """"start":0,"deleteCount":8,"messages":[""" +
+            """{"role":"user","content":[{"type":"text","text":"run echo hi"}],""" +
+            """"toolCalls":[],"origin":{"kind":"user"},"id":"msg_1"},""" +
+            """{"role":"user","content":[{"type":"text","text":"The conversation so far has been compacted…"}],""" +
+            """"toolCalls":[],"origin":{"kind":"compaction_summary"},"id":null}],""" +
+            """"agentId":"main","sessionId":"session_1"}}"""
 }

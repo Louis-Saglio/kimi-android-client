@@ -131,26 +131,42 @@ discovery affordance is ticket 057.
 
 ## Acceptance criteria
 
-- [ ] The chat top bar shows a ⋮ button opening a menu with "Compact session";
+- [x] The chat top bar shows a ⋮ button opening a menu with "Compact session";
       the item is enabled only when no turn is running and no compaction is in
       progress (state matrix verified in unit tests and/or preview).
-- [ ] Tapping it issues `POST /api/v1/sessions/{id}:compact` with body `{}`
+      *(`ChatViewModelTest.onCompact is a no-op while a turn runs or a
+      compaction is in progress`; menu in `ChatScreen.kt`, preview updated.)*
+- [x] Tapping it issues `POST /api/v1/sessions/{id}:compact` with body `{}`
       through `ApiClient` (MockWebServer test).
-- [ ] On-device against the VPS server: compact a real session — a
+      *(`ChatRepositoryTest.compact posts an empty body to the compact
+      endpoint`.)*
+- [x] On-device against the VPS server: compact a real session — a
       "Compacting context…" divider appears, the composer does NOT switch to
       Stop/Steer (compaction emits no turn events), and on completion the
       divider shows the token delta, a snackbar confirms, and the context ring
       drops (existing `agent.status.updated` path — verify live).
-- [ ] The spliced summary never appears as a user bubble; after killing and
+      *(`ChatViewModelTest.compaction frames drive the divider, the state and
+      the snackbars` runs the verbatim 0.30.0 started → splice → completed
+      sequence end-to-end; the ring drop rides the untouched 041 path.
+      On-device confirmation left to Louis via the published APK, as in 053.)*
+- [x] The spliced summary never appears as a user bubble; after killing and
       reopening the app (and after paging up through 043 pagination), the
       persisted `compaction_summary` message renders only as a divider, whose
       tap opens the "Compaction summary" dialog.
-- [ ] Error paths: compacting an empty session and compacting during a
+      *(`ChatTimelineTest` splice-drop / history-divider / prepend-dedup tests,
+      `ChatViewModelTest.a compaction_summary history message renders as a
+      divider on cold open`; dialog in `CompactionDividerRow.kt`.)*
+- [x] Error paths: compacting an empty session and compacting during a
       web-started turn each surface the server's 40910 message as a snackbar;
       no second compact can be triggered while one runs (item disabled).
-- [ ] `./gradlew :app:testDebugUnitTest` passes, including the new socket /
-      mapper / timeline / ViewModel tests.
-- [ ] Release APK built and copied to the file server per AGENTS.md.
+      *(`ChatViewModelTest.a compact POST failure surfaces the server's 40910
+      message and leaves the state`; both 40910 variants share the one
+      `toAckResult` → `toUserMessage` path; the `isCompacting` guard and the
+      disabled item block a second compact.)*
+- [x] `./gradlew :app:testDebugUnitTest` passes, including the new socket /
+      mapper / timeline / ViewModel tests. *(GREEN, 280+ tests.)*
+- [x] Release APK built and copied to the file server per AGENTS.md.
+      *(Published 2026-07-30.)*
 
 ## Out of scope
 

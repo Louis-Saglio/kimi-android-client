@@ -2,6 +2,7 @@ package fr.louissaglio.kimi.android.ui.chat
 
 import fr.louissaglio.kimi.android.data.chat.AGENT_TOOL_NAME
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
+import fr.louissaglio.kimi.android.data.chat.ORIGIN_KIND_COMPACTION_SUMMARY
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.TodoParser
@@ -314,6 +315,42 @@ class ChatTimeline(
         }
     }
 
+    /**
+     * `compaction.started` (ticket 056): a pending divider at the tail — or the previous
+     * run's done divider reset to pending (one constant id: the server runs one
+     * compaction per session at a time, so successive runs reuse the row rather than
+     * stacking keys). The row lives in the LIVE tail on purpose: a mid-compaction
+     * resync keeps it (busy=true → the keep-live refetch), and a post-completion idle
+     * resync drops it for the canonical history-sourced divider the refetch flattens
+     * from the persisted summary.
+     */
+    fun compactionStarted() {
+        val pending = ChatItem.CompactionDivider(LIVE_COMPACTION_DIVIDER_ID, pending = true)
+        val index = rows.indexOfFirst { it.id == LIVE_COMPACTION_DIVIDER_ID }
+        if (index >= 0) rows[index] = pending else rows += pending
+    }
+
+    /** `compaction.completed`: the pending divider flips to done with the token delta
+     * and the summary. With no pending row (the app subscribed mid-run), the done row
+     * is appended directly — the compaction still gets its timeline trace. */
+    fun compactionCompleted(summary: String, tokensBefore: Long, tokensAfter: Long) {
+        val done = ChatItem.CompactionDivider(
+            LIVE_COMPACTION_DIVIDER_ID,
+            pending = false,
+            tokensBefore = tokensBefore,
+            tokensAfter = tokensAfter,
+            summary = summary,
+        )
+        val index = rows.indexOfFirst { it.id == LIVE_COMPACTION_DIVIDER_ID }
+        if (index >= 0) rows[index] = done else rows += done
+    }
+
+    /** `compaction.failed`/`cancelled`/`blocked`: the pending divider is removed — the
+     * error snackbar (ViewModel) carries the feedback instead. */
+    fun compactionFailed() {
+        rows.removeAll { it.id == LIVE_COMPACTION_DIVIDER_ID }
+    }
+
     /** The just-sent user message arrives spliced mid-turn (0.27.0 dropped
      * prompt.submitted): commit it immediately so the chat does not look dead for the
      * whole turn. Deduped by message id — a reconnect replay or a racing refetch must
@@ -326,6 +363,11 @@ class ChatTimeline(
      * bubbles would otherwise collide as LazyColumn keys. */
     private fun appendSpliced(message: ChatMessage) {
         if (message.role != ChatMessage.Role.User) return
+        // The compaction splice (ticket 056) carries the summary as an ID-LESS user
+        // message whose text is the model-facing prefix — internal content, dropped
+        // outright (web parity). The check must come first: id-less, it would
+        // otherwise fall into the steer-echo text dedup and could surface as a bubble.
+        if (message.originKind == ORIGIN_KIND_COMPACTION_SUMMARY) return
         if (message.id.isNotBlank()) {
             if ((0 until liveStart).any { rows[it].id == message.id }) return
             val fresh = mutableListOf<ChatItem>()
@@ -463,7 +505,12 @@ class ChatTimeline(
                 val text = message.parts.filterIsInstance<ChatMessage.Part.Text>().joinToString("\n") { it.text }
                 val attachments = message.parts.filterIsInstance<ChatMessage.Part.Attachment>()
                 val images = message.parts.filterIsInstance<ChatMessage.Part.Image>()
-                if (text.isNotBlank() || attachments.isNotEmpty() || images.isNotEmpty()) {
+                if (message.originKind == ORIGIN_KIND_COMPACTION_SUMMARY) {
+                    // The persisted compaction summary (ticket 056): a done divider
+                    // holding the bare summary — never a user bubble (web parity).
+                    // The token numbers are not persisted, so the label goes without.
+                    target += ChatItem.CompactionDivider(message.id, pending = false, summary = text)
+                } else if (text.isNotBlank() || attachments.isNotEmpty() || images.isNotEmpty()) {
                     target += ChatItem.UserMessage(message.id, text, attachments, images, message.createdAt)
                 }
             }

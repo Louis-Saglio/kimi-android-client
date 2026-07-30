@@ -177,6 +177,12 @@ class ChatRepository @Inject constructor(
         questionId: String,
     ): Result<Unit> = chatApi.dismissQuestion(settings, sessionId, questionId)
 
+    /** Starts a compaction (`POST /api/v1/sessions/{id}:compact`, docs/server-api.md,
+     * Compact — ticket 056). Fire-and-forget: the progress arrives over the WebSocket
+     * (compaction.started/completed), so success carries no payload. */
+    suspend fun compact(settings: ServerSettings, sessionId: String): Result<Unit> =
+        chatApi.compact(settings, sessionId)
+
     /** Lightweight live status (`GET /api/v1/sessions/{id}/status`): the mid-turn flag
      * plus the context window fill when the server sends token counts (ticket 041). */
     suspend fun getSessionStatus(settings: ServerSettings, sessionId: String): Result<SessionStatus> =

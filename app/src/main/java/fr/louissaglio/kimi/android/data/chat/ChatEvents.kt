@@ -121,6 +121,25 @@ sealed interface SessionEvent {
         val contextUsage: ContextUsage,
         override val agentId: String = MAIN_AGENT_ID,
     ) : SessionEvent, AgentScopedEvent
+
+    /** `compaction.started` (docs/server-api.md, Compact — ticket 056): the server
+     * began summarizing the session — no turn events, compaction is not a turn. */
+    data class CompactionStarted(val trigger: String, val instruction: String?) : SessionEvent
+
+    /** `compaction.completed`: carries the result — the summary (also persisted to
+     * history) and the token delta of the compacted span. */
+    data class CompactionCompleted(
+        val summary: String,
+        val compactedCount: Int,
+        val tokensBefore: Long,
+        val tokensAfter: Long,
+        val keptUserMessageCount: Int,
+    ) : SessionEvent
+
+    /** `compaction.failed`/`cancelled`/`blocked` ([kind] is the wire event type): any
+     * of them ends the compacting state. [cause] is the payload's best-effort message;
+     * null when the (unverified) shape carried none. */
+    data class CompactionFailed(val kind: String, val cause: String?) : SessionEvent
 }
 
 /** Context window fill of a session: used tokens out of the model's maximum. */

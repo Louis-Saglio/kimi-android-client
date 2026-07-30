@@ -18,12 +18,30 @@ data class MessageListData(
 
 @Serializable
 data class MessageDto(
-    // The steer echo splices the steered user message without an id (docs/server-api.md).
-    val id: String = "",
+    // The steer echo splices the steered user message without an id (docs/server-api.md);
+    // the compaction summary carries an explicit `id: null` (Compact) — both read as "".
+    val id: String? = null,
     val role: String = "",
     val content: List<ContentPartDto> = emptyList(),
     // ISO-8601 UTC instant ("2026-07-23T03:27:03.317Z"); absent on splice echoes.
     @SerialName("created_at") val createdAt: String? = null,
+    // Origin kind (ticket 056): history carries it at metadata.origin.kind, the
+    // context.spliced echo at the message's top-level origin.kind — same kind space.
+    val metadata: MessageMetadataDto? = null,
+    val origin: MessageOriginDto? = null,
+) {
+    /** The message's origin kind wherever the wire shape puts it; null when absent. */
+    val originKind: String? get() = metadata?.origin?.kind ?: origin?.kind
+}
+
+@Serializable
+data class MessageMetadataDto(
+    val origin: MessageOriginDto? = null,
+)
+
+@Serializable
+data class MessageOriginDto(
+    val kind: String = "",
 )
 
 /** Flat part shape: each `type` fills only its own fields, the rest stay null. */
@@ -186,7 +204,7 @@ data class ToolProgressUpdateDto(
 data class TurnEndedPayload(val reason: String = "")
 
 /** `context.spliced` payload: full message objects, decoded with the history MessageDto
- * (its extra fields — toolCalls, origin — are ignored). */
+ * (its extra fields — toolCalls — are ignored; origin IS decoded, ticket 056). */
 @Serializable
 data class ContextSplicedPayload(
     val messages: List<MessageDto> = emptyList(),
@@ -363,3 +381,41 @@ data class TranscriptFrameDto(
     // String for shell-style tools, a JSON value for structured ones (like tool_result).
     val output: JsonElement? = null,
 )
+
+
+// --- compaction.* (docs/server-api.md, Compact — ticket 056) -------------------------
+
+/** `compaction.started` payload: [instruction] is the optional summarizer hint sent
+ * with the POST (consumed only for completeness — the app sends no instruction). */
+@Serializable
+data class CompactionStartedPayload(
+    val trigger: String = "",
+    val instruction: String? = null,
+)
+
+@Serializable
+data class CompactionCompletedPayload(
+    val result: CompactionResultDto? = null,
+)
+
+@Serializable
+data class CompactionResultDto(
+    val summary: String = "",
+    val compactedCount: Int = 0,
+    val tokensBefore: Long = 0,
+    val tokensAfter: Long = 0,
+    val keptUserMessageCount: Int = 0,
+)
+
+/** `compaction.failed`/`cancelled`/`blocked` payload: the schemas exist only in the
+ * protocol bundle and were never observed on this server — every field stays optional
+ * so any shape decodes, and a missing payload still ends the compacting state. */
+@Serializable
+data class CompactionFailedPayload(
+    val reason: String? = null,
+    val message: String? = null,
+    val error: String? = null,
+) {
+    /** Best-effort human-readable cause, whichever field the variant carries. */
+    val cause: String? get() = message ?: error ?: reason
+}

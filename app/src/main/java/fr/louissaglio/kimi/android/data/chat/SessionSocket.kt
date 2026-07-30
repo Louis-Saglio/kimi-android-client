@@ -266,6 +266,29 @@ internal class SessionSocket(
                 }
             "context.spliced" -> frame.decodePayload<ContextSplicedPayload>()
                 ?.let { onEvent(SessionEvent.ContextSpliced(it.messages.map { msg -> mapper.toDomain(msg) }, agentId)) }
+            // Compaction (docs/server-api.md, Compact — ticket 056): not a turn — no
+            // turn.* events accompany it, so these frames alone drive the UI state.
+            "compaction.started" -> frame.decodePayload<CompactionStartedPayload>()
+                ?.let { onEvent(SessionEvent.CompactionStarted(it.trigger, it.instruction)) }
+            "compaction.completed" -> frame.decodePayload<CompactionCompletedPayload>()
+                ?.let { payload ->
+                    val result = payload.result
+                    if (result == null) {
+                        Log.w(TAG, "compaction.completed without a result; ending the compacting state")
+                        onEvent(SessionEvent.CompactionFailed(frame.type, null))
+                    } else {
+                        onEvent(
+                            SessionEvent.CompactionCompleted(
+                                result.summary, result.compactedCount,
+                                result.tokensBefore, result.tokensAfter, result.keptUserMessageCount,
+                            ),
+                        )
+                    }
+                }
+            // The failure family must ALWAYS emit — even with no decodable payload —
+            // so a mid-run server failure can never leave the UI stuck compacting.
+            "compaction.failed", "compaction.cancelled", "compaction.blocked" ->
+                onEvent(SessionEvent.CompactionFailed(frame.type, frame.decodePayload<CompactionFailedPayload>()?.cause))
             // subagent.* lifecycle (docs/server-api.md, Sub-agents): tagged agentId
             // "main" but scoped to one sub-agent by the payload's subagentId; routed to
             // the sub-agent stream store like the sub-agent's own frames.
