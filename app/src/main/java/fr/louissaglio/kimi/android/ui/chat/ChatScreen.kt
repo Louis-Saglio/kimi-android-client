@@ -11,18 +11,12 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -44,10 +38,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -56,6 +47,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
+import fr.louissaglio.kimi.android.data.chat.ContextUsage
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.data.chat.ServerModel
 import fr.louissaglio.kimi.android.ui.common.EmptyState
@@ -245,36 +237,8 @@ private fun ChatContent(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
-                actions = {
-                    // Context ring first (ticket 041), then working spinner and stop
-                    // (ticket 038): screen-level chrome, ordered so the ring doesn't
-                    // shift when the spinner appears and disappears. Hidden until the
-                    // first /status or live status event delivers the usage.
-                    uiState.contextUsage?.let { usage ->
-                        ContextUsageRing(usage)
-                    }
-                    if (uiState.isWorking) {
-                        CircularProgressIndicator(
-                            modifier = Modifier
-                                .size(20.dp)
-                                .semantics { contentDescription = "Agent working" },
-                            strokeWidth = 2.dp,
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        // No stop glyph in material-icons-core: a plain filled square.
-                        IconButton(
-                            onClick = onStop,
-                            modifier = Modifier.semantics { contentDescription = "Stop" },
-                        ) {
-                            Box(
-                                Modifier
-                                    .size(14.dp)
-                                    .clip(MaterialTheme.shapes.extraSmall)
-                                    .background(MaterialTheme.colorScheme.onSurfaceVariant),
-                            )
-                        }
-                    }
-                },
+                // No actions (ticket 052): the context ring, working spinner and stop
+                // button moved into the composer — the top bar is navigation-only.
             )
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -333,11 +297,13 @@ private fun ChatContent(
                         val effort = uiState.selectedEffort ?: uiState.defaultEffort
                         if (effort != null) "$label · $effort" else label
                     },
+                    contextUsage = uiState.contextUsage,
                     onModelClick = { showModelPicker = true },
                     onTextChange = onInputChange,
                     // Send/Steer both funnel here; bump first so the jump rides
                     // the same recomposition as the ViewModel's echo append.
                     onSend = { scrollToBottomTick++; onSend() },
+                    onStop = onStop,
                     onAttach = onAttach,
                     onAttachmentRemoved = onAttachmentRemoved,
                 )
@@ -452,6 +418,7 @@ private fun ChatContentPreview() {
                 isWorking = true,
                 isReconnecting = true,
                 inputText = "Draft message",
+                contextUsage = ContextUsage(usedTokens = 205_000, maxTokens = 262_144),
                 pendingApprovals = listOf(
                     ChatViewModel.PendingApproval("ap_1", "Bash", "echo hello-from-spike"),
                     ChatViewModel.PendingApproval("ap_2", "Write", "Writing /tmp/spike/notes.txt"),

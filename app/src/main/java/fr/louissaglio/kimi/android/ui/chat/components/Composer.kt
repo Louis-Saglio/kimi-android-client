@@ -2,6 +2,7 @@ package fr.louissaglio.kimi.android.ui.chat
 
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -26,6 +27,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -45,6 +47,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import fr.louissaglio.kimi.android.data.chat.ContextUsage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -55,9 +58,11 @@ internal fun ChatInputBar(
     isWorking: Boolean,
     attachments: List<ChatViewModel.PendingAttachment>,
     modelLabel: String?,
+    contextUsage: ContextUsage?,
     onModelClick: () -> Unit,
     onTextChange: (String) -> Unit,
     onSend: () -> Unit,
+    onStop: () -> Unit,
     onAttach: () -> Unit,
     onAttachmentRemoved: (String) -> Unit,
 ) {
@@ -83,8 +88,8 @@ internal fun ChatInputBar(
             }
             // One rounded container echoes the web composer pill (ticket 038): the field
             // spans the full width on top, an action row below holds attach, the model
-            // chip and send. The field carries no outline or fill of its own — the
-            // container is the boundary.
+            // chip, the context ring and stop/send (ticket 052). The field carries no
+            // outline or fill of its own — the container is the boundary.
             Surface(
                 shape = MaterialTheme.shapes.extraLarge,
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
@@ -124,8 +129,32 @@ internal fun ChatInputBar(
                             Icon(Icons.Filled.Add, contentDescription = null)
                         }
                         modelLabel?.let { label -> ModelChip(label = label, onClick = onModelClick) }
+                        // Context usage right of the model chip (ticket 052): model-scoped
+                        // info next to the model it belongs to; hidden until known.
+                        contextUsage?.let { ContextUsageRing(it) }
                         Spacer(Modifier.weight(1f))
                         if (isWorking) {
+                            // Stop sits with the turn controls (ticket 052), for app- and
+                            // web-started turns alike. The filled M3 error/onError pair —
+                            // not the tonal errorContainer/error one, which inverts in dark
+                            // theme (dark circle, pale glyph): here the glyph stays darker
+                            // than the circle. No stop glyph in material-icons-core: a
+                            // plain filled square.
+                            FilledIconButton(
+                                onClick = onStop,
+                                modifier = Modifier.semantics { contentDescription = "Stop" },
+                                colors = IconButtonDefaults.filledIconButtonColors(
+                                    containerColor = MaterialTheme.colorScheme.error,
+                                    contentColor = MaterialTheme.colorScheme.onError,
+                                ),
+                            ) {
+                                Box(
+                                    Modifier
+                                        .size(14.dp)
+                                        .clip(MaterialTheme.shapes.extraSmall)
+                                        .background(MaterialTheme.colorScheme.onError),
+                                )
+                            }
                             Button(
                                 onClick = onSend,
                                 enabled = canSend,
