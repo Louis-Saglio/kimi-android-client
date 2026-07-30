@@ -19,6 +19,8 @@ Context:
   - `curl -sf -H "Authorization: Bearer $(cat /home/ubuntu/.kimi-code/server.token)" http://127.0.0.1:58627/api/v1/meta`
     returns JSON containing `data.server_version`
 
+Process hygiene (critical): you run headless as `kimi -p "<this prompt>"`, so your runner's command line contains this entire prompt text and its process name is `kimi`. Restart services via `systemctl` only. Never kill processes by name or command-line pattern (`pkill`, `pkill -f`, `killall`) — `pkill -x kimi`, `pkill -f kimi`, or any substring match can kill your own runner. If a stray process must die, identify its PID from `ps` output and `kill` that PID only.
+
 Procedure:
 
 1. Diagnose first. Look at `sudo journalctl -u kimi-web -n 150 --no-pager`.
