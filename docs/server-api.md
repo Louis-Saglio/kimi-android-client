@@ -1,36 +1,55 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-07-27
-(server version `0.29.2`, `"backend": "v2"`, WS `protocol_version: 2`; the
-Sub-agents section was added and verified on 2026-07-28, same server).
+by Kimi Code Web. Documented and verified against the live server on 2026-07-30
+(server version `0.31.0`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
-sub-agents (foreground lifecycle + background task store), plus
+sub-agents (foreground lifecycle + background task store), global message
+search, the tools catalog, plus
 the workspace list used by the mobile create-session flow. Explicitly skipped:
 `fs:*`, terminals, cron, goals, providers, skills.
 
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `0.29.1`
-(verified 2026-07-25; see git history), `0.29.0` before that, `0.28.1` before
-that, `0.27.0` before that, and `0.23.3` before that. The drift from 0.29.1 to
-0.29.2 is **minor** for the core loop: every REST and WebSocket shape the
-Android app parses is unchanged, with one exception — a steered user message
-spliced via `context.spliced` **carries an `id` again** (0.29.0 had dropped
-it; on 0.29.2 it is a fresh ULID, not the queued prompt's id — details in the
-WS section). This is backward compatible for clients that followed the 0.29.0
-advice to treat spliced-message ids as optional. Outside the core loop the
-release adds provider write endpoints (`POST`/`PUT`/`DELETE /api/v1/providers`,
-`GET /api/v1/catalog/providers[/{catalog_id}]`; the single-provider GET now
-also reveals the stored `api_key`), an optional `desktop` flag on session
-export, and a WS frame-flush fix (timing only, no shape change). The models
-catalog is unchanged apart from the `kimi-code/k3-256k` display name
-(`"k3-256k"` → `"K3-256k"`); `GET /api/v1/config` `default_model` reads
-`kimi-code/k3` on this server again (it is a config value, not protocol — see
-Models). Details inline. Server updates are installed by the
+**Protocol history:** this document previously described server `0.29.2`
+(verified 2026-07-27/28; see git history), `0.29.1` before that, `0.29.0`
+before that, `0.28.1` before
+that, `0.27.0` before that, and `0.23.3` before that. The drift from 0.29.2 to
+0.31.0 is again **minor** for the core loop: every REST and WebSocket shape the
+Android app parses still decodes. The real changes:
+
+- **Files:** the 50 MiB upload cap was **removed** (upstream commit "remove the
+  50 MiB upload size cap and stream uploads to disk"). `POST /api/v1/files` no
+  longer emits 413/41301 — uploads stream to disk; a 55 MiB upload returns
+  HTTP 200 with the exact `size` (verified live). `41301` remains in the
+  error-code table for session export only.
+- **Config:** `GET`/`POST /api/v1/config` gained a `secondary_model` field
+  (additive; `{}` on this server).
+- **New endpoints:** `POST /api/v1/search` (global message search — new
+  section) and an undocumented-till-now `GET /api/v1/tools` (tool catalog,
+  `input_schema: null`).
+- **WebSocket:** `agent.created` now fires for the **main** agent at the head
+  of the first prompt; new event type `turn.step.retrying` (LLM retry, e.g.
+  provider 429); `agent.status.updated` gained a nested-usage variant and
+  `stream:"assistant"`; right after `subagent.spawned` the server republishes
+  the sub-agent's `agent.status.updated`; background-task completion is now
+  delivered as a **new main turn** whose `turn.started` origin is
+  `{"kind":"task",...}`, and the notification splice message has **no `id`**
+  and origin kind `task`; the background Agent tool result text gained
+  `next_step:`/`resume_hint:` blocks (the Agent tool gained a `resume`
+  parameter); and the compaction summary message in `context.spliced` no
+  longer carries `id: null` — the `id` key is **absent** (backward compatible
+  for clients that treat spliced-message ids as optional, as advised since
+  0.29.0).
+- **Environment note:** the `kimi-web.service` unit now runs with
+  `PrivateTmp=yes`, so host-side `/tmp` directories (the old throwaway cwd)
+  are invisible to the server —
+  the throwaway-session examples below use `/home/ubuntu/spike` instead.
+
+Server updates are installed by the
 `kimi-nightly-update` systemd timer (see `scripts/`), which re-verifies this
 protocol after every update.
 
@@ -53,7 +72,7 @@ protocol after every update.
   so it cannot validate credentials. Use **`GET /api/v1/meta`** as the
   credential check endpoint: `200` ⇒ token valid, `401` ⇒ missing or invalid.
 
-Verified (server 0.29.2, 2026-07-27):
+Verified (server 0.31.0, 2026-07-30):
 
 ```bash
 # No token -> rejected on authenticated routes
@@ -96,10 +115,10 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
 {
   "code": 0, "msg": "success",
   "data": {
-    "server_version": "0.29.2",
+    "server_version": "0.31.0",
     "capabilities": {"websocket": true, "file_upload": true, "fs_query": true, "mcp": true, "tasks": true, "terminal": true},
-    "server_id": "01KYJGGW0WVW0SR8X6388R34PP",
-    "started_at": "2026-07-27T19:23:41.468Z",
+    "server_id": "01KYT7Q10XCKVZQPR5TEDQ1SHM",
+    "started_at": "2026-07-30T19:23:41.469Z",
     "open_in_apps": [],
     "dangerous_bypass_auth": false,
     "backend": "v2"
@@ -118,7 +137,8 @@ The models the server can run, for model pickers. Requires the token.
 curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/models
 ```
 
-Verified live on 0.29.2 (2026-07-27, `capabilities` arrays trimmed):
+Verified live on 0.31.0 (2026-07-30, `capabilities` arrays trimmed; catalog
+unchanged from 0.29.2):
 
 ```json
 {
@@ -154,9 +174,13 @@ Verified live on 0.29.2 (2026-07-27, `capabilities` arrays trimmed):
   effort string but degrades it to plain thinking-on (`thinking_level: "on"`).
 - The server-wide default model is *not* in this response — it comes from
   `GET /api/v1/config` (`data.default_model`). This is a config value, not
-  protocol: it read `kimi-code/kimi-for-coding` on 0.29.1 (2026-07-25) and
-  `kimi-code/k3` on 0.29.2 (2026-07-27) — the server may change it
-  independently of protocol drift.
+  protocol: it read `kimi-code/kimi-for-coding` on 0.29.1 (2026-07-25),
+  `kimi-code/k3` on 0.29.2 (2026-07-27) and `kimi-code/k3-256k` on 0.31.0
+  (2026-07-30) — the server may change it independently of protocol drift.
+- `GET`/`POST /api/v1/config` also carries a **`secondary_model`** field (new
+  in 0.31.0, additive): `{}` on this server (2026-07-30). It is writable via
+  `POST /api/v1/config`; per upstream, the POST body is snake_case while the
+  GET echoes camelCase for some fields. The Android app consumes neither.
 
 ## Sessions
 
@@ -164,14 +188,14 @@ Verified live on 0.29.2 (2026-07-27, `capabilities` arrays trimmed):
 
 Query params (all optional): `page_size` (default 20), `before_id`, `after_id`
 (pagination cursors — `before_id` paging verified 2026-07-22, list shape
-re-verified 2026-07-27 on 0.29.2), `status`, `include_archive`, `archived_only`,
+re-verified 2026-07-30 on 0.31.0), `status`, `include_archive`, `archived_only`,
 `exclude_empty`, `workspace_id`.
 
 ```bash
 curl -s -H "Authorization: Bearer <token>" 'http://127.0.0.1:58627/api/v1/sessions?page_size=2'
 ```
 
-Session object shape (0.29.2, fields truncated for brevity):
+Session object shape (0.31.0, fields truncated for brevity):
 
 ```json
 {
@@ -186,7 +210,7 @@ Session object shape (0.29.2, fields truncated for brevity):
   "last_turn_reason": "completed",
   "archived": false,
   "last_prompt": "Run exactly this one command, then reply done: echo doc-verify-0290",
-  "metadata": {"cwd": "/tmp/spike"},
+  "metadata": {"cwd": "/home/ubuntu/spike"},
   "agent_config": {"model": ""},
   "usage": {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0,
             "cache_creation_tokens": 0, "total_cost_usd": 0, "context_tokens": 0,
@@ -213,17 +237,16 @@ Body: `{"metadata": {"cwd": "<working directory>"}}`, optional top-level
 `"title"`. A `cwd` is expected; the server auto-creates a workspace for new
 cwds. A non-existent `cwd` is refused with envelope code `40409` over HTTP 200.
 **Note for this VPS:** the `kimi-web.service` unit runs with `PrivateTmp=yes`,
-so the server's `/tmp` is a private namespace — a host-side `/tmp/spike` is
-invisible to it; create it inside the service namespace, owned by the service user
-(`sudo nsenter -t $(systemctl show kimi-web -p MainPID --value) -m mkdir -p /tmp/spike &&
-sudo nsenter -t $(systemctl show kimi-web -p MainPID --value) -m chown ubuntu:ubuntu /tmp/spike`)
-or use a path outside `/tmp`.
+so the server's `/tmp` is a private namespace — host-side `/tmp` directories
+are invisible to it. Use a path outside `/tmp` instead; the throwaway-session
+examples in this document use `/home/ubuntu/spike` (pre-created, owned by the
+`ubuntu` user the service runs as).
 
 ```bash
 curl -s -X POST http://127.0.0.1:58627/api/v1/sessions \
   -H "Authorization: Bearer <token>" \
   -H 'Content-Type: application/json; charset=utf-8' \
-  -d '{"metadata":{"cwd":"/tmp/spike"}}'
+  -d '{"metadata":{"cwd":"/home/ubuntu/spike"}}'
 ```
 
 Returns the session object above. Fresh sessions created without a `title`
@@ -269,8 +292,8 @@ session's current config (`"off"`/`"yolo"` observed on a fresh session).
 
 ### List — `GET /api/v1/workspaces`
 
-Returns every workspace the server knows about (verified live 2026-07-27,
-server `0.29.2`). Requires the token.
+Returns every workspace the server knows about (verified live 2026-07-30,
+server `0.31.0`). Requires the token.
 
 ```bash
 curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/workspaces
@@ -384,7 +407,8 @@ Observed tags, all paired with attributes allowed on the opening tag:
 Turn-granular committed history for ONE agent — `"main"` or any sub-agent id —
 which makes it the history backing of the sub-agent page (the `/messages`
 history only ever carries the main agent). Verified live on 0.29.2
-(2026-07-28), including a running sub-agent and the cold-session rebuild path.
+(2026-07-28), including a running sub-agent and the cold-session rebuild path;
+re-verified unchanged on 0.31.0 (2026-07-30, `agent_id` paging included).
 
 Query params:
 
@@ -471,12 +495,60 @@ Finished sub-agent, cold-rebuild path (throwaway session left from 045,
 Out of scope for the app (unused siblings under the same route prefix):
 `/transcript/ops`, `/transcript/user-messages`, `/transcript/plan`.
 
+## Search
+
+### Global message search — `POST /api/v1/search`
+
+New in 0.31.0 (verified live 2026-07-30). Global full-text search over user
+messages, assistant replies and session titles, across all sessions.
+
+Request body (all fields optional except `query`):
+
+- `query` (required) — the search text.
+- `mode` — `terms` (default) | `literal`.
+- `op` — `AND` | `OR` (how multiple terms combine).
+- `container` — `{session_id, agent_id?}`: scope the search to one session
+  (and optionally one agent). **Only `container.session_id` filters** —
+  unknown top-level fields are silently ignored.
+- `role` — `user` | `assistant` | `title`.
+- `start_time` / `end_time` — epoch-ms bounds on the hit time.
+- `sort` — `score` (default) | `time_desc` | `time_asc`.
+- `page_size` — 1–50.
+- `page_token` — continue from a previous response.
+
+Response `data`:
+
+- `items[]` — `{session_id, workspace_id, session_title, agent_id, role,
+  snippet, time, turn?, step_id?, score}`. `agent_id` is `"main"`, a sub-agent
+  id, or `""` for title hits; `role` is `user` | `assistant` | `title`;
+  `time` is epoch ms; `turn` is 0-based and absent on title hits; `step_id`
+  appears on assistant hits; `score` is a float (0 in `literal` mode).
+- `has_more`, `page_token?` — the token is opaque base64 and present only
+  when `has_more` is true.
+- `incomplete?` — e.g. `"candidate_cap"` when the result set was truncated.
+- `index_state` — `{state ("building"|"ready"|"readonly"), indexed_sessions,
+  total_sessions, documents}`.
+- `source` — `"index"` for global searches, `"live"` for container-scoped
+  single-session scans.
+
+Verbatim `data` meta (items elided, 2026-07-30):
+
+```json
+{"has_more": true, "page_token": "eyJmIjoiNkltSGxYZElpYXNKcW1tOSIsInMiOjIwfQ",
+ "index_state": {"state": "ready", "indexed_sessions": 226, "total_sessions": 226, "documents": 3802},
+ "source": "index"}
+```
+
+Validation: an empty query answers HTTP 200 with
+`{"code":40001,"msg":"query: Too small: expected string to have >=1 characters","data":null,...,"details":[{"path":"query","message":"..."}]}`
+(the usual envelope-plus-`details` validation shape).
+
 ## Files (attachments)
 
 File upload backs message attachments: upload the bytes first, then reference
 the returned `file_id` in a prompt's `content` items (see Prompts below). The
 endpoints and the prompt-side rewriting were verified live on 0.29.0
-(2026-07-24, session `attach-spike`) and re-verified on 0.29.2 (2026-07-27:
+(2026-07-24, session `attach-spike`) and re-verified on 0.31.0 (2026-07-30:
 upload/download/`Range` 206/delete of a text file, plus a `file` attachment
 prompt — the ACK echo and history carried the `Attached file "…"` notice
 byte-for-byte, em dash included, and the bytes materialized under
@@ -502,8 +574,20 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/files \
  "request_id": "01KY9ZRNGF3Y5EA7V12YY8D7GX"}
 ```
 
-- File ids are `f_` + ULID/UUID. Any MIME type is accepted; the per-file limit
-  is **50 MiB** (server-enforced, truncated uploads are rejected 413/41301).
+- File ids are `f_` + ULID/UUID. Any MIME type is accepted. **There is no
+  upload size cap anymore** — the 50 MiB limit was removed upstream ("remove
+  the 50 MiB upload size cap and stream uploads to disk") and uploads stream
+  to disk; the 413 / envelope-`41301` "upload too large" error no longer
+  occurs on this route (the code survives for session export only). Verified
+  live on 0.31.0 (2026-07-30) with a 55 MiB binary — HTTP 200 with the exact
+  `size`:
+
+```json
+{"code":0,"msg":"success","data":{"id":"f_d3528325-75f6-482e-aaac-14c127488913","name":"big-55m.bin","media_type":"application/octet-stream","size":57671680,"created_at":"2026-07-30T19:28:29.936Z"},"request_id":"01KYT7ZTETCPH10NV0NHB0068N"}
+```
+
+- When `expires_in_sec` is sent, the FileMeta response adds an **`expires_at`**
+  ISO timestamp; the field is absent otherwise.
 - The returned `media_type` is **sniffed from the bytes**; the `name` field and
   file extension are ignored. On 0.29.0 the sniffer recognizes images and text
   but not video: even a valid ffmpeg-generated mp4 and a WebM upload come back
@@ -676,7 +760,8 @@ curl -s -X POST 'http://127.0.0.1:58627/api/v1/sessions/session_b6be6715...:abor
 # {"code":0,"msg":"success","data":{"aborted":true},"request_id":"01KY6GFG4S5FPPXCFMP60X0FVH"}
 ```
 
-Verified mid-run on 0.29.0 (2026-07-23) and again on 0.29.2 (2026-07-27): the
+Verified mid-run on 0.29.0 (2026-07-23), again on 0.29.2 (2026-07-27) and
+again on 0.31.0 (2026-07-30): the
 WS then emits `turn.step.interrupted` (`reason: "aborted"`) → `turn.ended`
 (`reason: "cancelled"`) → `event.session.work_changed` (idle) →
 `prompt.aborted`.
@@ -685,7 +770,9 @@ WS then emits `turn.step.interrupted` (`reason: "aborted"`) → `turn.ended`
 
 Compacting summarizes a session's history to free up context window (the wire
 equivalent of the TUI's `/compact`). Documented and verified live on server
-`0.30.0` (2026-07-30, ticket 054). **Beware, web-bundle recon is misleading
+`0.30.0` (2026-07-30, ticket 054); re-verified the same day on `0.31.0` with
+one field-level drift (the summary message's `id` key — see the splice
+paragraph below). **Beware, web-bundle recon is misleading
 here: the `event.session.history_compacted` event the web client maps
 (`before_seq` / `reason` / `summary_message_id`) was never emitted by this
 server — a manual compact produces `compaction.started` /
@@ -722,7 +809,7 @@ curl -s -X POST 'http://127.0.0.1:58627/api/v1/sessions/session_abf63a9c-...:com
 ### WebSocket sequence
 
 Captured 2026-07-30 on 0.30.0 (session with 8 messages / 3 completed turns,
-compacted with an empty body):
+compacted with an empty body); re-verified verbatim on 0.31.0 the same day:
 
 ```
 seq 34  compaction.started         {"trigger":"manual"} — plus "instruction" when one was sent
@@ -778,8 +865,17 @@ The `context.spliced` frame rewrites the model context wholesale:
 `start: 0`, `deleteCount: <previous context size>` (8 in the capture), and
 `messages` is the new context: the kept user messages (verbatim, original
 `msg_...` ids, `origin.kind: "user"`) followed by the summary as a user
-message with `origin.kind: "compaction_summary"` and **`id: null`**. The
-spliced summary text is prefixed with model-facing instructions that are
+message with `origin.kind: "compaction_summary"`. **0.31.0 drift:** the
+summary message no longer carries `id: null` — the **`id` key is absent
+entirely**, while kept user messages still carry their `msg_…` ids (key lists
+from the 0.31.0 capture):
+
+```
+['content','id','origin','role','toolCalls']        origin user
+['content','origin','role','toolCalls']             origin compaction_summary
+```
+
+The spliced summary text is prefixed with model-facing instructions that are
 **not** persisted — history stores the bare summary (verified, see below).
 The prefix (verbatim):
 
@@ -818,7 +914,8 @@ The prefix (verbatim):
 
 ### Errors
 
-All verified live 2026-07-30 on 0.30.0 (HTTP 200 envelopes; server-side
+All verified live 2026-07-30 on 0.30.0, re-verified verbatim on 0.31.0 the
+same day (HTTP 200 envelopes; server-side
 `stack` strings omitted):
 
 - Empty/fresh session (also when the body is omitted entirely):
@@ -864,7 +961,8 @@ runs.
 
 The agent's user-question tool (`AskUserQuestion`) surfaces as **WebSocket
 events**; the answer or dismissal is posted back via REST. Re-verified
-2026-07-27 on 0.29.2 (surface + selected-option answer + dismiss + polling,
+2026-07-30 on 0.31.0 (same flow as
+2026-07-27 on 0.29.2: surface + selected-option answer + dismiss + polling,
 same session flow as 2026-07-23 on 0.29.0) by prompting a session to call the
 tool — the question surfaced directly, with no approval gate, under the
 session's default permission mode.
@@ -945,7 +1043,9 @@ against upstream source on `main` 2026-07-27
 `"name": "TodoList"` and args `{"todos": [{"status": "in_progress", "title":
 "Run echo step-one"}, {"status": "pending", "title": "Run echo step-two"},
 {"status": "pending", "title": "Run echo step-three"}]}`; history carried the
-same `toolUse` part).
+same `toolUse` part). The write contract was re-verified on 0.31.0
+(2026-07-30); the read-only query variant (call without the `todos` key) was
+not triggered live that run.
 
 - **Tool name:** `TodoList` (upstream `TODO_LIST_TOOL_NAME`). It appears
   wherever tool calls do: `toolUse` content parts in message history, and live
@@ -970,13 +1070,35 @@ The Android app implements this derivation in `TodoParser` + `ChatTimeline`
 (ticket 042) and hides `TodoList` tool rows from the timeline in favour of a
 summary widget.
 
+## Tools
+
+### Tool catalog — `GET /api/v1/tools`
+
+Lists the agent's builtin tools. Undocumented upstream until now; verified
+live on 0.31.0 (2026-07-30). Response `data.tools[]` entries carry only
+`{name, description, source: "builtin", active: true, input_schema: null}` —
+**input schemas are not exposed** (so tool-parameter drift, e.g. the
+`TaskOutput` `block`/`timeout` removal, is not observable here). 27 builtin
+tools observed: Agent, AgentSwarm, AskUserQuestion, Bash, CreateGoal,
+CronCreate/Delete/List, Edit, EnterPlanMode, ExitPlanMode, FetchURL, GetGoal,
+Glob, Grep, Read, ReadMediaFile, select_tools, SetGoalBudget, Skill, TaskList,
+TaskOutput, TaskStop, TodoList, UpdateGoal, WebSearch, Write.
+
+```bash
+curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/tools
+```
+
 ## Sub-agents
 
 How the server exposes the sub-agents the main agent spawns with its `Agent`
 (or `AgentSwarm`) tool. All shapes below verified live on `0.29.2`
-(2026-07-28, throwaway session in `/tmp/spike`, prompts with
-`permission_mode:"yolo"`); fields not captured live are marked as
-upstream-schema-only (`packages/kap-server/src/protocol/events-zod.ts`).
+(2026-07-28, throwaway session — pre-PrivateTmp cwd — prompts with
+`permission_mode:"yolo"`) and re-verified on `0.31.0` (2026-07-30, throwaway
+session in `/home/ubuntu/spike`) — drift
+since 0.29.2 is called out inline (spawn-time status republication, the
+`agent_call` display, the git-context prefix, the background completion
+delivery, the Agent tool-result trailer); fields not captured live are marked
+as upstream-schema-only (`packages/kap-server/src/protocol/events-zod.ts`).
 
 There are **two exposure paths**, chosen by the `Agent` call's
 `run_in_background` argument:
@@ -1012,6 +1134,15 @@ The spawn is an ordinary tool call named `Agent` (verbatim history part):
           "prompt":"Reply with the single word: ok"}}
 ```
 
+The live `tool.call.started` for the `Agent` tool carries a dedicated
+**`display`** (new in 0.31.0):
+`"display":{"kind":"agent_call","agent_name":"explore","prompt":"..."}`
+(a background spawn adds `"background":true`). The Agent tool also gained a
+**`resume`** parameter (see the background result text below). Upstream note:
+the `TaskOutput` tool lost its `block`/`timeout` input params and is now
+always non-blocking — tool input schemas are not observable on this wire
+(`GET /api/v1/tools` returns `input_schema: null`; see the Tools section).
+
 The tool result is plain text. Foreground (waits for completion):
 
 ```
@@ -1023,7 +1154,9 @@ status: completed
 <the sub-agent's result summary>
 ```
 
-Background (returns immediately):
+Background (returns immediately). The head of the contract
+(`task_id:`/`status:`/`agent_id:`/`actual_subagent_type:`) is unchanged;
+**0.31.0 appends `next_step:`/`resume_hint:` blocks** after the description:
 
 ```
 task_id: agent-7noib8bb
@@ -1033,7 +1166,13 @@ actual_subagent_type: explore
 automatic_notification: true
 
 description: doc-verify-bg
+
+next_step: The completion arrives automatically in a later turn — do NOT wait, poll, or call TaskOutput on it; ...
+
+resume_hint: To continue or recover this same subagent later, call Agent(resume="agent-1", prompt="..."). The parameter is agent_id ("agent-1"), NOT task_id ...
 ```
+
+The killed-task notification body carries the same resume hint.
 
 `GET .../messages` history carries only the main agent's messages — the
 `Agent` tool_use/tool_result pair is the **only** trace of a sub-agent there
@@ -1045,6 +1184,8 @@ description: doc-verify-bg
 seq 17  tool.call.started   name "Agent", args {subagent_type, description, prompt} (main)
 seq 18  agent.created       payload {"agentId": "agent-12", "sessionId": ...}
 seq 19  subagent.spawned    identity metadata (payload.agentId "main")
+seq 19  agent.status.updated  0.31.0: republication for the sub-agent, same seq,
+                            volatile — see below
 seq 20  turn.started        agentId "agent-12"; origin {"kind":"system_trigger","name":"subagent"}
 seq 21  context.spliced     the sub-agent's first internal user message
 seq 22  subagent.started    {subagentId}
@@ -1056,7 +1197,17 @@ seq 34  tool.result         the Agent call's result; the main turn resumes
 ```
 
 `subagent.spawned` (verbatim; carries all the identity metadata — later
-`subagent.*` events carry only `subagentId`):
+`subagent.*` events carry only `subagentId`). **0.31.0:** immediately after
+`subagent.spawned` (same seq, volatile) the server **republishes the
+sub-agent's `agent.status.updated`** — a duplicate of the one that follows
+`agent.created`. The pair, verbatim:
+
+```json
+{"type":"subagent.spawned","seq":27,"payload":{"type":"subagent.spawned","subagentId":"agent-0","subagentName":"explore","parentToolCallId":"tool_7Fs0y4Xb5bwD5DtU7PCq2PdM","parentAgentId":"main","callerAgentId":"main","description":"doc-verify-fg","runInBackground":false,"agentId":"main","sessionId":"session_7f33a76c-..."}}
+{"type":"agent.status.updated","seq":27,"volatile":true,"payload":{"type":"agent.status.updated","model":"kimi-code/k3","thinkingEffort":"high","maxContextTokens":1048576,"usage":{},"contextTokens":0,"agentId":"agent-0","sessionId":"session_7f33a76c-..."}}
+```
+
+(0.29.2 capture for comparison:)
 
 ```json
 {"type":"subagent.spawned","seq":19,
@@ -1065,6 +1216,11 @@ seq 34  tool.result         the Agent call's result; the main turn resumes
             "callerAgentId":"main","description":"doc-verify-subagent",
             "runInBackground":false,"agentId":"main","sessionId":"session_..."}}
 ```
+
+Also new in 0.31.0: the sub-agent's first internal user message (the
+`context.spliced` after its `turn.started`) embeds a
+**`<git-context status="unavailable" reason="not-a-repo"/>`** prefix when the
+session cwd is not a git repository.
 
 `subagent.completed` (verbatim, `resultSummary` elided):
 
@@ -1099,6 +1255,8 @@ still surface in the main chat — they are actionable.)
 
 ### Background lifecycle — WS sequence
 
+Spawn half (0.29.2 capture, unchanged on 0.31.0):
+
 ```
 seq 46  tool.call.started   name "Agent", args {..., "run_in_background":true}
 seq 48  subagent.spawned    "runInBackground":true
@@ -1107,13 +1265,36 @@ seq 51  subagent.started
 seq 52  task.started        task-store registration (REST-visible from here)
 seq 53  background.task.started     legacy alias — same payload as task.started
 seq 55  tool.result         "task_id: ... status: running ..." (immediate)
-seq 71  subagent.completed
-seq 72  task.terminated     info.status "completed", endedAt set
-seq 73  background.task.terminated  legacy alias
-seq 77  task.notified       completion notification
-seq 78  context.spliced     a `<notification ...>` user message spliced into the
+```
+
+**Completion half — restructured in 0.31.0.** The completion is no longer just
+spliced into the running context: it is delivered inside a **NEW main turn**
+(0.31.0 capture, verbatim seqs):
+
+```
+seq 83  subagent.completed
+seq 84  task.terminated     info.status "completed"
+seq 85  background.task.terminated  legacy alias
+seq 86  event.session.work_changed  busy=false, last_turn_reason "completed"
+seq 87  turn.started        MAIN agent — origin {"kind":"task",...}, see below
+seq 88  event.session.work_changed  busy=true
+seq 89  task.notified       notificationType "task.completed"
+seq 90  context.spliced     a `<notification ...>` user message spliced into the
                             MAIN agent — how the main agent learns of it
 ```
+
+- New `turn.started` origin kind **`task`** (verbatim):
+  `{"kind":"task","taskId":"agent-a7fxomh0","status":"completed","notificationId":"task:agent-a7fxomh0:completed"}`.
+- The notification splice message's origin is `{"kind":"task",...}` (not
+  `user`) and it has **no `id` field** (keep treating spliced-message ids as
+  optional). The `<notification>` element gained attributes (`id`, `category`,
+  `type`, `source_kind`, `source_id`, `agent_id`) plus an
+  `<output-file path=".../agents/main/tasks/<taskId>/output.log" bytes="1532">`
+  child telling the agent to Read the output file. The `task.notified`
+  payload itself is unchanged.
+- The background Agent tool **result text** now ends with `next_step:` /
+  `resume_hint:` blocks (see the spawning tool call subsection); the Agent
+  tool gained a `resume` parameter.
 
 `task.started` / `task.terminated` payload (verbatim, from the cancel run):
 
@@ -1137,7 +1318,8 @@ below); `kind:"agent"` marks a sub-agent (`process` = background bash).
 
 ### REST `/tasks` — background tasks only
 
-All envelope-over-HTTP-200 (verified 2026-07-28):
+All envelope-over-HTTP-200 (verified 2026-07-28, re-verified unchanged
+2026-07-30 on 0.31.0):
 
 ```bash
 curl -s -H "Authorization: Bearer <token>" \
@@ -1162,10 +1344,14 @@ curl -s -X POST -H "Authorization: Bearer <token>" \
 - **Cancel** — `POST .../tasks/{task_id}:cancel` → `{"cancelled":true}` on a
   running task; a terminal task answers `40904` with
   `data:{"cancelled":false}` + `details.current_status`. Cancelling a
-  running background sub-agent emits `task.terminated` with
+  running background sub-agent (re-verified unchanged on 0.31.0, 2026-07-30)
+  emits `turn.step.interrupted` → `turn.ended` → `prompt.aborted` →
+  `task.terminated` with
   `status:"killed"` + `stopReason:"Aborted by the user"` — **no**
-  `subagent.failed`/`subagent.completed` — then `task.notified`
-  (`notificationType:"task.killed"`) and the notification splice; REST reads
+  `subagent.failed`/`subagent.completed` — then the `background.task.terminated`
+  legacy alias, `task.notified`
+  (`notificationType:"task.killed"`, severity warning) and the notification
+  splice; REST reads
   `"cancelled"` afterwards.
 
 Task object (verbatim):
@@ -1186,7 +1372,8 @@ The REST shape is thinner than the WS/snapshot one: no `subagent_type`, no
 the **foreground** roster at the watermark, so a reconnecting client can
 rebuild the identity metadata (cursor-resume replays nothing earlier than
 the cursor, and `subagent.spawned` is never replayed). Verified 2026-07-28
-right after the foreground run:
+right after the foreground run, re-verified 2026-07-30 on 0.31.0 (including
+the reset-to-`[]` behavior described below):
 
 ```json
 {"id":"agent-12","session_id":"session_...","kind":"subagent",
@@ -1253,7 +1440,8 @@ its `ack`.
                        "cursors":{"session_b6be6715...":{"seq":2,"epoch":"ep_01KY6G589H3J9XHG6RF1RYAE59"}}}}
 ```
 
-**Resume after disconnect** (re-verified on 0.29.2, 2026-07-27: subscribing
+**Resume after disconnect** (re-verified on 0.31.0, 2026-07-30 — durable
+replay; on 0.29.2, 2026-07-27: subscribing
 from `seq 135` replayed seqs 136–142 in order; on 0.29.0: from `seq 70`
 replayed 71–78, from `seq 78` replayed the later question events):
 
@@ -1261,6 +1449,24 @@ replayed 71–78, from `seq 78` replayed the later question events):
 {"type":"subscribe","id":"r_1","payload":{"session_ids":["session_..."],
  "cursors":{"session_...":{"seq":70,"epoch":"ep_01KY6G589H3J9XHG6RF1RYAE59"}}}}
 ```
+
+**Refused cursor** (verified on 0.31.0, 2026-07-30): when the cursor cannot be
+served (e.g. a future seq with a matching epoch), the server **first sends a
+standalone frame**, then answers the subscribe with an `ack` that lists the
+session in `resync_required` (the client must then drop its state and re-sync
+via REST). The standalone frame, verbatim:
+
+```json
+{"type":"resync_required","timestamp":"...","payload":{"session_id":"session_7f33a76c-...","reason":"epoch_changed","current_seq":1,"epoch":"ep_01KYT7YRH68CT2NDATYYXZZT9A"}}
+```
+
+Note the reason string is `"epoch_changed"` even when only the seq was in the
+future.
+
+**Caveat — unsolicited frames (observed repeatedly on 0.31.0):** an
+authenticated WS connection receives events for sessions it **never subscribed
+to** (frames for other live sessions arrived with zero subscribe frames sent).
+Clients MUST filter incoming events on `session_id`.
 
 `unsubscribe` works the same way and gets its own `ack` (re-verified
 2026-07-23: `{"type":"ack","id":"u_1","code":0,...,"payload":{"accepted":[],...}}`).
@@ -1285,11 +1491,15 @@ Every event frame:
 ### Captured round-trips
 
 Full prompt with a manual-permission tool call, recorded 2026-07-23 on 0.29.0
-and **re-verified event-for-event on 0.29.2 (2026-07-27)** (command:
+and **re-verified byte-for-byte on 0.31.0 (2026-07-30)** (command:
 `POST .../prompts` with `permission_mode: "manual"`, approval via REST as
 above). Same skeleton as 0.28.1 (one nit: on the 0.29.2 capture `turn.started`
 (seq 4) arrived *before* the busy `event.session.work_changed` (seq 5); treat
-their relative order as unspecified):
+their relative order as unspecified). **0.31.0 addition:** an `agent.created`
+frame now fires for the **main** agent — payload
+`{"agentId":"main","sessionId":"..."}` — at the head of the session's first
+prompt turn (this event was previously documented only in the sub-agent
+flow):
 
 ```
 seq 2   agent.status.updated       model/usage variant (now with thinkingEffort)
@@ -1360,7 +1570,7 @@ Dismiss path instead of the answer (2026-07-23): `event.session.work_changed`
 (`"none"`) → `event.question.dismissed` → `tool.result` with output
 `{"answers":{},"note":"User dismissed the question without answering."}`.
 
-### Core event payloads (verbatim captures, re-verified 0.29.2)
+### Core event payloads (verbatim captures, re-verified 0.31.0)
 
 **New user message** (`context.spliced`; `messages` carries full message
 objects — `start`/`deleteCount` are splice coordinates into the context).
@@ -1420,7 +1630,7 @@ action, same text as the approval's `action`). Unchanged:
  "payload":{"type":"tool.call.started","turnId":0,"toolCallId":"tool_RMgBIy1asIorg1eV8P3ZhHiL",
             "name":"Bash","args":{"command":"echo doc-verify-0290"},
             "description":"Running: echo doc-verify-0290",
-            "display":{"kind":"command","command":"echo doc-verify-0290","cwd":"/tmp/spike","language":"bash"},
+            "display":{"kind":"command","command":"echo doc-verify-0290","cwd":"/home/ubuntu/spike","language":"bash"},
             "agentId":"main","sessionId":"session_..."}}
 ```
 
@@ -1448,6 +1658,15 @@ action, same text as the approval's `action`). Unchanged:
             "agentId":"main","sessionId":"session_..."}}
 ```
 
+**Step retrying** (`turn.step.retrying`) — **new in 0.31.0**: fires when an
+LLM call is retried (e.g. provider 429); afterwards a fresh
+`turn.step.started` with a **new `stepId`** re-fires for the same step number.
+Verbatim:
+
+```json
+{"type":"turn.step.retrying","seq":21,"payload":{"type":"turn.step.retrying","turnId":1,"step":1,"stepId":"d09585d5-...","failedAttempt":1,"nextAttempt":2,"maxAttempts":10,"delayMs":592.08,"errorName":"APIProviderRateLimitError","errorMessage":"429 The engine is currently overloaded, please try again later","statusCode":429,"agentId":"main","sessionId":"session_..."}}
+```
+
 **turn.started / turn.ended** — unchanged (`turn.started` carries `prompt`,
 the prompt text):
 
@@ -1469,8 +1688,22 @@ can now carry `thinkingEffort`; the `phase` objects now carry `since` (epoch
 ms) on active phases; the `awaiting_approval` inline approval now carries both
 `approvalId` and `toolCallId`; and there is a **new phase kind `tool_call`**
 (emitted while a tool executes). Observed kinds: `running`, `streaming`
-(with `"stream": "thinking" | "tool_call"`), `awaiting_approval`, `tool_call`,
-`ended` (with `at` instead of `since`):
+(with `"stream": "thinking" | "tool_call"` — **0.31.0 adds
+`"stream": "assistant"`** to the streaming-phase variant), `awaiting_approval`,
+`tool_call`,
+`ended` (with `at` instead of `since`). **0.31.0, additive:** the model/usage
+variant's `usage` can be a **nested** object — per-model buckets plus
+`total`/`currentTurn` aggregates:
+
+```json
+"usage":{"byModel":{"kimi-code/k3":{"inputOther":14102,"output":61,"inputCacheRead":11520,"inputCacheCreation":0}},"total":{...},"currentTurn":{...}}
+```
+
+The top-level `contextTokens` / `maxContextTokens` are still present alongside
+it (verified). Note `turn.step.completed.usage` and
+`subagent.completed.usage` remain the **flat** shape
+(`{"inputOther":...,"output":...,"inputCacheRead":...,"inputCacheCreation":...}`)
+— only `agent.status.updated` got the nested form:
 
 ```json
 {"type":"agent.status.updated","seq":2,"volatile":true,
@@ -1523,7 +1756,7 @@ approval id**). Unchanged:
  "payload":{"type":"permission.approval.requested","sessionId":"session_...","agentId":"main",
             "turnId":0,"toolCallId":"tool_RMgBIy1asIorg1eV8P3ZhHiL",
             "toolName":"Bash","action":"Running: echo doc-verify-0290",
-            "display":{"kind":"command","command":"echo doc-verify-0290","cwd":"/tmp/spike","language":"bash"},
+            "display":{"kind":"command","command":"echo doc-verify-0290","cwd":"/home/ubuntu/spike","language":"bash"},
             "toolInput":{"command":"echo doc-verify-0290"}}}
 ```
 
@@ -1538,7 +1771,7 @@ Unchanged:
             "turn_id":0,"tool_call_id":"tool_RMgBIy1asIorg1eV8P3ZhHiL",
             "tool_name":"Bash","action":"Running: echo doc-verify-0290",
             "tool_input_display":{"kind":"command","command":"echo doc-verify-0290",
-                                  "cwd":"/tmp/spike","language":"bash"},
+                                  "cwd":"/home/ubuntu/spike","language":"bash"},
             "created_at":"2026-07-23T03:27:38.761Z","expires_at":"2026-07-24T03:27:38.761Z"}}
 ```
 
@@ -1610,6 +1843,45 @@ selected option and free text both re-verified 2026-07-23:
 
 ## Verification log
 
+- 2026-07-30 full re-verification on `0.31.0` (server 0.29.2 → 0.31.0;
+  throwaway sessions in `/home/ubuntu/spike` — `kimi-web.service` now runs
+  with `PrivateTmp=yes`, so the old `/tmp` throwaway cwd is invisible to the
+  server). All core-loop REST shapes re-verified unchanged: meta, models,
+  sessions CRUD + status + pagination, workspaces, messages, transcript,
+  prompts, steer REST, abort, compact REST + WS + errors, questions
+  answer/dismiss + WS events, approvals, TodoList write contract, files
+  (incl. the attachment rewrite), tasks REST, transcript `agent_id` paging,
+  snapshot `subagents` roster, WS hello/ack/cursor-resume. Drift found (all
+  detailed inline): (a) the 50 MiB file-upload cap was removed — uploads
+  stream to disk, a 55 MiB upload returns HTTP 200 with the exact `size`,
+  413/41301 no longer occurs on `/files` (the code survives for session
+  export); `expires_in_sec` now adds `expires_at` to the FileMeta response;
+  (b) `GET`/`POST /api/v1/config` gained `secondary_model` (`{}` here);
+  `default_model` reads `kimi-code/k3-256k` (config value, not protocol);
+  (c) new endpoints `POST /api/v1/search` (global message search) and
+  `GET /api/v1/tools` (tool catalog, `input_schema: null`, 27 builtin tools);
+  (d) WS: `agent.created` now fires for the main agent at the head of the
+  first prompt; new event type `turn.step.retrying` (LLM retry, e.g. provider
+  429); `agent.status.updated` gained a nested-usage variant (`byModel` /
+  `total` / `currentTurn`) and the streaming phase now also appears with
+  `stream:"assistant"` (`turn.step.completed.usage` and
+  `subagent.completed.usage` remain flat); right after `subagent.spawned` the
+  server republishes the sub-agent's `agent.status.updated`; the Agent
+  tool's `tool.call.started` carries `display.kind:"agent_call"`; sub-agent
+  first internal message embeds `<git-context status="unavailable"
+  reason="not-a-repo"/>` when the cwd is not a git repo; background-task
+  completion is now delivered as a NEW main turn (`turn.started` origin
+  `{"kind":"task",...}`) and the notification splice message has no `id` and
+  origin kind `task` (the `<notification>` element gained attributes and an
+  `<output-file>` child); the background Agent tool result text gained
+  `next_step:`/`resume_hint:` blocks (Agent gained a `resume` parameter;
+  `TaskOutput` lost `block`/`timeout`); the compact `context.spliced`
+  summary message no longer carries `id: null` — the `id` key is absent;
+  (e) environment: the old `/tmp` throwaway cwd replaced by
+  `/home/ubuntu/spike` in the examples. Two caveats: the steer WS mid-turn sequence could NOT be
+  re-verified (the steered turn hung model-side and was aborted), and the
+  TodoList read-query (no `todos` key) was not triggered live this run.
+
 - 2026-07-30 compact round-trips on `0.30.0` (ticket 054; throwaway
   sessions `session_647d8a6d-...` / `session_abf63a9c-...` /
   `session_e658daa5-...` in `/home/ubuntu/spike-compact-054`): `POST
@@ -1646,7 +1918,7 @@ selected option and free text both re-verified 2026-07-23:
   and `undo` markers on the main transcript, `prompt` field on user-origin
   turns. All `curl` against `http://100.64.0.1:80/api/v1/...`.
 - 2026-07-28 sub-agent round-trips on `0.29.2` (throwaway session
-  `session_1525d049-...` in `/tmp/spike`; first prompt needed
+  `session_1525d049-...`; first prompt needed
   `"model":"kimi-code/k3"` — a fresh session has no model and fails with
   `model.not_configured`): foreground `Agent` spawn (full lifecycle —
   `agent.created`, `subagent.spawned`/`started`/`completed`, two internal
@@ -1663,7 +1935,7 @@ selected option and free text both re-verified 2026-07-23:
   agent started a new turn), history showing only the main transcript. All
   captured with `websocat` 1.14.0 against `ws://127.0.0.1:58627/api/v1/ws`.
 - REST probes: `curl` against `http://127.0.0.1:58627/api/v1/...` (commands
-  inline above), server `0.29.2` (`backend: v2`).
+  inline above), server `0.31.0` (`backend: v2`).
 - Auth (re-verified 2026-07-27): `/api/v1/meta` → `401` without a token or
   with a wrong one, `200` with `Authorization: Bearer <token>`;
   `/api/v1/healthz` is public (always `200`). Auth is server-native (bearer
@@ -1698,8 +1970,8 @@ selected option and free text both re-verified 2026-07-23:
   an `api_key` reveal on the single-provider GET, a `desktop` flag on session
   export, and a WS frame-flush fix — all outside the core loop; no Android DTO
   or parser needs updating.
-- 2026-07-27 0.29.2 round-trips (throwaway session `session_43b9ba9b-...` in
-  `/tmp/spike`): manual tool-call approval (approve path, both
+- 2026-07-27 0.29.2 round-trips (throwaway session `session_43b9ba9b-...`):
+  manual tool-call approval (approve path, both
   `permission.approval.*` and legacy `event.approval.*` shapes with
   `expires_at` +24 h), queued prompt while busy, `prompts:steer` (fresh-id
   splice capture), idle-session steer error (`code:40402`), empty
@@ -1724,17 +1996,17 @@ selected option and free text both re-verified 2026-07-23:
   refreshes `capabilities` to `["thinking", "always_thinking", "image_in",
   "video_in", "tool_use"]` (k3-256k omits `"video_in"`). No Android DTO or
   parser needs updating.
-- 2026-07-25 0.29.1 round-trips (throwaway session `session_c42940aa-...` in
-  `/tmp/spike`): manual tool-call approval (approve path), `AskUserQuestion`
+- 2026-07-25 0.29.1 round-trips (throwaway session `session_c42940aa-...`):
+  manual tool-call approval (approve path), `AskUserQuestion`
   surface + answer via `POST .../questions/{qid}`, queued prompt while busy,
   `prompts:steer`, mid-run `:abort`, file upload/download/delete, and prompt
   with a `file` attachment (history confirmed the `Attached file "…"` notice
   wording, including the em dash, and `<sessionDir>/attachments/`
   materialization). All captured with `websocat` 1.14.0 against
   `ws://127.0.0.1:58627/api/v1/ws`; no heartbeat frames observed.
-- Housekeeping notes: the `kimi-web.service` unit has `PrivateTmp=yes`, so
-  `/tmp/spike` must exist in the service's mount namespace (see Sessions →
-  Create). There is no session-delete endpoint (`DELETE` → 404, re-verified
+- Housekeeping notes: the `kimi-web.service` unit has `PrivateTmp=yes`, so a
+  host-side `/tmp` directory is invisible to the server — throwaway sessions
+  are created with cwd `/home/ubuntu/spike` instead (see Sessions → Create). There is no session-delete endpoint (`DELETE` → 404, re-verified
   2026-07-27); throwaway sessions created for the captures were left in place.
 - 2026-07-24 attachment round-trips on 0.29.0 (session `attach-spike`, cwd the
   repo root): upload/download (incl. `Range` 206 and `content-disposition`

@@ -82,7 +82,8 @@ also the regression signal for "verified fixed" tickets.
   `SessionPrefsStore` (per-session model/effort prefs), and `ChatMessageMapper`
   (DTO→domain). New chat endpoints belong in a collaborator, not the facade.
 - `data/attachments/` — `AttachmentStore` owns all platform file I/O (content
-  resolver reads capped at 50 MiB, the server's own limit; cache writes;
+  resolver reads capped at 50 MiB — a client-side guard; the server removed
+  its own upload cap in 0.31.0, see ticket 059; cache writes;
   FileProvider URIs). Composables never touch `ContentResolver`/`File`.
 - Errors: repositories return `Result` + sealed `DataError`; ViewModels map them
   with `toUserMessage()` (kept next to `DataError`). Dropped WebSocket frames
