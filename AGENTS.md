@@ -29,6 +29,32 @@ stored in the app settings).
   and are deobfuscated because the Crashlytics Gradle plugin uploads the R8
   mapping on every release build.
 
+## Querying Crashlytics from the VPS
+
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS=/home/ubuntu/service-account.json
+TOKEN=$(gcloud auth application-default print-access-token)
+APP=projects/kimi-code-android-client/apps/1:000000000000:android:0000000000000000
+BASE=https://firebasecrashlytics.googleapis.com/v1alpha   # v1alpha only, v1beta1 404s
+```
+
+List issues:
+
+```bash
+curl -s -G -H "Authorization: Bearer $TOKEN" "$BASE/$APP/reports/topIssues" \
+  --data-urlencode "filter.interval.startTime=2026-07-30T00:00:00Z" \
+  --data-urlencode "filter.interval.endTime=2026-07-30T23:59:59Z"
+```
+
+Full stack traces (event ids from `sampleEvent` above; ~160 KB/event, parse
+with `python3`; frames in `exceptions[].frames`, deobfuscated via the R8
+mapping uploaded at build time):
+
+```bash
+curl -s -G -H "Authorization: Bearer $TOKEN" "$BASE/$APP/events:batchGet" \
+  --data-urlencode "names=projects/-/apps/<appId>/events/<eventId>"
+```
+
 ## Layout & conventions
 
 - `data/network/` — `ApiClient` is the shared HTTP scaffold (URL building,
