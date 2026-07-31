@@ -351,11 +351,11 @@ class ChatTimeline(
         rows.removeAll { it.id == LIVE_COMPACTION_DIVIDER_ID }
     }
 
-    /** The just-sent user message arrives spliced mid-turn (0.27.0 dropped
-     * prompt.submitted): commit it immediately so the chat does not look dead for the
-     * whole turn. Deduped by message id — a reconnect replay or a racing refetch must
-     * not add a second bubble; the turn.ended refetch then replaces committed rows
-     * wholesale. Assistant/tool splices are ignored: deltas and history cover them.
+    /** The just-sent user message arrives spliced mid-turn: commit it immediately so
+     * the chat does not look dead for the whole turn. Deduped by message id — a
+     * reconnect replay or a racing refetch must not add a second bubble; the
+     * turn.ended refetch then replaces committed rows wholesale. Assistant/tool
+     * splices are ignored: deltas and history cover them.
      *
      * The steer echo (docs/server-api.md, steer round-trip) splices the steered message
      * without an id: those dedup on the text instead — a racing mid-turn refetch commits

@@ -184,7 +184,7 @@ class ChatRepository @Inject constructor(
         chatApi.compact(settings, sessionId)
 
     /** Lightweight live status (`GET /api/v1/sessions/{id}/status`): the mid-turn flag
-     * plus the context window fill when the server sends token counts (ticket 041). */
+     * and the context window fill (ticket 041). */
     suspend fun getSessionStatus(settings: ServerSettings, sessionId: String): Result<SessionStatus> =
         chatApi.sessionStatus(settings, sessionId)
 

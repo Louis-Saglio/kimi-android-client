@@ -34,7 +34,7 @@ import okhttp3.WebSocketListener
 /**
  * The session WebSocket (`/api/v1/ws`, docs/server-api.md): connection management
  * (reconnect loop, resume cursor, backoff), frame parsing/dispatch, and the
- * subscribe/pong frame builders.
+ * subscribe frame builder.
  */
 internal class SessionSocket(
     client: OkHttpClient,
@@ -172,7 +172,7 @@ internal class SessionSocket(
                         webSocket.send(subscribeFrame(sessionId, cursor))
                     }
                     is Signal.Text ->
-                        handleFrame(signal.text, webSocket, sessionId, onCursor, onResyncRequired, onEvent)
+                        handleFrame(signal.text, sessionId, onCursor, onResyncRequired, onEvent)
                     Signal.Closed -> return
                     is Signal.Failed -> throw IOException("WebSocket failed", signal.cause)
                 }
@@ -186,7 +186,6 @@ internal class SessionSocket(
     /** One bad frame must not kill the connection: parse failures are dropped. */
     private suspend fun handleFrame(
         text: String,
-        webSocket: WebSocket,
         sessionId: String,
         onCursor: (Cursor) -> Unit,
         onResyncRequired: suspend () -> Unit,
@@ -209,15 +208,6 @@ internal class SessionSocket(
         // a sub-agent's approval/question is actionable whoever raised it.
         val agentId = frame.agentId()
         when (frame.type) {
-            // Legacy protocol: pre-v2 servers closed the connection when app-level pings
-            // went unanswered; v2 sends none, answering stays harmless (docs/server-api.md).
-            "ping" -> frame.payload
-                ?.let {
-                    runCatching { json.decodeFromJsonElement(PingPayload.serializer(), it) }
-                        .onFailure { e -> Log.w(TAG, "Dropping undecodable 'ping' payload", e) }
-                        .getOrNull()
-                }
-                ?.let { webSocket.send(pongFrame(it.nonce)) }
             "assistant.delta" -> frame.decodePayload<DeltaPayload>()
                 ?.let { onEvent(SessionEvent.AssistantDelta(it.delta, agentId)) }
             "thinking.delta" -> frame.decodePayload<DeltaPayload>()
@@ -365,11 +355,6 @@ internal class SessionSocket(
                 }
             }
         }
-    }.toString()
-
-    private fun pongFrame(nonce: String): String = buildJsonObject {
-        put("type", "pong")
-        putJsonObject("payload") { put("nonce", nonce) }
     }.toString()
 
     private companion object {

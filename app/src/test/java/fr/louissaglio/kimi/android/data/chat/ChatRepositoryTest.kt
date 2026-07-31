@@ -58,7 +58,7 @@ class ChatRepositoryTest {
 
     /**
      * Collects what one socket receives after the server sends [frames] on upgrade:
-     * collects until [eventCount] substantive events arrived (server_hello, pings, and
+     * collects until [eventCount] substantive events arrived (server_hello and
      * phase-only agent.status frames emit none), then waits [settleMillis] longer as
      * proof that nothing more comes, and cancels. Returns every emitted [SocketEvent],
      * Connected first; callers assert on the [SocketEvent.Event] subset.
@@ -855,18 +855,6 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun `getSessionStatus without token counts reports no context usage`() = runBlocking {
-        server.enqueue(
-            MockResponse().setBody("""{"code":0,"msg":"success","data":{"busy":false},"request_id":"01KX"}"""),
-        )
-
-        assertEquals(
-            SessionStatus(busy = false, contextUsage = null),
-            repository.getSessionStatus(settings(), "session_1").getOrThrow(),
-        )
-    }
-
-    @Test
     fun `agent status usage frame emits the context usage, phase frame emits nothing`() = runBlocking {
         // Verbatim 0.29.0 shapes (docs/server-api.md, Agent status). The settle wait
         // covers the phase frame: it must arrive and still produce no event.
@@ -892,7 +880,7 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun `socket subscribes, answers pings, and emits parsed events`() = runBlocking {
+    fun `socket subscribes and emits parsed events`() = runBlocking {
         val clientFrames = CopyOnWriteArrayList<String>()
         server.enqueue(
             MockResponse().withWebSocketUpgrade(
@@ -904,7 +892,6 @@ class ChatRepositoryTest {
                                 """"session_id":"session_1","timestamp":"2026-07-17T04:11:00.603Z",""" +
                                 """"payload":{"type":"assistant.delta","turnId":1,"delta":"ok","agentId":"main","sessionId":"session_1"}}""",
                         )
-                        webSocket.send("""{"type":"ping","payload":{"nonce":"n1"}}""")
                     }
 
                     override fun onMessage(webSocket: WebSocket, text: String) {
@@ -917,7 +904,6 @@ class ChatRepositoryTest {
         val emitted = CopyOnWriteArrayList<SocketEvent>()
         val job = launch { repository.observeSession(settings(), "session_1").collect { emitted += it } }
         try {
-            awaitCondition { clientFrames.any { "\"pong\"" in it } }
             awaitCondition { emitted.any { it is SocketEvent.Event } }
         } finally {
             job.cancel()
@@ -930,8 +916,6 @@ class ChatRepositoryTest {
         )
         val subscribe = clientFrames.first { "\"subscribe\"" in it }
         assertTrue(subscribe.contains("session_1"))
-        val pong = clientFrames.first { "\"pong\"" in it }
-        assertTrue(pong.contains("n1"))
         Unit
     }
 
@@ -1445,14 +1429,12 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun `uploadFile maps a 413 to an Http error`() = runBlocking {
-        // Pre-0.31.0 servers rejected over-cap uploads with 413 (docs/server-api.md):
-        // the mapping stays so such a server still surfaces a plain send failure.
-        server.enqueue(MockResponse().setResponseCode(413))
+    fun `uploadFile maps an HTTP error to an Http error`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(500))
 
         val result = repository.uploadFile(settings(), "big.bin", "application/octet-stream", ByteArray(4))
 
-        assertTrue((result.exceptionOrNull() as? DataError.Http)?.code == 413)
+        assertTrue((result.exceptionOrNull() as? DataError.Http)?.code == 500)
     }
 
     @Test

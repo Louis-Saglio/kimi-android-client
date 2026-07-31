@@ -4,7 +4,7 @@ import fr.louissaglio.kimi.android.data.DataError
 
 /** Payload tag of the main agent (docs/server-api.md, Sub-agents): every transcript
  * frame carries the emitting agent's id — "main", or the sub-agent's id for its own
- * turn frames. Absent on older captures, where it reads as main. */
+ * turn frames. Untagged payloads (the interaction families) read as main. */
 const val MAIN_AGENT_ID = "main"
 
 /** The main agent's sub-agent-spawning tool (docs/server-api.md, Sub-agents). */
@@ -88,8 +88,8 @@ sealed interface SessionEvent {
         override val agentId: String = MAIN_AGENT_ID,
     ) : SessionEvent, AgentScopedEvent
 
-    /** Messages spliced into the context inline (0.27.0): carries the just-sent user
-     * message, which replaced prompt.submitted as the sent-prompt echo. For a sub-agent
+    /** Messages spliced into the context inline (docs/server-api.md): carries the
+     * just-sent user message — the sent-prompt echo. For a sub-agent
      * ([AgentScopedEvent.agentId]) these are its internal prompts (the task, nudges). */
     data class ContextSpliced(
         val messages: List<ChatMessage>,
@@ -168,7 +168,7 @@ data class ContextUsage(
 )
 
 /** Snapshot of `GET /api/v1/sessions/{id}/status` (ticket 041): [busy] is the mid-turn
- * flag; [contextUsage] is null on older servers that send no token counts. */
+ * flag; [contextUsage] is null only when the success envelope carried no data object. */
 data class SessionStatus(
     val busy: Boolean,
     val contextUsage: ContextUsage?,

@@ -77,9 +77,9 @@ data class MediaSourceDto(
 @Serializable
 data class SessionStatusData(
     val busy: Boolean = false,
-    // Context window fill (ticket 041); absent on older servers.
-    @SerialName("context_tokens") val contextTokens: Long? = null,
-    @SerialName("max_context_tokens") val maxContextTokens: Long? = null,
+    // Context window fill (ticket 041); the current server always sends both counts.
+    @SerialName("context_tokens") val contextTokens: Long,
+    @SerialName("max_context_tokens") val maxContextTokens: Long,
 )
 
 /**
@@ -116,7 +116,7 @@ data class ModelDto(
     @SerialName("default_effort") val defaultEffort: String? = null,
 )
 
-/** `data` of the POST /prompts ack; on 0.27.0 `prompt_id` == `user_message_id`. */
+/** `data` of the POST /prompts ack. */
 @Serializable
 data class PromptData(
     @SerialName("prompt_id") val promptId: String = "",
@@ -145,12 +145,9 @@ data class WsFrame(
     val payload: JsonObject? = null,
 )
 
-@Serializable
-data class PingPayload(val nonce: String = "")
-
 /** Peek at the emitter tag every event payload carries (docs/server-api.md,
  * Sub-agents): `"main"` for the main agent, the sub-agent's id for its own frames.
- * Absent on older captures — reads as main. */
+ * Untagged payloads (the interaction families) read as main. */
 @Serializable
 data class AgentIdPeek(val agentId: String = "main")
 

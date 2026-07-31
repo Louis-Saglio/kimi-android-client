@@ -126,7 +126,8 @@ class ChatViewModelTest {
 
     @Volatile
     private var statusBody =
-        """{"code":0,"msg":"success","data":{"busy":false},"request_id":"r"}"""
+        """{"code":0,"msg":"success","data":{"busy":false,"context_tokens":0,""" +
+            """"max_context_tokens":1048576,"context_usage":0.0},"request_id":"r"}"""
 
     @Volatile
     private var serverSocket: WebSocket? = null
@@ -294,7 +295,7 @@ class ChatViewModelTest {
                             )
                         } else {
                             MockResponse().setBody(
-                                """{"code":41301,"msg":"file exceeds the 50 MiB limit","data":null,"request_id":"r"}""",
+                                """{"code":40001,"msg":"unsupported media type","data":null,"request_id":"r"}""",
                             )
                         }
                     }
@@ -544,7 +545,8 @@ class ChatViewModelTest {
 
     @Test
     fun `a turn still running on return keeps its live rows`() = runBlocking {
-        statusBody = """{"code":0,"msg":"success","data":{"busy":true},"request_id":"r"}"""
+        statusBody = """{"code":0,"msg":"success","data":{"busy":true,"context_tokens":25050,""" +
+            """"max_context_tokens":1048576,"context_usage":0.0239},"request_id":"r"}"""
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         awaitState(viewModel.uiState) { it.items != null }
@@ -851,16 +853,16 @@ class ChatViewModelTest {
     fun `usage frames grow the ring live, phase frames leave it untouched`() = runBlocking {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
-        // No token counts in the default /status body: the ring stays hidden.
-        assertNull(viewModel.uiState.value.contextUsage)
+        // The /status seed plants the baseline (the current server always sends counts).
+        awaitState(viewModel.uiState) { it.contextUsage != null }
+        assertEquals(ContextUsage(0, 1048576), viewModel.uiState.value.contextUsage)
 
         socket.send(agentStatusPhaseFrame())
         delay(200)
-        assertNull(viewModel.uiState.value.contextUsage)
+        assertEquals(ContextUsage(0, 1048576), viewModel.uiState.value.contextUsage)
 
         socket.send(agentStatusUsageFrame(25050, 1048576))
-        awaitState(viewModel.uiState) { it.contextUsage != null }
-        assertEquals(ContextUsage(25050, 1048576), viewModel.uiState.value.contextUsage)
+        awaitState(viewModel.uiState) { it.contextUsage == ContextUsage(25050, 1048576) }
 
         socket.send(agentStatusPhaseFrame())
         delay(200)
@@ -1651,7 +1653,7 @@ class ChatViewModelTest {
             awaitCondition { effects.isNotEmpty() }
 
             assertEquals(
-                ChatViewModel.Effect.SendFailed("file exceeds the 50 MiB limit"),
+                ChatViewModel.Effect.SendFailed("unsupported media type"),
                 effects.single(),
             )
             // The failed chip stays staged and marked; no prompt was posted.

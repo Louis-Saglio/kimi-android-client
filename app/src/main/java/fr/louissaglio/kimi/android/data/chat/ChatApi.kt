@@ -285,7 +285,7 @@ internal class ChatApi(
         }
 
     /** Lightweight live status (`GET /api/v1/sessions/{id}/status`): the mid-turn flag
-     * plus the context window fill when the server sends token counts (ticket 041). */
+     * and the context window fill (ticket 041). */
     suspend fun sessionStatus(settings: ServerSettings, sessionId: String): Result<SessionStatus> =
         api.get(settings, "/api/v1/sessions/$sessionId/status") { body ->
             val envelope = api.json.decodeFromString<Envelope<SessionStatusData>>(body)
@@ -294,11 +294,7 @@ internal class ChatApi(
                 else -> Result.success(
                     SessionStatus(
                         busy = envelope.data?.busy == true,
-                        contextUsage = envelope.data?.let { data ->
-                            val used = data.contextTokens
-                            val max = data.maxContextTokens
-                            if (used != null && max != null) ContextUsage(used, max) else null
-                        },
+                        contextUsage = envelope.data?.let { ContextUsage(it.contextTokens, it.maxContextTokens) },
                     ),
                 )
             }

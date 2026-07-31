@@ -488,8 +488,8 @@ class ChatViewModel @Inject constructor(
             result
                 .onSuccess {
                     // No local echo: the user message arrives inline in the socket's
-                    // context.spliced frame (0.27.0; prompt.submitted on older servers),
-                    // the reply via the streaming events.
+                    // context.spliced frame (docs/server-api.md), the reply via the
+                    // streaming events.
                     _uiState.update {
                         it.copy(inputText = "", attachments = emptyList(), isSending = false, isWorking = true)
                     }

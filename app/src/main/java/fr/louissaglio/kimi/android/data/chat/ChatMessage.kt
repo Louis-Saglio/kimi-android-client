@@ -13,8 +13,8 @@ data class ChatMessage(
     val role: Role,
     val parts: List<Part>,
     val createdAt: Instant? = null,
-    /** The message's `origin.kind` (docs/server-api.md); null for regular user/assistant
-     * messages on older servers. [ORIGIN_KIND_COMPACTION_SUMMARY] marks the persisted
+    /** The message's `origin.kind` (docs/server-api.md); null for regular
+     * user/assistant messages. [ORIGIN_KIND_COMPACTION_SUMMARY] marks the persisted
      * compaction summary (ticket 056): it renders as a divider, never a user bubble. */
     val originKind: String? = null,
 ) {
