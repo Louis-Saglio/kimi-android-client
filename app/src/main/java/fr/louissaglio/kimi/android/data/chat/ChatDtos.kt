@@ -138,6 +138,10 @@ data class WsFrame(
     val type: String = "",
     val seq: Long? = null,
     val epoch: String? = null,
+    // The emitting session, on event frames only (docs/server-api.md, Event envelope).
+    // 0.31.0 sends events for sessions this connection never subscribed to, so
+    // SessionSocket drops any frame whose sessionId is not the subscribed one.
+    @SerialName("session_id") val sessionId: String? = null,
     // Only on high-frequency deltas; absent otherwise (docs/server-api.md). Volatile
     // frames share the seq of the event they piggyback on, so they must not move the
     // resume cursor.

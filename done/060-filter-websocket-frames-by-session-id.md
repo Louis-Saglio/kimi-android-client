@@ -42,9 +42,28 @@ the field on *event* frames; control frames (ack, server_hello, standalone
 
 ## Acceptance criteria
 
-- [ ] Unit test: a frame carrying a foreign `session_id` is dropped and
+- [x] Unit test: a frame carrying a foreign `session_id` is dropped and
   logged; frames with matching or absent `session_id` are delivered.
-- [ ] `./gradlew :app:testDebugUnitTest` green.
+  *(`SessionSocketTest.frames for a foreign session are dropped, own and
+  untagged frames are delivered` — verified RED pre-fix (the foreign delta was
+  delivered), GREEN after. The drop branch's `Log.w` executes in the tested
+  path; unit-test `Log` is a stub, so the assertion is on non-delivery.)*
+- [x] `./gradlew :app:testDebugUnitTest` green.
+  *(286 tests, 18 classes, 0 failures — including the 65 existing
+  `ChatRepositoryTest` socket tests unmodified.)*
+
+## Implementation notes (2026-07-31)
+
+The guard sits right after the parse, BEFORE the resume-cursor update: a
+foreign frame carries a foreign seq/epoch, so letting it through would move
+the subscribed session's cursor and corrupt the next resume — the drop must
+cover the cursor too, not only the dispatch. Tested via a new
+`SessionSocketTest` driving `SessionSocket` directly over a MockWebServer WS
+upgrade (the `ChatRepositoryTest.runSocketEvents` harness pattern) rather than
+adding to `ChatRepositoryTest`: `handleFrame` stays `private`, and the
+socket's filtering contract lives next to the socket. The 200 ms settle after
+the two expected events is the proof the interleaved foreign frame arrived and
+still produced nothing.
 
 ## Out of scope
 

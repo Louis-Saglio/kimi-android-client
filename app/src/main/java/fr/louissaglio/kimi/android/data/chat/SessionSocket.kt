@@ -197,6 +197,17 @@ internal class SessionSocket(
             Log.w(TAG, "Dropping malformed frame", e)
             return
         }
+        // 0.31.0 caveat (docs/server-api.md): the server also sends events for sessions
+        // this connection never subscribed to — a foreign delta would render in the open
+        // chat, a foreign turn.ended would clear isWorking. Drop on the envelope
+        // session_id, BEFORE the cursor update (a foreign seq must not move this
+        // session's resume cursor). Fail open when session_id is absent: control frames
+        // (ack, server_hello, standalone resync_required) carry none, and doc drift
+        // must not brick the socket.
+        if (frame.sessionId != null && frame.sessionId != sessionId) {
+            Log.w(TAG, "Dropping '${frame.type}' frame for foreign session ${frame.sessionId}")
+            return
+        }
         // Volatile frames share the seq of the event they piggyback on (docs/server-api.md):
         // advancing the resume cursor on them could skip the substantive event on replay.
         if (frame.seq != null && frame.epoch != null && !frame.volatile) onCursor(Cursor(frame.seq, frame.epoch))
