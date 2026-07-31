@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-07-30
-(server version `0.31.0`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-07-31
+(server version `0.31.1`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
@@ -14,12 +14,40 @@ the workspace list used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `0.29.2`
-(verified 2026-07-27/28; see git history), `0.29.1` before that, `0.29.0`
+**Protocol history:** this document previously described server `0.31.0`
+(verified 2026-07-30; see git history), `0.29.2`
+(verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
-that, `0.27.0` before that, and `0.23.3` before that. The drift from 0.29.2 to
-0.31.0 is again **minor** for the core loop: every REST and WebSocket shape the
-Android app parses still decodes. The real changes:
+that, `0.27.0` before that, and `0.23.3` before that. The drift from 0.31.0 to
+0.31.1 is again **minor** for the core loop: every shape the Android app parses
+still decodes. The real changes:
+
+- **WebSocket:** `turn.ended` gained an optional `interruptReason`
+  (`"user_cancelled"` / `"aborted"` / `"max_steps"` / `"error"` / `"filtered"`
+  / `"blocked"`); a REST `:abort` reports `interruptReason:"user_cancelled"`.
+- **Interruption reminder (new):** after a user-cancelled turn the server
+  appends a user-role `<system-reminder>` injection to the context
+  (`metadata.origin: {"kind":"injection","variant":"interruption"}`) — it shows
+  up in `GET .../messages` and as a live `context.spliced` echo (see Messages
+  and Abort). Clients that already hide/strip injection envelopes (the app
+  does) see no change.
+- **Transcript:** new `interruption` markers between turns, and turn items now
+  carry their real terminal `state` (`"cancelled"` / `"failed"`) plus
+  `endedAt` / `durationMs` / `error` even on the cold rebuild — the engine
+  persists `turn.ended` records now; journals written before 0.31.1 keep the
+  old `completed` default.
+- **Tools catalog:** `GET /api/v1/tools` answers `{"tools":[]}` when NO
+  session is live (e.g. right after a server restart) — the route resolves the
+  catalog from a live session's agent.
+- **New endpoints (out of the app's scope):** `GET /api/v1/oauth/userinfo`
+  (managed-account profile), `POST /api/v1/workspace/fs:search` (session-less
+  file search — the web client switched its draft @-mention to it), and the
+  workspace-trust routes under `/workspaces/{id}` (see Workspaces).
+- **Invisible here:** the Agent/AgentSwarm tool schemas dropped their `model`
+  parameter while the secondary-model experiment is off — not observable
+  through `/api/v1/tools` (`input_schema: null`).
+
+The drift from 0.29.2 to 0.31.0 was likewise **minor**; its changes:
 
 - **Files:** the 50 MiB upload cap was **removed** (upstream commit "remove the
   50 MiB upload size cap and stream uploads to disk"). `POST /api/v1/files` no
@@ -293,7 +321,7 @@ session's current config (`"off"`/`"yolo"` observed on a fresh session).
 ### List — `GET /api/v1/workspaces`
 
 Returns every workspace the server knows about (verified live 2026-07-30,
-server `0.31.0`). Requires the token.
+server `0.31.0`; re-verified unchanged on `0.31.1`, 2026-07-31). Requires the token.
 
 ```bash
 curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/workspaces
@@ -322,6 +350,16 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/workspa
   server order** — sort by `last_opened_at` descending client-side.
 - `name` may be empty (observed: a workspace with root `/`); clients should
   fall back to `root` for display.
+
+### Trust — `GET|POST /api/v1/workspaces/{id}/trust`, `POST .../untrust`
+
+**New in 0.31.1** (upstream "Workspace domain" work). `GET` reads the trust
+state, `POST .../trust` marks trusted, `POST .../untrust` revokes; all answer
+`{"trusted": true|false}` (verified live 2026-07-31 — a healthy workspace
+reads `{"code":0,"data":{"trusted":false}}`; sessions run fine either way,
+trust only gates project-level MCP config files). Error paths: unknown
+workspace → `40410`; a workspace whose root no longer exists → `50001` whose
+envelope **leaks a `stack` field** (the only route observed doing so).
 
 ## Messages
 
@@ -400,6 +438,16 @@ Observed tags, all paired with attributes allowed on the opening tag:
   client renders the inner prompt as a dedicated cron turn; the app hides the
   envelope entirely for now).
 
+**0.31.1 addition — interruption reminder:** after a user-cancelled turn
+(`:abort`, or Esc in the TUI) the server appends a whole-message
+`<system-reminder>` user message — verbatim body: "The previous turn was
+interrupted by the user before completion; any partial output shown above is
+incomplete. The user's next message continues the conversation." — carrying
+`metadata.origin: {"kind":"injection","variant":"interruption"}` (verified
+live 2026-07-31: present in `GET .../messages` after each abort, and pushed
+live as a `context.spliced` echo right after `turn.ended`). It repeats per
+cancelled turn and persists in history.
+
 ## Transcript
 
 ### Per-agent transcript — `GET /api/v1/sessions/{id}/transcript`
@@ -408,7 +456,9 @@ Turn-granular committed history for ONE agent — `"main"` or any sub-agent id �
 which makes it the history backing of the sub-agent page (the `/messages`
 history only ever carries the main agent). Verified live on 0.29.2
 (2026-07-28), including a running sub-agent and the cold-session rebuild path;
-re-verified unchanged on 0.31.0 (2026-07-30, `agent_id` paging included).
+re-verified on 0.31.0 (2026-07-30, `agent_id` paging included) and on 0.31.1
+(2026-07-31 — `interruption` markers and real terminal turn states, see
+below).
 
 Query params:
 
@@ -456,7 +506,8 @@ Turn → step → frame structure (verbatim keys, running sub-agent capture):
 ```
 
 - Turn: `turnId` (`"t0"`, `"t1"`, …), `ordinal`, `state` (`"running"` /
-  `"completed"` observed), `origin`, `steps`. `origin` is `{"kind":"user"}`
+  `"completed"` / `"cancelled"` / `"failed"` — the terminal two are real since
+  0.31.1, see below), `origin`, `steps`. `origin` is `{"kind":"user"}`
   for user-prompted turns — those additionally carry a top-level **`prompt`**
   field with the prompt text (seen on main-agent turns) — or
   `{"kind":"other","payload":{"kind":"system_trigger","name":"subagent"}}` for
@@ -473,6 +524,11 @@ Turn → step → frame structure (verbatim keys, running sub-agent capture):
   rebuild from persisted wire records ships only `turnId`/`ordinal`/`state`/
   `origin`/`steps` on turns and the core frame fields (`input`+`output` on
   finished tool frames). Treat every field outside the core set as optional.
+  **0.31.1:** the engine now persists `turn.ended` records, so the cold
+  rebuild also reports a turn's real terminal `state` (`"cancelled"` /
+  `"failed"`; `"blocked"` folds into `"failed"`) plus `endedAt` / `durationMs`
+  / `error` (message only) — previously every cold turn read `"completed"`.
+  Journals written before 0.31.1 lack the records and keep the old default.
 
 Markers are interleaved between turns and must be tolerated, not rendered:
 
@@ -480,12 +536,17 @@ Markers are interleaved between turns and must be tolerated, not rendered:
 {"kind":"marker","markerId":"m1","marker":"swarm.enter","payload":{"trigger":"tool"},"at":"2026-07-28T06:17:58.498Z"}
 {"kind":"marker","markerId":"live-m1","marker":"undo",
  "payload":{"start":0,"deleteCount":0,"messages":[{"role":"user","content":[{"type":"text","text":"…"}],"id":"msg_01KYM2V437…","origin":{"kind":"system_trigger","name":"subagent"}}]}}
+{"kind":"marker","markerId":"m1","marker":"interruption","payload":{"turnId":0,"target":"active","reason":"user_cancelled"},"at":"2026-07-31T19:29:25.032Z"}
 ```
 
 `swarm.enter`/`swarm.exit` bracket AgentSwarm runs on the main transcript;
 `undo` markers carry context splices (the sub-agent's task prompt message —
 git-context envelope included — shows up here, full `MessageDto` shape) and
 persist after completion on the warm path. They vanish on the cold rebuild.
+**0.31.1 adds `interruption` markers** — one per user-cancelled turn, on both
+the warm and the cold path (verified live 2026-07-31 after two `:abort`s; the
+`turnId` in the payload is the engine turn id, the cold path maps it to the
+same numbering the turn items use).
 
 Finished sub-agent, cold-rebuild path (throwaway session left from 045,
 `agent_id=agent-15`, `page_size=3`, trimmed): two turns, both
@@ -760,11 +821,22 @@ curl -s -X POST 'http://127.0.0.1:58627/api/v1/sessions/session_b6be6715...:abor
 # {"code":0,"msg":"success","data":{"aborted":true},"request_id":"01KY6GFG4S5FPPXCFMP60X0FVH"}
 ```
 
-Verified mid-run on 0.29.0 (2026-07-23), again on 0.29.2 (2026-07-27) and
-again on 0.31.0 (2026-07-30): the
+Verified mid-run on 0.29.0 (2026-07-23), again on 0.29.2 (2026-07-27), again
+on 0.31.0 (2026-07-30), and again on 0.31.1 (2026-07-31): the
 WS then emits `turn.step.interrupted` (`reason: "aborted"`) → `turn.ended`
-(`reason: "cancelled"`) → `event.session.work_changed` (idle) →
-`prompt.aborted`.
+(`reason: "cancelled"`) → `event.session.work_changed` (idle,
+`last_turn_reason: "cancelled"`) →
+`prompt.aborted`. **0.31.1 additions to that sequence (verified live):**
+`turn.ended` carries `interruptReason: "user_cancelled"`, and a
+`context.spliced` echo of the interruption-reminder `<system-reminder>`
+injection (origin `{"kind":"injection","variant":"interruption"}` — see
+Messages) lands between `turn.ended` and the idle `work_changed`. Verbatim
+0.31.1 `turn.ended` payload:
+
+```json
+{"type":"turn.ended","turnId":1,"reason":"cancelled","durationMs":5030,
+ "interruptReason":"user_cancelled","agentId":"main","sessionId":"session_..."}
+```
 
 ## Compact
 
@@ -1075,7 +1147,8 @@ summary widget.
 ### Tool catalog — `GET /api/v1/tools`
 
 Lists the agent's builtin tools. Undocumented upstream until now; verified
-live on 0.31.0 (2026-07-30). Response `data.tools[]` entries carry only
+live on 0.31.0 (2026-07-30) and again on 0.31.1 (2026-07-31). Response
+`data.tools[]` entries carry only
 `{name, description, source: "builtin", active: true, input_schema: null}` —
 **input schemas are not exposed** (so tool-parameter drift, e.g. the
 `TaskOutput` `block`/`timeout` removal, is not observable here). 27 builtin
@@ -1083,6 +1156,14 @@ tools observed: Agent, AgentSwarm, AskUserQuestion, Bash, CreateGoal,
 CronCreate/Delete/List, Edit, EnterPlanMode, ExitPlanMode, FetchURL, GetGoal,
 Glob, Grep, Read, ReadMediaFile, select_tools, SetGoalBudget, Skill, TaskList,
 TaskOutput, TaskStop, TodoList, UpdateGoal, WebSearch, Write.
+
+**Liveness caveat (verified 2026-07-31):** the route resolves the catalog from
+a live session's agent (the `session_id` query param, else the most recent
+session). When NO session is live — e.g. right after a server restart, before
+any session is opened — it answers `{"code":0,"data":{"tools":[]}}`, not an
+error. The 0.31.1 Agent/AgentSwarm schema change (the `model` parameter is
+stripped while the secondary-model experiment is off) is therefore both
+invisible here and irrelevant to clients of this endpoint.
 
 ```bash
 curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/tools
@@ -1667,8 +1748,11 @@ Verbatim:
 {"type":"turn.step.retrying","seq":21,"payload":{"type":"turn.step.retrying","turnId":1,"step":1,"stepId":"d09585d5-...","failedAttempt":1,"nextAttempt":2,"maxAttempts":10,"delayMs":592.08,"errorName":"APIProviderRateLimitError","errorMessage":"429 The engine is currently overloaded, please try again later","statusCode":429,"agentId":"main","sessionId":"session_..."}}
 ```
 
-**turn.started / turn.ended** — unchanged (`turn.started` carries `prompt`,
-the prompt text):
+**turn.started / turn.ended** — `turn.started` carries `prompt`,
+the prompt text. **0.31.1, additive:** `turn.ended` gained an optional
+`interruptReason` (`"user_cancelled"` / `"aborted"` / `"max_steps"` /
+`"error"` / `"filtered"` / `"blocked"`), present when a turn stops early —
+a REST `:abort` reports `"user_cancelled"` (verbatim capture in Abort):
 
 ```json
 {"type":"turn.started","seq":5,
@@ -1842,6 +1926,37 @@ selected option and free text both re-verified 2026-07-23:
 ```
 
 ## Verification log
+
+- 2026-07-31 re-verification on `0.31.1` (server 0.31.0 → 0.31.1; throwaway
+  sessions `session_1cf6658d-...` / `session_ec77caa8-...` in
+  `/home/ubuntu/spike`, verified against the upstream 0.31.0→0.31.1 changelog
+  — 19 commits, mostly an agent-core-v2 internal refactor). Spot-checked
+  unchanged: meta, sessions create/get/list/status, workspaces list, config
+  (`secondary_model` still `{}`), messages history, transcript `agent_id`
+  paging, questions pending list, snapshot roster, global search, WS
+  hello/subscribe/ack. Drift found (all detailed inline): (a) `turn.ended`
+  gained optional `interruptReason` — a REST `:abort` reports
+  `"user_cancelled"`; (b) interruption reminder: a user-cancelled turn appends
+  a whole-message `<system-reminder>` user injection
+  (`metadata.origin: {"kind":"injection","variant":"interruption"}`), visible
+  in `GET .../messages` and pushed live as a `context.spliced` echo between
+  `turn.ended` and the idle `work_changed` — the app's envelope stripper
+  already hides it; (c) transcript: new `interruption` markers (warm AND cold
+  path) and real terminal turn `state`/`endedAt`/`durationMs`/`error` on the
+  cold rebuild (persisted `turn.ended` records; pre-0.31.1 journals keep the
+  `completed` default); (d) `GET /api/v1/tools` answers `{"tools":[]}` when no
+  session is live (verified empty right after the restart, 27 tools again once
+  a session ran); (e) new endpoints, all out of the app's scope:
+  `GET /api/v1/oauth/userinfo` (managed-account profile, verified 200),
+  `POST /api/v1/workspace/fs:search` (session-less; verified, `40410` on an
+  unknown workspace), and the workspace-trust routes
+  `GET|POST .../workspaces/{id}/trust` + `POST .../untrust`
+  (`{"trusted":bool}`; the missing-root error path leaks a `stack` field on
+  `50001`); (f) the Agent/AgentSwarm `model` schema-parameter strip is
+  invisible through `/api/v1/tools` (`input_schema: null`). No app breakage:
+  every change is additive or already tolerated by the app's parsers
+  (`ignoreUnknownKeys`, marker tolerance, envelope stripping, blank-part
+  drop). No `todo/` tickets filed.
 
 - 2026-07-30 full re-verification on `0.31.0` (server 0.29.2 → 0.31.0;
   throwaway sessions in `/home/ubuntu/spike` — `kimi-web.service` now runs
