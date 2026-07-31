@@ -3,6 +3,7 @@
 - **ID:** 069
 - **Created:** 2026-07-31
 - **Depends on:** none
+- **Status:** closed as no-op (2026-07-31) — see Resolution.
 
 ## Context
 
@@ -50,6 +51,24 @@ drift posture.
   migration, behavior stays at parity.
 - Removing the legacy family from the server doc — both families are still
   emitted by 0.31.0; the doc describes the server, not the client.
+
+## Resolution
+
+Closed as no-op 2026-07-31 (Louis's call): the re-verification hit this
+ticket's own stop condition. At the `@moonshot-ai/kimi-code@0.31.0` tag (the
+server version on the VPS), `apps/kimi-web` drives its approval UI
+exclusively from the legacy `event.approval.*` family —
+`api/daemon/mappers.ts` maps `event.approval.requested/resolved/expired`
+(snake_case `approval_id`, `expires_at`, `tool_input_display`) and
+`api/daemon/agentEventProjector.ts` classifies them as genuine protocol
+events ("MUST stay on the protocol path to drive the UI"). There is **no**
+reference to `permission.approval.*` anywhere in `apps/kimi-web`; a v2 frame
+would classify as an unknown agent-core event and no-op. The v2 family lives
+only in the SDK contract (`packages/klient/src/contract/agent/events.ts`,
+"not in the protocol union") and carries no expiry semantics (no
+`expires_at`, no `permission.approval.expired`). The app therefore keeps
+riding the legacy family, in step with the web client; revisit if a future
+server drops `event.approval.*` or the web client migrates.
 
 ## Notes
 
