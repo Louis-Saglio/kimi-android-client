@@ -39,10 +39,17 @@ Semantics that must survive (from 028/029, hard-won):
 
 ## Acceptance criteria
 
-- [ ] One guard implementation serves both seeded fields; the raw counters
-  are gone from `ChatViewModel`.
-- [ ] 028/029 regression tests green unmodified; new guard unit tests green.
-- [ ] `./gradlew :app:testDebugUnitTest` green.
+- [x] One guard implementation serves both seeded fields; the raw counters
+  are gone from `ChatViewModel`. *(2026-07-31: `SeedGuard` (ui/chat, internal)
+  serves all three guarded seeds — `isWorking`, `pendingQuestions`, and the
+  ticket-041 `contextUsage` sibling, plus the 048 resync's `clearLive`
+  downgrade; grep-verifiable: no `EventCount` left in `ChatViewModel`.)*
+- [x] 028/029 regression tests green unmodified; new guard unit tests green.
+  *(`status seed in flight does not clear a turn that just started`,
+  `questions poll in flight does not clear a question that just arrived`
+  untouched; `SeedGuardTest` covers stale/warm/both-edges/re-capture.)*
+- [x] `./gradlew :app:testDebugUnitTest` green. *(2026-07-31: full suite
+  green, 300 tests.)*
 
 ## Out of scope
 
@@ -55,4 +62,12 @@ Semantics that must survive (from 028/029, hard-won):
 ## Notes
 
 - Ticket 029's notes explain why reconnect polls must NOT be guarded; keep
-  that rationale visible at the guard's call sites.
+  that rationale visible at the guard's call sites. *(2026-07-31: kept — it
+  lives in `SeedGuard`'s KDoc and, unchanged, above `seedPendingQuestions` /
+  `refreshPendingQuestions`.)*
+- 2026-07-31: since this ticket was written, ticket 041 added a third raw
+  counter (`contextUsageEventCount`) and 048 a second capture site for the
+  turn counter (`resyncHistoryAfterDrop`'s `clearLive` downgrade) — both
+  migrated too, so no raw counter remains. `SeedGuard.bump()` calls sit
+  exactly where the `++`s were; `capture()`/`isStale()` where the
+  `val …AtSeed = count` / `count == …AtSeed` pairs were.

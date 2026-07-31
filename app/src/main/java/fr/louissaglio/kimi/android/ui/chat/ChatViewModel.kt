@@ -306,17 +306,17 @@ class ChatViewModel @Inject constructor(
         }
     }
 
-    /** Bumped on every turn.started/turn.ended event, so [seedSessionStatus] can drop a
-     * response that a newer turn event has already overtaken. Only touched on Main. */
-    private var turnEventCount = 0
+    /** Bumped on every turn.started/turn.ended event, so [seedSessionStatus] and
+     * [resyncHistoryAfterDrop] can drop a response a newer turn event has overtaken. */
+    private val turnSeedGuard = SeedGuard()
 
     /** Bumped on every question.requested/question.resolved event, so [seedPendingQuestions]
      * can drop a response that a newer question event has already overtaken. */
-    private var questionEventCount = 0
+    private val questionSeedGuard = SeedGuard()
 
     /** Bumped on every live context-usage event, so [seedSessionStatus] can drop a
      * /status snapshot a newer agent.status.updated frame has already overtaken. */
-    private var contextUsageEventCount = 0
+    private val contextUsageSeedGuard = SeedGuard()
 
     /** Publishes the timeline's current rows+todos — the coalescer's publish point
      * and [applySessionEvent]'s for timeline-bound events. */
@@ -703,12 +703,12 @@ class ChatViewModel @Inject constructor(
     private suspend fun applySessionEvent(event: SessionEvent) {
         when (event) {
             is SessionEvent.TurnStarted -> {
-                turnEventCount++
+                turnSeedGuard.bump()
                 timeline.apply(event)
                 _uiState.update { it.copy(isWorking = true, stepRetry = null, items = timeline.items(), todos = timeline.todos()) }
             }
             is SessionEvent.TurnEnded -> {
-                turnEventCount++
+                turnSeedGuard.bump()
                 // A turn that ends takes its pending approvals with it (e.g. abort) — but
                 // not its questions: a pending question survives turn.ended and is
                 // re-derived from the questions endpoint instead of being cleared here.
@@ -740,7 +740,7 @@ class ChatViewModel @Inject constructor(
                     it.copy(pendingApprovals = it.pendingApprovals.filterNot { a -> a.approvalId == event.approvalId })
                 }
             is SessionEvent.QuestionRequested -> {
-                questionEventCount++
+                questionSeedGuard.bump()
                 _uiState.update {
                     // Deduped: a reconnect replay must not queue the same request twice.
                     it.copy(
@@ -751,7 +751,7 @@ class ChatViewModel @Inject constructor(
                 }
             }
             is SessionEvent.QuestionResolved -> {
-                questionEventCount++
+                questionSeedGuard.bump()
                 _uiState.update {
                     it.copy(
                         pendingQuestions = it.pendingQuestions.filterNot { q -> q.questionId == event.questionId },
@@ -759,7 +759,7 @@ class ChatViewModel @Inject constructor(
                 }
             }
             is SessionEvent.ContextUsageUpdated -> {
-                contextUsageEventCount++
+                contextUsageSeedGuard.bump()
                 _uiState.update { it.copy(contextUsage = event.contextUsage) }
             }
             // Compaction (ticket 056): no turn events fire for it — these frames alone
@@ -811,11 +811,11 @@ class ChatViewModel @Inject constructor(
     private var resyncJob: Job? = null
 
     private fun resyncHistoryAfterDrop() {
-        val turnEventsAtStart = turnEventCount
+        val turnEventsAtStart = turnSeedGuard.capture()
         resyncJob?.cancel()
         resyncJob = viewModelScope.launch {
             val busy = chatRepository.getSessionStatus(settingsRepository.current(), sessionId).getOrNull()?.busy
-            refreshHistory(clearLive = busy == false && turnEventCount == turnEventsAtStart)
+            refreshHistory(clearLive = busy == false && !turnSeedGuard.isStale(turnEventsAtStart))
         }
     }
 
@@ -916,11 +916,11 @@ class ChatViewModel @Inject constructor(
      * unconditional: their snapshots are fresh and re-derivation is the point there.
      */
     private fun seedPendingQuestions() {
-        val eventsAtSeed = questionEventCount
+        val eventsAtSeed = questionSeedGuard.capture()
         viewModelScope.launch {
             chatRepository.getPendingQuestions(settingsRepository.current(), sessionId)
                 .onSuccess { questions ->
-                    if (questionEventCount == eventsAtSeed) {
+                    if (!questionSeedGuard.isStale(eventsAtSeed)) {
                         _uiState.update { it.copy(pendingQuestions = questions).prunedQuestionDrafts(it) }
                     }
                 }
@@ -1006,16 +1006,16 @@ class ChatViewModel @Inject constructor(
      * newer than the seed's snapshot, so the late response is dropped for that field
      * instead of overriding it. */
     private fun seedSessionStatus() {
-        val turnEventsAtSeed = turnEventCount
-        val contextEventsAtSeed = contextUsageEventCount
+        val turnEventsAtSeed = turnSeedGuard.capture()
+        val contextEventsAtSeed = contextUsageSeedGuard.capture()
         viewModelScope.launch {
             chatRepository.getSessionStatus(settingsRepository.current(), sessionId)
                 .onSuccess { status ->
                     _uiState.update {
                         it.copy(
-                            isWorking = if (turnEventCount == turnEventsAtSeed) status.busy else it.isWorking,
+                            isWorking = if (!turnSeedGuard.isStale(turnEventsAtSeed)) status.busy else it.isWorking,
                             contextUsage =
-                                if (contextUsageEventCount == contextEventsAtSeed && status.contextUsage != null) {
+                                if (!contextUsageSeedGuard.isStale(contextEventsAtSeed) && status.contextUsage != null) {
                                     status.contextUsage
                                 } else {
                                     it.contextUsage
