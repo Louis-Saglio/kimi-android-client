@@ -896,6 +896,10 @@ class ChatViewModel @Inject constructor(
             chatRepository.getMessages(settingsRepository.current(), sessionId)
                 .onSuccess { page ->
                     oldestHistoryId = page.items.firstOrNull()?.id
+                    // Any coalesced text must apply BEFORE the replace wipes/dedups
+                    // the live rows — the REST path bypasses the socket dispatcher's
+                    // flush (ticket 062; mirrors SubagentStreamStore.applyTranscriptPage).
+                    flushPendingDeltas()
                     timeline.replaceHistory(page.items, keepLive = !clearLive)
                     _uiState.update {
                         it.copy(

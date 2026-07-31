@@ -625,6 +625,60 @@ class ChatViewModelTest {
     }
 
     @Test
+    fun `a resync refetch landing mid burst flushes the pending deltas before replacing history`() = runBlocking {
+        // Ticket 062: the REST refetch bypasses the socket dispatcher's flush, so a
+        // keep-live response landing mid-burst dedups the committed full bubble
+        // against the live leading-edge FRAGMENT (exact-text match), keeps both, and
+        // the trailing flush grows the fragment into a duplicate bubble.
+        val vm = newViewModel(streamCoalesceWindowMillis = 100)
+        vm.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(vm.uiState) { it.items != null }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        socket.send(turnStartedFrame())
+        awaitState(vm.uiState) { it.isWorking }
+
+        // The resync's /status GET parks server-side, so the burst below opens
+        // strictly BEFORE the refetch lands; busy=true (a turn is streaming) makes
+        // the resync keep-live.
+        statusBody = """{"code":0,"msg":"success","data":{"busy":true,"context_tokens":0,""" +
+            """"max_context_tokens":1048576,"context_usage":0.0},"request_id":"r"}"""
+        messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
+            """{"id":"msg_1","session_id":"session_1","role":"assistant",""" +
+            """"content":[{"type":"text","text":"Hello world!"}],""" +
+            """"created_at":"2026-07-31T00:00:01.000Z"}""" +
+            """],"has_more":false},"request_id":"r"}"""
+        statusResponseGate = CountDownLatch(1)
+        vm.onScreenStarted()
+
+        socket.send(assistantDeltaFrame("Hello", seq = 5))
+        // The burst's leading edge renders on its own and stays the only published
+        // text (the flush timer never fires in this harness — see newViewModel).
+        awaitState(vm.uiState) { state ->
+            state.items?.filterIsInstance<ChatItem.AssistantMessage>()?.singleOrNull()?.text == "Hello"
+        }
+        socket.send(assistantDeltaFrame(" world!", seq = 6)) // coalesced, unpublished
+
+        // The committed page with the FULL bubble text lands mid-burst...
+        statusResponseGate!!.countDown()
+        awaitState(vm.uiState) { state ->
+            state.items?.filterIsInstance<ChatItem.AssistantMessage>()?.any { it.id == "msg_1" } == true
+        }
+        // ...then the next substantive event drives the trailing flush (in-order
+        // stream: the flush runs before the approval applies).
+        socket.send(approvalRequestedFrame(id = "ap_1", tool = "Bash", action = "Running: ls", command = "ls"))
+        awaitState(vm.uiState) { it.pendingApprovals.isNotEmpty() }
+
+        // One bubble, full text: the flush-before-replace made the exact-text dedup
+        // absorb the live bubble instead of stranding its fragment.
+        assertEquals(
+            listOf("Hello world!"),
+            vm.uiState.value.items.orEmpty().filterIsInstance<ChatItem.AssistantMessage>().map { it.text },
+        )
+    }
+
+    @Test
     fun `a resync_required ack re-syncs from REST`() = runBlocking {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()

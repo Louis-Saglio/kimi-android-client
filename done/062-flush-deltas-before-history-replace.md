@@ -36,9 +36,28 @@ precaution — the second drift between the two copies (first: ticket 061).
 
 ## Acceptance criteria
 
-- [ ] The race above cannot produce a duplicate bubble (unit-tested, RED
+- [x] The race above cannot produce a duplicate bubble (unit-tested, RED
   before the fix, GREEN after).
-- [ ] `./gradlew :app:testDebugUnitTest` green.
+  *(`ChatViewModelTest.a resync refetch landing mid burst flushes the pending
+  deltas before replacing history` — RED pre-fix (expected one bubble, got the
+  committed bubble plus its live twin: `[Hello world!, Hello world!]`), GREEN
+  after.)*
+- [x] `./gradlew :app:testDebugUnitTest` green.
+  *(288 tests, 18 classes, 0 failures.)*
+
+## Implementation notes (2026-07-31)
+
+One call site: the `historyJob` success path in `refreshHistory`
+(`ChatViewModel.kt`) — `resyncHistoryAfterDrop` and the turn.ended refetch both
+funnel through it, so the single `flushPendingDeltas()` before
+`replaceHistory` covers every replace, and `prependHistory` needs none (it
+never touches the live tail, like the twin's `prependTranscriptPage`). The
+flush must sit in the success path, not at the call site: a burst can open
+between the fetch's launch and its response. The test holds the burst open
+with the injectable 100 ms window (the flush timer never fires under
+`runBlocking` — the `newViewModel` harness property) and parks the resync's
+/status GET on the existing `statusResponseGate` so the keep-live refetch
+lands strictly mid-burst.
 
 ## Out of scope
 
