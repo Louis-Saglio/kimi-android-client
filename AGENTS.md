@@ -98,6 +98,16 @@ also the regression signal for "verified fixed" tickets.
   `ui/chat/components/` (same package, `internal` — androidTests import them).
   `ui/common/` holds shared `StateViews` (loading/error/empty) and
   `Formatters` — reuse them instead of adding one-off copies.
+- Chat feature collaborators (the 065 `DeltaCoalescer` pattern, generalized by
+  072): a cohesive chat feature gets an `internal` class in `ui/chat`
+  (`DeltaCoalescer`, `SeedGuard`, `ChatAttachments`, `QuestionWizard`) owned by
+  the ViewModel. Collaborators are logic holders, NOT second state sources —
+  the screen's `UiState`/`Effect` stay in the ViewModel; intents arrive as
+  calls (one-line delegates keep the screen-facing API) and updates report back
+  through constructor callbacks (a state-transform sink, an effect sink, a
+  scope provider). New chat features grow a collaborator from day one instead
+  of landing in `ChatViewModel`. Feature tests sit next to the collaborator on
+  the shared `ChatViewModelTestBase` harness.
 - Sub-agent streams (045): `SessionSocket` tags transcript events with the
   emitting `agentId`; sub-agent-scoped events route to `SubagentStreamStore`
   (ui/chat, session-scoped singleton keyed by session, one `ChatTimeline` per

@@ -1,7 +1,6 @@
 package fr.louissaglio.kimi.android.ui.chat
 
 import android.net.Uri
-import android.util.Base64
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -11,9 +10,7 @@ import fr.louissaglio.kimi.android.data.toUserMessage
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
-import fr.louissaglio.kimi.android.data.chat.FileMeta
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
-import fr.louissaglio.kimi.android.data.chat.QuestionAnswer
 import fr.louissaglio.kimi.android.data.chat.ServerModel
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.SocketEvent
@@ -26,9 +23,7 @@ import fr.louissaglio.kimi.android.data.sessions.displayNameFor
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.di.StreamCoalesceWindowMillis
 import fr.louissaglio.kimi.android.ui.common.formatTokenCount
-import java.util.UUID
 import javax.inject.Inject
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -40,7 +35,6 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 @HiltViewModel
 class ChatViewModel @Inject constructor(
@@ -80,36 +74,6 @@ class ChatViewModel @Inject constructor(
         val maxAttempts: Int,
         val errorMessage: String,
     )
-
-    /**
-     * Upload bytes of one staged attachment (ticket 033). A plain holder, NOT a data
-     * class, on purpose: [PendingAttachment] sits in UiState, and a raw ByteArray field
-     * would drag referential array equality into the state's data-class equals (and
-     * megabyte content compares into every StateFlow emission). Identity on this holder
-     * is the cheap, correct semantics — staged bytes never mutate; chip updates go
-     * through `copy(status = …)`, which keeps the same holder reference.
-     */
-    class AttachmentBytes(val value: ByteArray)
-
-    /**
-     * One attachment staged in the composer (ticket 033). [bytes] are read eagerly at
-     * pick time (size-capped, see [AttachmentStore.MAX_PICK_BYTES]) so the chip can
-     * render a thumbnail and the send path uploads them unchanged. [status] reflects
-     * the upload driven by [onSend]: Ready → Uploading → (Failed keeps the chip and
-     * blocks the send; the snackbar's Retry re-sends).
-     */
-    data class PendingAttachment(
-        val localId: String,
-        val name: String,
-        val sizeBytes: Long,
-        val mimeType: String,
-        val bytes: AttachmentBytes,
-        val status: Status = Status.Ready,
-    ) {
-        enum class Status { Ready, Uploading, Failed }
-
-        val isImage: Boolean get() = mimeType.startsWith("image/")
-    }
 
     /** [items] is null until the first load lands; [error] is shown only when there is nothing to display. */
     data class UiState(
@@ -170,18 +134,6 @@ class ChatViewModel @Inject constructor(
          * longer needs the nav argument for it. */
         val sessionLabel: String
             get() = sessionTitle ?: sessionId
-
-        /** True when every item of the head question has an answer (option picked or other text). */
-        val isQuestionSubmittable: Boolean
-            get() = pendingQuestions.firstOrNull()?.items?.all { item ->
-                questionOtherTexts[item.id]?.isNotBlank() == true || questionSelections.containsKey(item.id)
-            } == true
-
-        /** True when the item at [questionStep] has an answer — gates the wizard's Next. */
-        val isQuestionStepAnswered: Boolean
-            get() = pendingQuestions.firstOrNull()?.items?.getOrNull(questionStep)?.let { item ->
-                questionOtherTexts[item.id]?.isNotBlank() == true || questionSelections.containsKey(item.id)
-            } == true
 
         /** Top-bar chip label: the session choice or the server default, by display name
          * when the models list knows it, else the raw id. Null hides the chip. */
@@ -271,6 +223,30 @@ class ChatViewModel @Inject constructor(
     private val _effects = Channel<Effect>(Channel.BUFFERED)
     val effects = _effects.receiveAsFlow()
 
+    /** Attachments (ticket 072): pick → upload → remove → open orchestration. A logic
+     * holder only — UiState above stays the single state source; the collaborator
+     * receives intents and reports state updates/effects back through the callbacks. */
+    private val attachments = ChatAttachments(
+        scope = { viewModelScope },
+        attachmentStore = attachmentStore,
+        chatRepository = chatRepository,
+        settingsRepository = settingsRepository,
+        updateState = { transform -> _uiState.update(transform) },
+        sendEffect = { effect -> _effects.send(effect) },
+    )
+
+    /** The question wizard (ticket 072): pending-question lifecycle, answer submission,
+     * dismissal. Same logic-holder contract as [attachments]. */
+    private val questions = QuestionWizard(
+        scope = { viewModelScope },
+        chatRepository = chatRepository,
+        settingsRepository = settingsRepository,
+        sessionId = sessionId,
+        state = { _uiState.value },
+        updateState = { transform -> _uiState.update(transform) },
+        sendEffect = { effect -> _effects.send(effect) },
+    )
+
     private val timeline = ChatTimeline(todoParser)
     private var historyJob: Job? = null
 
@@ -318,10 +294,6 @@ class ChatViewModel @Inject constructor(
      * [resyncHistoryAfterDrop] can drop a response a newer turn event has overtaken. */
     private val turnSeedGuard = SeedGuard()
 
-    /** Bumped on every question.requested/question.resolved event, so [seedPendingQuestions]
-     * can drop a response that a newer question event has already overtaken. */
-    private val questionSeedGuard = SeedGuard()
-
     /** Bumped on every live context-usage event, so [seedSessionStatus] can drop a
      * /status snapshot a newer agent.status.updated frame has already overtaken. */
     private val contextUsageSeedGuard = SeedGuard()
@@ -351,7 +323,7 @@ class ChatViewModel @Inject constructor(
     fun onScreenStarted() {
         screenVisible.value = true
         resyncHistoryAfterDrop()
-        seedPendingQuestions()
+        questions.seed()
         refreshSessionInfo()
         seedSessionStatus()
         loadModels()
@@ -380,104 +352,31 @@ class ChatViewModel @Inject constructor(
         _uiState.update { it.copy(inputText = value) }
     }
 
-    /** Stages picked files as composer chips (ticket 033): the store resolves each
-     * content Uri (size-capped, see [AttachmentStore.MAX_PICK_BYTES]); files that fail
-     * the read surface one [Effect.AttachmentPickFailed] each and are not staged. */
-    fun onAttachmentsPicked(uris: List<Uri>) {
-        if (uris.isEmpty()) return
-        viewModelScope.launch {
-            for (uri in uris) {
-                onAttachmentRead(withContext(Dispatchers.IO) { attachmentStore.read(uri) })
-            }
-        }
-    }
+    // --- Attachments (ticket 072): the logic lives in [ChatAttachments] — these are
+    // the screen-facing intents, kept as one-line delegates. --------------------------
 
-    /** Handles one store read: stages the chip or surfaces why nothing was staged.
-     * Internal because unit tests have no android.net.Uri on the JVM — they drive this
+    fun onAttachmentsPicked(uris: List<Uri>) = attachments.onPicked(uris)
+
+    /** Internal because unit tests have no android.net.Uri on the JVM — they drive this
      * directly instead of going through [onAttachmentsPicked]. */
-    internal suspend fun onAttachmentRead(result: AttachmentStore.ReadResult) {
-        when (result) {
-            is AttachmentStore.ReadResult.Ok -> {
-                val picked = result.picked
-                val attachment = PendingAttachment(
-                    localId = UUID.randomUUID().toString(),
-                    name = picked.name,
-                    sizeBytes = picked.sizeBytes,
-                    mimeType = picked.mimeType,
-                    bytes = AttachmentBytes(picked.bytes),
-                )
-                _uiState.update { it.copy(attachments = it.attachments + attachment) }
-            }
-            is AttachmentStore.ReadResult.TooLarge ->
-                _effects.send(
-                    Effect.AttachmentPickFailed(
-                        "${result.name} is too large to attach " +
-                            "(limit ${AttachmentStore.MAX_PICK_BYTES / (1024 * 1024)} MiB)",
-                    ),
-                )
-            is AttachmentStore.ReadResult.Unreadable ->
-                _effects.send(Effect.AttachmentPickFailed("Could not read ${result.name}"))
-        }
-    }
+    internal suspend fun onAttachmentRead(result: AttachmentStore.ReadResult) = attachments.onRead(result)
 
-    /** Removes a staged chip before the send; the removed file is never uploaded. */
-    fun onAttachmentRemoved(localId: String) {
-        _uiState.update { state ->
-            state.copy(attachments = state.attachments.filterNot { it.localId == localId })
-        }
-    }
+    fun onAttachmentRemoved(localId: String) = attachments.onRemoved(localId)
 
-    /** Bytes of a history image (ticket 034): decoded from the inline base64, or fetched
-     * via `GET /api/v1/files/{id}` for a file-referenced source. Pull-based display data
-     * for the thumbnail/full-screen viewer, hence a call rather than state or an effect. */
-    suspend fun imageBytes(image: ChatMessage.Part.Image): ByteArray? =
-        image.base64Data?.let { runCatching { Base64.decode(it, Base64.DEFAULT) }.getOrNull() }
-            ?: image.fileId?.let { fileId ->
-                chatRepository.downloadFile(settingsRepository.current(), fileId).getOrNull()?.bytes
-            }
+    suspend fun imageBytes(image: ChatMessage.Part.Image): ByteArray? = attachments.imageBytes(image)
 
-    /** Downloads a history attachment's bytes, persists them via the store, and emits
-     * [Effect.OpenFile] for the screen to hand to another app (ticket 034). */
-    fun onOpenAttachment(attachment: ChatMessage.Part.Attachment) {
-        val fileId = attachment.fileId ?: return
-        viewModelScope.launch {
-            val download = chatRepository.downloadFile(settingsRepository.current(), fileId).getOrNull()
-            if (download == null) {
-                _effects.send(Effect.OpenAttachmentFailed("Could not download ${attachment.name}"))
-                return@launch
-            }
-            val uri = withContext(Dispatchers.IO) { attachmentStore.writeToCache(attachment.name, download.bytes) }
-            if (uri == null) {
-                _effects.send(Effect.OpenAttachmentFailed("No app can open ${attachment.name}"))
-            } else {
-                _effects.send(Effect.OpenFile(uri, download.mediaType, attachment.name))
-            }
-        }
-    }
+    fun onOpenAttachment(attachment: ChatMessage.Part.Attachment) = attachments.onOpen(attachment)
 
-    /** The screen found no viewer for an [Effect.OpenFile] (ActivityNotFoundException). */
-    fun onOpenAttachmentFailed(name: String) {
-        viewModelScope.launch { _effects.send(Effect.OpenAttachmentFailed("No app can open $name")) }
-    }
-
-    private fun markAttachment(localId: String, status: PendingAttachment.Status) {
-        _uiState.update { state ->
-            state.copy(
-                attachments = state.attachments.map {
-                    if (it.localId == localId) it.copy(status = status) else it
-                },
-            )
-        }
-    }
+    fun onOpenAttachmentFailed(name: String) = attachments.onOpenFailed(name)
 
     /**
      * POSTs the current input: a new prompt while the session is idle, a steer into the
      * running turn while it is busy (docs/server-api.md, Steer). No-ops when text and
      * attachments are both empty, or while a send is in flight (which covers the whole
-     * upload phase — a second tap cannot double-send). Staged attachments are uploaded
-     * sequentially first (`POST /api/v1/files`); a failed upload marks its chip, posts
-     * no prompt, and surfaces [Effect.SendFailed]. On failure the text stays in the
-     * field and [Effect.SendFailed] drives a snackbar with Retry.
+     * upload phase — a second tap cannot double-send). Staged attachments upload
+     * sequentially first via [ChatAttachments.uploadAll]; a failed upload marks its
+     * chip, posts no prompt, and surfaces [Effect.SendFailed]. On failure the text
+     * stays in the field and [Effect.SendFailed] drives a snackbar with Retry.
      */
     fun onSend() {
         val state = _uiState.value
@@ -486,21 +385,8 @@ class ChatViewModel @Inject constructor(
         _uiState.update { it.copy(isSending = true) }
         viewModelScope.launch {
             val settings = settingsRepository.current()
-            val uploaded = mutableListOf<FileMeta>()
-            for (attachment in state.attachments) {
-                markAttachment(attachment.localId, PendingAttachment.Status.Uploading)
-                chatRepository.uploadFile(settings, attachment.name, attachment.mimeType, attachment.bytes.value)
-                    .onSuccess { meta ->
-                        uploaded += meta
-                        markAttachment(attachment.localId, PendingAttachment.Status.Ready)
-                    }
-                    .onFailure { error ->
-                        markAttachment(attachment.localId, PendingAttachment.Status.Failed)
-                        _uiState.update { it.copy(isSending = false) }
-                        _effects.send(Effect.SendFailed(error.toUserMessage()))
-                        return@launch
-                    }
-            }
+            // Upload phase: null = a chip failed its upload, the send aborts here.
+            val uploaded = attachments.uploadAll(settings, state.attachments) ?: return@launch
             val result = if (state.isWorking) {
                 chatRepository.steer(settings, sessionId, text, uploaded)
             } else {
@@ -567,63 +453,20 @@ class ChatViewModel @Inject constructor(
         }
     }
 
-    /** Picks (or re-picks) the option answering one item of the head question. */
-    fun onQuestionOptionPicked(itemId: String, optionId: String) {
-        _uiState.update { it.copy(questionSelections = it.questionSelections + (itemId to optionId)) }
-    }
+    // --- Question wizard (ticket 072): the logic lives in [QuestionWizard] — these are
+    // the screen-facing intents, kept as one-line delegates. --------------------------
 
-    /** Free-text answer for one item (only rendered when the item allows it). A non-blank
-     * text wins over a picked option for that item. */
-    fun onQuestionOtherTextChange(itemId: String, text: String) {
-        _uiState.update { it.copy(questionOtherTexts = it.questionOtherTexts + (itemId to text)) }
-    }
+    fun onQuestionOptionPicked(itemId: String, optionId: String) = questions.onOptionPicked(itemId, optionId)
 
-    /** Advances the question wizard (ticket 035) to the next item. No-ops on the last
-     * item or while the current item is unanswered, same gating as the Next button. */
-    fun onQuestionNext() {
-        _uiState.update { state ->
-            val lastIndex = state.pendingQuestions.firstOrNull()?.items?.lastIndex ?: return@update state
-            if (!state.isQuestionStepAnswered || state.questionStep >= lastIndex) state
-            else state.copy(questionStep = state.questionStep + 1)
-        }
-    }
+    fun onQuestionOtherTextChange(itemId: String, text: String) = questions.onOtherTextChange(itemId, text)
 
-    /** Steps the question wizard back to the previous item; drafted answers are kept. */
-    fun onQuestionBack() {
-        _uiState.update { state ->
-            if (state.questionStep > 0) state.copy(questionStep = state.questionStep - 1) else state
-        }
-    }
+    fun onQuestionNext() = questions.onNext()
 
-    /** POSTs the drafted answers for the head question. No-ops while an item is
-     * unanswered. The card clears on the server's question.answered event — for our own
-     * answers too — so a failed POST leaves the card up and only reports the error. */
-    fun onSubmitQuestion() {
-        val state = _uiState.value
-        val question = state.pendingQuestions.firstOrNull() ?: return
-        if (!state.isQuestionSubmittable) return
-        val answers = question.items.map { item ->
-            state.questionOtherTexts[item.id]?.takeIf { it.isNotBlank() }
-                ?.let { QuestionAnswer.Other(item.id, it.trim()) }
-                ?: QuestionAnswer.OptionPick(item.id, state.questionSelections.getValue(item.id))
-        }
-        viewModelScope.launch {
-            chatRepository.answerQuestion(
-                settingsRepository.current(), sessionId, question.questionId, answers,
-            ).onFailure { error -> _effects.send(Effect.QuestionFailed(error.toUserMessage())) }
-        }
-    }
+    fun onQuestionBack() = questions.onBack()
 
-    /** POSTs `:dismiss` for the head question; the card clears on the server's
-     * question.dismissed event, so a failed POST leaves the card up. */
-    fun onDismissQuestion() {
-        val question = _uiState.value.pendingQuestions.firstOrNull() ?: return
-        viewModelScope.launch {
-            chatRepository.dismissQuestion(
-                settingsRepository.current(), sessionId, question.questionId,
-            ).onFailure { error -> _effects.send(Effect.QuestionFailed(error.toUserMessage())) }
-        }
-    }
+    fun onSubmitQuestion() = questions.onSubmit()
+
+    fun onDismissQuestion() = questions.onDismiss()
 
     /**
      * Collects the session socket (one run per socket-gate opening; cancelled when the
@@ -660,13 +503,13 @@ class ChatViewModel @Inject constructor(
                                 // ON_START — so a keep-live refetch can never race and
                                 // clobber the ON_START resync's clear-live decision.
                                 resyncHistoryAfterDrop()
-                                refreshPendingQuestions()
+                                questions.refresh()
                             }
                             SocketEvent.ResyncRequired -> {
                                 // No replay will come: the missed window (a turn.ended
                                 // above all) heals from REST only (ticket 048).
                                 resyncHistoryAfterDrop()
-                                refreshPendingQuestions()
+                                questions.refresh()
                             }
                             SocketEvent.Disconnected ->
                                 _uiState.update { it.copy(isReconnecting = true) }
@@ -723,7 +566,7 @@ class ChatViewModel @Inject constructor(
                 _uiState.update { it.copy(isWorking = false, stepRetry = null, pendingApprovals = emptyList()) }
                 // Replace live rows with the canonical committed turn.
                 refreshHistory(clearLive = true)
-                refreshPendingQuestions()
+                questions.refresh()
             }
             // LLM retry (ticket 058): a transient status line on the in-flight turn —
             // the retrying frame opens it, the replacement step.started (new stepId),
@@ -747,25 +590,10 @@ class ChatViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(pendingApprovals = it.pendingApprovals.filterNot { a -> a.approvalId == event.approvalId })
                 }
-            is SessionEvent.QuestionRequested -> {
-                questionSeedGuard.bump()
-                _uiState.update {
-                    // Deduped: a reconnect replay must not queue the same request twice.
-                    it.copy(
-                        pendingQuestions = it.pendingQuestions
-                            .filterNot { q -> q.questionId == event.question.questionId } +
-                            event.question,
-                    ).prunedQuestionDrafts(it)
-                }
-            }
-            is SessionEvent.QuestionResolved -> {
-                questionSeedGuard.bump()
-                _uiState.update {
-                    it.copy(
-                        pendingQuestions = it.pendingQuestions.filterNot { q -> q.questionId == event.questionId },
-                    ).prunedQuestionDrafts(it)
-                }
-            }
+            // Question queue, drafts and wizard step: the collaborator owns the whole
+            // lifecycle, including the seed guard's bump (ticket 072).
+            is SessionEvent.QuestionRequested -> questions.onRequested(event)
+            is SessionEvent.QuestionResolved -> questions.onResolved(event)
             is SessionEvent.ContextUsageUpdated -> {
                 contextUsageSeedGuard.bump()
                 _uiState.update { it.copy(contextUsage = event.contextUsage) }
@@ -899,60 +727,6 @@ class ChatViewModel @Inject constructor(
                     _uiState.update { it.copy(isLoadingMoreHistory = false) }
                 }
         }
-    }
-
-    /**
-     * Re-derives the pending questions from the questions endpoint (the documented
-     * source of truth, docs/server-api.md): runs on reconnect and turn.ended so the
-     * card survives history refetches and heals after an abort. A failure leaves the
-     * current state untouched.
-     */
-    private fun refreshPendingQuestions() {
-        viewModelScope.launch {
-            chatRepository.getPendingQuestions(settingsRepository.current(), sessionId)
-                .onSuccess { questions ->
-                    _uiState.update { it.copy(pendingQuestions = questions).prunedQuestionDrafts(it) }
-                }
-        }
-    }
-
-    /**
-     * Screen-start variant of [refreshPendingQuestions]: the socket streams live events
-     * from connect on, so a question.requested/question.resolved landing while this poll
-     * is in flight is newer than its snapshot — the late response is dropped instead of
-     * clearing (or resurrecting) a card. The reconnect and turn.ended polls stay
-     * unconditional: their snapshots are fresh and re-derivation is the point there.
-     */
-    private fun seedPendingQuestions() {
-        val eventsAtSeed = questionSeedGuard.capture()
-        viewModelScope.launch {
-            chatRepository.getPendingQuestions(settingsRepository.current(), sessionId)
-                .onSuccess { questions ->
-                    if (!questionSeedGuard.isStale(eventsAtSeed)) {
-                        _uiState.update { it.copy(pendingQuestions = questions).prunedQuestionDrafts(it) }
-                    }
-                }
-        }
-    }
-
-    /** Drops draft answers whose item id belongs to no pending question anymore, and
-     * resets the wizard step (ticket 035) when the queue head changed or shrank past it. */
-    private fun UiState.prunedQuestionDrafts(previous: UiState): UiState {
-        val itemIds = pendingQuestions.flatMap { q -> q.items.map { item -> item.id } }.toSet()
-        val head = pendingQuestions.firstOrNull()
-        val step =
-            if (head == null || head.questionId != previous.pendingQuestions.firstOrNull()?.questionId ||
-                questionStep > head.items.lastIndex
-            ) {
-                0
-            } else {
-                questionStep
-            }
-        return copy(
-            questionSelections = questionSelections.filterKeys { it in itemIds },
-            questionOtherTexts = questionOtherTexts.filterKeys { it in itemIds },
-            questionStep = step,
-        )
     }
 
     /**

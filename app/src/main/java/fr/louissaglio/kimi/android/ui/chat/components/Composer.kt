@@ -57,7 +57,7 @@ internal fun ChatInputBar(
     text: String,
     isSending: Boolean,
     isWorking: Boolean,
-    attachments: List<ChatViewModel.PendingAttachment>,
+    attachments: List<PendingAttachment>,
     modelLabel: String?,
     contextUsage: ContextUsage?,
     compactEnabled: Boolean,
@@ -84,7 +84,7 @@ internal fun ChatInputBar(
         ) {
             if (attachments.isNotEmpty()) {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(attachments, key = ChatViewModel.PendingAttachment::localId) { attachment ->
+                    items(attachments, key = PendingAttachment::localId) { attachment ->
                         AttachmentChip(attachment = attachment, onRemove = { onAttachmentRemoved(attachment.localId) })
                     }
                 }
@@ -224,10 +224,10 @@ private fun ModelChip(label: String, onClick: () -> Unit) {
  * removes the chip before the send. */
 @Composable
 private fun AttachmentChip(
-    attachment: ChatViewModel.PendingAttachment,
+    attachment: PendingAttachment,
     onRemove: () -> Unit,
 ) {
-    val failed = attachment.status == ChatViewModel.PendingAttachment.Status.Failed
+    val failed = attachment.status == PendingAttachment.Status.Failed
     Surface(
         shape = MaterialTheme.shapes.small,
         color = if (failed) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceVariant,
@@ -252,7 +252,7 @@ private fun AttachmentChip(
                     color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            if (attachment.status == ChatViewModel.PendingAttachment.Status.Uploading) {
+            if (attachment.status == PendingAttachment.Status.Uploading) {
                 CircularProgressIndicator(
                     modifier = Modifier
                         .size(14.dp)
@@ -282,7 +282,7 @@ private fun AttachmentChip(
 /** Image chips decode a bounded thumbnail off the main thread; other types get the
  * same generic sheet glyph the timeline uses for copy actions. */
 @Composable
-private fun AttachmentThumbnail(attachment: ChatViewModel.PendingAttachment) {
+private fun AttachmentThumbnail(attachment: PendingAttachment) {
     val thumbnail by produceState<ImageBitmap?>(initialValue = null, attachment.bytes) {
         if (attachment.isImage) {
             value = withContext(Dispatchers.Default) { decodeSampledThumbnail(attachment.bytes.value, THUMBNAIL_PX) }
