@@ -8,6 +8,7 @@ import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
 import fr.louissaglio.kimi.android.testutil.awaitState
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -52,17 +53,39 @@ class SubagentViewModelTest {
     @Volatile
     private var transcriptBody = EMPTY_TRANSCRIPT_BODY
 
+    /** When set, an older-page (`before_turn`) transcript response is held back
+     * server-side until the test releases it — the ticket 061 race harness (the
+     * ChatViewModelTest statusResponseGate pattern). */
+    @Volatile
+    private var olderTranscriptGate: CountDownLatch? = null
+
+    /** The body of older-page (`before_turn`) responses — a dedicated variable (the
+     * ChatViewModelTest olderMessagesBody split) because the dispatcher reads bodies
+     * at response time: a gated response must still serve the body that was current
+     * when its request went out, not a later [transcriptBody]. */
+    @Volatile
+    private var olderTranscriptBody = ""
+
     @Before
     fun setUp() {
         Dispatchers.setMain(UnconfinedTestDispatcher())
         server.start()
         server.dispatcher = object : Dispatcher() {
-            override fun dispatch(request: RecordedRequest): MockResponse =
-                if (request.path.orEmpty().startsWith("/api/v1/sessions/session_1/transcript")) {
-                    MockResponse().setBody(transcriptBody)
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path.orEmpty()
+                return if (path.startsWith("/api/v1/sessions/session_1/transcript")) {
+                    // Each request runs on its own connection thread, so a parked
+                    // older-page response never holds a fresh refetch's.
+                    if ("before_turn" in path) {
+                        olderTranscriptGate?.await(5, TimeUnit.SECONDS)
+                        MockResponse().setBody(olderTranscriptBody)
+                    } else {
+                        MockResponse().setBody(transcriptBody)
+                    }
                 } else {
                     MockResponse().setResponseCode(404)
                 }
+            }
         }
         val dataStore = FakePreferencesDataStore(
             preferencesOf(stringPreferencesKey("server_url") to server.url("/").toString()),
@@ -175,7 +198,7 @@ class SubagentViewModelTest {
             server.takeRequest(2, TimeUnit.SECONDS)?.path,
         )
 
-        transcriptBody = TRANSCRIPT_PAGE_T0
+        olderTranscriptBody = TRANSCRIPT_PAGE_T0
         viewModel.onHistoryTopReached()
         awaitState(viewModel.uiState) { it.items.size == 3 }
         assertEquals(
@@ -221,6 +244,47 @@ class SubagentViewModelTest {
 
         // Exactly one reconcile: no third transcript request ever goes out.
         assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun `a stale older page racing the reconcile refetch never prepends`() = runBlocking {
+        store.apply("session_1", SessionEvent.SubagentSpawned("agent-12", "explore", "tool_1", "doc-verify", false))
+        store.apply("session_1", SessionEvent.SubagentStarted("agent-12"))
+        transcriptBody = TRANSCRIPT_PAGE_T1_T2
+
+        val viewModel = newViewModel("agent-12")
+        awaitState(viewModel.uiState) { it.items.size == 2 && it.hasMoreHistory }
+        server.takeRequest(2, TimeUnit.SECONDS)
+
+        // Scroll to the top: the older-page GET (before_turn=t1) goes out and its
+        // response is parked server-side.
+        olderTranscriptBody = TRANSCRIPT_PAGE_T0
+        val gate = CountDownLatch(1)
+        olderTranscriptGate = gate
+        viewModel.onHistoryTopReached()
+        assertEquals(
+            "/api/v1/sessions/session_1/transcript?agent_id=agent-12&page_size=20&before_turn=t1",
+            server.takeRequest(2, TimeUnit.SECONDS)?.path,
+        )
+
+        // The sub-agent finishes while the older page is in flight: the reconcile
+        // refetches the canonical run and replaces the committed rows.
+        transcriptBody = RECONCILE_FRESH_PAGE
+        store.apply("session_1", SessionEvent.SubagentCompleted("agent-12", "the summary"))
+        awaitState(viewModel.uiState) { state ->
+            state.items.singleOrNull() == ChatItem.AssistantMessage("t2.1.f1", "reconciled newest", thinking = "")
+        }
+
+        // The stale page lands strictly after the refetch: fetched against the OLD
+        // timeline, its t0 no longer abuts the fresh page — prepending it would
+        // open a permanent hole (ticket 061). The settle beat gives a lost guard
+        // the time to prepend if it is going to.
+        gate.countDown()
+        delay(500)
+        assertEquals(
+            listOf(ChatItem.AssistantMessage("t2.1.f1", "reconciled newest", thinking = "")),
+            viewModel.uiState.value.items,
+        )
     }
 
     private companion object {
@@ -292,5 +356,10 @@ class SubagentViewModelTest {
 
         /** The canonical refetch at completion: the finished turn's final text. */
         val FINISHED_AFTER_RECONCILE_BODY = textTurnPage("agent-12", false, "t0" to "final answer")
+
+        /** The ticket 061 race's fresh newest page: turn t2 (re-committed, new text),
+         * no overlap with the parked older page's t0 so the turn-id dedup cannot mask
+         * a stale prepend. */
+        val RECONCILE_FRESH_PAGE = textTurnPage("agent-12", false, "t2" to "reconciled newest")
     }
 }

@@ -107,6 +107,12 @@ class SubagentViewModel @Inject constructor(
     private fun refreshTranscript(keepLive: Boolean) {
         // Latest fetch wins: a stale response must not overwrite a newer one.
         transcriptJob?.cancel()
+        // A full refetch resets history to the newest page (ChatViewModel's
+        // refreshHistory rule, ported in ticket 061): an in-flight older-page load
+        // must not prepend a stale page — contiguous with the OLD committed list,
+        // not the fresh one — onto the replacement.
+        olderPageJob?.cancel()
+        _uiState.update { it.copy(isLoadingMoreHistory = false) }
         transcriptJob = viewModelScope.launch {
             val showLoading = _uiState.value.items.isEmpty() && _uiState.value.status == null
             if (showLoading) _uiState.update { it.copy(isLoading = true) }
@@ -135,10 +141,14 @@ class SubagentViewModel @Inject constructor(
     /** Scroll-to-top trigger (ticket 043's mechanics on turn cursors): no-op while an
      * older-page load is in flight or the server said `has_more: false`; otherwise
      * fetches the next older page (`before_turn` = oldest loaded turn) and PREPENDS
-     * it, deduplicated by turn id in the store's timeline. A failure keeps the loaded
+     * it, deduplicated by turn id in the store's timeline. The newest-page guard
+     * ([transcriptJob], ported from ChatViewModel in ticket 061) is the same trap as
+     * the in-flight guard: a page fetched against the stale cursor would land on a
+     * refetch's fresh page with a hole in between. A failure keeps the loaded
      * history visible and retries on the next trigger. */
     fun onHistoryTopReached() {
         if (olderPageJob?.isActive == true) return
+        if (transcriptJob?.isActive == true) return
         if (!_uiState.value.hasMoreHistory) return
         olderPageJob = viewModelScope.launch {
             _uiState.update { it.copy(isLoadingMoreHistory = true) }

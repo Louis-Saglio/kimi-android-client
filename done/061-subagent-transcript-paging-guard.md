@@ -41,9 +41,27 @@ Port the documented `ChatViewModel` pattern into `SubagentViewModel`:
 
 ## Acceptance criteria
 
-- [ ] The race above cannot prepend a stale page (unit-tested, RED before the
+- [x] The race above cannot prepend a stale page (unit-tested, RED before the
   fix, GREEN after).
-- [ ] `./gradlew :app:testDebugUnitTest` green.
+  *(`SubagentViewModelTest.a stale older page racing the reconcile refetch
+  never prepends` — RED pre-fix (the parked t0 page prepended onto the fresh
+  t2 page), GREEN after.)*
+- [x] `./gradlew :app:testDebugUnitTest` green.
+  *(287 tests, 18 classes, 0 failures.)*
+
+## Implementation notes (2026-07-31)
+
+Both guards ported verbatim from `ChatViewModel`: `refreshTranscript` cancels
+`olderPageJob` (and resets `isLoadingMoreHistory`, like `refreshHistory`) before
+launching, and `onHistoryTopReached` returns early while `transcriptJob` is
+active. The test harness parks the older-page response in the MockWebServer
+dispatcher (the `statusResponseGate` pattern), with one adaptation: the
+dispatcher reads response bodies at response time, so a parked response must
+serve a dedicated `olderTranscriptBody` (the `olderMessagesBody` split in
+ChatViewModelTest) — otherwise it would serve the fresher `transcriptBody`
+assigned after the request went out, and the turn-id dedup would mask the
+prepend. The fresh page (t2) and the stale page (t0) share no turn id for the
+same reason.
 
 ## Out of scope
 
