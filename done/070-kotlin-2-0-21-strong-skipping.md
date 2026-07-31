@@ -39,10 +39,15 @@ Kotlin 2.0.x — 2.0.21 stays within it; the Compose BOM stays at
 
 ## Acceptance criteria
 
-- [ ] Catalog bump only (no app-code changes required).
-- [ ] `./gradlew :app:testDebugUnitTest` green.
-- [ ] androidTest suites green on Firebase Test Lab; robo run green.
-- [ ] Release APK built and copied to the file server per `AGENTS.md`.
+- [x] Catalog bump only (no app-code changes required) — `kotlin` 2.0.21,
+  `ksp` 2.0.21-1.0.25; Hilt 2.51.1 compiles fine against it.
+- [x] `./gradlew :app:testDebugUnitTest` green. *(305 tests, 0 failures,
+  2026-07-31.)*
+- [x] androidTest suites green on Firebase Test Lab; robo run green.
+  *(Full instrumented suite — incl. `ChatAutoScrollTest`, `ToolRowTest`,
+  `MarkdownBubbleTest`: 42/42 passed on MediumPhone.arm-34; robo passed.)*
+- [x] Release APK built and copied to the file server per `AGENTS.md`
+  (`kimi-android-client-main.apk`, 3.5 MB).
 
 ## Out of scope
 
