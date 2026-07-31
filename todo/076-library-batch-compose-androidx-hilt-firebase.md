@@ -23,7 +23,7 @@ Versions verified against Google Maven / Maven Central on 2026-07-31
 | activityCompose | 1.9.0 | 1.13.0 |
 | lifecycle | 2.8.3 | 2.11.0 |
 | navigationCompose | 2.7.7 | 2.9.8 (2.10.0 still beta) |
-| hilt | 2.57.2 | 2.60.1 |
+| hilt | 2.57.2 | 2.60.1 — **already landed in 075** (forced: 2.57.2's Gradle plugin is AGP-9-incompatible) |
 | hiltNavigationCompose | 1.2.0 | 1.4.0 |
 | coroutines | 1.7.3 | 1.11.0 |
 | kotlinxSerialization | 1.7.1 | 1.11.0 |

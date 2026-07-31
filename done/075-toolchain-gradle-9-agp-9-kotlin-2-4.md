@@ -37,6 +37,34 @@ Alternatives considered and rejected: staying on AGP 8.x (caps compileSdk at
 35, blocks "Android 16 and up" and the whole program); jumping to AGP
 9.4.0-alpha (program rule: stable only).
 
+## Landed (2026-07-31)
+
+- Gradle 8.9 → 9.6.1 (wrapper + `distributionSha256Sum` pin), AGP 8.6.1 →
+  9.3.1, Kotlin 2.2.21 → 2.4.10, KSP 2.2.21-2.0.5 → 2.3.10.
+- Built-in Kotlin migration landed clean — **no opt-out needed**:
+  `org.jetbrains.kotlin.android` removed from both build files, KGP/KSP
+  pinned via the root `buildscript { classpath(...) }` block, the app's
+  `kotlin { compilerOptions { jvmTarget } }` block untouched and resolving.
+  Compose/serialization/KSP/Hilt plugin applications all work on built-in
+  Kotlin.
+- Forced side-bump: **Hilt 2.57.2 → 2.60.1** — 2.57.2's Gradle plugin looks
+  up the removed `BaseExtension` (`IllegalStateException: Android
+  BaseExtension not found` in `HiltGradlePlugin.configureCompileClasspath`).
+  Pulled forward from ticket 076; 076's table marked accordingly.
+- OOM incident: the first parallel unit-test run was killed by the kimi-web
+  cgroup OOM killer (CONSTRAINT_MEMCG, 5 GB MemoryMax; a java process at
+  ~2.2 GB RSS). kimi-web.service itself was unaffected — the cap did its
+  job. Everything rerun with `--max-workers=1`: green; the caution is now
+  recorded in `AGENTS.md`.
+- No source changes required. Warnings only: pre-existing Compose
+  deprecations (`LocalClipboardManager`, `menuAnchor`) and new Kotlin 2.4
+  "Expression is unused" warnings in chat test files — left alone (out of
+  scope).
+- Verification: `testDebugUnitTest` green; `assembleRelease` green (R8 +
+  resource shrinking + lintVital + Crashlytics mapping upload); Firebase
+  robo **Passed** (MediumPhone.arm, API 34); `kimi-android-client-main.apk`
+  (3.9 MB) on the file server.
+
 ## Description
 
 1. `./gradlew wrapper --gradle-version 9.6.1` (commit the regenerated wrapper
@@ -70,14 +98,14 @@ Alternatives considered and rejected: staying on AGP 8.x (caps compileSdk at
 
 ## Acceptance criteria
 
-- [ ] `gradle-wrapper.properties` points at 9.6.1; `libs.versions.toml` shows
+- [x] `gradle-wrapper.properties` points at 9.6.1; `libs.versions.toml` shows
   AGP 9.3.1, Kotlin 2.4.10, KSP 2.3.10.
-- [ ] `./gradlew testDebugUnitTest` green (full suite, incl. the MockWebServer
+- [x] `./gradlew testDebugUnitTest` green (full suite, incl. the MockWebServer
   chat harnesses).
-- [ ] `./gradlew assembleRelease` green (R8 + resource shrinking).
-- [ ] Firebase robo green on the release/debug APK (command per `AGENTS.md`).
-- [ ] Release APK published to the file server per `AGENTS.md`.
-- [ ] `AGENTS.md` tech-stack section updated; if the built-in-Kotlin opt-out
+- [x] `./gradlew assembleRelease` green (R8 + resource shrinking).
+- [x] Firebase robo green on the release/debug APK (command per `AGENTS.md`).
+- [x] Release APK published to the file server per `AGENTS.md`.
+- [x] `AGENTS.md` tech-stack section updated; if the built-in-Kotlin opt-out
   was used, the blocker is recorded in this ticket instead.
 
 ## Out of scope

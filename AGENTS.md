@@ -21,10 +21,10 @@ drift check keeps the two in sync.
 - Kotlin + Jetpack Compose (Material 3), single `app` module.
 - Hilt + KSP for DI, coroutines/Flow, `kotlinx.serialization`, OkHttp, DataStore.
 - Chat markdown: `com.mikepenz:multiplatform-markdown-renderer-m3` 0.38.1
-  (ticket 073: newest release on the Kotlin 2.2.x line — 0.39.0 needs Kotlin
-  2.3, 0.42.0 Kotlin 2.4; those ladders are a new ticket). Stack: Kotlin
-  2.2.21, Compose BOM 2025.11.00, Hilt 2.57.2 (2.51.1's KSP processor crashes
-  under KSP2 — don't downgrade). `MarkdownBody` parses the INITIAL content
+  (ticket 073: newest release on the Kotlin 2.2.x line; the 0.43.0 rung is
+  unblocked now that Kotlin is 2.4 — ticket 077). Stack: Kotlin 2.4.10,
+  Compose BOM 2025.11.00, Hilt 2.60.1 (2.51.1's KSP processor crashes under
+  KSP2; 2.57.x's Gradle plugin predates AGP 9 — don't downgrade either). `MarkdownBody` parses the INITIAL content
   synchronously (`rememberMarkdownState(immediate = true)`) so MessageList's
   bottom pin measures real first-frame row heights; content changes (streaming)
   still re-parse asynchronously, with `retainState` keeping the previous
@@ -32,7 +32,15 @@ drift check keeps the two in sync.
 - MVVM: one immutable `UiState` per screen as `StateFlow`, one-shot effects via
   `Channel`. ALL one-shots (snackbars, open-file intents) go through the effect
   channel — composables never call `snackbarHostState` or do I/O directly.
-- minSdk 31, targetSdk 35, AGP 8.6.x.
+- minSdk 31, targetSdk 35 (SDK-level bumps are ticket 079), compileSdk 35,
+  AGP 9.3.1, Gradle 9.6.1, KSP 2.3.10 (ticket 075). AGP 9's built-in Kotlin
+  compiles the Kotlin sources — `org.jetbrains.kotlin.android` is NOT applied
+  (applying it errors out); KGP 2.4.10/KSP 2.3.10 are pinned via a
+  `buildscript { classpath(...) }` block in the root `build.gradle.kts` (the
+  documented AGP 9 override; its built-in baseline is KGP 2.2.10). Escape
+  hatches until AGP 10: `android.builtInKotlin=false`, `android.newDsl=false`.
+  On the VPS, build with `--max-workers=1`: the first parallel build on this
+  toolchain exceeded the 5 GB kimi-web cgroup and was OOM-killed.
 - Crash reporting: Firebase Crashlytics in the default VPS project
   (`kimi-code-android-client`, Android app `fr.louissaglio.kimi.android`,
   `app/google-services.json` committed). The SDK auto-initializes — no app
