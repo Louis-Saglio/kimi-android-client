@@ -20,10 +20,12 @@ import kotlinx.coroutines.launch
  * the session socket's live tail streams on top of committed history fetched from the
  * per-agent transcript endpoint (docs/server-api.md, Transcript) — the same
  * committed-history + live-tail architecture as the main chat. This ViewModel holds
- * NO socket of its own — the chat screen's collection is the store's only feeder,
- * kept alive while this page is open (the pageOpened/pageClosed pair below feeds the
- * chat's socket gate). A second, page-owned socket would double-feed the store on
- * every cursor replay.
+ * NO socket of its own — the store is fed by exactly one collection (ticket 064):
+ * the chat's while its gate holds the session, otherwise the store's own keep-alive
+ * collection, which the pageOpened/pageClosed pair below drives. The keep-alive is
+ * what keeps this page streaming after process death with the page on top (the chat
+ * ViewModel is never recreated then); a second, page-owned socket would double-feed
+ * the store on every cursor replay.
  */
 @HiltViewModel
 class SubagentViewModel @Inject constructor(

@@ -4,12 +4,15 @@ import android.util.Log
 import fr.louissaglio.kimi.android.data.chat.AGENT_TOOL_NAME
 import fr.louissaglio.kimi.android.data.chat.AgentScopedEvent
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
+import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.MAIN_AGENT_ID
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
+import fr.louissaglio.kimi.android.data.chat.SocketEvent
 import fr.louissaglio.kimi.android.data.chat.SubagentLifecycleEvent
 import fr.louissaglio.kimi.android.data.chat.TodoParser
 import fr.louissaglio.kimi.android.data.chat.TranscriptPage
 import fr.louissaglio.kimi.android.data.chat.TranscriptState
+import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.di.StreamCoalesceWindowMillis
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -35,12 +38,18 @@ import kotlinx.serialization.json.jsonPrimitive
 enum class SubagentStatus { Queued, Working, Suspended, Completed, Failed }
 
 /**
- * Session-scoped store of every sub-agent's live stream (ticket 045), fed by the chat
- * screen's socket collection — the ONLY feeder. The chat's socket gate keeps its
- * collection alive while a sub-agent page of the session is open ([pageOpened] /
- * [pageClosed]), so the accumulated stream survives navigation chat → page → chat
- * without a second socket (two sockets with independent resume cursors would
- * double-feed on every replay).
+ * Session-scoped store of every sub-agent's live stream (ticket 045), fed by exactly
+ * ONE session-socket collection at a time (ticket 064): the chat screen's while its
+ * socket gate holds the session (signaled via [chatCollectionStarted] /
+ * [chatCollectionStopped]), otherwise the store's own keep-alive collection while a
+ * sub-agent page of the session is open ([pageOpened] / [pageClosed]). The keep-alive
+ * ownership lives here — not in the chat's gate — because after process death with a
+ * page on top the chat ViewModel is never recreated, so a gate-owned keep-alive would
+ * never start and live streaming would be silently absent on the restored page. Two
+ * concurrent collections would double-feed the store on every cursor replay, so the
+ * keep-alive never runs while a chat collection does; [reconcileKeepAlive] runs on the
+ * caller's thread (all entry points are Main-confined), so the keep-alive's cancel and
+ * the chat collection's start can never interleave.
  *
  * Each entry owns a [ChatTimeline] in non-history-backed mode (turn.started seals the
  * finished internal turn's live rows; ticket 046's transcript pages feed the committed
@@ -55,6 +64,8 @@ enum class SubagentStatus { Queued, Working, Suspended, Completed, Failed }
 class SubagentStreamStore @Inject constructor(
     private val json: Json,
     private val todoParser: TodoParser,
+    private val chatRepository: ChatRepository,
+    private val settingsRepository: SettingsRepository,
     // No default: an all-default @Inject constructor makes Kotlin generate a second,
     // no-arg synthetic constructor, which Dagger rejects (two injected constructors).
     @StreamCoalesceWindowMillis
@@ -129,11 +140,19 @@ class SubagentStreamStore @Inject constructor(
     private val streams = mutableMapOf<String, MutableMap<String, Stream>>()
     private val _states = MutableStateFlow<Map<String, Map<String, SubagentState>>>(emptyMap())
 
-    // sessionId → number of open sub-agent pages. The chat keeps its socket — the
-    // store's only feeder — alive while a page of its session is open, so the stream
-    // survives navigation without a second socket (two sockets with independent
-    // resume cursors would double-feed on every replay).
+    // sessionId → number of open sub-agent pages. One of the two inputs of
+    // [reconcileKeepAlive]: a page needs the store fed from the socket.
     private val _openPages = MutableStateFlow<Map<String, Int>>(emptyMap())
+
+    // Sessions whose chat-screen socket collection is currently running (the other
+    // [reconcileKeepAlive] input): while the chat collects it is the feeder, and the
+    // store's keep-alive must stay off — two concurrent collections would double-apply
+    // replayed events.
+    private val _chatCollecting = MutableStateFlow<Set<String>>(emptySet())
+
+    // sessionId → the store-owned keep-alive collection (ticket 064); present only
+    // while a page is open AND no chat collection runs.
+    private val keepAliveJobs = mutableMapOf<String, Job>()
 
     /** The live entry of one sub-agent; stays null when its `subagent.spawned` was never
      * seen (the app subscribed after the spawn — the page shows its empty state). */
@@ -146,6 +165,7 @@ class SubagentStreamStore @Inject constructor(
 
     fun pageOpened(sessionId: String) {
         _openPages.update { it + (sessionId to (it[sessionId] ?: 0) + 1) }
+        reconcileKeepAlive(sessionId)
     }
 
     fun pageClosed(sessionId: String) {
@@ -153,7 +173,52 @@ class SubagentStreamStore @Inject constructor(
             val count = (counts[sessionId] ?: 1) - 1
             if (count <= 0) counts - sessionId else counts + (sessionId to count)
         }
+        reconcileKeepAlive(sessionId)
     }
+
+    /** The chat screen's socket collection of [sessionId] started: it is the feeder
+     * now, so the store's keep-alive collection (if any) stops first. Called by
+     * ChatViewModel's socket gate before it starts collecting. */
+    fun chatCollectionStarted(sessionId: String) {
+        _chatCollecting.update { it + sessionId }
+        reconcileKeepAlive(sessionId)
+    }
+
+    /** The chat screen's socket collection of [sessionId] ended (its gate closed);
+     * the keep-alive takes over when a page is still open. */
+    fun chatCollectionStopped(sessionId: String) {
+        _chatCollecting.update { it - sessionId }
+        reconcileKeepAlive(sessionId)
+    }
+
+    /** The single-feeder arbiter (ticket 064): the store collects the session socket
+     * itself exactly while a page is open AND no chat collection runs. Runs on the
+     * caller's thread — all callers are Main-confined, and [Job.cancel] is immediate,
+     * so a cancelled keep-alive collector never applies another event once the chat's
+     * collection starts. */
+    private fun reconcileKeepAlive(sessionId: String) {
+        val needed = (_openPages.value[sessionId] ?: 0) > 0 && sessionId !in _chatCollecting.value
+        val running = keepAliveJobs[sessionId]
+        if (!needed) {
+            running?.cancel()
+            keepAliveJobs.remove(sessionId)
+        } else if (running?.isActive != true) {
+            keepAliveJobs[sessionId] = scope.launch { runKeepAliveCollection(sessionId) }
+        }
+    }
+
+    /** The store-owned feeder: routes every socket event through [apply] — main-agent
+     * events are ignored there (the chat heals its own side from REST when it next
+     * opens). Connection lifecycle events carry nothing the page renders. */
+    private suspend fun runKeepAliveCollection(sessionId: String) {
+        chatRepository.observeSession(settingsRepository.current(), sessionId).collect { event ->
+            (event as? SocketEvent.Event)?.event?.let { apply(sessionId, it) }
+        }
+    }
+
+    /** The session's keep-alive collection, for tests (joining it in tearDown keeps a
+     * leaked socket coroutine from touching Main after resetMain — ticket 049). */
+    internal fun keepAliveJob(sessionId: String): Job? = keepAliveJobs[sessionId]
 
     fun apply(sessionId: String, event: SessionEvent) {
         when (event) {
@@ -165,11 +230,14 @@ class SubagentStreamStore @Inject constructor(
     }
 
     /** Releases the session's streams when the whole session is left (the chat
-     * ViewModel is cleared), cancelling any open coalescing bursts. */
+     * ViewModel is cleared), cancelling any open coalescing bursts and the keep-alive
+     * collection. */
     fun release(sessionId: String) {
         streams.remove(sessionId)?.values?.forEach { it.flushJob?.cancel() }
+        keepAliveJobs.remove(sessionId)?.cancel()
         _states.update { it - sessionId }
         _openPages.update { it - sessionId }
+        _chatCollecting.update { it - sessionId }
     }
 
     private fun spawn(sessionId: String, event: SessionEvent.SubagentSpawned) {

@@ -282,17 +282,27 @@ class ChatViewModel @Inject constructor(
 
     init {
         // The socket gate (ticket 045): the session socket is collected while the chat
-        // is visible OR a sub-agent page of this session is open. The chat's collection
-        // is the store's only feeder, so it must outlive navigation to a page — a
-        // second, page-owned socket would double-feed the store on every cursor replay.
-        // Gate flips cancel/restart the collection (collectLatest), matching the old
-        // explicit start/cancel for the chat-only case.
+        // is visible OR a sub-agent page of this session is open. While it runs, this
+        // collection is the sub-agent store's feeder — the chatCollectionStarted/
+        // Stopped pair (ticket 064) keeps the store's own keep-alive collection off,
+        // so exactly one collection per session exists in every state combination (two
+        // concurrent ones would double-feed the store on every cursor replay). The
+        // gate still outlives navigation to a page, so chat → page → chat costs no
+        // reconnect. Gate flips cancel/restart the collection (collectLatest),
+        // matching the old explicit start/cancel for the chat-only case.
         viewModelScope.launch {
             combine(screenVisible, subagentStore.openPageCount(sessionId)) { visible, openPages ->
                 visible || openPages > 0
             }.distinctUntilChanged()
                 .collectLatest { holdSocket ->
-                    if (holdSocket) collectSessionSocket()
+                    if (holdSocket) {
+                        subagentStore.chatCollectionStarted(sessionId)
+                        try {
+                            collectSessionSocket()
+                        } finally {
+                            subagentStore.chatCollectionStopped(sessionId)
+                        }
+                    }
                 }
         }
     }

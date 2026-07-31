@@ -2,6 +2,8 @@ package fr.louissaglio.kimi.android.testutil
 
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.preferencesOf
+import androidx.datastore.preferences.core.stringPreferencesKey
 import fr.louissaglio.kimi.android.data.chat.ChatApi
 import fr.louissaglio.kimi.android.data.chat.ChatMessageMapper
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
@@ -12,8 +14,13 @@ import fr.louissaglio.kimi.android.data.chat.TodoParser
 import fr.louissaglio.kimi.android.data.network.ApiClient
 import fr.louissaglio.kimi.android.data.network.ConnectionChecker
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
+import fr.louissaglio.kimi.android.data.settings.SettingsRepository
+import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
 import fr.louissaglio.kimi.android.ui.chat.ChatTimeline
 import fr.louissaglio.kimi.android.ui.chat.SubagentStreamStore
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 
@@ -51,7 +58,25 @@ fun testConnectionChecker(): ConnectionChecker {
     return ConnectionChecker(ApiClient(OkHttpClient(), json), json)
 }
 
-fun testSubagentStreamStore(streamCoalesceWindowMillis: Long): SubagentStreamStore {
+fun testSubagentStreamStore(
+    streamCoalesceWindowMillis: Long,
+    chatRepository: ChatRepository? = null,
+    settingsRepository: SettingsRepository? = null,
+): SubagentStreamStore {
     val json = Json { ignoreUnknownKeys = true }
-    return SubagentStreamStore(json, TodoParser(json), streamCoalesceWindowMillis)
+    // Fallback data layer for tests that never open a sub-agent page: the store's
+    // keep-alive collection (ticket 064) only starts on pageOpened without a chat
+    // collection, which those tests never do — this is constructor wiring only,
+    // pointed at an unroutable URL so an accidental start still hits no network.
+    val dataStore = FakePreferencesDataStore(
+        preferencesOf(stringPreferencesKey("server_url") to "http://127.0.0.1:1/"),
+    )
+    return SubagentStreamStore(
+        json,
+        TodoParser(json),
+        chatRepository ?: testChatRepository(dataStore),
+        settingsRepository
+            ?: SettingsRepository(dataStore, CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)),
+        streamCoalesceWindowMillis,
+    )
 }

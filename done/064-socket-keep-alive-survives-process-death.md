@@ -45,12 +45,24 @@ Tests:
 
 ## Acceptance criteria
 
-- [ ] Live streaming works on a sub-agent page restored after process death
+- [x] Live streaming works on a sub-agent page restored after process death
   without visiting the chat screen first (unit-tested at the owner/store
   level; manual or robo verification on device if feasible).
-- [ ] No state combination produces two concurrent collections for one
+  *(`SubagentStreamStoreKeepAliveTest.pageOpened without a chat collection
+  starts a socket collection that feeds the store` — no ChatViewModel exists;
+  the store's own keep-alive connects and its frames land in the entry.
+  On-device robo verification not feasible: needs a live server plus a real
+  process kill/restore cycle.)
+- [x] No state combination produces two concurrent collections for one
   session (unit-tested).
-- [ ] `./gradlew :app:testDebugUnitTest` green.
+  *(`SubagentStreamStoreKeepAliveTest.the keep-alive runs exactly while a
+  page is open and no chat collection is` — the reconcile state machine over
+  every page/chat combination, and `.opening the chat hands the feed over
+  with exactly one collection` — the hand-off with a real ChatViewModel: the
+  keep-alive is cancelled before the chat collects, the chat's subscribe
+  resumes the keep-alive's cursor, and a straggler frame on the cancelled
+  connection is never applied.)
+- [x] `./gradlew :app:testDebugUnitTest` green. *(295 tests, 0 failures.)*
 
 ## Out of scope
 

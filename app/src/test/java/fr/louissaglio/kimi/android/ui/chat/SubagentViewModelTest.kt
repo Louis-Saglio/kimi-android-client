@@ -22,6 +22,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
+import okhttp3.WebSocketListener
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -44,8 +45,11 @@ class SubagentViewModelTest {
     private val server = MockWebServer()
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
 
-    /** 0 ms window: sub-agent frames apply on arrival, no flush timer involved. */
-    private val store = testSubagentStreamStore(streamCoalesceWindowMillis = 0)
+    /** 0 ms window: sub-agent frames apply on arrival, no flush timer involved. Built
+     * in [setUp] against the MockWebServer-backed repository: onScreenStarted drives
+     * the store's keep-alive collection (ticket 064), which must hit the mock, never
+     * the fallback wiring's unroutable URL. */
+    private lateinit var store: SubagentStreamStore
 
     private lateinit var settingsRepository: SettingsRepository
     private lateinit var repository: ChatRepository
@@ -82,6 +86,10 @@ class SubagentViewModelTest {
                     } else {
                         MockResponse().setBody(transcriptBody)
                     }
+                } else if (path.startsWith("/api/v1/ws")) {
+                    // The store's keep-alive collection (ticket 064, started by
+                    // onScreenStarted → pageOpened) idles on an open upgrade.
+                    MockResponse().withWebSocketUpgrade(object : WebSocketListener() {})
                 } else {
                     MockResponse().setResponseCode(404)
                 }
@@ -92,10 +100,19 @@ class SubagentViewModelTest {
         )
         repository = testChatRepository(dataStore)
         settingsRepository = SettingsRepository(dataStore, appScope)
+        store = testSubagentStreamStore(streamCoalesceWindowMillis = 0, repository, settingsRepository)
     }
 
     @After
     fun tearDown() {
+        // Cancel the store's keep-alive collection AND join it while Main is still
+        // set and the server still up — a leaked socket coroutine outliving the test
+        // crashes on the dispatcher thread (the ticket-049 pattern).
+        runBlocking {
+            val keepAlive = store.keepAliveJob("session_1")
+            store.release("session_1")
+            keepAlive?.join()
+        }
         server.shutdown()
         Dispatchers.resetMain()
     }

@@ -42,8 +42,9 @@ fun SubagentScreen(
     viewModel: SubagentViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    // Registers the page while visible (ON_START/ON_STOP pair): the chat's socket
-    // gate keeps the store fed for as long as a page of the session is open.
+    // Registers the page while visible (ON_START/ON_STOP pair): the registration keeps
+    // the store fed for as long as a page of the session is open — by the chat's socket
+    // gate when it exists, by the store's own keep-alive collection otherwise (064).
     LifecycleEventEffect(Lifecycle.Event.ON_START) { viewModel.onScreenStarted() }
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) { viewModel.onScreenStopped() }
     Scaffold(

@@ -101,11 +101,15 @@ also the regression signal for "verified fixed" tickets.
 - Sub-agent streams (045): `SessionSocket` tags transcript events with the
   emitting `agentId`; sub-agent-scoped events route to `SubagentStreamStore`
   (ui/chat, session-scoped singleton keyed by session, one `ChatTimeline` per
-  sub-agent, same delta coalescing as ChatViewModel). The
-  chat's socket collection is the store's ONLY feeder: a socket gate in
-  ChatViewModel keeps it alive while a sub-agent page of the session is open
-  (SubagentViewModel registers via pageOpened/pageClosed) — never open a
-  second, page-owned socket (two cursors would double-feed on replay). The
+  sub-agent, same delta coalescing as ChatViewModel). The store is fed by
+  exactly ONE session-socket collection at a time (064): the chat's while its
+  socket gate holds the session (ChatViewModel signals
+  chatCollectionStarted/Stopped), otherwise the store's own keep-alive
+  collection while a sub-agent page is open (SubagentViewModel registers via
+  pageOpened/pageClosed) — the keep-alive lives in the store because after
+  process death with a page on top the chat ViewModel is never recreated. Two
+  concurrent collections would double-feed on replay, so the keep-alive never
+  runs while a chat collection does; never open a page-owned socket. The
   read-only `SubagentScreen` reuses `MessageList`/`ToolRows`; linked `Agent`
   rows carry `subagentId` — linked rows never expand (the page has all the
   details); tapping the row or its trailing open button navigates to the page. Cold-open (spawn before
