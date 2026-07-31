@@ -20,7 +20,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -53,8 +52,8 @@ enum class SubagentStatus { Queued, Working, Suspended, Completed, Failed }
  *
  * Each entry owns a [ChatTimeline] in non-history-backed mode (turn.started seals the
  * finished internal turn's live rows; ticket 046's transcript pages feed the committed
- * side via [applyTranscriptPage]/[prependTranscriptPage]) and its own streaming-delta
- * coalescing, mirroring ChatViewModel's leading-edge + ~100 ms trailing flush: a
+ * side via [applyTranscriptPage]/[prependTranscriptPage]) and a [DeltaCoalescer] — the
+ * same streaming-delta conflation ChatViewModel delegates to (ticket 065): a
  * published state update costs a full MarkdownBody re-parse per sub-agent page, so
  * deltas publish at most once per window during a burst. All mutations are confined
  * to the Main dispatcher (ViewModel callers and the flush jobs alike), keeping the
@@ -87,8 +86,9 @@ class SubagentStreamStore @Inject constructor(
         val items: List<ChatItem> = emptyList(),
     )
 
-    private class Stream(
+    private inner class Stream(
         val id: String,
+        val sessionId: String,
         val name: String,
         val description: String,
         val runInBackground: Boolean,
@@ -98,6 +98,21 @@ class SubagentStreamStore @Inject constructor(
         var resultSummary: String? = null
         var error: String? = null
         val timeline = ChatTimeline(todoParser, historyBacked = false)
+
+        /** The shared delta-coalescing state machine (ticket 065); every
+         * timeline-bound transcript frame routes through it. */
+        val coalescer = DeltaCoalescer(
+            windowMillis = streamCoalesceWindowMillis,
+            // Deferred like the store's scope: JVM tests run with window = 0 (no flush
+            // job ever launches) and have no Main dispatcher to reference.
+            scope = { scope },
+            applyDelta = timeline::apply,
+            applyEvent = { event ->
+                timeline.apply(event)
+                publish(sessionId)
+            },
+            publish = { publish(sessionId) },
+        )
 
         /** Set by any started/suspended/completed/failed frame: transcript-derived
          * status (ticket 046) applies only while no live lifecycle frame was seen. */
@@ -116,10 +131,6 @@ class SubagentStreamStore @Inject constructor(
          * so it lives OUTSIDE the timeline — a refetch must not wipe the page's only
          * user bubble. Rendered as the page's first row by [toState]. */
         var seededPrompt: String? = null
-
-        /** Deltas received but not yet published; null = no burst open. */
-        var pendingDeltas: MutableList<SessionEvent>? = null
-        var flushJob: Job? = null
 
         fun toState(): SubagentState {
             val promptBubble = seededPrompt?.takeIf { it.isNotBlank() }
@@ -220,7 +231,7 @@ class SubagentStreamStore @Inject constructor(
      * leaked socket coroutine from touching Main after resetMain — ticket 049). */
     internal fun keepAliveJob(sessionId: String): Job? = keepAliveJobs[sessionId]
 
-    fun apply(sessionId: String, event: SessionEvent) {
+    suspend fun apply(sessionId: String, event: SessionEvent) {
         when (event) {
             is SessionEvent.SubagentSpawned -> spawn(sessionId, event)
             is SubagentLifecycleEvent -> onLifecycle(sessionId, event)
@@ -233,7 +244,7 @@ class SubagentStreamStore @Inject constructor(
      * ViewModel is cleared), cancelling any open coalescing bursts and the keep-alive
      * collection. */
     fun release(sessionId: String) {
-        streams.remove(sessionId)?.values?.forEach { it.flushJob?.cancel() }
+        streams.remove(sessionId)?.values?.forEach { it.coalescer.cancel() }
         keepAliveJobs.remove(sessionId)?.cancel()
         _states.update { it - sessionId }
         _openPages.update { it - sessionId }
@@ -246,6 +257,7 @@ class SubagentStreamStore @Inject constructor(
         if (sessionStreams.containsKey(event.subagentId)) return
         sessionStreams[event.subagentId] = Stream(
             id = event.subagentId,
+            sessionId = sessionId,
             name = event.name,
             description = event.description,
             runInBackground = event.runInBackground,
@@ -280,6 +292,7 @@ class SubagentStreamStore @Inject constructor(
         }
         val stream = Stream(
             id = subagentId,
+            sessionId = sessionId,
             name = resultField(row.output, "actual_subagent_type") ?: agentArg(row.input, "subagent_type").orEmpty(),
             description = agentArg(row.input, "description") ?: resultField(row.output, "description").orEmpty(),
             runInBackground = agentRunInBackground(row.input),
@@ -327,10 +340,10 @@ class SubagentStreamStore @Inject constructor(
         // creates nothing: the page keeps its "no transcript" empty state.
         if (existing == null && page.turns.isEmpty()) return
         val stream = existing ?: streams.getOrPut(sessionId) { mutableMapOf() }.getOrPut(subagentId) {
-            Stream(id = subagentId, name = "", description = "", runInBackground = false, todoParser = todoParser)
+            Stream(id = subagentId, sessionId = sessionId, name = "", description = "", runInBackground = false, todoParser = todoParser)
         }
         // Any coalesced text must apply BEFORE the replace wipes/dedups the live rows.
-        flushPendingDeltas(stream)
+        stream.coalescer.flush()
         stream.timeline.replaceTranscript(page.turns, keepLive)
         stream.transcriptLoaded = true
         stream.oldestTurnId = page.turns.firstOrNull()?.id
@@ -358,7 +371,7 @@ class SubagentStreamStore @Inject constructor(
         val stream = stream(sessionId, event.subagentId) ?: return
         // A lifecycle transition freezes the stream exactly: publish the coalesced
         // text before the status flips.
-        flushPendingDeltas(stream)
+        stream.coalescer.flush()
         when (event) {
             is SessionEvent.SubagentSpawned -> Unit // handled by spawn()
             is SessionEvent.SubagentStarted -> {
@@ -383,7 +396,7 @@ class SubagentStreamStore @Inject constructor(
         publish(sessionId)
     }
 
-    private fun onTranscript(sessionId: String, agentId: String, event: SessionEvent) {
+    private suspend fun onTranscript(sessionId: String, agentId: String, event: SessionEvent) {
         val stream = stream(sessionId, agentId)
         if (stream == null) {
             // The spawn predates the app's subscription: the page shows the empty
@@ -391,79 +404,9 @@ class SubagentStreamStore @Inject constructor(
             Log.d(TAG, "Dropping frame for unknown sub-agent '$agentId' (spawn missed)")
             return
         }
-        if (event.isStreamDelta()) {
-            onStreamDelta(sessionId, stream, event)
-        } else {
-            flushPendingDeltas(stream)
-            stream.timeline.apply(event)
-            publish(sessionId)
-        }
-    }
-
-    private fun SessionEvent.isStreamDelta(): Boolean =
-        this is SessionEvent.AssistantDelta || this is SessionEvent.ThinkingDelta
-
-    private fun onStreamDelta(sessionId: String, stream: Stream, event: SessionEvent) {
-        if (streamCoalesceWindowMillis <= 0L) {
-            stream.timeline.apply(event)
-            publish(sessionId)
-            return
-        }
-        val pending = stream.pendingDeltas
-        if (pending == null) {
-            // Leading edge of a burst: publish immediately, then coalesce until the
-            // stream pauses for a full window.
-            stream.timeline.apply(event)
-            publish(sessionId)
-            stream.pendingDeltas = mutableListOf()
-            stream.flushJob = scope.launch { runDeltaFlushLoop(sessionId, stream) }
-        } else {
-            pending.mergeDelta(event)
-        }
-    }
-
-    /** Trailing flush of an open burst: publishes the accumulated deltas once per
-     * window; a window with nothing new closes the burst so the next delta renders
-     * on its leading edge again. */
-    private suspend fun runDeltaFlushLoop(sessionId: String, stream: Stream) {
-        while (true) {
-            delay(streamCoalesceWindowMillis)
-            val pending = stream.pendingDeltas ?: return
-            if (pending.isEmpty()) {
-                stream.pendingDeltas = null
-                stream.flushJob = null
-                return
-            }
-            pending.forEach(stream.timeline::apply)
-            pending.clear()
-            publish(sessionId)
-        }
-    }
-
-    /** Applies any coalesced deltas NOW, in arrival order, and closes the burst. Runs
-     * before every non-delta event and lifecycle transition; the caller publishes. */
-    private fun flushPendingDeltas(stream: Stream) {
-        stream.flushJob?.cancel()
-        stream.flushJob = null
-        val pending = stream.pendingDeltas ?: return
-        stream.pendingDeltas = null
-        if (pending.isEmpty()) return
-        pending.forEach(stream.timeline::apply)
-    }
-
-    /** Consecutive same-kind deltas merge into one, so a flush costs one append per
-     * text stream. Assistant and thinking deltas never merge across kinds; each kind
-     * appends to its own bubble field, so keeping them as separate list entries
-     * preserves the observable arrival order. */
-    private fun MutableList<SessionEvent>.mergeDelta(event: SessionEvent) {
-        val last = lastOrNull()
-        when {
-            last is SessionEvent.AssistantDelta && event is SessionEvent.AssistantDelta ->
-                set(lastIndex, last.copy(delta = last.delta + event.delta))
-            last is SessionEvent.ThinkingDelta && event is SessionEvent.ThinkingDelta ->
-                set(lastIndex, last.copy(delta = last.delta + event.delta))
-            else -> add(event)
-        }
+        // The coalescer conflates deltas and flushes-before-apply for anything else
+        // (ticket 065).
+        stream.coalescer.onEvent(event)
     }
 
     private fun stream(sessionId: String, subagentId: String): Stream? = streams[sessionId]?.get(subagentId)

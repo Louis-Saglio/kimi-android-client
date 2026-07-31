@@ -30,7 +30,6 @@ import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -319,17 +318,23 @@ class ChatViewModel @Inject constructor(
      * /status snapshot a newer agent.status.updated frame has already overtaken. */
     private var contextUsageEventCount = 0
 
-    // --- Streaming-delta conflation (see collectSessionSocket) -----------------------
-    // All three are confined to Main: the socket collect, the flush loop, and
-    // onScreenStopped all run on viewModelScope's dispatcher (or are called from it).
+    /** Publishes the timeline's current rows+todos — the coalescer's publish point
+     * and [applySessionEvent]'s for timeline-bound events. */
+    private fun publishTimeline() {
+        _uiState.update { it.copy(items = timeline.items(), todos = timeline.todos()) }
+    }
 
-    /** Deltas received but not yet published; null = no burst open. Holds only
-     * [SessionEvent.AssistantDelta]/[SessionEvent.ThinkingDelta], consecutive
-     * same-kind entries merged into one. */
-    private var pendingDeltas: MutableList<SessionEvent>? = null
-
-    /** The trailing-flush timer of an open burst; null when no burst is open. */
-    private var deltaFlushJob: Job? = null
+    /** The delta-coalescing state machine (ticket 065): every timeline-bound socket
+     * event routes through it, so the flush-before-apply invariant can't be forgotten
+     * at a call site. Confined to Main: the socket collect, the flush loop, and
+     * onScreenStopped all run on viewModelScope's dispatcher (or are called from it). */
+    private val deltaCoalescer = DeltaCoalescer(
+        windowMillis = streamCoalesceWindowMillis,
+        scope = { viewModelScope },
+        applyDelta = timeline::apply,
+        applyEvent = ::applySessionEvent,
+        publish = ::publishTimeline,
+    )
 
     /** Wired to ON_START: re-syncs history (status-aware — a turn that ended while
      * the app was away takes its ghost live rows with it, ticket 048); the socket
@@ -348,7 +353,7 @@ class ChatViewModel @Inject constructor(
      * session is open. Coalesced deltas flush first, so no received text is ever held
      * back (or lost with the timer). */
     fun onScreenStopped() {
-        flushPendingDeltas()
+        deltaCoalescer.flush()
         screenVisible.value = false
     }
 
@@ -614,24 +619,10 @@ class ChatViewModel @Inject constructor(
 
     /**
      * Collects the session socket (one run per socket-gate opening; cancelled when the
-     * gate closes). Streaming deltas (assistant/thinking) are conflated
-     * here, at the ViewModel layer, so the UiState — and with it MarkdownBody, which
-     * re-parses the whole streaming bubble per emission — updates at most once per
-     * [streamCoalesceWindowMillis] during a burst instead of once per socket frame.
-     *
-     * Semantics (window > 0):
-     * - The FIRST delta of a burst applies immediately: the bubble starts rendering
-     *   without waiting out a window.
-     * - Later deltas accumulate in [pendingDeltas] (consecutive same-kind deltas merge
-     *   into one append) and publish once per window from [runDeltaFlushLoop]; a full
-     *   quiet window closes the burst, re-arming the leading edge.
-     * - ANY other socket event — turn/approval/question/tool/status frames and the
-     *   connection lifecycle alike — flushes the pending text first, so no substantive
-     *   event is ever delayed behind coalesced text and the pre-completion state is
-     *   exact. No delta is lost and order is preserved: a flush replays the buffered
-     *   events through the timeline in arrival order.
-     *
-     * With window = 0 every delta publishes on arrival (the pre-conflation behavior).
+     * gate closes). Main-agent session events route through [deltaCoalescer] (ticket
+     * 065): it conflates the streaming deltas and flushes-before-apply for anything
+     * else, so no substantive event is ever delayed behind coalesced text. Sub-agent
+     * frames go to the store, which coalesces per sub-agent stream.
      */
     private suspend fun collectSessionSocket() {
         chatRepository.observeSession(settingsRepository.current(), sessionId)
@@ -644,11 +635,12 @@ class ChatViewModel @Inject constructor(
                     // working state, or an open main delta burst (ticket 044).
                     sessionEvent != null && sessionEvent.isSubagentScoped() ->
                         onSubagentEvent(sessionEvent)
-                    sessionEvent != null && sessionEvent.isStreamDelta() -> {
-                        onStreamDelta(sessionEvent)
-                    }
+                    sessionEvent != null -> deltaCoalescer.onEvent(sessionEvent)
                     else -> {
-                        flushPendingDeltas()
+                        // Connection lifecycle frames mutate no timeline rows, but the
+                        // flush is owed all the same: no event waits behind coalesced
+                        // text.
+                        deltaCoalescer.flush()
                         when (event) {
                             SocketEvent.Connected ->
                                 _uiState.update { it.copy(isReconnecting = false) }
@@ -673,7 +665,7 @@ class ChatViewModel @Inject constructor(
                             // No-op: the history load validates the URL first and owns the
                             // user-facing error.
                             is SocketEvent.Failed -> Unit
-                            is SocketEvent.Event -> applySessionEvent(event.event)
+                            is SocketEvent.Event -> Unit // handled above via the coalescer
                         }
                     }
                 }
@@ -682,7 +674,7 @@ class ChatViewModel @Inject constructor(
 
     /** Routes one sub-agent-scoped event into the store; a spawn additionally links the
      * spawning `Agent` tool row to its sub-agent's page (ticket 045). */
-    private fun onSubagentEvent(event: SessionEvent) {
+    private suspend fun onSubagentEvent(event: SessionEvent) {
         if (event is SessionEvent.SubagentSpawned) {
             timeline.linkSubagentTool(event.parentToolCallId, event.subagentId)
             _uiState.update { it.copy(items = timeline.items()) }
@@ -700,76 +692,12 @@ class ChatViewModel @Inject constructor(
             .forEach { subagentStore.seedFromAgentRow(sessionId, it) }
     }
 
-    private fun SessionEvent.isStreamDelta(): Boolean =
-        this is SessionEvent.AssistantDelta || this is SessionEvent.ThinkingDelta
-
-    /** One delta applied+published on its own — the leading edge, and every delta
-     * when the window is 0. */
+    /** One event applied+published on its own — the [applySessionEvent] path for
+     * timeline-bound events. Deltas never come through here: the coalescer applies
+     * them via its own sink. */
     private fun applyTimelineEvent(event: SessionEvent) {
         timeline.apply(event)
-        _uiState.update { it.copy(items = timeline.items(), todos = timeline.todos()) }
-    }
-
-    private fun onStreamDelta(event: SessionEvent) {
-        if (streamCoalesceWindowMillis <= 0L) {
-            applyTimelineEvent(event)
-            return
-        }
-        val pending = pendingDeltas
-        if (pending == null) {
-            // Leading edge of a burst: publish immediately, then coalesce until the
-            // stream pauses for a full window.
-            applyTimelineEvent(event)
-            pendingDeltas = mutableListOf()
-            deltaFlushJob = viewModelScope.launch { runDeltaFlushLoop() }
-        } else {
-            pending.mergeDelta(event)
-        }
-    }
-
-    /** Trailing flush of an open burst: publishes the accumulated deltas once per
-     * window; a window with nothing new closes the burst so the next delta renders
-     * on its leading edge again. */
-    private suspend fun runDeltaFlushLoop() {
-        while (true) {
-            delay(streamCoalesceWindowMillis)
-            val pending = pendingDeltas ?: return
-            if (pending.isEmpty()) {
-                pendingDeltas = null
-                deltaFlushJob = null
-                return
-            }
-            pending.forEach(timeline::apply)
-            pending.clear()
-            _uiState.update { it.copy(items = timeline.items(), todos = timeline.todos()) }
-        }
-    }
-
-    /** Publishes any coalesced deltas NOW, in arrival order, and closes the burst.
-     * Runs before every non-delta socket event and on ON_STOP; no-op outside a burst. */
-    private fun flushPendingDeltas() {
-        deltaFlushJob?.cancel()
-        deltaFlushJob = null
-        val pending = pendingDeltas ?: return
-        pendingDeltas = null
-        if (pending.isEmpty()) return
-        pending.forEach(timeline::apply)
-        _uiState.update { it.copy(items = timeline.items(), todos = timeline.todos()) }
-    }
-
-    /** Consecutive same-kind deltas merge into one, so a flush costs one append per
-     * text stream. Assistant and thinking deltas never merge across kinds; each kind
-     * appends to its own bubble field, so keeping them as separate list entries
-     * preserves the observable arrival order. */
-    private fun MutableList<SessionEvent>.mergeDelta(event: SessionEvent) {
-        val last = lastOrNull()
-        when {
-            last is SessionEvent.AssistantDelta && event is SessionEvent.AssistantDelta ->
-                set(lastIndex, last.copy(delta = last.delta + event.delta))
-            last is SessionEvent.ThinkingDelta && event is SessionEvent.ThinkingDelta ->
-                set(lastIndex, last.copy(delta = last.delta + event.delta))
-            else -> add(event)
-        }
+        publishTimeline()
     }
 
     private suspend fun applySessionEvent(event: SessionEvent) {
@@ -907,7 +835,7 @@ class ChatViewModel @Inject constructor(
                     // Any coalesced text must apply BEFORE the replace wipes/dedups
                     // the live rows — the REST path bypasses the socket dispatcher's
                     // flush (ticket 062; mirrors SubagentStreamStore.applyTranscriptPage).
-                    flushPendingDeltas()
+                    deltaCoalescer.flush()
                     timeline.replaceHistory(page.items, keepLive = !clearLive)
                     _uiState.update {
                         it.copy(

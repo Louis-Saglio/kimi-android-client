@@ -40,13 +40,14 @@ timeline keys: carry the invariant in the structure, not at call sites.
 
 ## Acceptance criteria
 
-- [ ] One coalescing implementation remains; both call sites route every
+- [x] One coalescing implementation remains; both call sites route every
   timeline-bound event through it (grep-verifiable: no `pendingDeltas` left
   in `ChatViewModel`/`SubagentStreamStore`).
-- [ ] The 062 regression test still passes, now exercising the coalescer's
+- [x] The 062 regression test still passes, now exercising the coalescer's
   `flush()`.
-- [ ] `./gradlew :app:testDebugUnitTest` green, including the ticket-049
-  conflation tests under repeated runs.
+- [x] `./gradlew :app:testDebugUnitTest` green, including the ticket-049
+  conflation tests under repeated runs. *(4 consecutive runs, 295 tests, 0
+  failures.)*
 
 ## Out of scope
 

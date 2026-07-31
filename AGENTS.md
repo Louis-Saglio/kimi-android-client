@@ -101,7 +101,8 @@ also the regression signal for "verified fixed" tickets.
 - Sub-agent streams (045): `SessionSocket` tags transcript events with the
   emitting `agentId`; sub-agent-scoped events route to `SubagentStreamStore`
   (ui/chat, session-scoped singleton keyed by session, one `ChatTimeline` per
-  sub-agent, same delta coalescing as ChatViewModel). The store is fed by
+  sub-agent, delta coalescing via the `DeltaCoalescer` shared with ChatViewModel,
+  ticket 065). The store is fed by
   exactly ONE session-socket collection at a time (064): the chat's while its
   socket gate holds the session (ChatViewModel signals
   chatCollectionStarted/Stopped), otherwise the store's own keep-alive
@@ -124,9 +125,11 @@ also the regression signal for "verified fixed" tickets.
   `before_turn` on scroll-to-top (prepend, dedup by turn id). The seeded
   task-prompt bubble lives outside the timeline (`Stream.seededPrompt`) —
   the transcript never carries the task prompt.
-- Streaming: `ChatViewModel` conflates assistant/thinking deltas (leading edge
-  immediately, then one emission per ~100 ms window, flushed before any
-  non-delta event) because `MarkdownBody` re-parses on every emission. The
+- Streaming: `ChatViewModel` and `SubagentStreamStore` conflate assistant/thinking
+  deltas through the shared `DeltaCoalescer` (ui/chat, internal — ticket 065):
+  leading edge immediately, then one emission per ~100 ms window, flushed before any
+  non-delta event (`onEvent` carries the invariant) and before REST refetches
+  (`flush()`), because `MarkdownBody` re-parses on every emission. The
   window is injectable (`streamCoalesceWindowMillis`; 0 in unit tests).
 
 ## Distribution: put the release APK on the file server

@@ -17,7 +17,7 @@ import org.junit.Test
 /**
  * The store runs with a 0 ms coalescing window here: every delta applies and publishes
  * on arrival, no flush timer involved (the window's semantics are covered by
- * ChatViewModelTest's twin implementation).
+ * ChatViewModelTest, which exercises the same shared DeltaCoalescer).
  */
 class SubagentStreamStoreTest {
 
