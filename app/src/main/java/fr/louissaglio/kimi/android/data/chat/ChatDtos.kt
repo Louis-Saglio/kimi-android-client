@@ -203,6 +203,32 @@ data class ToolProgressUpdateDto(
 @Serializable
 data class TurnEndedPayload(val reason: String = "")
 
+/** `turn.step.retrying` payload (docs/server-api.md, 0.31.0 — ticket 058): the step's
+ * LLM call failed ([errorName]/[errorMessage]/[statusCode]) and attempt [nextAttempt]
+ * of [maxAttempts] starts after [delayMs]; a fresh `turn.step.started` with a NEW
+ * stepId then re-fires for the same step number. [delayMs] is a double on the wire. */
+@Serializable
+data class StepRetryingPayload(
+    val step: Int = 0,
+    val stepId: String = "",
+    val failedAttempt: Int = 0,
+    val nextAttempt: Int = 0,
+    val maxAttempts: Int = 0,
+    val delayMs: Double = 0.0,
+    val errorName: String = "",
+    val errorMessage: String = "",
+    val statusCode: Int? = null,
+)
+
+/** Shared consumed shape of `turn.step.started`/`turn.step.completed`: only the step
+ * identity is used — clearing the retry status (ticket 058). Every other field
+ * (usage, latency stats, finishReason) stays ignored. */
+@Serializable
+data class TurnStepPayload(
+    val step: Int = 0,
+    val stepId: String = "",
+)
+
 /** `context.spliced` payload: full message objects, decoded with the history MessageDto
  * (its extra fields — toolCalls — are ignored; origin IS decoded, ticket 056). */
 @Serializable

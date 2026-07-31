@@ -254,6 +254,16 @@ internal class SessionSocket(
                     ?.let { onEvent(SessionEvent.QuestionResolved(it.questionId)) }
             "turn.started" -> onEvent(SessionEvent.TurnStarted(agentId))
             "turn.ended" -> onEvent(SessionEvent.TurnEnded(frame.decodePayload<TurnEndedPayload>()?.reason.orEmpty(), agentId))
+            // LLM-call retry (0.31.0 — ticket 058): a fresh turn.step.started with a
+            // NEW stepId re-fires for the same step once the retry begins. The step
+            // frames carry no rows for the app — started/completed are parsed only so
+            // the collector can end the retry status the retrying frame opened.
+            "turn.step.retrying" -> frame.decodePayload<StepRetryingPayload>()
+                ?.let { onEvent(SessionEvent.StepRetrying(it.step, it.nextAttempt, it.maxAttempts, it.errorMessage, agentId)) }
+            "turn.step.started" -> frame.decodePayload<TurnStepPayload>()
+                ?.let { onEvent(SessionEvent.StepStarted(it.step, it.stepId, agentId)) }
+            "turn.step.completed" -> frame.decodePayload<TurnStepPayload>()
+                ?.let { onEvent(SessionEvent.StepCompleted(it.step, agentId)) }
             // Volatile (docs/server-api.md): the model/usage variant carries the token
             // counts; the phase variant has them null and emits nothing (ticket 041).
             "agent.status.updated" -> frame.decodePayload<AgentStatusUpdatedPayload>()

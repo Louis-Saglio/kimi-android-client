@@ -37,6 +37,25 @@ fun SessionEvent.isSubagentScoped(): Boolean = when (this) {
 sealed interface SessionEvent {
     data class TurnStarted(override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
     data class TurnEnded(val reason: String, override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
+
+    /** `turn.step.retrying` (0.31.0 — ticket 058): the step's LLM call failed and
+     * attempt [nextAttempt] of [maxAttempts] starts after a backoff. Transient status
+     * only — it never creates a timeline row; the replacement [StepStarted] (new
+     * stepId, same [step]) ends it. */
+    data class StepRetrying(
+        val step: Int,
+        val nextAttempt: Int,
+        val maxAttempts: Int,
+        val errorMessage: String,
+        override val agentId: String = MAIN_AGENT_ID,
+    ) : SessionEvent, AgentScopedEvent
+
+    /** `turn.step.started`: parsed only to clear the retry status (ticket 058) — the
+     * app renders no per-step rows. */
+    data class StepStarted(val step: Int, val stepId: String, override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
+
+    /** `turn.step.completed`: same contract as [StepStarted]. */
+    data class StepCompleted(val step: Int, override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
     data class AssistantDelta(val delta: String, override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
     data class ThinkingDelta(val delta: String, override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
     data class ToolCallDelta(val toolCallId: String, val name: String, override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent

@@ -452,6 +452,52 @@ class ChatViewModelTest {
     }
 
     @Test
+    fun `step retrying shows a transient status cleared by the replacement step started`() = runBlocking {
+        // Ticket 058: a 0.31.0 retry storm (provider 429) must read as "retrying
+        // (attempt N of 10)", not as a stalled chat.
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+
+        socket.send(turnStartedFrame())
+        awaitState(viewModel.uiState) { it.isWorking }
+
+        socket.send(stepRetryingFrame(nextAttempt = 2))
+        awaitState(viewModel.uiState) { it.stepRetry != null }
+        assertEquals(
+            ChatViewModel.StepRetry(
+                nextAttempt = 2,
+                maxAttempts = 10,
+                errorMessage = "429 The engine is currently overloaded, please try again later",
+            ),
+            viewModel.uiState.value.stepRetry,
+        )
+
+        // The retry begins: a fresh turn.step.started re-fires with a NEW stepId for
+        // the same step number (docs/server-api.md) and ends the status.
+        socket.send(stepStartedFrame(step = 1, stepId = "f1ed9c2a-new"))
+        awaitState(viewModel.uiState) { it.stepRetry == null }
+        // Neither frame created a timeline row.
+        assertEquals(emptyList<ChatItem>(), viewModel.uiState.value.items)
+    }
+
+    @Test
+    fun `step retrying status clears when the turn ends`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+
+        socket.send(turnStartedFrame())
+        awaitState(viewModel.uiState) { it.isWorking }
+        socket.send(stepRetryingFrame(nextAttempt = 9))
+        awaitState(viewModel.uiState) { it.stepRetry != null }
+
+        socket.send(turnEndedFrame(reason = "failed"))
+        awaitState(viewModel.uiState) { !it.isWorking }
+        assertNull(viewModel.uiState.value.stepRetry)
+    }
+
+    @Test
     fun `a turn that ended while the screen was away leaves no ghost live rows`() = runBlocking {
         // Louis's report (ticket 048): the stream is watched, the app backgrounds
         // mid-turn, the agent finishes while away, the app comes back.
@@ -1653,7 +1699,7 @@ class ChatViewModelTest {
 
             assertEquals(
                 listOf(
-                    ChatViewModel.Effect.AttachmentPickFailed("big.bin exceeds the 50 MiB upload limit"),
+                    ChatViewModel.Effect.AttachmentPickFailed("big.bin is too large to attach (limit 256 MiB)"),
                     ChatViewModel.Effect.AttachmentPickFailed("Could not read broken.bin"),
                 ),
                 effects,
@@ -1918,6 +1964,22 @@ class ChatViewModelTest {
         """{"type":"turn.ended","seq":21,"epoch":"ep_1","session_id":"session_1",""" +
             """"timestamp":"2026-07-19T00:00:01.000Z","payload":{"type":"turn.ended","turnId":1,""" +
             """"reason":"$reason","durationMs":1000,"agentId":"main","sessionId":"session_1"}}"""
+
+    /** Verbatim 0.31.0 frame (docs/server-api.md, Step retrying — ticket 058): an LLM
+     * call retried on provider 429; delayMs is a double on the wire. */
+    private fun stepRetryingFrame(nextAttempt: Int): String =
+        """{"type":"turn.step.retrying","seq":21,"epoch":"ep_1","session_id":"session_1",""" +
+            """"timestamp":"2026-07-30T00:00:00.000Z","payload":{"type":"turn.step.retrying","turnId":1,""" +
+            """"step":1,"stepId":"d09585d5-old","failedAttempt":${nextAttempt - 1},"nextAttempt":$nextAttempt,""" +
+            """"maxAttempts":10,"delayMs":592.08,"errorName":"APIProviderRateLimitError",""" +
+            """"errorMessage":"429 The engine is currently overloaded, please try again later","statusCode":429,""" +
+            """"agentId":"main","sessionId":"session_1"}}"""
+
+    /** The replacement step start after a retry (docs/server-api.md): new stepId, same step. */
+    private fun stepStartedFrame(step: Int, stepId: String): String =
+        """{"type":"turn.step.started","seq":22,"epoch":"ep_1","session_id":"session_1",""" +
+            """"timestamp":"2026-07-30T00:00:00.600Z","payload":{"type":"turn.step.started","turnId":1,""" +
+            """"step":$step,"stepId":"$stepId","agentId":"main","sessionId":"session_1"}}"""
 
     private fun contextSplicedFrame(id: String, text: String): String =
         """{"type":"context.spliced","seq":6,"epoch":"ep_1","session_id":"session_1",""" +

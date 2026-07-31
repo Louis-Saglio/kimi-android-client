@@ -47,10 +47,12 @@ interface AttachmentStore {
     }
 
     companion object {
-        /** Pick-time size cap: the server's per-file upload limit (docs/server-api.md,
-         * Files — 50 MiB, enforced with 413/41301). A larger pick could never upload,
-         * and its bytes would sit in UiState memory for nothing. */
-        const val MAX_PICK_BYTES = 50L * 1024 * 1024
+        /** Pick-time size cap: the APP's own guard rail (ticket 059), not the server's
+         * — server 0.31.0 removed its upload cap entirely (docs/server-api.md, Files;
+         * uploads stream to disk, 413/41301 no longer occurs on /files). 256 MiB sits
+         * comfortably above realistic phone picks while keeping a multi-GB video from
+         * being copied into the cache and held in UiState memory. */
+        const val MAX_PICK_BYTES = 256L * 1024 * 1024
     }
 }
 
@@ -96,8 +98,9 @@ class AndroidAttachmentStore @Inject constructor(
     }.getOrNull()
 }
 
-/** Reads the whole stream, giving up (null) as soon as it exceeds [max] bytes. */
-private fun InputStream.readCapped(max: Long): ByteArray? {
+/** Reads the whole stream, giving up (null) as soon as it exceeds [max] bytes.
+ * Internal for the JVM boundary test (ticket 059). */
+internal fun InputStream.readCapped(max: Long): ByteArray? {
     val out = ByteArrayOutputStream()
     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
     var total = 0L

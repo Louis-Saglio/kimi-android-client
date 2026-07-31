@@ -1446,7 +1446,8 @@ class ChatRepositoryTest {
 
     @Test
     fun `uploadFile maps a 413 to an Http error`() = runBlocking {
-        // 50 MiB server limit (docs/server-api.md): surfaced as a plain send failure.
+        // Pre-0.31.0 servers rejected over-cap uploads with 413 (docs/server-api.md):
+        // the mapping stays so such a server still surfaces a plain send failure.
         server.enqueue(MockResponse().setResponseCode(413))
 
         val result = repository.uploadFile(settings(), "big.bin", "application/octet-stream", ByteArray(4))

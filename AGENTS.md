@@ -10,6 +10,12 @@ Tailscale (or `https://agent.example.com:8443` over the public internet),
 authenticated with the server's bearer token (`Authorization: Bearer <token>`,
 stored in the app settings).
 
+The app only ever runs against the LATEST server version: never keep
+compatibility shims for older server APIs (legacy event shapes, removed error
+codes, superseded fields). When the server drops something, drop it here too —
+`docs/server-api.md` always describes the current version, and the nightly
+drift check keeps the two in sync.
+
 ## Tech stack
 
 - Kotlin + Jetpack Compose (Material 3), single `app` module.
@@ -82,7 +88,7 @@ also the regression signal for "verified fixed" tickets.
   `SessionPrefsStore` (per-session model/effort prefs), and `ChatMessageMapper`
   (DTO→domain). New chat endpoints belong in a collaborator, not the facade.
 - `data/attachments/` — `AttachmentStore` owns all platform file I/O (content
-  resolver reads capped at 50 MiB — a client-side guard; the server removed
+  resolver reads capped at 256 MiB — a client-side guard; the server removed
   its own upload cap in 0.31.0, see ticket 059; cache writes;
   FileProvider URIs). Composables never touch `ContentResolver`/`File`.
 - Errors: repositories return `Result` + sealed `DataError`; ViewModels map them

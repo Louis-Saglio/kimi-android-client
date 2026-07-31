@@ -73,6 +73,16 @@ class ChatViewModel @Inject constructor(
         val summary: String,
     )
 
+    /** Transient LLM-retry status of the in-flight step (turn.step.retrying, 0.31.0 —
+     * ticket 058): rendered as a status line, never a bubble. Set by the retrying
+     * frame, cleared by the replacement turn.step.started (new stepId), the step's
+     * completion, or any turn-terminal event. */
+    data class StepRetry(
+        val nextAttempt: Int,
+        val maxAttempts: Int,
+        val errorMessage: String,
+    )
+
     /**
      * Upload bytes of one staged attachment (ticket 033). A plain holder, NOT a data
      * class, on purpose: [PendingAttachment] sits in UiState, and a raw ByteArray field
@@ -115,6 +125,8 @@ class ChatViewModel @Inject constructor(
         val sessionCwd: String? = null,
         val isWorking: Boolean = false,
         val isReconnecting: Boolean = false,
+        /** The in-flight step's LLM retry, if any (ticket 058); transient status line. */
+        val stepRetry: StepRetry? = null,
         val inputText: String = "",
         val isSending: Boolean = false,
         /** Attachments staged above the input, in pick order (ticket 033). */
@@ -376,7 +388,12 @@ class ChatViewModel @Inject constructor(
                 _uiState.update { it.copy(attachments = it.attachments + attachment) }
             }
             is AttachmentStore.ReadResult.TooLarge ->
-                _effects.send(Effect.AttachmentPickFailed("${result.name} exceeds the 50 MiB upload limit"))
+                _effects.send(
+                    Effect.AttachmentPickFailed(
+                        "${result.name} is too large to attach " +
+                            "(limit ${AttachmentStore.MAX_PICK_BYTES / (1024 * 1024)} MiB)",
+                    ),
+                )
             is AttachmentStore.ReadResult.Unreadable ->
                 _effects.send(Effect.AttachmentPickFailed("Could not read ${result.name}"))
         }
@@ -752,18 +769,27 @@ class ChatViewModel @Inject constructor(
             is SessionEvent.TurnStarted -> {
                 turnEventCount++
                 timeline.apply(event)
-                _uiState.update { it.copy(isWorking = true, items = timeline.items(), todos = timeline.todos()) }
+                _uiState.update { it.copy(isWorking = true, stepRetry = null, items = timeline.items(), todos = timeline.todos()) }
             }
             is SessionEvent.TurnEnded -> {
                 turnEventCount++
                 // A turn that ends takes its pending approvals with it (e.g. abort) — but
                 // not its questions: a pending question survives turn.ended and is
                 // re-derived from the questions endpoint instead of being cleared here.
-                _uiState.update { it.copy(isWorking = false, pendingApprovals = emptyList()) }
+                _uiState.update { it.copy(isWorking = false, stepRetry = null, pendingApprovals = emptyList()) }
                 // Replace live rows with the canonical committed turn.
                 refreshHistory(clearLive = true)
                 refreshPendingQuestions()
             }
+            // LLM retry (ticket 058): a transient status line on the in-flight turn —
+            // the retrying frame opens it, the replacement step.started (new stepId),
+            // the step's completion, or a turn end closes it. Never a timeline row.
+            is SessionEvent.StepRetrying ->
+                _uiState.update {
+                    it.copy(stepRetry = StepRetry(event.nextAttempt, event.maxAttempts, event.errorMessage))
+                }
+            is SessionEvent.StepStarted, is SessionEvent.StepCompleted ->
+                _uiState.update { it.copy(stepRetry = null) }
             is SessionEvent.ApprovalRequested ->
                 _uiState.update {
                     // Deduped: a reconnect replay must not queue the same request twice.

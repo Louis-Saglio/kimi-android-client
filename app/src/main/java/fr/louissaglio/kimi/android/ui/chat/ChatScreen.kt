@@ -361,6 +361,24 @@ private fun ChatContent(
                     )
                 }
             }
+            // Transient LLM-retry status (ticket 058): the same status-line affordance
+            // as the reconnect banner — while the server backs off and retries the
+            // step's model call, the chat would otherwise look stalled.
+            uiState.stepRetry?.let { retry ->
+                Surface(color = MaterialTheme.colorScheme.secondaryContainer) {
+                    Text(
+                        text = "Model call failed — retrying (attempt ${retry.nextAttempt} of " +
+                            "${retry.maxAttempts})" +
+                            if (retry.errorMessage.isNotBlank()) ": ${retry.errorMessage}" else "",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 6.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
             val items = uiState.items
             when {
                 items.isNullOrEmpty() && uiState.error != null ->
