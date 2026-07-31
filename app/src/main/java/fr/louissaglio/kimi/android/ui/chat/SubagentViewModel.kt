@@ -5,10 +5,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
+import fr.louissaglio.kimi.android.data.chat.TranscriptPage
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.data.toUserMessage
 import javax.inject.Inject
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -60,15 +60,48 @@ class SubagentViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(UiState(subagentId = subagentId))
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
-    /** Newest-page transcript loads (initial + completion reconcile); latest wins. */
-    private var transcriptJob: Job? = null
-
-    /** In-flight guard of the older-page load (ticket 010's pattern): the Job, not a
-     * state flag. */
-    private var olderPageJob: Job? = null
-
     /** Last status the entry collector observed — the reconcile trigger's edge detector. */
     private var lastSeenStatus: SubagentStatus? = null
+
+    /** The paged-history loader (ticket 074), shared with the main chat: it owns the
+     * fetch jobs and their guards (newest-page latest-wins, the 061 race guards); the
+     * callbacks are this page's parameterization — transcript backing, the store-owned
+     * merge (the entry collector republishes it here), and the loading/error state of
+     * this UiState. */
+    private val historyPager = HistoryPager<TranscriptPage>(
+        scope = { viewModelScope },
+        fetch = { beforeTurn ->
+            chatRepository.getTranscript(
+                settingsRepository.current(), sessionId, subagentId, beforeTurn = beforeTurn, pageSize = PAGE_SIZE,
+            )
+        },
+        onNewestStart = {
+            val showLoading = _uiState.value.items.isEmpty() && _uiState.value.status == null
+            if (showLoading) _uiState.update { it.copy(isLoading = true) }
+        },
+        applyNewest = { page, keepLive ->
+            subagentStore.applyTranscriptPage(sessionId, subagentId, page, keepLive)
+            _uiState.update { it.copy(isLoading = false, error = null) }
+        },
+        applyOlder = { page ->
+            subagentStore.prependTranscriptPage(sessionId, subagentId, page)
+        },
+        onNewestError = { error ->
+            _uiState.update {
+                it.copy(
+                    isLoading = false,
+                    // With nothing to show the fetch is the page's only data
+                    // source: surface the failure full-screen (retry via onRetry).
+                    // Otherwise the live stream keeps rendering and the next
+                    // reconcile/refetch heals.
+                    error = if (it.items.isEmpty() && it.status == null) error.toUserMessage() else it.error,
+                )
+            }
+        },
+        hasMore = { _uiState.value.hasMoreHistory },
+        cursor = { subagentStore.oldestTurnId(sessionId, subagentId) },
+        setLoadingMore = { loading -> _uiState.update { it.copy(isLoadingMoreHistory = loading) } },
+    )
 
     init {
         // The store entry arrives whenever the spawn did (typically while the chat was
@@ -90,7 +123,7 @@ class SubagentViewModel @Inject constructor(
         // Cold open: nothing fetched yet for this sub-agent (a reopened page trusts the
         // store — the chat's socket keeps its live tail fresh).
         if (!subagentStore.hasTranscript(sessionId, subagentId)) {
-            refreshTranscript(keepLive = true)
+            historyPager.refresh(keepLive = true)
         }
     }
 
@@ -103,71 +136,18 @@ class SubagentViewModel @Inject constructor(
         lastSeenStatus = status
         if (previous == null || previous == SubagentStatus.Completed || previous == SubagentStatus.Failed) return
         if (status != SubagentStatus.Completed && status != SubagentStatus.Failed) return
-        refreshTranscript(keepLive = false)
+        historyPager.refresh(keepLive = false)
     }
 
-    private fun refreshTranscript(keepLive: Boolean) {
-        // Latest fetch wins: a stale response must not overwrite a newer one.
-        transcriptJob?.cancel()
-        // A full refetch resets history to the newest page (ChatViewModel's
-        // refreshHistory rule, ported in ticket 061): an in-flight older-page load
-        // must not prepend a stale page — contiguous with the OLD committed list,
-        // not the fresh one — onto the replacement.
-        olderPageJob?.cancel()
-        _uiState.update { it.copy(isLoadingMoreHistory = false) }
-        transcriptJob = viewModelScope.launch {
-            val showLoading = _uiState.value.items.isEmpty() && _uiState.value.status == null
-            if (showLoading) _uiState.update { it.copy(isLoading = true) }
-            chatRepository.getTranscript(
-                settingsRepository.current(), sessionId, subagentId, beforeTurn = null, pageSize = PAGE_SIZE,
-            )
-                .onSuccess { page ->
-                    subagentStore.applyTranscriptPage(sessionId, subagentId, page, keepLive)
-                    _uiState.update { it.copy(isLoading = false, error = null) }
-                }
-                .onFailure { error ->
-                    _uiState.update {
-                        it.copy(
-                            isLoading = false,
-                            // With nothing to show the fetch is the page's only data
-                            // source: surface the failure full-screen (retry via onRetry).
-                            // Otherwise the live stream keeps rendering and the next
-                            // reconcile/refetch heals.
-                            error = if (it.items.isEmpty() && it.status == null) error.toUserMessage() else it.error,
-                        )
-                    }
-                }
-        }
-    }
-
-    /** Scroll-to-top trigger (ticket 043's mechanics on turn cursors): no-op while an
-     * older-page load is in flight or the server said `has_more: false`; otherwise
-     * fetches the next older page (`before_turn` = oldest loaded turn) and PREPENDS
-     * it, deduplicated by turn id in the store's timeline. The newest-page guard
-     * ([transcriptJob], ported from ChatViewModel in ticket 061) is the same trap as
-     * the in-flight guard: a page fetched against the stale cursor would land on a
-     * refetch's fresh page with a hole in between. A failure keeps the loaded
-     * history visible and retries on the next trigger. */
-    fun onHistoryTopReached() {
-        if (olderPageJob?.isActive == true) return
-        if (transcriptJob?.isActive == true) return
-        if (!_uiState.value.hasMoreHistory) return
-        olderPageJob = viewModelScope.launch {
-            _uiState.update { it.copy(isLoadingMoreHistory = true) }
-            chatRepository.getTranscript(
-                settingsRepository.current(), sessionId, subagentId,
-                beforeTurn = subagentStore.oldestTurnId(sessionId, subagentId), pageSize = PAGE_SIZE,
-            ).onSuccess { page ->
-                subagentStore.prependTranscriptPage(sessionId, subagentId, page)
-            }
-            _uiState.update { it.copy(isLoadingMoreHistory = false) }
-        }
-    }
+    /** Scroll-to-top trigger (ticket 043's mechanics on turn cursors): the shared
+     * pager fetches the next older page (`before_turn` = oldest loaded turn) and
+     * prepends it, deduplicated by turn id in the store's timeline. */
+    fun onHistoryTopReached() = historyPager.loadOlder()
 
     /** Retry of the failed initial load (the error state is the whole screen). */
     fun onRetry() {
         _uiState.update { it.copy(error = null) }
-        refreshTranscript(keepLive = true)
+        historyPager.refresh(keepLive = true)
     }
 
     /** Wired to ON_START. */

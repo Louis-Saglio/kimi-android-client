@@ -10,6 +10,7 @@ import fr.louissaglio.kimi.android.data.toUserMessage
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
+import fr.louissaglio.kimi.android.data.chat.MessagePage
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.data.chat.ServerModel
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
@@ -248,11 +249,6 @@ class ChatViewModel @Inject constructor(
     )
 
     private val timeline = ChatTimeline(todoParser)
-    private var historyJob: Job? = null
-
-    /** In-flight guard of the older-page load (ticket 010's pattern): the Job, not a
-     * state flag. */
-    private var olderHistoryJob: Job? = null
 
     /** The `before_id` cursor of the next older page (ticket 043): the oldest loaded
      * history message's id, tracked ViewModel-side like ticket 010 — the timeline rows
@@ -314,6 +310,59 @@ class ChatViewModel @Inject constructor(
         applyDelta = timeline::apply,
         applyEvent = ::applySessionEvent,
         publish = ::publishTimeline,
+    )
+
+    /** The paged-history loader (ticket 074), shared with the sub-agent page: it owns
+     * the fetch jobs and their guards; the callbacks are this screen's
+     * parameterization — message-history backing, the coalescer flush before every
+     * replace (ticket 062), sub-agent row seeding on a fresh page, and the
+     * error/loading state of this UiState. */
+    private val historyPager = HistoryPager<MessagePage>(
+        scope = { viewModelScope },
+        fetch = { beforeId ->
+            chatRepository.getMessages(settingsRepository.current(), sessionId, beforeId = beforeId)
+        },
+        // No loading flag to set: this screen's loading state is items == null.
+        onNewestStart = { },
+        applyNewest = { page, keepLive ->
+            oldestHistoryId = page.items.firstOrNull()?.id
+            // Any coalesced text must apply BEFORE the replace wipes/dedups
+            // the live rows — the REST path bypasses the socket dispatcher's
+            // flush (ticket 062; mirrors SubagentStreamStore.applyTranscriptPage).
+            deltaCoalescer.flush()
+            timeline.replaceHistory(page.items, keepLive = keepLive)
+            _uiState.update {
+                it.copy(
+                    items = timeline.items(),
+                    todos = timeline.todos(),
+                    error = null,
+                    hasMoreHistory = page.hasMore,
+                )
+            }
+            // History is where cold links come from (the app subscribed after
+            // the spawn): seed the store from the linked Agent rows.
+            seedSubagentStoreFromLinkedRows()
+        },
+        applyOlder = { page ->
+            oldestHistoryId = page.items.firstOrNull()?.id ?: oldestHistoryId
+            timeline.prependHistory(page.items)
+            _uiState.update {
+                it.copy(
+                    items = timeline.items(),
+                    hasMoreHistory = page.hasMore,
+                )
+            }
+        },
+        onNewestError = { error ->
+            if (_uiState.value.items.isNullOrEmpty()) {
+                _uiState.update { it.copy(error = error.toUserMessage()) }
+            } else {
+                _effects.send(Effect.RefreshFailed(error.toUserMessage()))
+            }
+        },
+        hasMore = { _uiState.value.hasMoreHistory },
+        cursor = { oldestHistoryId },
+        setLoadingMore = { loading -> _uiState.update { it.copy(isLoadingMoreHistory = loading) } },
     )
 
     /** Wired to ON_START: re-syncs history (status-aware — a turn that ended while
@@ -655,79 +704,18 @@ class ChatViewModel @Inject constructor(
         }
     }
 
+    /** Newest-page history refetch (initial load, turn-end commit, resync — ticket
+     * 048): the shared pager fetches and merges it, latest-wins. [clearLive] is this
+     * screen's polarity of the pager's keepLive: a finished turn has no legitimate
+     * live rows, a running one keeps its tail. */
     private fun refreshHistory(clearLive: Boolean) {
-        // Latest fetch wins: a stale response must not overwrite a newer one.
-        historyJob?.cancel()
-        // A full refetch resets history to the newest page (ticket 043): an in-flight
-        // older-page load must not prepend a stale page — contiguous with the OLD
-        // committed list, not the fresh one — onto the replacement (010's
-        // reload-cancels-loadMore trap, backwards).
-        olderHistoryJob?.cancel()
-        _uiState.update { it.copy(isLoadingMoreHistory = false) }
-        historyJob = viewModelScope.launch {
-            chatRepository.getMessages(settingsRepository.current(), sessionId)
-                .onSuccess { page ->
-                    oldestHistoryId = page.items.firstOrNull()?.id
-                    // Any coalesced text must apply BEFORE the replace wipes/dedups
-                    // the live rows — the REST path bypasses the socket dispatcher's
-                    // flush (ticket 062; mirrors SubagentStreamStore.applyTranscriptPage).
-                    deltaCoalescer.flush()
-                    timeline.replaceHistory(page.items, keepLive = !clearLive)
-                    _uiState.update {
-                        it.copy(
-                            items = timeline.items(),
-                            todos = timeline.todos(),
-                            error = null,
-                            hasMoreHistory = page.hasMore,
-                        )
-                    }
-                    // History is where cold links come from (the app subscribed after
-                    // the spawn): seed the store from the linked Agent rows.
-                    seedSubagentStoreFromLinkedRows()
-                }
-                .onFailure { error ->
-                    if (_uiState.value.items.isNullOrEmpty()) {
-                        _uiState.update { it.copy(error = error.toUserMessage()) }
-                    } else {
-                        _effects.send(Effect.RefreshFailed(error.toUserMessage()))
-                    }
-                }
-        }
+        historyPager.refresh(keepLive = !clearLive)
     }
 
-    /**
-     * Scroll-to-top trigger (ticket 043): no-op while any history load is in flight or
-     * once the server reported `has_more: false`; otherwise fetches the next older page
-     * (`before_id` = oldest loaded message) and PREPENDS it, deduplicated by message id
-     * in the timeline. The newest-page guard ([historyJob]) is the same trap as the
-     * in-flight guard: a page fetched against the stale cursor would land on a refetch's
-     * fresh page with a hole in between. A failure keeps the loaded history visible and
-     * retries on the next trigger.
-     */
-    fun onHistoryTopReached() {
-        if (olderHistoryJob?.isActive == true) return
-        if (historyJob?.isActive == true) return
-        if (!_uiState.value.hasMoreHistory) return
-        val beforeId = oldestHistoryId ?: return
-        olderHistoryJob = viewModelScope.launch {
-            _uiState.update { it.copy(isLoadingMoreHistory = true) }
-            chatRepository.getMessages(settingsRepository.current(), sessionId, beforeId = beforeId)
-                .onSuccess { page ->
-                    oldestHistoryId = page.items.firstOrNull()?.id ?: oldestHistoryId
-                    timeline.prependHistory(page.items)
-                    _uiState.update {
-                        it.copy(
-                            items = timeline.items(),
-                            hasMoreHistory = page.hasMore,
-                            isLoadingMoreHistory = false,
-                        )
-                    }
-                }
-                .onFailure {
-                    _uiState.update { it.copy(isLoadingMoreHistory = false) }
-                }
-        }
-    }
+    /** Scroll-to-top trigger (ticket 043): the shared pager fetches the next older
+     * page (`before_id` = oldest loaded message) and prepends it, deduplicated by
+     * message id in the timeline. */
+    fun onHistoryTopReached() = historyPager.loadOlder()
 
     /**
      * Loads the model picker's data (ticket 031): the server's model list, its default,

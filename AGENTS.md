@@ -100,8 +100,9 @@ also the regression signal for "verified fixed" tickets.
   `Formatters` — reuse them instead of adding one-off copies.
 - Chat feature collaborators (the 065 `DeltaCoalescer` pattern, generalized by
   072): a cohesive chat feature gets an `internal` class in `ui/chat`
-  (`DeltaCoalescer`, `SeedGuard`, `ChatAttachments`, `QuestionWizard`) owned by
-  the ViewModel. Collaborators are logic holders, NOT second state sources —
+  (`DeltaCoalescer`, `SeedGuard`, `ChatAttachments`, `QuestionWizard`,
+  `HistoryPager`) owned by the ViewModel. Collaborators are logic holders, NOT
+  second state sources —
   the screen's `UiState`/`Effect` stay in the ViewModel; intents arrive as
   calls (one-line delegates keep the screen-facing API) and updates report back
   through constructor callbacks (a state-transform sink, an effect sink, a
@@ -132,7 +133,15 @@ also the regression signal for "verified fixed" tickets.
   `ChatMessage`); `SubagentViewModel` fetches the newest page on cold open
   (keepLive merge under the live tail), refetches canonically when the
   sub-agent reaches a terminal state, and pages older turns with
-  `before_turn` on scroll-to-top (prepend, dedup by turn id). The seeded
+  `before_turn` on scroll-to-top (prepend, dedup by turn id). That paging
+  machinery is NOT a second implementation: both this page and the main chat
+  drive the shared `HistoryPager` (ui/chat, internal — ticket 074, the root
+  fix for the 061/062 drift), which owns the fetch jobs and their guards
+  (newest-page latest-wins, older-page in-flight/newest-page guards) while
+  each screen parameterizes the fetch (messages vs transcript), the merge
+  (`ChatTimeline` directly vs the store's `applyTranscriptPage`/
+  `prependTranscriptPage`, each flushing its own `DeltaCoalescer` before a
+  replace), and the cursor/hasMore ownership. The seeded
   task-prompt bubble lives outside the timeline (`Stream.seededPrompt`) —
   the transcript never carries the task prompt.
 - Streaming: `ChatViewModel` and `SubagentStreamStore` conflate assistant/thinking
