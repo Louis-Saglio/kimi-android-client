@@ -6,6 +6,8 @@ import fr.louissaglio.kimi.android.data.network.Envelope
 import fr.louissaglio.kimi.android.data.network.toAckResult
 import fr.louissaglio.kimi.android.data.network.toResult
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
+import javax.inject.Inject
+import javax.inject.Singleton
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonPrimitive
@@ -23,7 +25,8 @@ import okhttp3.MediaType.Companion.toMediaTypeOrNull
  * [ApiClient] scaffold, which owns the error boundary: failures come back as
  * [Result.failure] of [DataError].
  */
-internal class ChatApi(
+@Singleton
+class ChatApi @Inject constructor(
     private val api: ApiClient,
     private val mapper: ChatMessageMapper,
 ) {

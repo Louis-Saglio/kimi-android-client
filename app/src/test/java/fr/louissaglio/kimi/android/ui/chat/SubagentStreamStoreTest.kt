@@ -7,9 +7,9 @@ import fr.louissaglio.kimi.android.data.chat.TranscriptPage
 import fr.louissaglio.kimi.android.data.chat.TranscriptState
 import fr.louissaglio.kimi.android.data.chat.TranscriptStep
 import fr.louissaglio.kimi.android.data.chat.TranscriptTurn
+import fr.louissaglio.kimi.android.testutil.testSubagentStreamStore
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
-import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -21,7 +21,7 @@ import org.junit.Test
  */
 class SubagentStreamStoreTest {
 
-    private val store = SubagentStreamStore(Json { ignoreUnknownKeys = true }, streamCoalesceWindowMillis = 0)
+    private val store = testSubagentStreamStore(streamCoalesceWindowMillis = 0)
 
     private fun spawned(id: String, toolCallId: String = "tool_1") = SessionEvent.SubagentSpawned(
         subagentId = id,

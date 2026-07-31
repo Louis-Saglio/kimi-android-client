@@ -7,14 +7,12 @@ import javax.inject.Inject
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import okhttp3.OkHttpClient
 import okhttp3.Request
 
 class ConnectionChecker @Inject constructor(
-    client: OkHttpClient,
+    private val api: ApiClient,
     private val json: Json,
 ) {
-    private val api = ApiClient(client, json)
 
     /** Deliberately not [DataError]: the settings screen reports distinct UI states. */
     sealed interface Result {

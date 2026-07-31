@@ -1,6 +1,8 @@
 package fr.louissaglio.kimi.android.data.chat
 
 import java.time.Instant
+import javax.inject.Inject
+import javax.inject.Singleton
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -13,7 +15,8 @@ import kotlinx.serialization.json.contentOrNull
  * mapping layer shared by ChatApi and SessionSocket). Also owns the display
  * renderings derived from payloads (previews, summaries, pretty-printed details).
  */
-internal class ChatMessageMapper(json: Json) {
+@Singleton
+class ChatMessageMapper @Inject constructor(json: Json) {
 
     // Pretty-printing for the expanded tool row (ticket 023): strings render as-is,
     // JSON values (tool inputs, structured outputs) render indented.

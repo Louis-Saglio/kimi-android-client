@@ -7,6 +7,7 @@ import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.MAIN_AGENT_ID
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.SubagentLifecycleEvent
+import fr.louissaglio.kimi.android.data.chat.TodoParser
 import fr.louissaglio.kimi.android.data.chat.TranscriptPage
 import fr.louissaglio.kimi.android.data.chat.TranscriptState
 import fr.louissaglio.kimi.android.di.StreamCoalesceWindowMillis
@@ -53,6 +54,7 @@ enum class SubagentStatus { Queued, Working, Suspended, Completed, Failed }
 @Singleton
 class SubagentStreamStore @Inject constructor(
     private val json: Json,
+    private val todoParser: TodoParser,
     // No default: an all-default @Inject constructor makes Kotlin generate a second,
     // no-arg synthetic constructor, which Dagger rejects (two injected constructors).
     @StreamCoalesceWindowMillis
@@ -79,11 +81,12 @@ class SubagentStreamStore @Inject constructor(
         val name: String,
         val description: String,
         val runInBackground: Boolean,
+        todoParser: TodoParser,
         var status: SubagentStatus = SubagentStatus.Queued,
     ) {
         var resultSummary: String? = null
         var error: String? = null
-        val timeline = ChatTimeline(historyBacked = false)
+        val timeline = ChatTimeline(todoParser, historyBacked = false)
 
         /** Set by any started/suspended/completed/failed frame: transcript-derived
          * status (ticket 046) applies only while no live lifecycle frame was seen. */
@@ -178,6 +181,7 @@ class SubagentStreamStore @Inject constructor(
             name = event.name,
             description = event.description,
             runInBackground = event.runInBackground,
+            todoParser = todoParser,
         )
         publish(sessionId)
     }
@@ -211,6 +215,7 @@ class SubagentStreamStore @Inject constructor(
             name = resultField(row.output, "actual_subagent_type") ?: agentArg(row.input, "subagent_type").orEmpty(),
             description = agentArg(row.input, "description") ?: resultField(row.output, "description").orEmpty(),
             runInBackground = agentRunInBackground(row.input),
+            todoParser = todoParser,
             status = status,
         )
         stream.resultSummary = summary
@@ -254,7 +259,7 @@ class SubagentStreamStore @Inject constructor(
         // creates nothing: the page keeps its "no transcript" empty state.
         if (existing == null && page.turns.isEmpty()) return
         val stream = existing ?: streams.getOrPut(sessionId) { mutableMapOf() }.getOrPut(subagentId) {
-            Stream(id = subagentId, name = "", description = "", runInBackground = false)
+            Stream(id = subagentId, name = "", description = "", runInBackground = false, todoParser = todoParser)
         }
         // Any coalesced text must apply BEFORE the replace wipes/dedups the live rows.
         flushPendingDeltas(stream)

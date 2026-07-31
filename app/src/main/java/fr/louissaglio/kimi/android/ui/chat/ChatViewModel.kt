@@ -41,7 +41,6 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.Json
 
 @HiltViewModel
 class ChatViewModel @Inject constructor(
@@ -51,8 +50,7 @@ class ChatViewModel @Inject constructor(
     private val attachmentStore: AttachmentStore,
     private val subagentStore: SubagentStreamStore,
     savedStateHandle: SavedStateHandle,
-    // Default mirrors the DI Json for direct construction in tests.
-    private val todoParser: TodoParser = TodoParser(Json { ignoreUnknownKeys = true }),
+    private val todoParser: TodoParser,
     // Default mirrors the DI value (AppModule) for direct construction in tests;
     // pass 0 to publish every delta immediately (the pre-conflation behavior).
     @StreamCoalesceWindowMillis

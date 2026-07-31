@@ -2,10 +2,9 @@ package fr.louissaglio.kimi.android.data.sessions
 
 import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
+import fr.louissaglio.kimi.android.testutil.testSessionsRepository
 import java.time.Instant
 import kotlinx.coroutines.runBlocking
-import kotlinx.serialization.json.Json
-import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
@@ -19,7 +18,7 @@ import org.junit.Test
 class SessionsRepositoryTest {
 
     private val server = MockWebServer()
-    private val repository = SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true })
+    private val repository = testSessionsRepository()
 
     @Before
     fun setUp() = server.start()

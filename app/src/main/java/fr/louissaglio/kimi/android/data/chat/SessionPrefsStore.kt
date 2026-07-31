@@ -6,6 +6,8 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import java.io.IOException
+import javax.inject.Inject
+import javax.inject.Singleton
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 
@@ -15,7 +17,8 @@ import kotlinx.coroutines.flow.first
  * preferences (SettingsRepository's pattern). No stored value = follow the server
  * default. DataStore reads are already suspending — no extra dispatcher.
  */
-internal class SessionPrefsStore(
+@Singleton
+class SessionPrefsStore @Inject constructor(
     private val dataStore: DataStore<Preferences>,
 ) {
     /** The session's stored model choice, null when the session follows the server default. */

@@ -17,7 +17,8 @@ data class Todo(val title: String, val status: Status) {
 /**
  * Extracts the todo list from a tool call's input JSON, in the spirit of [ToolPreview]:
  * deliberately dumb and total — malformed input parses to null, never crashes.
- * Uses the shared DI Json (same ignoreUnknownKeys config the parser relies on).
+ * Injected everywhere (ticket 067), so the shared DI Json is the only
+ * ignoreUnknownKeys configuration the parser ever runs on.
  */
 @Singleton
 class TodoParser @Inject constructor(

@@ -7,6 +7,8 @@ import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import javax.inject.Inject
+import javax.inject.Singleton
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
@@ -36,7 +38,8 @@ import okhttp3.WebSocketListener
  * (reconnect loop, resume cursor, backoff), frame parsing/dispatch, and the
  * subscribe frame builder.
  */
-internal class SessionSocket(
+@Singleton
+class SessionSocket @Inject constructor(
     client: OkHttpClient,
     private val json: Json,
     private val mapper: ChatMessageMapper,

@@ -8,7 +8,6 @@ import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.TodoParser
 import fr.louissaglio.kimi.android.data.chat.TranscriptFrame
 import fr.louissaglio.kimi.android.data.chat.TranscriptTurn
-import kotlinx.serialization.json.Json
 
 /**
  * Pure reducer behind the chat screen: flattens history messages into timeline rows
@@ -30,8 +29,7 @@ import kotlinx.serialization.json.Json
  * turn pages into the same prefix/tail split.
  */
 class ChatTimeline(
-    // Default mirrors the DI Json for direct construction in tests.
-    private val todoParser: TodoParser = TodoParser(Json { ignoreUnknownKeys = true }),
+    private val todoParser: TodoParser,
     private val historyBacked: Boolean = true,
 ) {
 

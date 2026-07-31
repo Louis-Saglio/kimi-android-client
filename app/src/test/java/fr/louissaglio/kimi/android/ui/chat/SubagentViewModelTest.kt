@@ -8,6 +8,8 @@ import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
 import fr.louissaglio.kimi.android.testutil.awaitState
+import fr.louissaglio.kimi.android.testutil.testChatRepository
+import fr.louissaglio.kimi.android.testutil.testSubagentStreamStore
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
@@ -20,8 +22,6 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
-import kotlinx.serialization.json.Json
-import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -45,7 +45,7 @@ class SubagentViewModelTest {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
 
     /** 0 ms window: sub-agent frames apply on arrival, no flush timer involved. */
-    private val store = SubagentStreamStore(Json { ignoreUnknownKeys = true }, streamCoalesceWindowMillis = 0)
+    private val store = testSubagentStreamStore(streamCoalesceWindowMillis = 0)
 
     private lateinit var settingsRepository: SettingsRepository
     private lateinit var repository: ChatRepository
@@ -90,7 +90,7 @@ class SubagentViewModelTest {
         val dataStore = FakePreferencesDataStore(
             preferencesOf(stringPreferencesKey("server_url") to server.url("/").toString()),
         )
-        repository = ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }, dataStore)
+        repository = testChatRepository(dataStore)
         settingsRepository = SettingsRepository(dataStore, appScope)
     }
 

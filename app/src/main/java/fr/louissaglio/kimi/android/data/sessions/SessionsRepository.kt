@@ -10,14 +10,12 @@ import javax.inject.Singleton
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
-import okhttp3.OkHttpClient
 
 @Singleton
 class SessionsRepository @Inject constructor(
-    client: OkHttpClient,
+    private val api: ApiClient,
     private val json: Json,
 ) {
-    private val api = ApiClient(client, json)
 
     /**
      * Fetches one page of the session list from `GET /api/v1/sessions`. Settings are

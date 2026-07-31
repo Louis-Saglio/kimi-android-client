@@ -12,6 +12,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import fr.louissaglio.kimi.android.data.attachments.AndroidAttachmentStore
 import fr.louissaglio.kimi.android.data.attachments.AttachmentStore
+import fr.louissaglio.kimi.android.data.network.ApiClient
 import fr.louissaglio.kimi.android.data.network.BearerTokenInterceptor
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import java.util.concurrent.TimeUnit
@@ -56,6 +57,11 @@ object AppModule {
     @Provides
     @Singleton
     fun provideJson(): Json = Json { ignoreUnknownKeys = true }
+
+    /** The one shared REST scaffold — every repository takes it from the graph. */
+    @Provides
+    @Singleton
+    fun provideApiClient(client: OkHttpClient, json: Json): ApiClient = ApiClient(client, json)
 
     @Provides
     @Singleton

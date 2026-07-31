@@ -1,9 +1,8 @@
 package fr.louissaglio.kimi.android.data.network
 
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
+import fr.louissaglio.kimi.android.testutil.testConnectionChecker
 import kotlinx.coroutines.runBlocking
-import kotlinx.serialization.json.Json
-import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
@@ -14,7 +13,7 @@ import org.junit.Test
 class ConnectionCheckerTest {
 
     private val server = MockWebServer()
-    private val checker = ConnectionChecker(OkHttpClient(), Json { ignoreUnknownKeys = true })
+    private val checker = testConnectionChecker()
 
     @Before
     fun setUp() = server.start()

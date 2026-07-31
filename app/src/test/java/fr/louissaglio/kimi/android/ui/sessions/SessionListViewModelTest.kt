@@ -7,6 +7,7 @@ import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.awaitState
+import fr.louissaglio.kimi.android.testutil.testSessionsRepository
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
@@ -20,8 +21,6 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
-import kotlinx.serialization.json.Json
-import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
@@ -55,7 +54,7 @@ class SessionListViewModelTest {
             appScope,
         )
         viewModel = SessionListViewModel(
-            SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
+            testSessionsRepository(),
             settingsRepository,
         )
     }

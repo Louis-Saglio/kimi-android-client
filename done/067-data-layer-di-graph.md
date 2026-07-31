@@ -42,10 +42,35 @@ up six collaborators — `ApiClient`, `ChatMessageMapper`, `ChatApi`,
 
 ## Acceptance criteria
 
-- [ ] One `ApiClient` instance in the graph (grep: `ApiClient(` appears only
+- [x] One `ApiClient` instance in the graph (grep: `ApiClient(` appears only
   in `AppModule`).
-- [ ] No `Json { ... }` configuration outside `AppModule`.
-- [ ] `./gradlew :app:testDebugUnitTest` green.
+  *(`grep -rn "ApiClient(" app/src/main` → only the class declaration
+  (`ApiClient.kt:26`) and the single construction (`AppModule.kt:64`);
+  unit tests hand-build the graph — the pre-existing real-collaborator
+  strategy — via `testutil/TestGraph.kt`.)*
+- [x] No `Json { ... }` configuration outside `AppModule`.
+  *(In `app/src/main`: only `AppModule.kt:59`; the two other hits are
+  comments. `ChatMessageMapper`'s `Json(json) { prettyPrint = true }`
+  derives from the injected instance — not a duplicated base config.)*
+- [x] `./gradlew :app:testDebugUnitTest` green.
+  *(292 tests, 18 classes, 0 failures.)*
+
+## Implementation notes (2026-07-31)
+
+`ChatApi`, `ModelsRepository`, `SessionSocket`, `SessionPrefsStore` and
+`ChatMessageMapper` are now public `@Singleton @Inject constructor`s with
+unchanged parameter shapes; `AppModule` provides the single `ApiClient`.
+`ChatRepository` is a pure facade over its four injected collaborators,
+`SessionsRepository`/`ConnectionChecker` take `ApiClient` + `Json` from the
+graph (the `ConnectionChecker` hand-rolled `Request.Builder` stays, per the
+ticket's gray zone). Both `TodoParser(Json { … })` defaults are gone:
+`ChatViewModel` injects the parser and passes it to its `ChatTimeline`;
+`SubagentStreamStore` injects it too and threads it through the private
+`Stream` class (three construction sites). The stale `Todo.kt` claim is now
+true and says so. Tests keep the real-collaborator strategy against
+MockWebServer — the hand-assembly that used to live inside each repository
+moved to `testutil/TestGraph.kt`, so each call site is a one-liner and the
+graph shape is written down exactly once.
 
 ## Out of scope
 

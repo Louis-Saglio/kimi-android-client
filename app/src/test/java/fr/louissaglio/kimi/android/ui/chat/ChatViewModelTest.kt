@@ -11,11 +11,14 @@ import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.data.chat.ServerModel
-import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.awaitState
+import fr.louissaglio.kimi.android.testutil.testChatRepository
+import fr.louissaglio.kimi.android.testutil.testSessionsRepository
+import fr.louissaglio.kimi.android.testutil.testSubagentStreamStore
+import fr.louissaglio.kimi.android.testutil.testTodoParser
 import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
@@ -36,8 +39,6 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
-import kotlinx.serialization.json.Json
-import okhttp3.OkHttpClient
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
@@ -72,7 +73,7 @@ class ChatViewModelTest {
     private lateinit var dataStore: FakePreferencesDataStore
 
     /** 0 ms window: sub-agent frames apply on arrival, no flush timer involved. */
-    private val subagentStore = SubagentStreamStore(Json { ignoreUnknownKeys = true }, streamCoalesceWindowMillis = 0)
+    private val subagentStore = testSubagentStreamStore(streamCoalesceWindowMillis = 0)
 
     @Volatile
     private var approvalsSucceed = true
@@ -325,12 +326,13 @@ class ChatViewModelTest {
         )
         settingsRepository = SettingsRepository(dataStore, appScope)
         viewModel = ChatViewModel(
-            ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }, dataStore),
-            SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
+            testChatRepository(dataStore),
+            testSessionsRepository(),
             settingsRepository,
             FakeAttachmentStore(),
             subagentStore,
             SavedStateHandle(mapOf("sessionId" to "session_1")),
+            todoParser = testTodoParser(),
             // The suite asserts per-event application: 0 publishes every delta on
             // arrival (the pre-conflation behavior), no timer involved.
             streamCoalesceWindowMillis = 0,
@@ -1458,8 +1460,8 @@ class ChatViewModelTest {
     @Test
     fun `nav arguments seed the top bar before the session fetch lands`() {
         val seeded = ChatViewModel(
-            ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }, dataStore),
-            SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
+            testChatRepository(dataStore),
+            testSessionsRepository(),
             settingsRepository,
             FakeAttachmentStore(),
             subagentStore,
@@ -1470,6 +1472,7 @@ class ChatViewModelTest {
                     "cwd" to "/home/ubuntu/kimi-android-client",
                 ),
             ),
+            todoParser = testTodoParser(),
         )
 
         assertEquals("Fix the bug", seeded.uiState.value.sessionTitle)
@@ -1479,14 +1482,15 @@ class ChatViewModelTest {
     @Test
     fun `nav arguments with only a cwd seed the basename`() {
         val seeded = ChatViewModel(
-            ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }, dataStore),
-            SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
+            testChatRepository(dataStore),
+            testSessionsRepository(),
             settingsRepository,
             FakeAttachmentStore(),
             subagentStore,
             SavedStateHandle(
                 mapOf("sessionId" to "session_1", "cwd" to "/home/ubuntu/kimi-android-client"),
             ),
+            todoParser = testTodoParser(),
         )
 
         assertEquals("kimi-android-client", seeded.uiState.value.sessionTitle)
@@ -1570,12 +1574,13 @@ class ChatViewModelTest {
 
         // Recreation over the same DataStore: the choice is reloaded, not lost.
         val recreated = ChatViewModel(
-            ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }, dataStore),
-            SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
+            testChatRepository(dataStore),
+            testSessionsRepository(),
             settingsRepository,
             FakeAttachmentStore(),
             subagentStore,
             SavedStateHandle(mapOf("sessionId" to "session_1")),
+            todoParser = testTodoParser(),
         )
         startedViewModels += recreated
         recreated.onScreenStarted()
@@ -1600,12 +1605,13 @@ class ChatViewModelTest {
 
         // Recreation over the same DataStore: the choice is reloaded, not lost.
         val recreated = ChatViewModel(
-            ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }, dataStore),
-            SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
+            testChatRepository(dataStore),
+            testSessionsRepository(),
             settingsRepository,
             FakeAttachmentStore(),
             subagentStore,
             SavedStateHandle(mapOf("sessionId" to "session_1")),
+            todoParser = testTodoParser(),
         )
         startedViewModels += recreated
         recreated.onScreenStarted()
@@ -1960,12 +1966,13 @@ class ChatViewModelTest {
      * pumps the test scheduler under runBlocking — so flushes are driven by the
      * substantive events each test sends, deterministically. */
     private fun newViewModel(streamCoalesceWindowMillis: Long): ChatViewModel = ChatViewModel(
-        ChatRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }, dataStore),
-        SessionsRepository(OkHttpClient(), Json { ignoreUnknownKeys = true }),
+        testChatRepository(dataStore),
+        testSessionsRepository(),
         settingsRepository,
         FakeAttachmentStore(),
         subagentStore,
         SavedStateHandle(mapOf("sessionId" to "session_1")),
+        todoParser = testTodoParser(),
         streamCoalesceWindowMillis = streamCoalesceWindowMillis,
     ).also { startedViewModels += it }
 

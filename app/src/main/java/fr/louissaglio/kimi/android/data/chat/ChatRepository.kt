@@ -1,35 +1,26 @@
 package fr.louissaglio.kimi.android.data.chat
 
-import androidx.datastore.core.DataStore
-import androidx.datastore.preferences.core.Preferences
-import fr.louissaglio.kimi.android.data.network.ApiClient
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.Flow
-import kotlinx.serialization.json.Json
-import okhttp3.OkHttpClient
 
 /**
  * Thin public facade of the chat data layer: delegates the REST verbs to [ChatApi],
  * the WebSocket stream to [SessionSocket], the per-session model/effort prefs to
  * [SessionPrefsStore] and the models/config fetches to [ModelsRepository], keeping
- * only the send-path glue (model/effort resolution) here. This is the error
- * boundary: failures come back as [Result.failure] of
+ * only the send-path glue (model/effort resolution) here. The collaborators come
+ * from the Hilt graph (ticket 067). This is the error boundary: failures come back
+ * as [Result.failure] of
  * [fr.louissaglio.kimi.android.data.DataError].
  */
 @Singleton
 class ChatRepository @Inject constructor(
-    client: OkHttpClient,
-    json: Json,
-    dataStore: DataStore<Preferences>,
+    private val chatApi: ChatApi,
+    private val models: ModelsRepository,
+    private val prefs: SessionPrefsStore,
+    private val socket: SessionSocket,
 ) {
-    private val api = ApiClient(client, json)
-    private val mapper = ChatMessageMapper(json)
-    private val chatApi = ChatApi(api, mapper)
-    private val models = ModelsRepository(api)
-    private val prefs = SessionPrefsStore(dataStore)
-    private val socket = SessionSocket(client, json, mapper)
 
     /**
      * Fetches one page of history from `GET /api/v1/sessions/{id}/messages`, mapped to

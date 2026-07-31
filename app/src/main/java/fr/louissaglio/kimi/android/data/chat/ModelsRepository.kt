@@ -5,10 +5,13 @@ import fr.louissaglio.kimi.android.data.network.ApiClient
 import fr.louissaglio.kimi.android.data.network.Envelope
 import fr.louissaglio.kimi.android.data.network.toResult
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
+import javax.inject.Inject
+import javax.inject.Singleton
 
 /** Models/config REST (`GET /api/v1/models`, `GET /api/v1/config`) with the
  * per-server-URL caches the send path reads. */
-internal class ModelsRepository(
+@Singleton
+class ModelsRepository @Inject constructor(
     private val api: ApiClient,
 ) {
     @Volatile

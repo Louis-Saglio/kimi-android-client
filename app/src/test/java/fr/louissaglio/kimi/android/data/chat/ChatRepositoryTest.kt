@@ -5,8 +5,9 @@ import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
 import fr.louissaglio.kimi.android.testutil.awaitCondition
+import fr.louissaglio.kimi.android.testutil.testChatRepository
+import fr.louissaglio.kimi.android.testutil.testChatTimeline
 import fr.louissaglio.kimi.android.ui.chat.ChatItem
-import fr.louissaglio.kimi.android.ui.chat.ChatTimeline
 import fr.louissaglio.kimi.android.ui.chat.ToolStatus
 import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
@@ -16,8 +17,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.serialization.json.Json
-import okhttp3.OkHttpClient
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
@@ -34,11 +33,7 @@ import org.junit.Test
 class ChatRepositoryTest {
 
     private val server = MockWebServer()
-    private val repository = ChatRepository(
-        OkHttpClient(),
-        Json { ignoreUnknownKeys = true },
-        FakePreferencesDataStore(emptyPreferences()),
-    )
+    private val repository = testChatRepository(FakePreferencesDataStore(emptyPreferences()))
 
     @Before
     fun setUp() = server.start()
@@ -305,7 +300,7 @@ class ChatRepositoryTest {
             ),
         )
 
-        val timeline = ChatTimeline()
+        val timeline = testChatTimeline()
         timeline.replaceHistory(repository.getMessages(settings(), "session_1").getOrThrow().items, keepLive = false)
 
         assertEquals(
@@ -342,7 +337,7 @@ class ChatRepositoryTest {
             ),
         )
 
-        val timeline = ChatTimeline()
+        val timeline = testChatTimeline()
         timeline.replaceHistory(repository.getMessages(settings(), "session_1").getOrThrow().items, keepLive = false)
 
         assertEquals(
@@ -1215,7 +1210,7 @@ class ChatRepositoryTest {
             ),
         )
 
-        val timeline = ChatTimeline()
+        val timeline = testChatTimeline()
         timeline.replaceHistory(repository.getMessages(settings(), "session_1").getOrThrow().items, keepLive = false)
 
         // The envelope-only messages produce no row; the mixed one keeps its genuine text.
@@ -1233,7 +1228,7 @@ class ChatRepositoryTest {
                 """"agentId":"main","sessionId":"session_1"}}""",
         )
 
-        val timeline = ChatTimeline()
+        val timeline = testChatTimeline()
         timeline.apply((emitted.first { it is SocketEvent.Event } as SocketEvent.Event).event)
 
         assertEquals(emptyList<ChatItem>(), timeline.items())
