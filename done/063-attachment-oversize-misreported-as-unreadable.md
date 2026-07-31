@@ -30,9 +30,29 @@ succeed.
 
 ## Acceptance criteria
 
-- [ ] Oversize-with-bad-advertised-size pick reports `TooLarge`
+- [x] Oversize-with-bad-advertised-size pick reports `TooLarge`
   (unit-tested).
-- [ ] `./gradlew :app:testDebugUnitTest` green.
+  *(`AttachmentStoreTest.an oversize pick with no advertised size reports
+  TooLarge` and `an oversize pick with a lying advertised size reports
+  TooLarge` — RED pre-fix (expected TooLarge(video.mp4), got
+  Unreadable(video.mp4)), GREEN after; `a pick whose stream breaks mid-read
+  still reports Unreadable` and `a pick whose stream cannot be opened still
+  reports Unreadable` pin the unchanged failure mapping.)*
+- [x] `./gradlew :app:testDebugUnitTest` green.
+  *(292 tests, 18 classes, 0 failures.)*
+
+## Implementation notes (2026-07-31)
+
+`readCapped` now returns a sealed `CappedRead` (Ok / Overflow / Failed)
+instead of collapsing overflow and open failure into the same null; the
+mapping lives in `readPicked`, the ContentResolver-free seam extracted from
+`AndroidAttachmentStore.read` so JVM tests can drive it (`max` injectable so
+the overflow tests don't stream a real 256 MiB). `Overflow` maps to
+`TooLarge`; genuine open/read failures stay `Unreadable` — a throwing
+`openInputStream` and an `IOException` mid-read now land there too instead of
+escaping the pick coroutine. The flow shape is unchanged (advertised-size
+guard first, capped stream read as the real guard), so the
+`MAX_PICK_BYTES` comment stays accurate as-is.
 
 ## Out of scope
 

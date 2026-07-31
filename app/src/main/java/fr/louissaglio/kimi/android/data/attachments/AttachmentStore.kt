@@ -7,6 +7,7 @@ import androidx.core.content.FileProvider
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.IOException
 import java.io.InputStream
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -74,18 +75,9 @@ class AndroidAttachmentStore @Inject constructor(
             }
         }
         val displayName = name?.takeIf { it.isNotBlank() } ?: uri.lastPathSegment ?: "attachment"
-        // The advertised size is a hint only: the stream read below is capped too.
-        if (size > AttachmentStore.MAX_PICK_BYTES) return AttachmentStore.ReadResult.TooLarge(displayName)
-        val bytes = resolver.openInputStream(uri)?.use { it.readCapped(AttachmentStore.MAX_PICK_BYTES) }
-            ?: return AttachmentStore.ReadResult.Unreadable(displayName)
-        return AttachmentStore.ReadResult.Ok(
-            AttachmentStore.Picked(
-                name = displayName,
-                sizeBytes = if (size >= 0) size else bytes.size.toLong(),
-                mimeType = resolver.getType(uri) ?: "application/octet-stream",
-                bytes = bytes,
-            ),
-        )
+        return readPicked(displayName, size, resolver.getType(uri)) {
+            resolver.openInputStream(uri)
+        }
     }
 
     override fun writeToCache(name: String, bytes: ByteArray): Uri? = runCatching {
@@ -98,17 +90,61 @@ class AndroidAttachmentStore @Inject constructor(
     }.getOrNull()
 }
 
-/** Reads the whole stream, giving up (null) as soon as it exceeds [max] bytes.
- * Internal for the JVM boundary test (ticket 059). */
-internal fun InputStream.readCapped(max: Long): ByteArray? {
+/** The pick-read pipeline minus its ContentResolver plumbing, extracted so JVM
+ * tests can drive it (ticket 063): [advertisedSize] is the provider's
+ * OpenableColumns.SIZE hint (-1 when omitted — providers lie, so the capped
+ * stream read stays the real guard). [max] is injectable so tests can exercise
+ * the overflow path without streaming a real 256 MiB. */
+internal fun readPicked(
+    displayName: String,
+    advertisedSize: Long,
+    mimeType: String?,
+    max: Long = AttachmentStore.MAX_PICK_BYTES,
+    openStream: () -> InputStream?,
+): AttachmentStore.ReadResult {
+    // The advertised size is a hint only: the stream read below is capped too.
+    if (advertisedSize > max) return AttachmentStore.ReadResult.TooLarge(displayName)
+    val stream = runCatching { openStream() }.getOrNull()
+        ?: return AttachmentStore.ReadResult.Unreadable(displayName)
+    return when (val result = stream.use { it.readCapped(max) }) {
+        is CappedRead.Ok -> AttachmentStore.ReadResult.Ok(
+            AttachmentStore.Picked(
+                name = displayName,
+                sizeBytes = if (advertisedSize >= 0) advertisedSize else result.bytes.size.toLong(),
+                mimeType = mimeType ?: "application/octet-stream",
+                bytes = result.bytes,
+            ),
+        )
+        CappedRead.Overflow -> AttachmentStore.ReadResult.TooLarge(displayName)
+        CappedRead.Failed -> AttachmentStore.ReadResult.Unreadable(displayName)
+    }
+}
+
+/** Outcome of a capped stream read (ticket 063): overflow reaches the caller
+ * apart from I/O failure — the first maps to TooLarge, the second to
+ * Unreadable. */
+internal sealed interface CappedRead {
+    class Ok(val bytes: ByteArray) : CappedRead
+    data object Overflow : CappedRead
+    data object Failed : CappedRead
+}
+
+/** Reads the whole stream, giving up ([CappedRead.Overflow]) as soon as it
+ * exceeds [max] bytes; [CappedRead.Failed] when the stream breaks mid-read.
+ * Internal for the JVM boundary test (tickets 059/063). */
+internal fun InputStream.readCapped(max: Long): CappedRead {
     val out = ByteArrayOutputStream()
     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
     var total = 0L
-    while (true) {
-        val read = read(buffer, 0, minOf(buffer.size.toLong(), max + 1 - total).toInt())
-        if (read < 0) return out.toByteArray()
-        total += read
-        if (total > max) return null
-        out.write(buffer, 0, read)
+    try {
+        while (true) {
+            val read = read(buffer, 0, minOf(buffer.size.toLong(), max + 1 - total).toInt())
+            if (read < 0) return CappedRead.Ok(out.toByteArray())
+            total += read
+            if (total > max) return CappedRead.Overflow
+            out.write(buffer, 0, read)
+        }
+    } catch (_: IOException) {
+        return CappedRead.Failed
     }
 }
