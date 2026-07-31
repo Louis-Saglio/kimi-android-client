@@ -111,7 +111,8 @@ fun ChatScreen(
             }
         }
     }
-    // The socket is held only while the screen is visible (ON_START/ON_STOP pair).
+    // ON_START/ON_STOP feed the socket gate (ticket 045): the session socket stays
+    // collected while this screen is visible OR a sub-agent page of it is open.
     LifecycleEventEffect(Lifecycle.Event.ON_START) { viewModel.onScreenStarted() }
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) { viewModel.onScreenStopped() }
     // History attachments (ticket 034): images resolve their bytes inline (base64) or

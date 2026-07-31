@@ -16,9 +16,9 @@ class EnvelopeTest {
     }
 
     @Test
-    fun `toResult maps a missing data payload to Api missing data`() {
+    fun `toResult maps a missing data payload to a user-facing Api error`() {
         assertEquals(
-            Result.failure<JsonObject>(DataError.Api(0, "missing data")),
+            Result.failure<JsonObject>(DataError.Api(0, "Unexpected empty server response")),
             Envelope<JsonObject>(code = 0, msg = "", data = null).toResult(),
         )
     }
@@ -28,6 +28,25 @@ class EnvelopeTest {
         val data = JsonObject(emptyMap())
 
         assertEquals(Result.success(data), Envelope(code = 0, msg = "", data = data).toResult())
+    }
+
+    @Test
+    fun `toNullableResult maps a non-zero code to Api with the server message`() {
+        assertEquals(
+            Result.failure<JsonObject?>(DataError.Api(50001, "boom")),
+            Envelope<JsonObject>(code = 50001, msg = "boom", data = null).toNullableResult(),
+        )
+    }
+
+    @Test
+    fun `toNullableResult passes the payload through on success, null included`() {
+        val data = JsonObject(emptyMap())
+
+        assertEquals(Result.success(data), Envelope(code = 0, msg = "", data = data).toNullableResult())
+        assertEquals(
+            Result.success(null),
+            Envelope<JsonObject>(code = 0, msg = "", data = null).toNullableResult(),
+        )
     }
 
     @Test

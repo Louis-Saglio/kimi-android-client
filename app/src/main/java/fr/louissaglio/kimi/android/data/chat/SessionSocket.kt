@@ -329,7 +329,9 @@ class SessionSocket @Inject constructor(
             "ack" -> frame.decodePayload<AckPayload>()
                 ?.takeIf { sessionId in it.resyncRequired }
                 ?.let { onResyncRequired() }
-            // server_hello and events we don't render yet: ignore.
+            // server_hello and events we don't render yet: ignored, but logged so a
+            // server rename shows up during development.
+            else -> Log.d(TAG, "Ignoring '${frame.type}' frame")
         }
     }
 

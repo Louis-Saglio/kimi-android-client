@@ -4,6 +4,7 @@ import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.network.ApiClient
 import fr.louissaglio.kimi.android.data.network.Envelope
 import fr.louissaglio.kimi.android.data.network.toAckResult
+import fr.louissaglio.kimi.android.data.network.toNullableResult
 import fr.louissaglio.kimi.android.data.network.toResult
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import javax.inject.Inject
@@ -288,17 +289,14 @@ class ChatApi @Inject constructor(
         }
 
     /** Lightweight live status (`GET /api/v1/sessions/{id}/status`): the mid-turn flag
-     * and the context window fill (ticket 041). */
+     * and the context window fill (ticket 041). A data-less success envelope degrades
+     * to "not busy, fill unknown" (see SessionStatus). */
     suspend fun sessionStatus(settings: ServerSettings, sessionId: String): Result<SessionStatus> =
         api.get(settings, "/api/v1/sessions/$sessionId/status") { body ->
-            val envelope = api.json.decodeFromString<Envelope<SessionStatusData>>(body)
-            when {
-                envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
-                else -> Result.success(
-                    SessionStatus(
-                        busy = envelope.data?.busy == true,
-                        contextUsage = envelope.data?.let { ContextUsage(it.contextTokens, it.maxContextTokens) },
-                    ),
+            api.json.decodeFromString<Envelope<SessionStatusData>>(body).toNullableResult().map { data ->
+                SessionStatus(
+                    busy = data?.busy == true,
+                    contextUsage = data?.let { ContextUsage(it.contextTokens, it.maxContextTokens) },
                 )
             }
         }

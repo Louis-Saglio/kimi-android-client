@@ -130,15 +130,16 @@ class ChatMessageMapper @Inject constructor(json: Json) {
     private fun toDomain(dto: TranscriptFrameDto): TranscriptFrame? = when (dto.kind) {
         "thinking" -> dto.text?.let { TranscriptFrame.Thinking(dto.frameId, it) }
         "text" -> dto.text?.let { text ->
-            TranscriptFrame.Text(
-                dto.frameId,
-                when (dto.role) {
-                    "assistant" -> TranscriptFrame.Text.Role.Assistant
-                    "user" -> TranscriptFrame.Text.Role.User
-                    else -> TranscriptFrame.Text.Role.Other
-                },
-                text,
-            )
+            val role = when (dto.role) {
+                "assistant" -> TranscriptFrame.Text.Role.Assistant
+                "user" -> TranscriptFrame.Text.Role.User
+                else -> TranscriptFrame.Text.Role.Other
+            }
+            // Same boundary as the message path: a sub-agent's user-role frames (its
+            // internal prompts/nudges) can carry harness envelopes — strip them rather
+            // than render raw XML on the sub-agent page; a frame left blank is dropped.
+            val stripped = if (role == TranscriptFrame.Text.Role.User) InternalEnvelopes.strip(text) else text
+            stripped.takeIf { it.isNotBlank() }?.let { TranscriptFrame.Text(dto.frameId, role, it) }
         }
         "tool" -> dto.toolCallId?.let { toolCallId ->
             TranscriptFrame.Tool(

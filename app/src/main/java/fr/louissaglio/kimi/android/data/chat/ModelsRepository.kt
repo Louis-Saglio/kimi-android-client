@@ -1,8 +1,8 @@
 package fr.louissaglio.kimi.android.data.chat
 
-import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.network.ApiClient
 import fr.louissaglio.kimi.android.data.network.Envelope
+import fr.louissaglio.kimi.android.data.network.toNullableResult
 import fr.louissaglio.kimi.android.data.network.toResult
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import javax.inject.Inject
@@ -70,10 +70,8 @@ class ModelsRepository @Inject constructor(
     /** GET /api/v1/config → `data.default_model` (null when the server has none). */
     private suspend fun fetchDefaultModel(settings: ServerSettings): Result<String?> =
         api.get(settings, "/api/v1/config") { body ->
-            val envelope = api.json.decodeFromString<Envelope<ConfigData>>(body)
-            when {
-                envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
-                else -> Result.success(envelope.data?.defaultModel?.takeIf { it.isNotBlank() })
+            api.json.decodeFromString<Envelope<ConfigData>>(body).toNullableResult().map { data ->
+                data?.defaultModel?.takeIf { it.isNotBlank() }
             }
         }
 

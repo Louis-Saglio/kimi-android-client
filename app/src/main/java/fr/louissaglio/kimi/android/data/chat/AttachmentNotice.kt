@@ -27,7 +27,9 @@ object AttachmentNotice {
         return ChatMessage.Part.Attachment(
             name = match.groupValues[1],
             mimeType = match.groupValues[2],
-            sizeBytes = match.groupValues[3].toLong(),
+            // A size past Long range can't parse: treat it as no-notice — the caller
+            // keeps the text as a plain part (the parse contract above).
+            sizeBytes = match.groupValues[3].toLongOrNull() ?: return null,
             fileId = fileId,
         )
     }

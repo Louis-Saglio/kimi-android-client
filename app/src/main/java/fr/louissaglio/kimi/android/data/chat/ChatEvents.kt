@@ -114,8 +114,7 @@ sealed interface SessionEvent {
 
     data class SubagentFailed(override val subagentId: String, val error: String) : SubagentLifecycleEvent
 
-    /** `subagent.suspended` (upstream schema only, not captured live); not terminal —
-     * a later [SubagentStarted] marks the resume. */
+    /** `subagent.suspended`; not terminal — a later [SubagentStarted] marks the resume. */
     data class SubagentSuspended(override val subagentId: String) : SubagentLifecycleEvent
 
     /** A tool call waits on the user's decision. [summary] is the compact argument

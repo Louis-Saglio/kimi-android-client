@@ -19,7 +19,7 @@ data class MessageListData(
 @Serializable
 data class MessageDto(
     // The steer echo splices the steered user message without an id (docs/server-api.md);
-    // the compaction summary carries an explicit `id: null` (Compact) — both read as "".
+    // the compaction summary omits the key too since 0.31.0 (Compact) — both read as "".
     val id: String? = null,
     val role: String = "",
     val content: List<ContentPartDto> = emptyList(),
@@ -77,9 +77,10 @@ data class MediaSourceDto(
 @Serializable
 data class SessionStatusData(
     val busy: Boolean = false,
-    // Context window fill (ticket 041); the current server always sends both counts.
-    @SerialName("context_tokens") val contextTokens: Long,
-    @SerialName("max_context_tokens") val maxContextTokens: Long,
+    // Context window fill (ticket 041); defaulted like every DTO field so a server
+    // omission degrades to a partial read instead of failing the whole status poll.
+    @SerialName("context_tokens") val contextTokens: Long = 0,
+    @SerialName("max_context_tokens") val maxContextTokens: Long = 0,
 )
 
 /**
@@ -329,26 +330,6 @@ data class TranscriptData(
     @SerialName("agent_id") val agentId: String = "",
     val items: List<TranscriptItemDto> = emptyList(),
     @SerialName("has_more") val hasMore: Boolean = false,
-    // The session's unpaginated global state, shipped with every page. Pinned from the
-    // captures but not consumed (046 out of scope); element shapes were not observed
-    // (all empty on the captured pages), so they stay raw elements.
-    val tasks: List<JsonElement> = emptyList(),
-    val interactions: List<JsonElement> = emptyList(),
-    val attachments: List<JsonElement> = emptyList(),
-    val todos: List<JsonElement> = emptyList(),
-    val meta: JsonObject? = null,
-    val agents: List<TranscriptAgentDto> = emptyList(),
-    @SerialName("pending_interactions") val pendingInteractions: List<JsonElement> = emptyList(),
-    val seq: Long? = null,
-)
-
-/** One entry of the `agents` roster (observed: `{"agentId":"agent-17","type":"sub","parentAgentId":"main","label":"…"}`). */
-@Serializable
-data class TranscriptAgentDto(
-    val agentId: String = "",
-    val type: String = "",
-    val parentAgentId: String? = null,
-    val label: String? = null,
 )
 
 /** Flat item shape: [kind] is `turn` or `marker`, each filling only its own fields.

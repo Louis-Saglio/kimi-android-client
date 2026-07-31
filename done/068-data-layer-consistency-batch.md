@@ -55,9 +55,9 @@ share a diff).
 
 ## Acceptance criteria
 
-- [ ] Items 1-9 done; transcript stripping covered by a test next to
-  `InternalEnvelopesTest`.
-- [ ] `./gradlew :app:testDebugUnitTest` green.
+- [x] Items 1-9 done; transcript stripping covered by a test next to
+  `InternalEnvelopesTest` (`ChatMessageMapperTest`).
+- [x] `./gradlew :app:testDebugUnitTest` green (2026-07-31).
 
 ## Out of scope
 

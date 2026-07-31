@@ -272,8 +272,9 @@ class ChatTimeline(
                     // leftovers (possible only if the earlier turn.ended refetch failed).
                     rows.subList(liveStart, rows.size).clear()
                 } else {
-                    // No refetch ever comes: seal the finished internal turn's rows so
-                    // they keep their place above the next turn's spliced prompts.
+                    // Seal the finished internal turn's rows so they keep their place
+                    // above the next turn's spliced prompts; transcript refetches
+                    // (046) merge under the live tail instead of clearing it.
                     liveStart = rows.size
                 }
                 // Same clear as the rows: the previous turn's todo calls are committed
