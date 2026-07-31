@@ -38,8 +38,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.pulltorefresh.PullToRefreshContainer
-import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -50,7 +49,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -143,18 +141,12 @@ private fun SessionsContent(
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { innerPadding ->
-        val pullRefreshState = rememberPullToRefreshState()
-        if (pullRefreshState.isRefreshing) {
-            LaunchedEffect(true) { onPullToRefresh() }
-        }
-        LaunchedEffect(uiState.isRefreshing) {
-            if (!uiState.isRefreshing) pullRefreshState.endRefresh()
-        }
-        Box(
+        PullToRefreshBox(
+            isRefreshing = uiState.isRefreshing,
+            onRefresh = onPullToRefresh,
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding)
-                .nestedScroll(pullRefreshState.nestedScrollConnection),
+                .padding(innerPadding),
         ) {
             when {
                 uiState.sessions == null && uiState.error != null ->
@@ -170,10 +162,6 @@ private fun SessionsContent(
                     EmptyState("No sessions yet", modifier = Modifier.verticalScroll(rememberScrollState()))
                 else -> SessionList(uiState, onSessionClick, onEndReached)
             }
-            PullToRefreshContainer(
-                state = pullRefreshState,
-                modifier = Modifier.align(Alignment.TopCenter),
-            )
         }
         if (uiState.showCreateDialog) {
             CreateSessionDialog(

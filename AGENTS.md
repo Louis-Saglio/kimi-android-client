@@ -20,9 +20,15 @@ drift check keeps the two in sync.
 
 - Kotlin + Jetpack Compose (Material 3), single `app` module.
 - Hilt + KSP for DI, coroutines/Flow, `kotlinx.serialization`, OkHttp, DataStore.
-- Chat markdown: `com.mikepenz:multiplatform-markdown-renderer-m3` (pinned to
-  0.26.0, the newest release built against Compose 1.6.8 / Kotlin 2.0.x — do
-  not upgrade past it without also bumping the Compose BOM / Kotlin).
+- Chat markdown: `com.mikepenz:multiplatform-markdown-renderer-m3` 0.38.1
+  (ticket 073: newest release on the Kotlin 2.2.x line — 0.39.0 needs Kotlin
+  2.3, 0.42.0 Kotlin 2.4; those ladders are a new ticket). Stack: Kotlin
+  2.2.21, Compose BOM 2025.11.00, Hilt 2.57.2 (2.51.1's KSP processor crashes
+  under KSP2 — don't downgrade). `MarkdownBody` parses the INITIAL content
+  synchronously (`rememberMarkdownState(immediate = true)`) so MessageList's
+  bottom pin measures real first-frame row heights; content changes (streaming)
+  still re-parse asynchronously, with `retainState` keeping the previous
+  snapshot on screen.
 - MVVM: one immutable `UiState` per screen as `StateFlow`, one-shot effects via
   `Channel`. ALL one-shots (snackbars, open-file intents) go through the effect
   channel — composables never call `snackbarHostState` or do I/O directly.
@@ -148,7 +154,9 @@ also the regression signal for "verified fixed" tickets.
   deltas through the shared `DeltaCoalescer` (ui/chat, internal — ticket 065):
   leading edge immediately, then one emission per ~100 ms window, flushed before any
   non-delta event (`onEvent` carries the invariant) and before REST refetches
-  (`flush()`), because `MarkdownBody` re-parses on every emission. The
+  (`flush()`), because each new text snapshot still costs one full re-parse in
+  `MarkdownBody` (renderer 0.38.1 memoizes unchanged content; incremental
+  `StreamingMarkdownState` needs renderer 0.42 + Kotlin 2.4). The
   window is injectable (`streamCoalesceWindowMillis`; 0 in unit tests).
 
 ## Distribution: put the release APK on the file server

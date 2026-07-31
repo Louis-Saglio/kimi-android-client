@@ -1,10 +1,10 @@
 [versions]
 agp = "8.6.1"
-kotlin = "2.0.21"
-ksp = "2.0.21-1.0.25"
-hilt = "2.51.1"
+kotlin = "2.2.21"
+ksp = "2.2.21-2.0.5"
+hilt = "2.57.2"
 coreKtx = "1.13.1"
-composeBom = "2024.06.00"
+composeBom = "2025.11.00"
 activityCompose = "1.9.0"
 lifecycle = "2.8.3"
 navigationCompose = "2.7.7"
@@ -13,9 +13,10 @@ okhttp = "4.12.0"
 kotlinxSerialization = "1.7.1"
 datastore = "1.1.1"
 hiltNavigationCompose = "1.2.0"
-# Newest release built against Compose 1.6.8 / Kotlin 2.0.x (matches composeBom/kotlin above);
-# 0.27.0+ moved to Compose 1.7.x.
-markdownRenderer = "0.26.0"
+# Newest release still on the Kotlin 2.2.x line (0.39.0 moved to Kotlin 2.3) — ticket 073.
+# Parsing is async + memoized since 0.33.0; 0.42.0's incremental StreamingMarkdownState
+# needs Kotlin 2.4 and is the next ladder rung.
+markdownRenderer = "0.38.1"
 junit = "4.13.2"
 testExtJunit = "1.2.1"
 googleServices = "4.5.0"
