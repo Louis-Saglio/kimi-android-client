@@ -39,6 +39,9 @@ import fr.louissaglio.kimi.android.ui.common.LoadingState
 @Composable
 fun SubagentScreen(
     onNavigateBack: () -> Unit,
+    /** Nested sub-agents (ticket 071): a linked `Agent` row inside this transcript
+     * navigates one page deeper. Invoked with the nested subagentId. */
+    onOpenSubagent: (String) -> Unit = {},
     viewModel: SubagentViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -82,17 +85,19 @@ fun SubagentScreen(
         },
     ) { innerPadding ->
         Box(Modifier.fillMaxSize().padding(innerPadding)) {
+            val error = uiState.error
             when {
                 // The transcript fetch is the page's only data source here (no spawn,
                 // no seed, no stream): its failure gets the full-screen retry.
-                uiState.error != null && uiState.items.isEmpty() ->
-                    ErrorState(uiState.error!!, onRetry = viewModel::onRetry, enabled = !uiState.isLoading)
+                error != null && uiState.items.isEmpty() ->
+                    ErrorState(error, onRetry = viewModel::onRetry)
                 uiState.status == null && uiState.isLoading -> LoadingState()
                 // Neither a live stream nor a transcript entry exists.
                 uiState.status == null -> EmptyState("No transcript for this sub-agent.")
                 uiState.items.isEmpty() -> EmptyState("No activity yet")
                 else -> MessageList(
                     uiState.items,
+                    onOpenSubagent = onOpenSubagent,
                     isLoadingMoreHistory = uiState.isLoadingMoreHistory,
                     onHistoryTopReached = viewModel::onHistoryTopReached,
                 )

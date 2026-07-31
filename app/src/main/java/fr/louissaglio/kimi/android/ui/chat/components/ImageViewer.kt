@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
+import fr.louissaglio.kimi.android.ui.common.formatFileSize
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -155,19 +156,30 @@ internal fun FullScreenImageViewer(
                 .clickable(onClick = onDismiss),
             contentAlignment = Alignment.Center,
         ) {
+            // Same resolve-then-mark dance as the thumbnail: without [resolved] a
+            // failed load would spin forever (ticket 071).
+            var resolved by remember(image) { mutableStateOf(false) }
             val bitmap by produceState<ImageBitmap?>(initialValue = null, image) {
                 val bytes = loadImageBytes(image)
                 if (bytes != null) {
                     value = withContext(Dispatchers.Default) { decodeSampledThumbnail(bytes, FULL_IMAGE_PX) }
                 }
+                resolved = true
             }
-            val resolved = bitmap
-            if (resolved != null) {
+            val loaded = bitmap
+            if (loaded != null) {
                 Image(
-                    bitmap = resolved,
+                    bitmap = loaded,
                     contentDescription = "Attached image",
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Fit,
+                )
+            } else if (resolved) {
+                // The thumbnail's failure fallback: the generic sheet glyph.
+                CopyGlyph(
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    background = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.size(48.dp),
                 )
             } else {
                 CircularProgressIndicator()

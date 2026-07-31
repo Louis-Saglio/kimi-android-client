@@ -7,11 +7,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -29,6 +27,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
+import fr.louissaglio.kimi.android.ui.common.formatTokenCount
 
 /**
  * The chat composer's context-usage indicator (ticket 041, moved from the top bar into
@@ -88,38 +87,31 @@ internal fun ContextUsageRing(
         }
     }
     if (showDetails) {
-        AlertDialog(
-            onDismissRequest = { showDetails = false },
-            confirmButton = {
-                TextButton(onClick = { showDetails = false }) { Text("OK") }
-            },
-            title = { Text("Context usage") },
-            text = {
-                Column {
-                    Text(
-                        text = details,
-                        color = if (isHigh) MaterialTheme.colorScheme.error else Color.Unspecified,
-                    )
-                    // Ticket 057: at high usage the dialog itself carries the compact
-                    // action, right under the numbers that motivate it — same entry
-                    // point and enabled rules as the 056 overflow menu item. The tap
-                    // dismisses; the timeline's compacting divider takes over the
-                    // feedback, so no extra snackbar from here.
-                    if (isHigh) {
-                        Button(
-                            onClick = {
-                                showDetails = false
-                                onCompact()
-                            },
-                            enabled = compactEnabled,
-                            modifier = Modifier.padding(top = 12.dp),
-                        ) {
-                            Text("Compact session")
-                        }
+        InfoDialog(title = "Context usage", onDismiss = { showDetails = false }) {
+            Column {
+                Text(
+                    text = details,
+                    color = if (isHigh) MaterialTheme.colorScheme.error else Color.Unspecified,
+                )
+                // Ticket 057: at high usage the dialog itself carries the compact
+                // action, right under the numbers that motivate it — same entry
+                // point and enabled rules as the 056 overflow menu item. The tap
+                // dismisses; the timeline's compacting divider takes over the
+                // feedback, so no extra snackbar from here.
+                if (isHigh) {
+                    Button(
+                        onClick = {
+                            showDetails = false
+                            onCompact()
+                        },
+                        enabled = compactEnabled,
+                        modifier = Modifier.padding(top = 12.dp),
+                    ) {
+                        Text("Compact session")
                     }
                 }
-            },
-        )
+            }
+        }
     }
 }
 
@@ -135,18 +127,4 @@ internal fun isHighContextUsage(pct: Int): Boolean = pct >= HIGH_CONTEXT_USAGE_P
 internal fun contextUsagePercent(used: Long, max: Long): Int {
     if (max <= 0 || used <= 0) return 0
     return ((used * 100 + max - 1) / max).coerceIn(0, 100).toInt()
-}
-
-/** Compact token count in the style of the model picker's `formatContextSize`:
- * "25.5k", "1M" — one truncated decimal, dropped when zero. */
-internal fun formatTokenCount(count: Long): String = when {
-    count >= 1_000_000 -> scaled(count, 1_000_000, "M")
-    count >= 1_000 -> scaled(count, 1_000, "k")
-    else -> "$count"
-}
-
-private fun scaled(count: Long, divisor: Long, suffix: String): String {
-    val whole = count / divisor
-    val tenth = count % divisor * 10 / divisor
-    return if (tenth == 0L) "$whole$suffix" else "$whole.$tenth$suffix"
 }

@@ -25,6 +25,7 @@ import fr.louissaglio.kimi.android.data.sessions.displayName
 import fr.louissaglio.kimi.android.data.sessions.displayNameFor
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.di.StreamCoalesceWindowMillis
+import fr.louissaglio.kimi.android.ui.common.formatTokenCount
 import java.util.UUID
 import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
@@ -213,38 +214,45 @@ class ChatViewModel @Inject constructor(
     }
 
     sealed interface Effect {
-        data class RefreshFailed(val message: String) : Effect
+        /** Snackbar text — the collector's catch-all branch shows it; the two special
+         * cases ([SendFailed]'s Retry, [OpenFile]) handle themselves first (ticket 071). */
+        val message: String
+
+        data class RefreshFailed(override val message: String) : Effect
 
         /** The typed text stays in [UiState.inputText]; the snackbar's Retry re-calls [onSend]. */
-        data class SendFailed(val message: String) : Effect
+        data class SendFailed(override val message: String) : Effect
 
         /** The turn is still running; the Stop action stays available. */
-        data class AbortFailed(val message: String) : Effect
+        data class AbortFailed(override val message: String) : Effect
 
         /** The card stays up: with no resolved event coming, the request is still pending. */
-        data class ApprovalFailed(val message: String) : Effect
+        data class ApprovalFailed(override val message: String) : Effect
 
         /** Same contract as approvals: no resolved event, the question card stays up. */
-        data class QuestionFailed(val message: String) : Effect
+        data class QuestionFailed(override val message: String) : Effect
 
         /** A picked file was not staged: unreadable, or over [AttachmentStore.MAX_PICK_BYTES]. */
-        data class AttachmentPickFailed(val message: String) : Effect
+        data class AttachmentPickFailed(override val message: String) : Effect
 
         /** A history attachment's bytes are downloaded and persisted (ticket 034); the
          * screen hands [contentUri] to another app via ACTION_VIEW and reports a missing
          * viewer back through [onOpenAttachmentFailed]. [mimeType] is the server's
          * response Content-Type — more reliable than the notice-parsed attachment MIME. */
-        data class OpenFile(val contentUri: Uri, val mimeType: String, val name: String) : Effect
+        data class OpenFile(val contentUri: Uri, val mimeType: String, val name: String) : Effect {
+            // Never shown: the collector's OpenFile branch handles the effect itself.
+            override val message: String get() = name
+        }
 
         /** The download or cache-write of a history attachment failed, or no app could open it. */
-        data class OpenAttachmentFailed(val message: String) : Effect
+        data class OpenAttachmentFailed(override val message: String) : Effect
 
         /** Confirmation of a finished compaction (ticket 056): the token delta label. */
-        data class CompactionFinished(val message: String) : Effect
+        data class CompactionFinished(override val message: String) : Effect
 
         /** The compact POST failed (e.g. the empty-session 40910 — the server's own
          * message) or a compaction ended with failed/cancelled/blocked. */
-        data class CompactionFailed(val message: String) : Effect
+        data class CompactionFailed(override val message: String) : Effect
     }
 
     private val _uiState = MutableStateFlow(

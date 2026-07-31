@@ -15,17 +15,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 
 /** Full-screen error with a Retry button, shared by the chat and sessions screens.
- * [modifier] slots between the fill and the padding: the sessions screen passes a
- * verticalScroll so the otherwise static state reaches pull-to-refresh's nested scroll. */
+ * Retry needs no enabled gate: every ViewModel clears the error synchronously on the
+ * tap, so this state swaps out in the same frame (ticket 071). [modifier] slots
+ * between the fill and the padding: the sessions screen passes a verticalScroll so the
+ * otherwise static state reaches pull-to-refresh's nested scroll. */
 @Composable
-internal fun ErrorState(message: String, onRetry: () -> Unit, enabled: Boolean, modifier: Modifier = Modifier) {
+internal fun ErrorState(message: String, onRetry: () -> Unit, modifier: Modifier = Modifier) {
     Column(
         modifier = Modifier.fillMaxSize().then(modifier).padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
     ) {
         Text(text = message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyLarge)
-        Button(onClick = onRetry, enabled = enabled) {
+        Button(onClick = onRetry) {
             Text("Retry")
         }
     }

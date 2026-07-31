@@ -48,6 +48,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
+import fr.louissaglio.kimi.android.ui.common.formatFileSize
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -320,11 +321,4 @@ internal fun decodeSampledThumbnail(bytes: ByteArray, targetPx: Int): ImageBitma
     while (bounds.outWidth / (sample * 2) >= targetPx && bounds.outHeight / (sample * 2) >= targetPx) sample *= 2
     val options = BitmapFactory.Options().apply { inSampleSize = sample }
     return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.asImageBitmap()
-}
-
-/** "340 kB", "1.2 MB" — decimal units, like the web client's chip labels. */
-internal fun formatFileSize(bytes: Long): String = when {
-    bytes >= 1_000_000 -> "%.1f MB".format(bytes / 1_000_000.0)
-    bytes >= 1_000 -> "%.0f kB".format(bytes / 1_000.0)
-    else -> "$bytes B"
 }

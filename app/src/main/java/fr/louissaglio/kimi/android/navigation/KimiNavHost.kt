@@ -46,7 +46,10 @@ fun KimiNavHost() {
         composable(KimiRoutes.Sessions) {
             SessionsScreen(
                 onNavigateToSettings = { navController.navigate(KimiRoutes.Settings) },
-                onNavigateToChat = { session -> navController.navigate(KimiRoutes.chat(session)) },
+                // launchSingleTop: a fast double-tap must not stack the destination (071).
+                onNavigateToChat = { session ->
+                    navController.navigate(KimiRoutes.chat(session)) { launchSingleTop = true }
+                },
             )
         }
         composable(KimiRoutes.Settings) {
@@ -72,12 +75,24 @@ fun KimiNavHost() {
             ChatScreen(
                 onNavigateBack = { navController.popBackStack() },
                 onNavigateToSubagent = { sessionId, subagentId ->
-                    navController.navigate(KimiRoutes.subagent(sessionId, subagentId))
+                    navController.navigate(KimiRoutes.subagent(sessionId, subagentId)) {
+                        launchSingleTop = true
+                    }
                 },
             )
         }
-        composable(KimiRoutes.Subagent) {
-            SubagentScreen(onNavigateBack = { navController.popBackStack() })
+        composable(KimiRoutes.Subagent) { entry ->
+            // Nested sub-agents (ticket 071): the page can navigate one level deeper,
+            // into another sub-agent of the SAME session (from this entry's arguments).
+            val sessionId = entry.arguments?.getString("sessionId").orEmpty()
+            SubagentScreen(
+                onNavigateBack = { navController.popBackStack() },
+                onOpenSubagent = { subagentId ->
+                    navController.navigate(KimiRoutes.subagent(sessionId, subagentId)) {
+                        launchSingleTop = true
+                    }
+                },
+            )
         }
     }
 }

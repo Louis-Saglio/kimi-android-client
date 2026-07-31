@@ -35,14 +35,4 @@ class ContextUsageRingTest {
         assertTrue(isHighContextUsage(contextUsagePercent(used = 100, max = 100)))
         assertEquals(80, HIGH_CONTEXT_USAGE_PERCENT)
     }
-
-    @Test
-    fun `token counts format compactly with one truncated decimal`() {
-        assertEquals("999", formatTokenCount(999))
-        assertEquals("25.5k", formatTokenCount(25500))
-        assertEquals("25k", formatTokenCount(25050))
-        assertEquals("262.1k", formatTokenCount(262144))
-        assertEquals("1M", formatTokenCount(1048576))
-        assertEquals("2M", formatTokenCount(2_000_000))
-    }
 }

@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -90,27 +89,18 @@ internal fun TodosSheet(
                 style = MaterialTheme.typography.titleLarge,
             )
             todos.forEach { todo ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 48.dp)
-                        .padding(horizontal = 16.dp)
-                        .semantics(mergeDescendants = true) {},
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    TodoStatusIcon(todo.status)
-                    Text(
-                        text = todo.title,
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = if (todo.status == Todo.Status.Done) {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        } else {
-                            MaterialTheme.colorScheme.onSurface
-                        },
-                        textDecoration = if (todo.status == Todo.Status.Done) TextDecoration.LineThrough else null,
-                    )
-                }
+                SheetCheckRow(
+                    title = todo.title,
+                    checked = false,
+                    onClick = null,
+                    titleColor = if (todo.status == Todo.Status.Done) {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    },
+                    titleDecoration = if (todo.status == Todo.Status.Done) TextDecoration.LineThrough else null,
+                    leading = { TodoStatusIcon(todo.status) },
+                )
             }
         }
     }

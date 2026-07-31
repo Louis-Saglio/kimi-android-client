@@ -79,8 +79,6 @@ fun ChatScreen(
     LaunchedEffect(Unit) {
         viewModel.effects.collect { effect ->
             when (effect) {
-                is ChatViewModel.Effect.RefreshFailed ->
-                    snackbarHostState.showSnackbar(effect.message)
                 is ChatViewModel.Effect.SendFailed -> {
                     val result = snackbarHostState.showSnackbar(
                         message = effect.message,
@@ -90,24 +88,12 @@ fun ChatScreen(
                     // The typed text was preserved in the UiState; Retry re-sends it as-is.
                     if (result == SnackbarResult.ActionPerformed) viewModel.onSend()
                 }
-                is ChatViewModel.Effect.ApprovalFailed ->
-                    snackbarHostState.showSnackbar(effect.message)
-                is ChatViewModel.Effect.QuestionFailed ->
-                    snackbarHostState.showSnackbar(effect.message)
-                is ChatViewModel.Effect.AbortFailed ->
-                    snackbarHostState.showSnackbar(effect.message)
-                is ChatViewModel.Effect.AttachmentPickFailed ->
-                    snackbarHostState.showSnackbar(effect.message)
-                is ChatViewModel.Effect.OpenAttachmentFailed ->
-                    snackbarHostState.showSnackbar(effect.message)
-                is ChatViewModel.Effect.CompactionFinished ->
-                    snackbarHostState.showSnackbar(effect.message)
-                is ChatViewModel.Effect.CompactionFailed ->
-                    snackbarHostState.showSnackbar(effect.message)
                 is ChatViewModel.Effect.OpenFile ->
                     if (!openWithOtherApp(context, effect.contentUri, effect.mimeType)) {
                         viewModel.onOpenAttachmentFailed(effect.name)
                     }
+                // Every other effect is a plain message snackbar (ticket 071).
+                else -> snackbarHostState.showSnackbar(effect.message)
             }
         }
     }
@@ -184,6 +170,23 @@ private fun openWithOtherApp(context: Context, uri: Uri, mimeType: String): Bool
     true
 } catch (e: ActivityNotFoundException) {
     false
+}
+
+/** The secondary-container status line above the timeline (ticket 071): reconnect and
+ * transient LLM-retry notices — one line, ellipsized (a retry error message can be long). */
+@Composable
+private fun StatusBanner(text: String) {
+    Surface(color = MaterialTheme.colorScheme.secondaryContainer) {
+        Text(
+            text = text,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            style = MaterialTheme.typography.labelMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -352,38 +355,22 @@ private fun ChatContent(
     ) { innerPadding ->
         Column(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
             if (uiState.isReconnecting) {
-                Surface(color = MaterialTheme.colorScheme.secondaryContainer) {
-                    Text(
-                        text = "Connection lost — reconnecting…",
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 6.dp),
-                        style = MaterialTheme.typography.labelMedium,
-                    )
-                }
+                StatusBanner("Connection lost — reconnecting…")
             }
             // Transient LLM-retry status (ticket 058): the same status-line affordance
             // as the reconnect banner — while the server backs off and retries the
             // step's model call, the chat would otherwise look stalled.
             uiState.stepRetry?.let { retry ->
-                Surface(color = MaterialTheme.colorScheme.secondaryContainer) {
-                    Text(
-                        text = "Model call failed — retrying (attempt ${retry.nextAttempt} of " +
-                            "${retry.maxAttempts})" +
-                            if (retry.errorMessage.isNotBlank()) ": ${retry.errorMessage}" else "",
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 6.dp),
-                        style = MaterialTheme.typography.labelMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
+                StatusBanner(
+                    "Model call failed — retrying (attempt ${retry.nextAttempt} of " +
+                        "${retry.maxAttempts})" +
+                        if (retry.errorMessage.isNotBlank()) ": ${retry.errorMessage}" else "",
+                )
             }
             val items = uiState.items
             when {
                 items.isNullOrEmpty() && uiState.error != null ->
-                    ErrorState(uiState.error, onRetry, enabled = true)
+                    ErrorState(uiState.error, onRetry)
                 items == null ->
                     LoadingState()
                 items.isEmpty() ->
@@ -404,7 +391,12 @@ private fun ChatContent(
     }
     if (showModelPicker) {
         ModelPickerSheet(
-            uiState = uiState,
+            availableModels = uiState.availableModels,
+            currentModelId = uiState.sessionModel ?: uiState.serverDefaultModel,
+            serverDefaultModel = uiState.serverDefaultModel,
+            supportedEfforts = uiState.supportedEfforts,
+            selectedEffort = uiState.selectedEffort,
+            defaultEffort = uiState.defaultEffort,
             onModelSelected = onModelSelected,
             onEffortSelected = onEffortSelected,
             onDismiss = { showModelPicker = false },

@@ -162,7 +162,6 @@ private fun SessionsContent(
                     ErrorState(
                         uiState.error,
                         onRetry,
-                        enabled = !uiState.isLoading,
                         modifier = Modifier.verticalScroll(rememberScrollState()),
                     )
                 uiState.sessions == null ->
@@ -303,7 +302,7 @@ private fun SessionList(
     }
     LaunchedEffect(endReached) { if (endReached) onEndReached() }
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-        items(sessions, key = Session::id, contentType = { "session" }) { session ->
+        items(sessions, key = Session::id, contentType = { it::class }) { session ->
             SessionRow(session, onClick = { onSessionClick(session) })
         }
         if (uiState.isLoadingMore || uiState.loadMoreError != null) {

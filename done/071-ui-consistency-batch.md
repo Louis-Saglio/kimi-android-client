@@ -49,9 +49,9 @@ with another, and the alternative is eight micro-tickets.
 
 ## Acceptance criteria
 
-- [ ] Items 1-8 done.
-- [ ] `./gradlew :app:testDebugUnitTest` green; androidTests green on
-  Firebase Test Lab; robo green.
+- [x] Items 1-8 done.
+- [x] `./gradlew :app:testDebugUnitTest` green; androidTests green on
+  Firebase Test Lab (42 cases); robo green (2026-07-31).
 
 ## Out of scope
 
