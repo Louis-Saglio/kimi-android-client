@@ -23,7 +23,7 @@ drift check keeps the two in sync.
 - Chat markdown: `com.mikepenz:multiplatform-markdown-renderer-m3` 0.38.1
   (ticket 073: newest release on the Kotlin 2.2.x line; the 0.43.0 rung is
   unblocked now that Kotlin is 2.4 — ticket 077). Stack: Kotlin 2.4.10,
-  Compose BOM 2025.11.00, Hilt 2.60.1 (2.51.1's KSP processor crashes under
+  Compose BOM 2026.06.01, Hilt 2.60.1 (2.51.1's KSP processor crashes under
   KSP2; 2.57.x's Gradle plugin predates AGP 9 — don't downgrade either). `MarkdownBody` parses the INITIAL content
   synchronously (`rememberMarkdownState(immediate = true)`) so MessageList's
   bottom pin measures real first-frame row heights; content changes (streaming)

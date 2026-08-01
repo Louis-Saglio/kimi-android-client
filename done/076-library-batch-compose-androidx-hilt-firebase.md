@@ -38,6 +38,26 @@ Deliberately NOT here: markdown renderer (077 — ticket 073 reserved that
 ladder rung its own ticket), OkHttp (078 — major version, isolated for
 regression bisecting).
 
+## Landed (2026-08-01)
+
+- All 11 catalog bumps landed in one pass: composeBom 2026.06.01
+  (compose-ui 1.11.4; material3 stays 1.4.0 — that IS the newest stable),
+  coreKtx 1.19.0, activityCompose 1.13.0, lifecycle 2.11.0,
+  navigationCompose 2.9.8, hiltNavigationCompose 1.4.0, coroutines 1.11.0,
+  kotlinxSerialization 1.11.0, datastore 1.2.1, firebaseBom 34.17.0,
+  testExtJunit 1.3.0. Hilt 2.60.1 had already landed in 075.
+- Versions re-verified against Google Maven / Maven Central at
+  implementation time — unchanged from the 2026-07-31 investigation.
+- **Zero compile breaks, zero source changes.** No new warnings beyond the
+  two pre-existing deprecations (`LocalClipboardManager` in `Bubbles.kt`,
+  `menuAnchor()` in `SessionsScreen.kt`) — still deprecation-level at
+  compose-ui 1.11.4 / material3 1.4.0, left alone (out of scope).
+- junit 4.13.2, googleServices 4.5.0, firebaseCrashlyticsPlugin 3.0.7
+  verified already-latest.
+- Verification: `testDebugUnitTest` + `assembleRelease` green (single 5 min
+  serialized run); Firebase robo **Passed** (MediumPhone.arm, API 36);
+  `kimi-android-client-main.apk` (3.9 MB) on the file server.
+
 ## Description
 
 1. Bump the versions above in `gradle/libs.versions.toml`.
@@ -48,11 +68,11 @@ regression bisecting).
 
 ## Acceptance criteria
 
-- [ ] Catalog shows the versions above.
-- [ ] `./gradlew testDebugUnitTest` + `assembleRelease` green.
-- [ ] Firebase robo green.
-- [ ] Release APK published to the file server per `AGENTS.md`.
-- [ ] `AGENTS.md` updated.
+- [x] Catalog shows the versions above.
+- [x] `./gradlew testDebugUnitTest` + `assembleRelease` green.
+- [x] Firebase robo green.
+- [x] Release APK published to the file server per `AGENTS.md`.
+- [x] `AGENTS.md` updated.
 
 ## Out of scope
 
