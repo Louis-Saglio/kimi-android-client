@@ -10,6 +10,7 @@ import fr.louissaglio.kimi.android.navigation.Subagent
 import fr.louissaglio.kimi.android.testutil.awaitState
 import fr.louissaglio.kimi.android.testutil.testChatRepository
 import fr.louissaglio.kimi.android.testutil.testSubagentStreamStore
+import fr.louissaglio.kimi.android.testutil.webSocketUpgradeResponse
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
@@ -89,7 +90,7 @@ class SubagentViewModelTest {
                 } else if (path.startsWith("/api/v1/ws")) {
                     // The store's keep-alive collection (ticket 064, started by
                     // onScreenStarted → pageOpened) idles on an open upgrade.
-                    MockResponse().withWebSocketUpgrade(object : WebSocketListener() {})
+                    webSocketUpgradeResponse(object : WebSocketListener() {})
                 } else {
                     MockResponse(code = 404)
                 }
@@ -212,7 +213,7 @@ class SubagentViewModelTest {
         // The cursor-less first call fetches the newest page.
         assertEquals(
             "/api/v1/sessions/session_1/transcript?agent_id=agent-12&page_size=20",
-            server.takeRequest(2, TimeUnit.SECONDS)?.path,
+            server.takeRequest(2, TimeUnit.SECONDS)?.target,
         )
 
         olderTranscriptBody = TRANSCRIPT_PAGE_T0
@@ -220,7 +221,7 @@ class SubagentViewModelTest {
         awaitState(viewModel.uiState) { it.items.size == 3 }
         assertEquals(
             "/api/v1/sessions/session_1/transcript?agent_id=agent-12&page_size=20&before_turn=t1",
-            server.takeRequest(2, TimeUnit.SECONDS)?.path,
+            server.takeRequest(2, TimeUnit.SECONDS)?.target,
         )
 
         assertEquals(
@@ -281,7 +282,7 @@ class SubagentViewModelTest {
         viewModel.onHistoryTopReached()
         assertEquals(
             "/api/v1/sessions/session_1/transcript?agent_id=agent-12&page_size=20&before_turn=t1",
-            server.takeRequest(2, TimeUnit.SECONDS)?.path,
+            server.takeRequest(2, TimeUnit.SECONDS)?.target,
         )
 
         // The sub-agent finishes while the older page is in flight: the reconcile

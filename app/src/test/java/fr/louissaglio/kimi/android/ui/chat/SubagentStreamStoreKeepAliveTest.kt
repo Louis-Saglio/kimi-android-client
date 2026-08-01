@@ -13,6 +13,7 @@ import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.testChatRepository
 import fr.louissaglio.kimi.android.testutil.testSessionsRepository
 import fr.louissaglio.kimi.android.testutil.testSubagentStreamStore
+import fr.louissaglio.kimi.android.testutil.webSocketUpgradeResponse
 import fr.louissaglio.kimi.android.testutil.testTodoParser
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.CoroutineScope
@@ -104,7 +105,7 @@ class SubagentStreamStoreKeepAliveTest {
                     path == "/api/v1/models" -> MockResponse(body = MODELS_BODY)
                     path == "/api/v1/config" -> MockResponse(body = CONFIG_BODY)
                     path.startsWith("/api/v1/ws") ->
-                        MockResponse().withWebSocketUpgrade(
+                        webSocketUpgradeResponse(
                             object : WebSocketListener() {
                                 override fun onOpen(webSocket: WebSocket, response: Response) {
                                     serverSocket = webSocket

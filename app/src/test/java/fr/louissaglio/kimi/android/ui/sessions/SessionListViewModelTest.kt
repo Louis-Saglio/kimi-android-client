@@ -235,7 +235,7 @@ class SessionListViewModelTest {
 
     @Test
     fun `a custom path typed before the workspaces land is preserved`() = runBlocking {
-        server.enqueue(MockResponse(body = WORKSPACES_BODY).setBodyDelay(300, TimeUnit.MILLISECONDS))
+        server.enqueue(MockResponse(body = WORKSPACES_BODY).newBuilder().bodyDelay(300, TimeUnit.MILLISECONDS).build())
 
         viewModel.onNewSessionClick()
         viewModel.onNewSessionCwdChange("/tmp/custom")

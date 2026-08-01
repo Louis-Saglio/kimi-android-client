@@ -7,6 +7,7 @@ import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.testChatRepository
 import fr.louissaglio.kimi.android.testutil.testChatTimeline
+import fr.louissaglio.kimi.android.testutil.webSocketUpgradeResponse
 import fr.louissaglio.kimi.android.ui.chat.ChatItem
 import fr.louissaglio.kimi.android.ui.chat.ToolStatus
 import java.time.Instant
@@ -64,7 +65,7 @@ class ChatRepositoryTest {
         settleMillis: Long = 0,
     ): List<SocketEvent> = coroutineScope {
         server.enqueue(
-            MockResponse().withWebSocketUpgrade(
+            webSocketUpgradeResponse(
                 object : WebSocketListener() {
                     override fun onOpen(webSocket: WebSocket, response: Response) {
                         frames.forEach(webSocket::send)
@@ -89,7 +90,7 @@ class ChatRepositoryTest {
     private fun wsUpgrade(
         clientFrames: CopyOnWriteArrayList<String>,
         onOpen: (WebSocket) -> Unit = {},
-    ): MockResponse = MockResponse().withWebSocketUpgrade(
+    ): MockResponse = webSocketUpgradeResponse(
         object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) = onOpen(webSocket)
 
@@ -270,9 +271,10 @@ class ChatRepositoryTest {
     @Test
     fun `downloadFile streams the bytes and the content type`() = runBlocking {
         server.enqueue(
-            MockResponse()
-                .setBody("hello file")
-                .setHeader("Content-Type", "text/plain; charset=utf-8"),
+            MockResponse.Builder()
+                .body("hello file")
+                .setHeader("Content-Type", "text/plain; charset=utf-8")
+                .build(),
         )
 
         val download = repository.downloadFile(settings(), "f_1").getOrThrow()
@@ -878,7 +880,7 @@ class ChatRepositoryTest {
     fun `socket subscribes and emits parsed events`() = runBlocking {
         val clientFrames = CopyOnWriteArrayList<String>()
         server.enqueue(
-            MockResponse().withWebSocketUpgrade(
+            webSocketUpgradeResponse(
                 object : WebSocketListener() {
                     override fun onOpen(webSocket: WebSocket, response: Response) {
                         webSocket.send("""{"type":"server_hello","payload":{"protocol_version":2,"heartbeat_ms":30000}}""")
@@ -918,7 +920,7 @@ class ChatRepositoryTest {
     fun `volatile frames do not advance the resume cursor`() = runBlocking {
         val clientFrames = CopyOnWriteArrayList<String>()
         server.enqueue(
-            MockResponse().withWebSocketUpgrade(
+            webSocketUpgradeResponse(
                 object : WebSocketListener() {
                     override fun onOpen(webSocket: WebSocket, response: Response) {
                         webSocket.send(
@@ -943,7 +945,7 @@ class ChatRepositoryTest {
             ),
         )
         server.enqueue(
-            MockResponse().withWebSocketUpgrade(
+            webSocketUpgradeResponse(
                 object : WebSocketListener() {
                     override fun onMessage(webSocket: WebSocket, text: String) {
                         clientFrames += text

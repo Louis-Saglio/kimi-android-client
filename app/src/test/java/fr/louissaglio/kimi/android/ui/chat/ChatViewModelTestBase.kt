@@ -13,6 +13,7 @@ import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.testChatRepository
 import fr.louissaglio.kimi.android.testutil.testSessionsRepository
 import fr.louissaglio.kimi.android.testutil.testSubagentStreamStore
+import fr.louissaglio.kimi.android.testutil.webSocketUpgradeResponse
 import fr.louissaglio.kimi.android.testutil.testTodoParser
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
@@ -292,7 +293,7 @@ abstract class ChatViewModelTestBase {
                     path == "/api/v1/config" -> MockResponse(body = configBody)
                     path.startsWith("/api/v1/ws") -> {
                         awaitStartupGetsQuiet()
-                        MockResponse().withWebSocketUpgrade(
+                        webSocketUpgradeResponse(
                             object : WebSocketListener() {
                                 override fun onOpen(webSocket: WebSocket, response: Response) {
                                     serverSocket = webSocket

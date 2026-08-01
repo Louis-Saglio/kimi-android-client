@@ -2,6 +2,7 @@ package fr.louissaglio.kimi.android.data.chat
 
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import fr.louissaglio.kimi.android.testutil.awaitCondition
+import fr.louissaglio.kimi.android.testutil.webSocketUpgradeResponse
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -41,7 +42,7 @@ class SessionSocketTest {
         settleMillis: Long = 0,
     ): List<SocketEvent> = coroutineScope {
         server.enqueue(
-            MockResponse().withWebSocketUpgrade(
+            webSocketUpgradeResponse(
                 object : WebSocketListener() {
                     override fun onOpen(webSocket: WebSocket, response: Response) {
                         frames.forEach(webSocket::send)
