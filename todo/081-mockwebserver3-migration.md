@@ -46,12 +46,36 @@ touch this codebase's 11 MockWebServer test files:
 
 ## Acceptance criteria
 
-- [ ] No `okhttp3.mockwebserver` imports remain; legacy artifact gone from
+- [x] No `okhttp3.mockwebserver` imports remain; legacy artifact gone from
   the dependency graph (`./gradlew :app:dependencies` spot-check).
-- [ ] `./gradlew testDebugUnitTest` green; androidTest green on Firebase
-  Test Lab.
-- [ ] Release APK published to the file server per `AGENTS.md` (only if
-  landed on a branch Louis runs).
+- [x] `./gradlew testDebugUnitTest` green; ~~androidTest green on Firebase
+  Test Lab~~ — androidTest **compile** proven (`assembleDebugAndroidTest`);
+  on-device execution pending Test Lab quota (~07:00 UTC reset, parent runs
+  it from main).
+- [ ] Release APK published to the file server per `AGENTS.md` — pending
+  (parent publishes from main post-merge).
+
+## Landed (2026-08-01, worktree agent/mockwebserver3)
+
+- Coordinate swapped: `com.squareup.okhttp3:mockwebserver3` (same `okhttp`
+  version ref) in catalog + `app/build.gradle.kts` (test + androidTest).
+- 15 test files migrated mechanically: imports to `mockwebserver3.*`,
+  `MockResponse().setBody(x)` → `MockResponse(body = x)`, `path` →
+  `target`, `setBodyDelay` → `newBuilder().bodyDelay().build()`. No
+  assertion changes.
+- `withWebSocketUpgrade` has no direct equivalent on the immutable
+  `MockResponse`: the 9 call sites now go through
+  `testutil/webSocketUpgradeResponse` (`MockResponses.kt` —
+  `MockResponse.Builder().webSocketUpgrade(l).build()`), keeping every
+  call-site shape (and the custom `Dispatcher` in `ChatViewModelTestBase`)
+  structurally identical.
+- Verification: `testDebugUnitTest` + `assembleRelease` +
+  `assembleDebugAndroidTest` green (6m 33s); dependency-graph spot-check
+  shows only `mockwebserver3:5.4.0`, zero legacy references.
+- Process note: the delegated agent was OOM-killed (06:08 kimi-web.service
+  restart) mid-migration; the parent completed the leftover API sites
+  (`withWebSocketUpgrade` ×9, `setBody`, `path` ×3, `setBodyDelay`), ran
+  the gates, and merged.
 
 ## Out of scope
 
