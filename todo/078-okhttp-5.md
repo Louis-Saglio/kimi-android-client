@@ -42,15 +42,17 @@ interceptor/timeout fixes, and years of HTTP/2 + WebSocket bug fixes.
 
 ## Acceptance criteria
 
-- [ ] Catalog at OkHttp 5.4.0, legacy `mockwebserver` coordinate unchanged.
-- [ ] `./gradlew testDebugUnitTest` green (the MockWebServer chat/session
-  harnesses are the regression net).
+- [x] Catalog at OkHttp 5.4.0, legacy `mockwebserver` coordinate unchanged.
+- [x] `./gradlew testDebugUnitTest` green (the MockWebServer chat/session
+  harnesses are the regression net). — 306 tests, 0 failures/errors, 0 skipped.
 - [ ] androidTest green on Firebase Test Lab (`SettingsFlowTest` uses
-  MockWebServer on-device) + robo.
+  MockWebServer on-device) + robo. — Not run: Test Lab daily quota was
+  exhausted at implementation time; deferred to post-merge verification.
 - [ ] Real-server smoke check: release APK connects to the live server,
   streams a chat turn over WebSocket, resumes after backgrounding. (Louis on
-  the published APK.)
-- [ ] Release APK published to the file server per `AGENTS.md`.
+  the published APK.) — Pending Louis.
+- [ ] Release APK published to the file server per `AGENTS.md`. — Not done in
+  the worktree (publishing happens from main after merge, per session scope).
 
 ## Out of scope
 
@@ -59,6 +61,27 @@ interceptor/timeout fixes, and years of HTTP/2 + WebSocket bug fixes.
 - Adopting OkHttp 5 features (zstd, new EventListener decisions,
   `Request.toCurl()`, interceptor client overrides) — none needed.
 - `okhttp-coroutines` artifact — not used today.
+
+## Landed (2026-08-01, worktree agent/okhttp-5)
+
+- `okhttp = "4.12.0" → "5.4.0"` in `gradle/libs.versions.toml` — the only
+  change; both `okhttp` and legacy `mockwebserver` coordinates ride the same
+  ref. Re-verified 5.4.0 as newest stable on Maven Central (metadata
+  lastUpdated 2026-06-08) and legacy `mockwebserver:5.4.0` still published.
+- Zero source/test changes: all 13 `okhttp3` imports and the 11
+  `okhttp3.mockwebserver.*` test files compiled unchanged against 5.4.0, as
+  predicted by the API review.
+- `testDebugUnitTest` green: 306 tests, 0 failures/errors/skips — includes
+  the `ChatViewModelTestBase` real-`SessionSocket`-vs-MockWebServer
+  reconnect/resume harnesses, so the 5.2.0 WebSocket client reimplementation
+  shows no regression at unit level.
+- `assembleRelease` green (R8 + resource shrinking, no new keep rules
+  needed), Crashlytics mapping uploaded. First attempt was killed mid-R8 by a
+  sibling agent's `./gradlew --stop` (the per-user stop clobbers parallel
+  `--no-daemon` builds in other worktrees); retried after 60 s, passed.
+- Runtime note: legacy `mockwebserver:5.4.0` now delegates to `mockwebserver3`
+  internally (its own transitive dep) while keeping the `okhttp3.mockwebserver`
+  package — the 081 migration remains a pure coordinate/API rename.
 
 ## Notes
 
