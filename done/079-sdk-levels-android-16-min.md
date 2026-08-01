@@ -30,6 +30,23 @@ No `Build.VERSION_CODES`/`SDK_INT` conditionals exist anywhere in `app/src`
 (verified 2026-07-31), so the minSdk bump is purely declarative — no code
 simplification follows from it.
 
+## Landed (2026-07-31)
+
+- `app/build.gradle.kts`: compileSdk 35 → 37, minSdk 31 → 36, targetSdk
+  35 → 36 (37 deliberately deferred to 080), Java 17 → 21
+  (`sourceCompatibility`/`targetCompatibility`/`jvmTarget`).
+- SDK install: the VPS `sdkmanager` (cmdline-tools 19.0) can't parse the
+  current repository XML (v4) and doesn't see `platforms;android-37` —
+  skipped it and let AGP 9.3.1's own SDK manager auto-install
+  `$ANDROID_HOME/platforms/android-37.0` at build time. Recorded in
+  `administration.md`.
+- Merged manifest verified: `minSdkVersion="36" targetSdkVersion="36"`.
+- No source changes — the codebase has no `SDK_INT`/`VERSION_CODES`
+  conditionals, and nothing at these levels needed adaptation.
+- Verification: `testDebugUnitTest` + `assembleRelease` green; Firebase robo
+  **Passed** on MediumPhone.arm API 36; `kimi-android-client-main.apk`
+  (3.8 MB) on the file server.
+
 ## Description
 
 In `app/build.gradle.kts`:
@@ -46,13 +63,13 @@ In `app/build.gradle.kts`:
 
 ## Acceptance criteria
 
-- [ ] `app/build.gradle.kts` shows compileSdk 37, minSdk 36, targetSdk 36,
+- [x] `app/build.gradle.kts` shows compileSdk 37, minSdk 36, targetSdk 36,
   Java 21.
-- [ ] `./gradlew testDebugUnitTest` + `assembleRelease` green.
-- [ ] Firebase robo green on an API 36 (or newer) device, e.g.
+- [x] `./gradlew testDebugUnitTest` + `assembleRelease` green.
+- [x] Firebase robo green on an API 36 (or newer) device, e.g.
   `--device model=MediumPhone.arm,version=36,locale=en,orientation=portrait`.
-- [ ] Release APK published to the file server per `AGENTS.md`.
-- [ ] `AGENTS.md` updated.
+- [x] Release APK published to the file server per `AGENTS.md`.
+- [x] `AGENTS.md` updated.
 
 ## Out of scope
 

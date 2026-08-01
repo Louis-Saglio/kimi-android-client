@@ -32,15 +32,18 @@ drift check keeps the two in sync.
 - MVVM: one immutable `UiState` per screen as `StateFlow`, one-shot effects via
   `Channel`. ALL one-shots (snackbars, open-file intents) go through the effect
   channel — composables never call `snackbarHostState` or do I/O directly.
-- minSdk 31, targetSdk 35 (SDK-level bumps are ticket 079), compileSdk 35,
-  AGP 9.3.1, Gradle 9.6.1, KSP 2.3.10 (ticket 075). AGP 9's built-in Kotlin
-  compiles the Kotlin sources — `org.jetbrains.kotlin.android` is NOT applied
-  (applying it errors out); KGP 2.4.10/KSP 2.3.10 are pinned via a
-  `buildscript { classpath(...) }` block in the root `build.gradle.kts` (the
-  documented AGP 9 override; its built-in baseline is KGP 2.2.10). Escape
-  hatches until AGP 10: `android.builtInKotlin=false`, `android.newDsl=false`.
-  On the VPS, build with `--max-workers=1`: the first parallel build on this
-  toolchain exceeded the 5 GB kimi-web cgroup and was OOM-killed.
+- minSdk 36 (Android 16+ only), targetSdk 36, compileSdk 37, Java 21
+  (ticket 079), AGP 9.3.1, Gradle 9.6.1, KSP 2.3.10 (ticket 075). AGP 9's
+  built-in Kotlin compiles the Kotlin sources — `org.jetbrains.kotlin.android`
+  is NOT applied (applying it errors out); KGP 2.4.10/KSP 2.3.10 are pinned
+  via a `buildscript { classpath(...) }` block in the root `build.gradle.kts`
+  (the documented AGP 9 override; its built-in baseline is KGP 2.2.10).
+  Escape hatches until AGP 10: `android.builtInKotlin=false`,
+  `android.newDsl=false`. The VPS cmdline-tools are too stale to see new SDK
+  packages — let AGP auto-install platforms at build time (android-37.0 got
+  installed that way). On the VPS, build with `--max-workers=1`: the first
+  parallel build on this toolchain exceeded the 5 GB kimi-web cgroup and was
+  OOM-killed.
 - Crash reporting: Firebase Crashlytics in the default VPS project
   (`kimi-code-android-client`, Android app `fr.louissaglio.kimi.android`,
   `app/google-services.json` committed). The SDK auto-initializes — no app
