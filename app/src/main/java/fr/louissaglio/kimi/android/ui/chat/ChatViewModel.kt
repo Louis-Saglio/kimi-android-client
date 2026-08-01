@@ -4,6 +4,7 @@ import android.net.Uri
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.navigation.toRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
 import fr.louissaglio.kimi.android.data.attachments.AttachmentStore
 import fr.louissaglio.kimi.android.data.toUserMessage
@@ -23,6 +24,7 @@ import fr.louissaglio.kimi.android.data.sessions.displayName
 import fr.louissaglio.kimi.android.data.sessions.displayNameFor
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.di.StreamCoalesceWindowMillis
+import fr.louissaglio.kimi.android.navigation.Chat
 import fr.louissaglio.kimi.android.ui.common.formatTokenCount
 import javax.inject.Inject
 import kotlinx.coroutines.Job
@@ -38,13 +40,13 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 @HiltViewModel
-class ChatViewModel @Inject constructor(
+class ChatViewModel internal constructor(
     private val chatRepository: ChatRepository,
     private val sessionsRepository: SessionsRepository,
     private val settingsRepository: SettingsRepository,
     private val attachmentStore: AttachmentStore,
     private val subagentStore: SubagentStreamStore,
-    savedStateHandle: SavedStateHandle,
+    private val routeArgs: Chat,
     private val todoParser: TodoParser,
     // Default mirrors the DI value (AppModule) for direct construction in tests;
     // pass 0 to publish every delta immediately (the pre-conflation behavior).
@@ -52,12 +54,38 @@ class ChatViewModel @Inject constructor(
     private val streamCoalesceWindowMillis: Long = 100L,
 ) : ViewModel() {
 
-    private val sessionId: String = checkNotNull(savedStateHandle["sessionId"])
+    // Production entry point (Hilt): the destination's SavedStateHandle is decoded
+    // from the typed route (ticket 083). Local unit tests call the primary
+    // constructor with the route object directly instead — toRoute's decode path
+    // needs a real android.os.Bundle, and the JVM android.jar in local tests is a
+    // stub that silently decodes every argument to null.
+    @Inject
+    constructor(
+        chatRepository: ChatRepository,
+        sessionsRepository: SessionsRepository,
+        settingsRepository: SettingsRepository,
+        attachmentStore: AttachmentStore,
+        subagentStore: SubagentStreamStore,
+        savedStateHandle: SavedStateHandle,
+        todoParser: TodoParser,
+        @StreamCoalesceWindowMillis streamCoalesceWindowMillis: Long,
+    ) : this(
+        chatRepository,
+        sessionsRepository,
+        settingsRepository,
+        attachmentStore,
+        subagentStore,
+        savedStateHandle.toRoute<Chat>(),
+        todoParser,
+        streamCoalesceWindowMillis,
+    )
+
+    private val sessionId: String = routeArgs.sessionId
 
     // Optional navigation arguments from the session list: they let the top bar show
     // the right label immediately, before [refreshSessionInfo] confirms it.
-    private val seedTitle: String? = savedStateHandle["title"]
-    private val seedCwd: String? = savedStateHandle["cwd"]
+    private val seedTitle: String? = routeArgs.title
+    private val seedCwd: String? = routeArgs.cwd
 
     /** One pending permission request, surfaced as the approval card above the input row. */
     data class PendingApproval(

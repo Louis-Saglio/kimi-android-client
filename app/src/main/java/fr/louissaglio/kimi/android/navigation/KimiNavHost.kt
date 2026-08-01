@@ -1,94 +1,74 @@
 package fr.louissaglio.kimi.android.navigation
 
-import android.net.Uri
 import androidx.compose.runtime.Composable
-import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import androidx.navigation.navArgument
-import fr.louissaglio.kimi.android.data.sessions.Session
+import androidx.navigation.toRoute
 import fr.louissaglio.kimi.android.ui.chat.ChatScreen
 import fr.louissaglio.kimi.android.ui.chat.SubagentScreen
 import fr.louissaglio.kimi.android.ui.sessions.SessionsScreen
 import fr.louissaglio.kimi.android.ui.settings.SettingsScreen
+import kotlinx.serialization.Serializable
 
-object KimiRoutes {
-    const val Sessions = "sessions"
-    const val Settings = "settings"
+// Type-safe routes (ticket 083): the serializers own the route patterns and the Uri
+// encoding — no string templates, navArgument blocks, or hand-rolled Uri.encode.
+// ViewModels read the args back with SavedStateHandle.toRoute<T>().
 
-    // title/cwd ride along as optional query args so the chat top bar can show the
-    // label the session list already had, before the session fetch lands.
-    const val Chat = "chat/{sessionId}?title={title}&cwd={cwd}"
+@Serializable
+object Sessions
 
-    // Read-only sub-agent stream page (ticket 045); both ids reach the ViewModel
-    // through its SavedStateHandle.
-    const val Subagent = "subagent/{sessionId}/{subagentId}"
+@Serializable
+object Settings
 
-    fun chat(session: Session): String {
-        val route = StringBuilder("chat/").append(Uri.encode(session.id))
-        val query = buildList {
-            session.title?.let { add("title=" + Uri.encode(it)) }
-            session.cwd?.let { add("cwd=" + Uri.encode(it)) }
-        }
-        if (query.isNotEmpty()) route.append('?').append(query.joinToString("&"))
-        return route.toString()
-    }
+/** title/cwd ride along as optional query args so the chat top bar can show the
+ * label the session list already had, before the session fetch lands. */
+@Serializable
+data class Chat(val sessionId: String, val title: String? = null, val cwd: String? = null)
 
-    fun subagent(sessionId: String, subagentId: String): String =
-        "subagent/${Uri.encode(sessionId)}/${Uri.encode(subagentId)}"
-}
+/** Read-only sub-agent stream page (ticket 045); both ids reach the ViewModel
+ * through its SavedStateHandle. */
+@Serializable
+data class Subagent(val sessionId: String, val subagentId: String)
 
 @Composable
 fun KimiNavHost() {
     val navController = rememberNavController()
-    NavHost(navController = navController, startDestination = KimiRoutes.Sessions) {
-        composable(KimiRoutes.Sessions) {
+    NavHost(navController = navController, startDestination = Sessions) {
+        composable<Sessions> {
             SessionsScreen(
-                onNavigateToSettings = { navController.navigate(KimiRoutes.Settings) },
+                onNavigateToSettings = { navController.navigate(Settings) },
                 // launchSingleTop: a fast double-tap must not stack the destination (071).
                 onNavigateToChat = { session ->
-                    navController.navigate(KimiRoutes.chat(session)) { launchSingleTop = true }
-                },
-            )
-        }
-        composable(KimiRoutes.Settings) {
-            SettingsScreen(onNavigateBack = { navController.popBackStack() })
-        }
-        composable(
-            KimiRoutes.Chat,
-            arguments = listOf(
-                navArgument("title") {
-                    type = NavType.StringType
-                    nullable = true
-                    defaultValue = null
-                },
-                navArgument("cwd") {
-                    type = NavType.StringType
-                    nullable = true
-                    defaultValue = null
-                },
-            ),
-        ) {
-            // sessionId/title/cwd reach the ViewModel through its SavedStateHandle;
-            // the screen itself needs nothing from the route.
-            ChatScreen(
-                onNavigateBack = { navController.popBackStack() },
-                onNavigateToSubagent = { sessionId, subagentId ->
-                    navController.navigate(KimiRoutes.subagent(sessionId, subagentId)) {
+                    navController.navigate(Chat(session.id, session.title, session.cwd)) {
                         launchSingleTop = true
                     }
                 },
             )
         }
-        composable(KimiRoutes.Subagent) { entry ->
+        composable<Settings> {
+            SettingsScreen(onNavigateBack = { navController.popBackStack() })
+        }
+        // sessionId/title/cwd reach the ViewModel through its SavedStateHandle;
+        // the screen itself needs nothing from the route.
+        composable<Chat> {
+            ChatScreen(
+                onNavigateBack = { navController.popBackStack() },
+                onNavigateToSubagent = { sessionId, subagentId ->
+                    navController.navigate(Subagent(sessionId, subagentId)) {
+                        launchSingleTop = true
+                    }
+                },
+            )
+        }
+        composable<Subagent> { entry ->
             // Nested sub-agents (ticket 071): the page can navigate one level deeper,
-            // into another sub-agent of the SAME session (from this entry's arguments).
-            val sessionId = entry.arguments?.getString("sessionId").orEmpty()
+            // into another sub-agent of the SAME session (from this entry's route).
+            val sessionId = entry.toRoute<Subagent>().sessionId
             SubagentScreen(
                 onNavigateBack = { navController.popBackStack() },
                 onOpenSubagent = { subagentId ->
-                    navController.navigate(KimiRoutes.subagent(sessionId, subagentId)) {
+                    navController.navigate(Subagent(sessionId, subagentId)) {
                         launchSingleTop = true
                     }
                 },

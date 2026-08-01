@@ -46,15 +46,56 @@ identical:
 
 ## Acceptance criteria
 
-- [ ] No string route templates, `Uri.encode`, or `navArgument` blocks
+- [x] No string route templates, `Uri.encode`, or `navArgument` blocks
   remain; all four destinations use `@Serializable` routes.
 - [ ] Navigation flows verified on-device/emulator: sessions → chat,
   chat → sub-agent page, nested sub-agent (same session), settings, back.
-- [ ] A session whose title/cwd contains `/ & # % ?` and spaces shows the
+  _(Not run — no emulator/Test Lab quota in the worktree wave; see Landed.)_
+- [x] A session whose title/cwd contains `/ & # % ?` and spaces shows the
   correct title in the chat top bar (the case hand-rolled encoding breaks
-  on).
+  on). _(Verified at unit level: `RoutesTest` kotlinx round-trips of exactly
+  those characters + the existing seed-to-top-bar ViewModel tests. The
+  URI encode/decode leg itself is owned by the nav library on-device.)_
 - [ ] `./gradlew testDebugUnitTest` green + Firebase robo green.
+  _(testDebugUnitTest green — 308 tests, 0 failures. Robo not run: daily
+  Test Lab quota exhausted, per wave instructions.)_
 - [ ] Release APK published to the file server per `AGENTS.md`.
+  _(Deferred to the merge wave, per wave instructions; `assembleRelease`
+  is green in the worktree.)_
+
+## Landed (2026-08-01, worktree agent/type-safe-nav)
+
+- `navigation/KimiNavHost.kt`: `KimiRoutes` object, string templates,
+  `Uri.encode` builders and `navArgument` blocks deleted; routes are now
+  `@Serializable object Sessions`/`Settings`,
+  `@Serializable data class Chat(sessionId, title? = null, cwd? = null)` and
+  `@Serializable data class Subagent(sessionId, subagentId)`. Destinations
+  use `composable<T>`, navigation calls pass route objects, and the nested
+  sub-agent page reads its sessionId via `entry.toRoute<Subagent>()`.
+  `launchSingleTop = true` (ticket 071) kept on all three navigate calls.
+- `ChatViewModel` / `SubagentViewModel`: production arg read is
+  `savedStateHandle.toRoute<Chat>()` / `toRoute<Subagent>()`
+  (`androidx.navigation.toRoute`) in the `@Inject` constructor. **Deviation
+  from the ticket's literal shape:** each ViewModel now has an `internal`
+  primary constructor taking the decoded route object, and the `@Inject`
+  secondary constructor just delegates with the `toRoute` call. Reason:
+  `toRoute`'s decode path round-trips every arg through
+  `bundleOf` + `NavType.get(Bundle)` (`SavedStateHandleArgStore`), and local
+  unit tests run against a stub `android.os.Bundle`
+  (`unitTests.isReturnDefaultValues = true`), which silently decodes every
+  argument to null — 68 tests failed that way on the first run (Google's own
+  tests for this API use Robolectric, which this project doesn't have and the
+  ticket forbids adding). Tests now pass route objects directly; no
+  `SavedStateHandle` is constructed in tests anymore.
+- Tests: `ChatViewModelTestBase`, `ChatViewModelTest`, `SubagentViewModelTest`,
+  `SubagentStreamStoreKeepAliveTest` migrated from hand-written
+  `SavedStateHandle(mapOf("sessionId" to …))` to route objects. New
+  `navigation/RoutesTest` covers kotlinx round-trips with `/ & # % ?` and
+  spaces. No `SavedStateHandle`-building test helper remains.
+- Verified: `./gradlew testDebugUnitTest` green (308 tests, 0 failures) and
+  `./gradlew assembleRelease` green (Hilt/KSP accepts the constructor split,
+  R8 OK). Not verified: on-device navigation flows, Firebase robo, APK
+  publish (wave rules — merge wave owns them).
 
 ## Out of scope
 

@@ -2,11 +2,11 @@ package fr.louissaglio.kimi.android.ui.chat
 
 import androidx.datastore.preferences.core.preferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
-import androidx.lifecycle.SavedStateHandle
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
+import fr.louissaglio.kimi.android.navigation.Subagent
 import fr.louissaglio.kimi.android.testutil.awaitState
 import fr.louissaglio.kimi.android.testutil.testChatRepository
 import fr.louissaglio.kimi.android.testutil.testSubagentStreamStore
@@ -121,7 +121,7 @@ class SubagentViewModelTest {
         store,
         repository,
         settingsRepository,
-        SavedStateHandle(mapOf("sessionId" to "session_1", "subagentId" to subagentId)),
+        Subagent("session_1", subagentId),
     )
 
     @Test

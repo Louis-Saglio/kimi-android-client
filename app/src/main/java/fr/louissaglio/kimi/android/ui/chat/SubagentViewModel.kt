@@ -3,11 +3,13 @@ package fr.louissaglio.kimi.android.ui.chat
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.navigation.toRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.TranscriptPage
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.data.toUserMessage
+import fr.louissaglio.kimi.android.navigation.Subagent
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -28,15 +30,28 @@ import kotlinx.coroutines.launch
  * the store on every cursor replay.
  */
 @HiltViewModel
-class SubagentViewModel @Inject constructor(
+class SubagentViewModel internal constructor(
     private val subagentStore: SubagentStreamStore,
     private val chatRepository: ChatRepository,
     private val settingsRepository: SettingsRepository,
-    savedStateHandle: SavedStateHandle,
+    private val routeArgs: Subagent,
 ) : ViewModel() {
 
-    private val sessionId: String = checkNotNull(savedStateHandle["sessionId"])
-    private val subagentId: String = checkNotNull(savedStateHandle["subagentId"])
+    // Production entry point (Hilt): the destination's SavedStateHandle is decoded
+    // from the typed route (ticket 083). Local unit tests call the primary
+    // constructor with the route object directly instead — toRoute's decode path
+    // needs a real android.os.Bundle, and the JVM android.jar in local tests is a
+    // stub that silently decodes every argument to null.
+    @Inject
+    constructor(
+        subagentStore: SubagentStreamStore,
+        chatRepository: ChatRepository,
+        settingsRepository: SettingsRepository,
+        savedStateHandle: SavedStateHandle,
+    ) : this(subagentStore, chatRepository, settingsRepository, savedStateHandle.toRoute<Subagent>())
+
+    private val sessionId: String = routeArgs.sessionId
+    private val subagentId: String = routeArgs.subagentId
 
     /** [status] null = the store has no entry for [subagentId] yet (its spawn predates
      * the app's subscription and the transcript fetch has not landed): the screen

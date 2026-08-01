@@ -3,12 +3,12 @@ package fr.louissaglio.kimi.android.ui.chat
 import android.net.Uri
 import androidx.datastore.preferences.core.preferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
-import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import fr.louissaglio.kimi.android.data.attachments.AttachmentStore
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
+import fr.louissaglio.kimi.android.navigation.Chat
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.testChatRepository
 import fr.louissaglio.kimi.android.testutil.testSessionsRepository
@@ -319,7 +319,7 @@ abstract class ChatViewModelTestBase {
             settingsRepository,
             FakeAttachmentStore(),
             subagentStore,
-            SavedStateHandle(mapOf("sessionId" to "session_1")),
+            Chat("session_1"),
             todoParser = testTodoParser(),
             // The suite asserts per-event application: 0 publishes every delta on
             // arrival (the pre-conflation behavior), no timer involved.
@@ -357,7 +357,7 @@ abstract class ChatViewModelTestBase {
         settingsRepository,
         FakeAttachmentStore(),
         subagentStore,
-        SavedStateHandle(mapOf("sessionId" to "session_1")),
+        Chat("session_1"),
         todoParser = testTodoParser(),
         streamCoalesceWindowMillis = streamCoalesceWindowMillis,
     ).also { startedViewModels += it }

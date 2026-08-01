@@ -2,9 +2,9 @@ package fr.louissaglio.kimi.android.ui.chat
 
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
-import androidx.lifecycle.SavedStateHandle
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
 import fr.louissaglio.kimi.android.data.chat.ServerModel
+import fr.louissaglio.kimi.android.navigation.Chat
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.awaitState
 import fr.louissaglio.kimi.android.testutil.testChatRepository
@@ -890,13 +890,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             settingsRepository,
             FakeAttachmentStore(),
             subagentStore,
-            SavedStateHandle(
-                mapOf(
-                    "sessionId" to "session_1",
-                    "title" to "Fix the bug",
-                    "cwd" to "/home/ubuntu/kimi-android-client",
-                ),
-            ),
+            Chat("session_1", title = "Fix the bug", cwd = "/home/ubuntu/kimi-android-client"),
             todoParser = testTodoParser(),
         )
 
@@ -912,9 +906,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             settingsRepository,
             FakeAttachmentStore(),
             subagentStore,
-            SavedStateHandle(
-                mapOf("sessionId" to "session_1", "cwd" to "/home/ubuntu/kimi-android-client"),
-            ),
+            Chat("session_1", cwd = "/home/ubuntu/kimi-android-client"),
             todoParser = testTodoParser(),
         )
 
@@ -1004,7 +996,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             settingsRepository,
             FakeAttachmentStore(),
             subagentStore,
-            SavedStateHandle(mapOf("sessionId" to "session_1")),
+            Chat("session_1"),
             todoParser = testTodoParser(),
         )
         startedViewModels += recreated
@@ -1035,7 +1027,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             settingsRepository,
             FakeAttachmentStore(),
             subagentStore,
-            SavedStateHandle(mapOf("sessionId" to "session_1")),
+            Chat("session_1"),
             todoParser = testTodoParser(),
         )
         startedViewModels += recreated
