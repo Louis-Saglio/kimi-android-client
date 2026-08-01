@@ -21,8 +21,8 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
+import mockwebserver3.MockResponse
+import mockwebserver3.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -63,7 +63,7 @@ class SessionListViewModelTest {
     fun tearDown() {
         Dispatchers.resetMain()
         appScope.cancel()
-        server.shutdown()
+        server.close()
     }
 
     @Test
@@ -89,7 +89,7 @@ class SessionListViewModelTest {
         assertTrue(state.showCreateDialog)
         assertFalse(state.isCreating)
         // The only request is the best-effort workspaces fetch from opening the dialog.
-        assertEquals("/api/v1/workspaces", server.takeRequest(5, TimeUnit.SECONDS)!!.path)
+        assertEquals("/api/v1/workspaces", server.takeRequest(5, TimeUnit.SECONDS)!!.target)
         assertEquals(1, server.requestCount)
     }
 
@@ -101,7 +101,7 @@ class SessionListViewModelTest {
         viewModel.onCreateSessionConfirm()
 
         assertEquals("Path must be absolute", viewModel.uiState.value.newSessionCwdError)
-        assertEquals("/api/v1/workspaces", server.takeRequest(5, TimeUnit.SECONDS)!!.path)
+        assertEquals("/api/v1/workspaces", server.takeRequest(5, TimeUnit.SECONDS)!!.target)
         assertEquals(1, server.requestCount)
     }
 
@@ -119,9 +119,9 @@ class SessionListViewModelTest {
     @Test
     fun `successful confirm posts creation, dismisses dialog and emits SessionCreated`() = runBlocking {
         // The workspaces fetch fails so the dialog stays on the fallback field.
-        server.enqueue(MockResponse().setResponseCode(500))
+        server.enqueue(MockResponse(code = 500))
         server.enqueue(
-            MockResponse().setBody(
+            MockResponse(body = 
                 """{"code":0,"msg":"success","data":{"id":"session_new","title":"My session",""" +
                     """"updated_at":"2026-07-19T05:29:30.815Z","busy":false,""" +
                     """"metadata":{"cwd":"/tmp/spike-008"}},"request_id":"r"}""",
@@ -137,14 +137,14 @@ class SessionListViewModelTest {
             // Wait for the workspaces fetch so MockWebServer hands the 500 to the
             // GET and the create body to the POST (responses are assigned in
             // request-arrival order).
-            assertEquals("/api/v1/workspaces", server.takeRequest(5, TimeUnit.SECONDS)!!.path)
+            assertEquals("/api/v1/workspaces", server.takeRequest(5, TimeUnit.SECONDS)!!.target)
             viewModel.onCreateSessionConfirm()
 
             val request = server.takeRequest(5, TimeUnit.SECONDS)!!
             assertEquals("POST", request.method)
-            assertEquals("/api/v1/sessions", request.path)
+            assertEquals("/api/v1/sessions", request.target)
             // The path is trimmed before sending.
-            assertEquals("""{"metadata":{"cwd":"/tmp/spike-008"},"title":"My session"}""", request.body.readUtf8())
+            assertEquals("""{"metadata":{"cwd":"/tmp/spike-008"},"title":"My session"}""", request.body!!.utf8())
 
             awaitState(viewModel.uiState) { !it.showCreateDialog && !it.isCreating }
             awaitCondition { effects.isNotEmpty() }
@@ -159,9 +159,9 @@ class SessionListViewModelTest {
 
     @Test
     fun `server failure keeps the dialog open with input intact and emits CreateFailed`() = runBlocking {
-        server.enqueue(MockResponse().setResponseCode(500))
+        server.enqueue(MockResponse(code = 500))
         server.enqueue(
-            MockResponse().setBody(
+            MockResponse(body = 
                 """{"code":40409,"msg":"workspace root /tmp/nope does not exist","data":null,"request_id":"r"}""",
             ),
         )
@@ -191,13 +191,13 @@ class SessionListViewModelTest {
 
     @Test
     fun `opening the dialog prefills the most recently used workspace root`() = runBlocking {
-        server.enqueue(MockResponse().setBody(WORKSPACES_BODY))
+        server.enqueue(MockResponse(body = WORKSPACES_BODY))
 
         viewModel.onNewSessionClick()
 
         awaitState(viewModel.uiState) { it.workspaces != null }
         val state = viewModel.uiState.value
-        assertEquals("/api/v1/workspaces", server.takeRequest(5, TimeUnit.SECONDS)!!.path)
+        assertEquals("/api/v1/workspaces", server.takeRequest(5, TimeUnit.SECONDS)!!.target)
         // Sorted client-side by last_opened_at desc; the newest root becomes the default.
         assertEquals(listOf("wd_new", "wd_old"), state.workspaces!!.map { it.id })
         assertEquals("/home/ubuntu/kimi-android-client", state.newSessionCwd)
@@ -205,11 +205,11 @@ class SessionListViewModelTest {
 
     @Test
     fun `failed workspaces fetch keeps the plain field with the default cwd`() = runBlocking {
-        server.enqueue(MockResponse().setResponseCode(500))
+        server.enqueue(MockResponse(code = 500))
 
         viewModel.onNewSessionClick()
 
-        assertEquals("/api/v1/workspaces", server.takeRequest(5, TimeUnit.SECONDS)!!.path)
+        assertEquals("/api/v1/workspaces", server.takeRequest(5, TimeUnit.SECONDS)!!.target)
         // Let the failed fetch land; no error is surfaced and nothing changes.
         delay(200)
         val state = viewModel.uiState.value
@@ -221,7 +221,7 @@ class SessionListViewModelTest {
     @Test
     fun `empty workspace list keeps the plain field with the default cwd`() = runBlocking {
         server.enqueue(
-            MockResponse().setBody("""{"code":0,"msg":"success","data":{"items":[]},"request_id":"r"}"""),
+            MockResponse(body = """{"code":0,"msg":"success","data":{"items":[]},"request_id":"r"}"""),
         )
 
         viewModel.onNewSessionClick()
@@ -235,7 +235,7 @@ class SessionListViewModelTest {
 
     @Test
     fun `a custom path typed before the workspaces land is preserved`() = runBlocking {
-        server.enqueue(MockResponse().setBody(WORKSPACES_BODY).setBodyDelay(300, TimeUnit.MILLISECONDS))
+        server.enqueue(MockResponse(body = WORKSPACES_BODY).setBodyDelay(300, TimeUnit.MILLISECONDS))
 
         viewModel.onNewSessionClick()
         viewModel.onNewSessionCwdChange("/tmp/custom")
@@ -246,9 +246,9 @@ class SessionListViewModelTest {
 
     @Test
     fun `selecting a workspace then confirming posts its root as cwd`() = runBlocking {
-        server.enqueue(MockResponse().setBody(WORKSPACES_BODY))
+        server.enqueue(MockResponse(body = WORKSPACES_BODY))
         server.enqueue(
-            MockResponse().setBody(
+            MockResponse(body = 
                 """{"code":0,"msg":"success","data":{"id":"session_new","title":"",""" +
                     """"updated_at":"2026-07-19T05:29:30.815Z","busy":false,""" +
                     """"metadata":{"cwd":"/tmp/old"}},"request_id":"r"}""",
@@ -264,16 +264,16 @@ class SessionListViewModelTest {
         server.takeRequest(5, TimeUnit.SECONDS) // workspaces fetch
         val request = server.takeRequest(5, TimeUnit.SECONDS)!!
         assertEquals("POST", request.method)
-        assertEquals("""{"metadata":{"cwd":"/tmp/old"}}""", request.body.readUtf8())
+        assertEquals("""{"metadata":{"cwd":"/tmp/old"}}""", request.body!!.utf8())
     }
 
     @Test
     fun `onEndReached appends the next page deduplicated and stops when has_more is false`() = runBlocking {
-        server.enqueue(MockResponse().setBody(pageBody(hasMore = true, "session_1", "session_2")))
+        server.enqueue(MockResponse(body = pageBody(hasMore = true, "session_1", "session_2")))
         viewModel.onScreenStarted()
         awaitState(viewModel.uiState) { it.sessions != null }
         // Page 2 overlaps page 1 by one row; the duplicate must not appear twice.
-        server.enqueue(MockResponse().setBody(pageBody(hasMore = false, "session_2", "session_3")))
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_2", "session_3")))
 
         viewModel.onEndReached()
 
@@ -283,16 +283,16 @@ class SessionListViewModelTest {
         assertFalse(state.hasMore)
         assertFalse(state.isLoadingMore)
         assertNull(state.loadMoreError)
-        assertEquals("/api/v1/sessions", server.takeRequest().path)
-        assertEquals("/api/v1/sessions?before_id=session_2", server.takeRequest().path)
+        assertEquals("/api/v1/sessions", server.takeRequest().target)
+        assertEquals("/api/v1/sessions?before_id=session_2", server.takeRequest().target)
     }
 
     @Test
     fun `failed next page keeps the loaded list and exposes a footer error`() = runBlocking {
-        server.enqueue(MockResponse().setBody(pageBody(hasMore = true, "session_1", "session_2")))
+        server.enqueue(MockResponse(body = pageBody(hasMore = true, "session_1", "session_2")))
         viewModel.onScreenStarted()
         awaitState(viewModel.uiState) { it.sessions != null }
-        server.enqueue(MockResponse().setResponseCode(500))
+        server.enqueue(MockResponse(code = 500))
 
         viewModel.onEndReached()
 
@@ -307,7 +307,7 @@ class SessionListViewModelTest {
 
     @Test
     fun `onEndReached is a no-op when the server reported no more pages`() = runBlocking {
-        server.enqueue(MockResponse().setBody(pageBody(hasMore = false, "session_1")))
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1")))
         viewModel.onScreenStarted()
         awaitState(viewModel.uiState) { it.sessions != null }
 
@@ -318,13 +318,13 @@ class SessionListViewModelTest {
 
     @Test
     fun `refresh after paging resets to the first page`() = runBlocking {
-        server.enqueue(MockResponse().setBody(pageBody(hasMore = true, "session_1", "session_2")))
+        server.enqueue(MockResponse(body = pageBody(hasMore = true, "session_1", "session_2")))
         viewModel.onScreenStarted()
         awaitState(viewModel.uiState) { it.sessions != null }
-        server.enqueue(MockResponse().setBody(pageBody(hasMore = false, "session_3")))
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_3")))
         viewModel.onEndReached()
         awaitState(viewModel.uiState) { it.sessions?.size == 3 }
-        server.enqueue(MockResponse().setBody(pageBody(hasMore = true, "session_9")))
+        server.enqueue(MockResponse(body = pageBody(hasMore = true, "session_9")))
 
         viewModel.onPullToRefresh()
 
@@ -333,7 +333,7 @@ class SessionListViewModelTest {
         assertTrue(state.hasMore)
         assertNull(state.loadMoreError)
         // The refresh hit the endpoint without a cursor.
-        val paths = (1..3).map { server.takeRequest(5, TimeUnit.SECONDS)!!.path }
+        val paths = (1..3).map { server.takeRequest(5, TimeUnit.SECONDS)!!.target }
         assertEquals("/api/v1/sessions", paths[0])
         assertEquals("/api/v1/sessions?before_id=session_2", paths[1])
         assertEquals("/api/v1/sessions", paths[2])
@@ -342,7 +342,7 @@ class SessionListViewModelTest {
     @Test
     fun `approval flag comes from the latest fetched payload only`() = runBlocking {
         server.enqueue(
-            MockResponse().setBody(
+            MockResponse(body = 
                 """{"code":0,"msg":"success","data":{"items":[
                   {"id":"session_1","title":"Blocked","updated_at":"2026-07-17T03:48:31.606Z",
                    "busy":true,"pending_interaction":"approval","metadata":{"cwd":"/tmp/a"}},
@@ -359,7 +359,7 @@ class SessionListViewModelTest {
 
         // After the approval is resolved, the next refresh must clear the badge — the
         // state carries the server value only, nothing is latched locally.
-        server.enqueue(MockResponse().setBody(pageBody(hasMore = false, "session_1", "session_2")))
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1", "session_2")))
         viewModel.onPullToRefresh()
 
         awaitState(viewModel.uiState) { it.sessions?.none { s -> s.isAwaitingApproval } == true }

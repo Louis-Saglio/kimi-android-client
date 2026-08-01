@@ -14,8 +14,8 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextReplacement
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import java.util.concurrent.TimeUnit
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
+import mockwebserver3.MockResponse
+import mockwebserver3.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Before
@@ -39,24 +39,24 @@ class SettingsFlowTest {
     fun setUp() = server.start()
 
     @After
-    fun tearDown() = server.shutdown()
+    fun tearDown() = server.close()
 
     @Test
     fun validTokenReportsConnectionSuccess() {
-        server.enqueue(MockResponse().setBody("""{"code":0,"msg":"success","data":{"ok":true}}"""))
+        server.enqueue(MockResponse(body = """{"code":0,"msg":"success","data":{"ok":true}}"""))
         openSettingsAndType(serverBaseUrl(), token = "tok-abc-123")
 
         clickTestConnection()
 
         waitForText("Connection successful")
         val recorded = server.takeRequest(5, TimeUnit.SECONDS)!!
-        assertEquals("/api/v1/meta", recorded.path)
-        assertEquals("Bearer tok-abc-123", recorded.getHeader("Authorization"))
+        assertEquals("/api/v1/meta", recorded.target)
+        assertEquals("Bearer tok-abc-123", recorded.headers["Authorization"])
     }
 
     @Test
     fun wrongTokenReportsAuthenticationFailure() {
-        server.enqueue(MockResponse().setResponseCode(401))
+        server.enqueue(MockResponse(code = 401))
         openSettingsAndType(serverBaseUrl(), token = "wrong-token")
 
         clickTestConnection()
@@ -69,7 +69,7 @@ class SettingsFlowTest {
         val deadServer = MockWebServer()
         deadServer.start()
         val deadUrl = deadServer.url("/").toString().trimEnd('/')
-        deadServer.shutdown()
+        deadServer.close()
         openSettingsAndType(deadUrl, token = "tok-abc-123")
 
         clickTestConnection()

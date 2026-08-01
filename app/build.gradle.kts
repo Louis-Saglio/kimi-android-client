@@ -85,11 +85,11 @@ dependencies {
     implementation(libs.firebase.crashlytics)
 
     testImplementation(libs.junit)
-    testImplementation(libs.mockwebserver)
+    testImplementation(libs.mockwebserver3)
     testImplementation(libs.kotlinx.coroutines.test)
 
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
-    androidTestImplementation(libs.mockwebserver)
+    androidTestImplementation(libs.mockwebserver3)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
 }

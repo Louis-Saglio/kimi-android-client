@@ -3,8 +3,8 @@ package fr.louissaglio.kimi.android.data.network
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import fr.louissaglio.kimi.android.testutil.testConnectionChecker
 import kotlinx.coroutines.runBlocking
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
+import mockwebserver3.MockResponse
+import mockwebserver3.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Before
@@ -19,19 +19,19 @@ class ConnectionCheckerTest {
     fun setUp() = server.start()
 
     @After
-    fun tearDown() = server.shutdown()
+    fun tearDown() = server.close()
 
     private fun settings(token: String = "") =
         ServerSettings(serverUrl = server.url("/").toString(), token = token)
 
     @Test
     fun `a token pasted with a trailing newline is trimmed, not reported as invalid url`() = runBlocking {
-        server.enqueue(MockResponse().setBody("""{"code":0,"msg":"success"}"""))
+        server.enqueue(MockResponse(body = """{"code":0,"msg":"success"}"""))
 
         val result = checker.check(settings(token = "secret-token\n"))
 
         assertEquals(ConnectionChecker.Result.Success, result)
-        assertEquals("Bearer secret-token", server.takeRequest().getHeader("Authorization"))
+        assertEquals("Bearer secret-token", server.takeRequest().headers["Authorization"])
     }
 
     @Test

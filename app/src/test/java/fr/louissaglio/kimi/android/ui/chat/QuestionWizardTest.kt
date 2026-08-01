@@ -85,8 +85,8 @@ class QuestionWizardTest : ChatViewModelTestBase() {
 
         val request = awaitRequest("/questions/")
         assertEquals("POST", request.method)
-        assertEquals("/api/v1/sessions/session_1/questions/tool_q1", request.path)
-        assertEquals("""{"answers":{"q_0":{"kind":"single","option_id":"opt_0_1"}}}""", request.body.readUtf8())
+        assertEquals("/api/v1/sessions/session_1/questions/tool_q1", request.target)
+        assertEquals("""{"answers":{"q_0":{"kind":"single","option_id":"opt_0_1"}}}""", request.body!!.utf8())
 
         // The ack alone must not clear the card — only the answered event does.
         delay(300)
@@ -106,7 +106,7 @@ class QuestionWizardTest : ChatViewModelTestBase() {
         viewModel.onSubmitQuestion()
 
         val request = awaitRequest("/questions/")
-        assertEquals("""{"answers":{"q_0":{"kind":"other","text":"green"}}}""", request.body.readUtf8())
+        assertEquals("""{"answers":{"q_0":{"kind":"other","text":"green"}}}""", request.body!!.utf8())
     }
 
     @Test
@@ -211,8 +211,8 @@ class QuestionWizardTest : ChatViewModelTestBase() {
 
         val request = awaitRequest(":dismiss")
         assertEquals("POST", request.method)
-        assertEquals("/api/v1/sessions/session_1/questions/tool_q1:dismiss", request.path)
-        assertEquals("{}", request.body.readUtf8())
+        assertEquals("/api/v1/sessions/session_1/questions/tool_q1:dismiss", request.target)
+        assertEquals("{}", request.body!!.utf8())
 
         socket.send(questionDismissedFrame("tool_q1"))
         awaitState(viewModel.uiState) { it.pendingQuestions.isEmpty() }

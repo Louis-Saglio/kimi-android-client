@@ -31,10 +31,10 @@ import kotlinx.coroutines.test.setMain
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
-import okhttp3.mockwebserver.Dispatcher
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
-import okhttp3.mockwebserver.RecordedRequest
+import mockwebserver3.Dispatcher
+import mockwebserver3.MockResponse
+import mockwebserver3.MockWebServer
+import mockwebserver3.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -90,19 +90,19 @@ class SubagentStreamStoreKeepAliveTest {
         server.start()
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
-                val path = request.path.orEmpty()
+                val path = request.target.orEmpty()
                 return when {
                     // The startup GET burst of the real ChatViewModel used by the
                     // hand-off test; none of these bodies touches the sub-agent store.
                     path == "/api/v1/sessions/session_1" && request.method == "GET" ->
-                        MockResponse().setBody(SESSION_BODY)
+                        MockResponse(body = SESSION_BODY)
                     path.startsWith("/api/v1/sessions/session_1/messages") ->
-                        MockResponse().setBody(MESSAGES_BODY)
-                    path == "/api/v1/sessions/session_1/status" -> MockResponse().setBody(STATUS_BODY)
+                        MockResponse(body = MESSAGES_BODY)
+                    path == "/api/v1/sessions/session_1/status" -> MockResponse(body = STATUS_BODY)
                     path.startsWith("/api/v1/sessions/session_1/questions") ->
-                        MockResponse().setBody(QUESTIONS_BODY)
-                    path == "/api/v1/models" -> MockResponse().setBody(MODELS_BODY)
-                    path == "/api/v1/config" -> MockResponse().setBody(CONFIG_BODY)
+                        MockResponse(body = QUESTIONS_BODY)
+                    path == "/api/v1/models" -> MockResponse(body = MODELS_BODY)
+                    path == "/api/v1/config" -> MockResponse(body = CONFIG_BODY)
                     path.startsWith("/api/v1/ws") ->
                         MockResponse().withWebSocketUpgrade(
                             object : WebSocketListener() {
@@ -115,7 +115,7 @@ class SubagentStreamStoreKeepAliveTest {
                                 }
                             },
                         )
-                    else -> MockResponse().setResponseCode(404)
+                    else -> MockResponse(code = 404)
                 }
             }
         }
@@ -144,7 +144,7 @@ class SubagentStreamStoreKeepAliveTest {
         }
         Dispatchers.resetMain()
         appScope.cancel()
-        server.shutdown()
+        server.close()
     }
 
     @Test

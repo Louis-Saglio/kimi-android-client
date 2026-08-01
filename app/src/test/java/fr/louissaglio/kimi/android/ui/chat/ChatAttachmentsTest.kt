@@ -35,12 +35,12 @@ class ChatAttachmentsTest : ChatViewModelTestBase() {
         assertEquals("POST", upload.method)
         val prompt = awaitRequest("/prompts")
         assertEquals("POST", prompt.method)
-        assertEquals("/api/v1/sessions/session_1/prompts", prompt.path)
+        assertEquals("/api/v1/sessions/session_1/prompts", prompt.target)
         assertEquals(
             """{"content":[""" +
                 """{"type":"file","file_id":"f_1","name":"a.txt","media_type":"text/plain","size":5},""" +
                 """{"type":"text","text":"see attached"}],"model":"kimi-code/k3"}""",
-            prompt.body.readUtf8(),
+            prompt.body!!.utf8(),
         )
         // Chips and text clear on success, like a text-only send.
         awaitState(viewModel.uiState) { it.attachments.isEmpty() && it.inputText.isEmpty() && !it.isSending }
@@ -71,7 +71,7 @@ class ChatAttachmentsTest : ChatViewModelTestBase() {
         assertEquals(
             """{"content":[{"type":"file","file_id":"f_1","name":"a.txt","media_type":"text/plain","size":5}],""" +
                 """"model":"kimi-code/k3"}""",
-            prompt.body.readUtf8(),
+            prompt.body!!.utf8(),
         )
         awaitState(viewModel.uiState) { it.attachments.isEmpty() && !it.isSending }
         // Exactly one upload and one prompt: the second tap sent nothing.
@@ -126,7 +126,7 @@ class ChatAttachmentsTest : ChatViewModelTestBase() {
         val prompt = awaitRequest("/prompts")
         assertEquals(
             """{"content":[{"type":"text","text":"just text"}],"model":"kimi-code/k3"}""",
-            prompt.body.readUtf8(),
+            prompt.body!!.utf8(),
         )
         // No upload happened for the removed chip.
         assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))

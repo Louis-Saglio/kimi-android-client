@@ -5,8 +5,8 @@ import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import fr.louissaglio.kimi.android.testutil.testSessionsRepository
 import java.time.Instant
 import kotlinx.coroutines.runBlocking
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
+import mockwebserver3.MockResponse
+import mockwebserver3.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -24,14 +24,14 @@ class SessionsRepositoryTest {
     fun setUp() = server.start()
 
     @After
-    fun tearDown() = server.shutdown()
+    fun tearDown() = server.close()
 
     private fun settings() = ServerSettings(serverUrl = server.url("/").toString())
 
     @Test
     fun `envelope items are mapped to domain sessions`() = runBlocking {
         server.enqueue(
-            MockResponse().setBody(
+            MockResponse(body = 
                 """
                 {"code":0,"msg":"success","data":{"items":[
                   {"id":"session_1","title":"Build an Android clone","created_at":"2026-07-17T03:34:49.193Z",
@@ -50,7 +50,7 @@ class SessionsRepositoryTest {
 
         val page = result.getOrThrow()
         // First page: no pagination cursor is sent.
-        assertEquals("/api/v1/sessions", server.takeRequest().path)
+        assertEquals("/api/v1/sessions", server.takeRequest().target)
         assertTrue(page.hasMore)
         val sessions = page.items
         assertEquals(2, sessions.size)
@@ -75,7 +75,7 @@ class SessionsRepositoryTest {
     @Test
     fun `next page sends before_id and parses has_more`() = runBlocking {
         server.enqueue(
-            MockResponse().setBody(
+            MockResponse(body = 
                 """
                 {"code":0,"msg":"success","data":{"items":[
                   {"id":"session_21","title":"Older session","updated_at":"2026-07-10T10:00:00.000Z",
@@ -88,7 +88,7 @@ class SessionsRepositoryTest {
         val result = repository.listSessions(settings(), beforeId = "session_20")
 
         val page = result.getOrThrow()
-        assertEquals("/api/v1/sessions?before_id=session_20", server.takeRequest().path)
+        assertEquals("/api/v1/sessions?before_id=session_20", server.takeRequest().target)
         assertEquals(listOf("session_21"), page.items.map { it.id })
         assertFalse(page.hasMore)
     }
@@ -96,7 +96,7 @@ class SessionsRepositoryTest {
     @Test
     fun `non-zero envelope code maps to Api error`() = runBlocking {
         server.enqueue(
-            MockResponse().setBody("""{"code":50001,"msg":"boom","data":null,"request_id":"01KX"}"""),
+            MockResponse(body = """{"code":50001,"msg":"boom","data":null,"request_id":"01KX"}"""),
         )
 
         val result = repository.listSessions(settings())
@@ -106,7 +106,7 @@ class SessionsRepositoryTest {
 
     @Test
     fun `http 401 maps to Auth error`() = runBlocking {
-        server.enqueue(MockResponse().setResponseCode(401))
+        server.enqueue(MockResponse(code = 401))
 
         val result = repository.listSessions(settings())
 
@@ -118,7 +118,7 @@ class SessionsRepositoryTest {
         val deadServer = MockWebServer()
         deadServer.start()
         val deadSettings = ServerSettings(serverUrl = deadServer.url("/").toString())
-        deadServer.shutdown()
+        deadServer.close()
 
         val result = repository.listSessions(deadSettings)
 
@@ -134,14 +134,14 @@ class SessionsRepositoryTest {
 
     @Test
     fun `create posts cwd and title and maps the created session`() = runBlocking {
-        server.enqueue(MockResponse().setBody(CREATED_SESSION_BODY))
+        server.enqueue(MockResponse(body = CREATED_SESSION_BODY))
 
         val result = repository.createSession(settings(), "/tmp/spike-008", "My session")
 
         val request = server.takeRequest()
         assertEquals("POST", request.method)
-        assertEquals("/api/v1/sessions", request.path)
-        assertEquals("""{"metadata":{"cwd":"/tmp/spike-008"},"title":"My session"}""", request.body.readUtf8())
+        assertEquals("/api/v1/sessions", request.target)
+        assertEquals("""{"metadata":{"cwd":"/tmp/spike-008"},"title":"My session"}""", request.body!!.utf8())
         assertEquals(
             Session(
                 id = "session_new",
@@ -157,18 +157,18 @@ class SessionsRepositoryTest {
 
     @Test
     fun `create without title omits the field from the body`() = runBlocking {
-        server.enqueue(MockResponse().setBody(CREATED_SESSION_BODY))
+        server.enqueue(MockResponse(body = CREATED_SESSION_BODY))
 
         repository.createSession(settings(), "/tmp/spike-008", null)
 
-        assertEquals("""{"metadata":{"cwd":"/tmp/spike-008"}}""", server.takeRequest().body.readUtf8())
+        assertEquals("""{"metadata":{"cwd":"/tmp/spike-008"}}""", server.takeRequest().body!!.utf8())
     }
 
     @Test
     fun `create surfaces a non-zero envelope code as Api error`() = runBlocking {
         // Shape of the server's refusal for a missing directory (verified live 2026-07-19).
         server.enqueue(
-            MockResponse().setBody(
+            MockResponse(body = 
                 """{"code":40409,"msg":"workspace root /tmp/nope does not exist","data":null,"request_id":"01KX"}""",
             ),
         )
@@ -181,7 +181,7 @@ class SessionsRepositoryTest {
     @Test
     fun `workspaces are sorted by last_opened_at descending`() = runBlocking {
         server.enqueue(
-            MockResponse().setBody(
+            MockResponse(body = 
                 """
                 {"code":0,"msg":"success","data":{"items":[
                   {"id":"wd_old","root":"/tmp/old","name":"old",
@@ -201,7 +201,7 @@ class SessionsRepositoryTest {
         val result = repository.listWorkspaces(settings())
 
         val workspaces = result.getOrThrow()
-        assertEquals("/api/v1/workspaces", server.takeRequest().path)
+        assertEquals("/api/v1/workspaces", server.takeRequest().target)
         // Server order is not relied upon: client-side sort by last_opened_at desc.
         assertEquals(listOf("wd_new", "wd_root", "wd_old"), workspaces.map { it.id })
         assertEquals(Instant.parse("2026-07-22T03:30:42.000Z"), workspaces[0].lastOpenedAt)
@@ -211,13 +211,13 @@ class SessionsRepositoryTest {
 
     @Test
     fun `get fetches one session by id`() = runBlocking {
-        server.enqueue(MockResponse().setBody(CREATED_SESSION_BODY))
+        server.enqueue(MockResponse(body = CREATED_SESSION_BODY))
 
         val result = repository.getSession(settings(), "session_new")
 
         val request = server.takeRequest()
         assertEquals("GET", request.method)
-        assertEquals("/api/v1/sessions/session_new", request.path)
+        assertEquals("/api/v1/sessions/session_new", request.target)
         assertEquals("session_new", result.getOrThrow().id)
         assertEquals("My session", result.getOrThrow().title)
     }
@@ -225,7 +225,7 @@ class SessionsRepositoryTest {
     @Test
     fun `get surfaces a non-zero envelope code as Api error`() = runBlocking {
         server.enqueue(
-            MockResponse().setBody(
+            MockResponse(body = 
                 """{"code":40404,"msg":"session not found","data":null,"request_id":"01KX"}""",
             ),
         )

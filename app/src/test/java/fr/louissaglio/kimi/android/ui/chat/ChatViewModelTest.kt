@@ -495,7 +495,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         viewModel.onHistoryTopReached()
 
         val request = awaitRequest("before_id")
-        assertEquals("/api/v1/sessions/session_1/messages?page_size=100&before_id=msg_2", request.path)
+        assertEquals("/api/v1/sessions/session_1/messages?page_size=100&before_id=msg_2", request.target)
         awaitState(viewModel.uiState) { it.items?.map(ChatItem::id) == listOf("msg_1", "msg_2", "msg_3", "msg_4") }
         assertFalse(viewModel.uiState.value.hasMoreHistory)
         assertFalse(viewModel.uiState.value.isLoadingMoreHistory)
@@ -531,7 +531,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         viewModel.onHistoryTopReached()
 
         val retry = awaitRequest("before_id")
-        assertEquals("/api/v1/sessions/session_1/messages?page_size=100&before_id=msg_2", retry.path)
+        assertEquals("/api/v1/sessions/session_1/messages?page_size=100&before_id=msg_2", retry.target)
         awaitState(viewModel.uiState) { it.items?.map(ChatItem::id) == listOf("msg_1", "msg_2") }
     }
 
@@ -566,7 +566,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             """],"has_more":false},"request_id":"r"}"""
         viewModel.onHistoryTopReached()
         val request = awaitRequest("before_id")
-        assertEquals("/api/v1/sessions/session_1/messages?page_size=100&before_id=msg_3", request.path)
+        assertEquals("/api/v1/sessions/session_1/messages?page_size=100&before_id=msg_3", request.target)
         awaitState(viewModel.uiState) { it.items?.map(ChatItem::id) == listOf("msg_2", "msg_3", "msg_4") }
         assertFalse(viewModel.uiState.value.hasMoreHistory)
     }
@@ -633,8 +633,8 @@ class ChatViewModelTest : ChatViewModelTestBase() {
 
         val request = awaitRequest("/approvals/")
         assertEquals("POST", request.method)
-        assertEquals("/api/v1/sessions/session_1/approvals/ap_1", request.path)
-        assertEquals("""{"decision":"approved"}""", request.body.readUtf8())
+        assertEquals("/api/v1/sessions/session_1/approvals/ap_1", request.target)
+        assertEquals("""{"decision":"approved"}""", request.body!!.utf8())
 
         // The ack alone must not clear the card — only the resolved event does.
         delay(300)
@@ -654,8 +654,8 @@ class ChatViewModelTest : ChatViewModelTestBase() {
 
         val request = awaitRequest("/approvals/")
         assertEquals("POST", request.method)
-        assertEquals("/api/v1/sessions/session_1/approvals/ap_1", request.path)
-        assertEquals("""{"decision":"rejected"}""", request.body.readUtf8())
+        assertEquals("/api/v1/sessions/session_1/approvals/ap_1", request.target)
+        assertEquals("""{"decision":"rejected"}""", request.body!!.utf8())
     }
 
     @Test
@@ -695,8 +695,8 @@ class ChatViewModelTest : ChatViewModelTestBase() {
 
         val request = awaitRequest(":abort")
         assertEquals("POST", request.method)
-        assertEquals("/api/v1/sessions/session_1:abort", request.path)
-        assertEquals("{}", request.body.readUtf8())
+        assertEquals("/api/v1/sessions/session_1:abort", request.target)
+        assertEquals("{}", request.body!!.utf8())
 
         // The ack alone must not clear the indicator — the server's turn.ended does.
         assertTrue(viewModel.uiState.value.isWorking)
@@ -831,12 +831,12 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         // The config GET served at screen start makes the server default known (017).
         val prompt = awaitRequest("/prompts")
         assertEquals("POST", prompt.method)
-        assertEquals("/api/v1/sessions/session_1/prompts", prompt.path)
-        assertEquals("""{"content":[{"type":"text","text":"Stop counting"}],"model":"kimi-code/k3"}""", prompt.body.readUtf8())
+        assertEquals("/api/v1/sessions/session_1/prompts", prompt.target)
+        assertEquals("""{"content":[{"type":"text","text":"Stop counting"}],"model":"kimi-code/k3"}""", prompt.body!!.utf8())
         val steer = awaitRequest("prompts:steer")
         assertEquals("POST", steer.method)
-        assertEquals("/api/v1/sessions/session_1/prompts:steer", steer.path)
-        assertEquals("""{"prompt_ids":["msg_1"]}""", steer.body.readUtf8())
+        assertEquals("/api/v1/sessions/session_1/prompts:steer", steer.target)
+        assertEquals("""{"prompt_ids":["msg_1"]}""", steer.body!!.utf8())
 
         awaitState(viewModel.uiState) { it.inputText.isEmpty() && !it.isSending }
         // The turn keeps running: the working state and Stop action stay up.
@@ -855,8 +855,8 @@ class ChatViewModelTest : ChatViewModelTestBase() {
 
         val request = awaitRequest("/prompts")
         assertEquals("POST", request.method)
-        assertEquals("/api/v1/sessions/session_1/prompts", request.path)
-        assertEquals("""{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/k3"}""", request.body.readUtf8())
+        assertEquals("/api/v1/sessions/session_1/prompts", request.target)
+        assertEquals("""{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/k3"}""", request.body!!.utf8())
         // A plain prompt marks the session busy; no steer call follows.
         awaitState(viewModel.uiState) { it.isWorking }
         assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
@@ -943,7 +943,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         val deadline = System.currentTimeMillis() + 5_000
         while (System.currentTimeMillis() < deadline) {
             val request = server.takeRequest(100, TimeUnit.MILLISECONDS) ?: continue
-            if (request.path == "/api/v1/sessions/session_1") break
+            if (request.target == "/api/v1/sessions/session_1") break
         }
         delay(200)
         assertNull(viewModel.uiState.value.sessionTitle)
@@ -1067,8 +1067,8 @@ class ChatViewModelTest : ChatViewModelTestBase() {
 
         val request = awaitRequest(":compact")
         assertEquals("POST", request.method)
-        assertEquals("/api/v1/sessions/session_1:compact", request.path)
-        assertEquals("{}", request.body.readUtf8())
+        assertEquals("/api/v1/sessions/session_1:compact", request.target)
+        assertEquals("{}", request.body!!.utf8())
         awaitState(viewModel.uiState) { it.isCompacting }
     }
 

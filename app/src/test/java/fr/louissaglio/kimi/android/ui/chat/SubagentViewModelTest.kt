@@ -23,10 +23,10 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import okhttp3.WebSocketListener
-import okhttp3.mockwebserver.Dispatcher
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
-import okhttp3.mockwebserver.RecordedRequest
+import mockwebserver3.Dispatcher
+import mockwebserver3.MockResponse
+import mockwebserver3.MockWebServer
+import mockwebserver3.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -76,22 +76,22 @@ class SubagentViewModelTest {
         server.start()
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
-                val path = request.path.orEmpty()
+                val path = request.target.orEmpty()
                 return if (path.startsWith("/api/v1/sessions/session_1/transcript")) {
                     // Each request runs on its own connection thread, so a parked
                     // older-page response never holds a fresh refetch's.
                     if ("before_turn" in path) {
                         olderTranscriptGate?.await(5, TimeUnit.SECONDS)
-                        MockResponse().setBody(olderTranscriptBody)
+                        MockResponse(body = olderTranscriptBody)
                     } else {
-                        MockResponse().setBody(transcriptBody)
+                        MockResponse(body = transcriptBody)
                     }
                 } else if (path.startsWith("/api/v1/ws")) {
                     // The store's keep-alive collection (ticket 064, started by
                     // onScreenStarted → pageOpened) idles on an open upgrade.
                     MockResponse().withWebSocketUpgrade(object : WebSocketListener() {})
                 } else {
-                    MockResponse().setResponseCode(404)
+                    MockResponse(code = 404)
                 }
             }
         }
@@ -113,7 +113,7 @@ class SubagentViewModelTest {
             store.release("session_1")
             keepAlive?.join()
         }
-        server.shutdown()
+        server.close()
         Dispatchers.resetMain()
     }
 

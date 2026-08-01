@@ -34,10 +34,10 @@ import kotlinx.coroutines.test.setMain
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
-import okhttp3.mockwebserver.Dispatcher
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
-import okhttp3.mockwebserver.RecordedRequest
+import mockwebserver3.Dispatcher
+import mockwebserver3.MockResponse
+import mockwebserver3.MockWebServer
+import mockwebserver3.RecordedRequest
 import org.junit.After
 import org.junit.Before
 
@@ -191,7 +191,7 @@ abstract class ChatViewModelTestBase {
         lastGetArrivalNanos.set(System.nanoTime())
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
-                val path = request.path.orEmpty()
+                val path = request.target.orEmpty()
                 // Stamped at arrival, not at response time: the /status and /questions
                 // responses may be parked behind a test gate below, and the WS upgrade's
                 // quiet window must not wait for those. The WS path is itself a GET but
@@ -201,95 +201,95 @@ abstract class ChatViewModelTestBase {
                 }
                 return when {
                     path == "/api/v1/sessions/session_1" && request.method == "GET" ->
-                        MockResponse().setBody(sessionBody)
+                        MockResponse(body = sessionBody)
                     path.startsWith("/api/v1/sessions/session_1/messages") ->
-                        MockResponse().setBody(if ("before_id" in path) olderMessagesBody else messagesBody)
+                        MockResponse(body = if ("before_id" in path) olderMessagesBody else messagesBody)
                     path == "/api/v1/sessions/session_1/status" -> {
                         statusResponseGate?.await(5, TimeUnit.SECONDS)
-                        MockResponse().setBody(statusBody)
+                        MockResponse(body = statusBody)
                     }
-                    path == "/api/v1/sessions/session_1/prompts" -> MockResponse().setBody(
+                    path == "/api/v1/sessions/session_1/prompts" -> MockResponse(body = 
                         """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
                             """"status":"running","created_at":"2026-07-20T00:00:00.000Z"},"request_id":"r"}""",
                     )
-                    path == "/api/v1/sessions/session_1/prompts:steer" -> MockResponse().setBody(
+                    path == "/api/v1/sessions/session_1/prompts:steer" -> MockResponse(body = 
                         """{"code":0,"msg":"success","data":{"steered":true,"prompt_ids":["msg_1"]},"request_id":"r"}""",
                     )
                     path == "/api/v1/sessions/session_1:compact" ->
                         if (compactsSucceed) {
-                            MockResponse().setBody(
+                            MockResponse(body = 
                                 """{"code":0,"msg":"success","data":{},"request_id":"r"}""",
                             )
                         } else {
-                            MockResponse().setBody(
+                            MockResponse(body = 
                                 """{"code":40910,"msg":"No messages to compact in current history.",""" +
                                     """"data":null,"request_id":"r"}""",
                             )
                         }
                     path == "/api/v1/sessions/session_1:abort" ->
                         if (abortsSucceed) {
-                            MockResponse().setBody(
+                            MockResponse(body = 
                                 """{"code":0,"msg":"success","data":{"aborted":true},"request_id":"r"}""",
                             )
                         } else {
-                            MockResponse().setBody(
+                            MockResponse(body = 
                                 """{"code":40001,"msg":"no running prompt","data":null,"request_id":"r"}""",
                             )
                         }
                     path.startsWith("/api/v1/sessions/session_1/approvals/") ->
                         if (approvalsSucceed) {
-                            MockResponse().setBody(
+                            MockResponse(body = 
                                 """{"code":0,"msg":"success","data":{"resolved":true,"resolved_at":"2026-07-19T00:00:01.000Z"},"request_id":"r"}""",
                             )
                         } else {
-                            MockResponse().setBody(
+                            MockResponse(body = 
                                 """{"code":40401,"msg":"approval does not exist","data":null,"request_id":"r"}""",
                             )
                         }
                     path.startsWith("/api/v1/sessions/session_1/questions") -> when {
                         path.endsWith(":dismiss") ->
                             if (answersSucceed) {
-                                MockResponse().setBody(
+                                MockResponse(body = 
                                     """{"code":40909,"msg":"question tool_q1 dismissed",""" +
                                         """"data":{"dismissed":true,"dismissed_at":"2026-07-20T06:17:24.711Z"},"request_id":"r"}""",
                                 )
                             } else {
-                                MockResponse().setBody(
+                                MockResponse(body = 
                                     """{"code":40405,"msg":"question tool_q1 not found","data":null,"request_id":"r"}""",
                                 )
                             }
                         request.method == "POST" ->
                             if (answersSucceed) {
-                                MockResponse().setBody(
+                                MockResponse(body = 
                                     """{"code":0,"msg":"success","data":{"resolved":true,""" +
                                         """"resolved_at":"2026-07-20T06:08:12.548Z"},"request_id":"r"}""",
                                 )
                             } else {
-                                MockResponse().setBody(
+                                MockResponse(body = 
                                     """{"code":40405,"msg":"question tool_q1 not found","data":null,"request_id":"r"}""",
                                 )
                             }
                         else -> {
                             questionsResponseGate?.await(5, TimeUnit.SECONDS)
-                            MockResponse().setBody(questionsBody)
+                            MockResponse(body = questionsBody)
                         }
                     }
                     path == "/api/v1/files" -> {
                         filesResponseGate?.await(5, TimeUnit.SECONDS)
                         if (uploadsSucceed) {
-                            MockResponse().setBody(
+                            MockResponse(body = 
                                 """{"code":0,"msg":"success","data":{"id":"f_1","name":"a.txt",""" +
                                     """"media_type":"text/plain","size":5,""" +
                                     """"created_at":"2026-07-24T00:00:00.000Z"},"request_id":"r"}""",
                             )
                         } else {
-                            MockResponse().setBody(
+                            MockResponse(body = 
                                 """{"code":40001,"msg":"unsupported media type","data":null,"request_id":"r"}""",
                             )
                         }
                     }
-                    path == "/api/v1/models" -> MockResponse().setBody(modelsBody)
-                    path == "/api/v1/config" -> MockResponse().setBody(configBody)
+                    path == "/api/v1/models" -> MockResponse(body = modelsBody)
+                    path == "/api/v1/config" -> MockResponse(body = configBody)
                     path.startsWith("/api/v1/ws") -> {
                         awaitStartupGetsQuiet()
                         MockResponse().withWebSocketUpgrade(
@@ -304,7 +304,7 @@ abstract class ChatViewModelTestBase {
                             },
                         )
                     }
-                    else -> MockResponse().setResponseCode(404)
+                    else -> MockResponse(code = 404)
                 }
             }
         }
@@ -339,7 +339,7 @@ abstract class ChatViewModelTestBase {
         runBlocking { startedViewModels.forEach { it.viewModelScope.coroutineContext.job.cancelAndJoin() } }
         Dispatchers.resetMain()
         appScope.cancel()
-        server.shutdown()
+        server.close()
     }
 
     protected suspend fun awaitServerSocket(): WebSocket {
@@ -393,7 +393,7 @@ abstract class ChatViewModelTestBase {
         val deadline = System.currentTimeMillis() + 5_000
         while (System.currentTimeMillis() < deadline) {
             val request = server.takeRequest(100, TimeUnit.MILLISECONDS) ?: continue
-            if (request.path.orEmpty().contains(pathSubstring)) return request
+            if (request.target.orEmpty().contains(pathSubstring)) return request
         }
         error("Timed out waiting for request to $pathSubstring")
     }
