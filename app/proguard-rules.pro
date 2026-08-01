@@ -7,9 +7,3 @@
 # name-based serializer lookup, so shrinking already keeps everything needed.
 #
 # Add future app-specific keep rules below as they become necessary.
-
-# Crashlytics (BoM 34.x) references android.os.ProfilingTrigger*, only present
-# in android.jar from API 36 while compileSdk is 35. The call site is guarded
-# by a runtime SDK check, so the classes are never touched on older devices.
--dontwarn android.os.ProfilingTrigger
--dontwarn android.os.ProfilingTrigger$Builder

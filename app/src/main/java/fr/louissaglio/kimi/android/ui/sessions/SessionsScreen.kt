@@ -24,6 +24,7 @@ import androidx.compose.material3.Badge
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuAnchorType
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FloatingActionButton
@@ -207,7 +208,7 @@ private fun CreateSessionDialog(
                         OutlinedTextField(
                             value = uiState.newSessionCwd,
                             onValueChange = onCwdChange,
-                            modifier = Modifier.menuAnchor(),
+                            modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryEditable, enabled = true),
                             label = { Text("Working directory") },
                             isError = uiState.newSessionCwdError != null,
                             supportingText = { uiState.newSessionCwdError?.let { Text(it) } },

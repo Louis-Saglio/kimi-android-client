@@ -1,5 +1,6 @@
 package fr.louissaglio.kimi.android.ui.chat
 
+import android.content.ClipData
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -22,6 +23,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -34,16 +36,17 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.unit.dp
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.ui.common.formatTimestamp
 import fr.louissaglio.kimi.android.ui.theme.successColor
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
 /** Copy-menu idiom shared by the message bubbles (ticket 039): a long-press — via
@@ -58,7 +61,8 @@ private fun CopyableMessage(
     onCopiedChange: (Boolean) -> Unit,
     content: @Composable (longPress: Modifier) -> Unit,
 ) {
-    val clipboard = LocalClipboardManager.current
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
     var menuExpanded by remember { mutableStateOf(false) }
     LaunchedEffect(copied) {
         if (copied) {
@@ -81,9 +85,11 @@ private fun CopyableMessage(
             DropdownMenuItem(
                 text = { Text("Copy") },
                 onClick = {
-                    clipboard.setText(AnnotatedString(text))
-                    onCopiedChange(true)
-                    menuExpanded = false
+                    scope.launch {
+                        clipboard.setClipEntry(ClipEntry(ClipData.newPlainText(text, text)))
+                        onCopiedChange(true)
+                        menuExpanded = false
+                    }
                 },
             )
         }
