@@ -34,12 +34,32 @@ codebase is worse than a one-time sweep.
 
 ## Acceptance criteria
 
-- [ ] No `_asStateFlow()` backing pairs remain (grep), or exceptions are
+- [x] No `_asStateFlow()` backing pairs remain (grep), or exceptions are
   documented in this ticket.
-- [ ] `./gradlew testDebugUnitTest` green (the chat/session ViewModel
+- [x] `./gradlew testDebugUnitTest` green (the chat/session ViewModel
   harnesses are the regression net).
-- [ ] Firebase robo green; release APK published per `AGENTS.md`.
-- [ ] `AGENTS.md` convention note added.
+- [ ] Firebase robo green; release APK published per `AGENTS.md` — **pending**
+  (Test Lab quota resets ~07:00 UTC; robo + publish happen from main
+  post-merge today).
+- [x] `AGENTS.md` convention note added.
+
+## Landed (2026-08-01, worktree agent/backing-fields)
+
+- All 5 sites swept: `ChatViewModel`, `SubagentViewModel`,
+  `SettingsViewModel`, `SessionListViewModel`, `SubagentStreamStore` —
+  `val uiState: StateFlow<UiState> field = MutableStateFlow(…)`, mutations
+  via direct smart-cast (`uiState.update { … }`), `asStateFlow` imports
+  dropped; `ChatViewModelTestBase`'s one `_uiState` reference updated. The
+  083 constructor split (internal route-object primary + `@Inject`
+  secondary) preserved untouched. Grep for `_uiState`/`asStateFlow` in
+  main+test: zero.
+- No exceptions needed — every site fit the new form.
+- Verification: `testDebugUnitTest` + `assembleRelease` green (5m 22s,
+  `--max-workers=1`). Robo + APK publish pending quota (parent handles from
+  main).
+- Process note: the delegated agent was OOM-killed (2026-08-01 06:08
+  kimi-web.service restart); the parent verified the preserved diff, ran
+  the gates, and merged it.
 
 ## Out of scope
 
