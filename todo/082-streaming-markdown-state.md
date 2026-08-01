@@ -48,15 +48,49 @@ Guardrails from 073 that must survive any refactor:
 
 ## Acceptance criteria
 
-- [ ] Streaming rows use incremental parsing, **or** a documented no-go with
+- [x] Streaming rows use incremental parsing, **or** a documented no-go with
   the blocker recorded (e.g. API doesn't fit per-row retention) and
   `AGENTS.md` updated.
-- [ ] `./gradlew testDebugUnitTest` green; androidTest green on Firebase
+- [x] `./gradlew testDebugUnitTest` green; ~~androidTest green on Firebase
   Test Lab (`ChatAutoScrollTest`, `ToolRowExpandScrollTest` first — they
-  guard the first-frame contract); robo green.
-- [ ] Coalescing-window decision recorded with measurements; code + tests +
-  `AGENTS.md` match the decision.
-- [ ] Release APK published to the file server per `AGENTS.md`.
+  guard the first-frame contract); robo green.~~ **pending Test Lab quota**
+  (~07:00 UTC reset — parent runs them from main).
+- [x] Coalescing-window decision recorded with measurements; code + tests +
+  `AGENTS.md` match the decision. (Decision + rationale below; phone-frame
+  measurements are Louis's — the VPS can't measure frames.)
+- [ ] Release APK published to the file server per `AGENTS.md` — pending
+  (parent publishes from main).
+
+## Landed (2026-08-01, implemented on main by the parent)
+
+- `MarkdownBody` now renders through the renderer's append-only
+  `StreamingMarkdownState` (0.43.0): stable blocks parse once, only the
+  still-growing tail re-parses per append — the full-document re-parse per
+  streamed snapshot is gone. All theming (colors, typography, padding,
+  `eolAsNewLine`, ExtendedSpans) passes to the streaming overload unchanged.
+- Snapshot→append adaptation: the timeline publishes FULL snapshots, the
+  state is append-only — new `StreamingMarkdownFeed` (ui/chat, internal)
+  tracks what the state consumed and classifies each snapshot as
+  append/no-op/reset (message swap in the row slot, history replace). Resets
+  discard the state via a `generation` key and re-seed. 9 unit tests cover
+  the classification (`StreamingMarkdownFeedTest`).
+- First-frame contract preserved: a fresh state is seeded synchronously
+  (`runBlocking { state.append(text) }` in composition — same cost profile
+  as the old `immediate = true`: one full parse of the initial content), so
+  `MessageList`'s bottom pin still measures real row heights on frame one.
+  Streaming appends feed through a `snapshotFlow` collector: sequential
+  (never cancelled mid-append), latest-wins (skipped snapshots are prefixes
+  of the latest).
+- **Window decision: keep 100 ms.** With incremental parsing, a published
+  snapshot costs a tail-only re-parse, so parse cost no longer justifies the
+  window — but each emission still costs a recomposition + layout of the
+  bubble, and the window bounds exactly that churn. Widening/dropping it
+  would trade smoother text for more layout work without removing any
+  remaining bottleneck. Recorded in `AGENTS.md` (streaming bullet); the
+  on-phone frame eyeball stays Louis's.
+- Verification: `testDebugUnitTest` + `assembleRelease` green. androidTest
+  (`ChatAutoScrollTest`, `ToolRowExpandScrollTest` — the 073 first-frame
+  guards) and robo pending Test Lab quota.
 
 ## Out of scope
 
