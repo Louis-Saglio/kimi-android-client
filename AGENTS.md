@@ -20,9 +20,10 @@ drift check keeps the two in sync.
 
 - Kotlin + Jetpack Compose (Material 3), single `app` module.
 - Hilt + KSP for DI, coroutines/Flow, `kotlinx.serialization`, OkHttp, DataStore.
-- Chat markdown: `com.mikepenz:multiplatform-markdown-renderer-m3` 0.38.1
-  (ticket 073: newest release on the Kotlin 2.2.x line; the 0.43.0 rung is
-  unblocked now that Kotlin is 2.4 — ticket 077). Stack: Kotlin 2.4.10,
+- Chat markdown: `com.mikepenz:multiplatform-markdown-renderer-m3` 0.43.0
+  (ticket 077: 073's ladder rung — 0.39+ moved to Kotlin 2.3, 0.42–0.43 need
+  Kotlin 2.4 / Compose 1.11 / Java 21 / compileSdk 37, all landed in 075/076/079).
+  Stack: Kotlin 2.4.10,
   Compose BOM 2026.06.01, Hilt 2.60.1 (2.51.1's KSP processor crashes under
   KSP2; 2.57.x's Gradle plugin predates AGP 9 — don't downgrade either). `MarkdownBody` parses the INITIAL content
   synchronously (`rememberMarkdownState(immediate = true)`) so MessageList's
@@ -166,8 +167,9 @@ also the regression signal for "verified fixed" tickets.
   leading edge immediately, then one emission per ~100 ms window, flushed before any
   non-delta event (`onEvent` carries the invariant) and before REST refetches
   (`flush()`), because each new text snapshot still costs one full re-parse in
-  `MarkdownBody` (renderer 0.38.1 memoizes unchanged content; incremental
-  `StreamingMarkdownState` needs renderer 0.42 + Kotlin 2.4). The
+  `MarkdownBody` (renderer 0.43.0 memoizes unchanged content; incremental
+  `StreamingMarkdownState` is available since 0.42.0 on the Kotlin 2.4 stack —
+  adopting it is ticket 082). The
   window is injectable (`streamCoalesceWindowMillis`; 0 in unit tests).
 
 ## Distribution: put the release APK on the file server

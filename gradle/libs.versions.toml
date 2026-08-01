@@ -13,10 +13,10 @@ okhttp = "4.12.0"
 kotlinxSerialization = "1.11.0"
 datastore = "1.2.1"
 hiltNavigationCompose = "1.4.0"
-# Newest release still on the Kotlin 2.2.x line (0.39.0 moved to Kotlin 2.3) — ticket 073.
-# Parsing is async + memoized since 0.33.0; 0.42.0's incremental StreamingMarkdownState
-# needs Kotlin 2.4 and is the next ladder rung.
-markdownRenderer = "0.38.1"
+# Newest stable (re-verified 2026-08-01) — ticket 077. On the Kotlin 2.4 / Compose 1.11 /
+# Java 21 / compileSdk 37 rung unlocked by 075/076/079. Parsing is async + memoized since
+# 0.33.0; 0.42.0 added incremental StreamingMarkdownState — adopting it is ticket 082.
+markdownRenderer = "0.43.0"
 junit = "4.13.2"
 testExtJunit = "1.3.0"
 googleServices = "4.5.0"

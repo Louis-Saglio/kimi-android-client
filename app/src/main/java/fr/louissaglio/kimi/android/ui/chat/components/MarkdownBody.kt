@@ -32,9 +32,9 @@ import com.mikepenz.markdown.model.rememberMarkdownState
  * longer re-parses. `retainState` keeps the previous snapshot on screen while a
  * changed text re-parses, so streamed emissions never flash the blank loading
  * slot. Each new text snapshot still costs one full re-parse of the document
- * (incremental `StreamingMarkdownState` only exists from 0.42.0, which needs
- * Kotlin 2.4), so the `DeltaCoalescer` 100 ms window still bounds the re-parse
- * rate during streaming.
+ * (incremental `StreamingMarkdownState` exists since 0.42.0 but is not adopted
+ * yet — ticket 082), so the `DeltaCoalescer` 100 ms window still bounds the
+ * re-parse rate during streaming.
  */
 @Composable
 internal fun MarkdownBody(text: String, modifier: Modifier = Modifier) {
