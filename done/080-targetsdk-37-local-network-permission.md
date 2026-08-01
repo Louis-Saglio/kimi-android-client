@@ -102,9 +102,30 @@ permission.**
 - [x] ~~If the permission was needed: granted → works; denied → clear error
   state, no silent failure; unit tests for the request gating.~~ **n/a —
   permission not needed** (Findings).
-- [ ] Firebase robo green on an API 37 device.
-- [ ] Release APK published to the file server per `AGENTS.md`; `AGENTS.md`
+- [x] ~~Firebase robo green on an API 37 device.~~ **API 37 unavailable on
+  Firebase Test Lab** (2026-08-01: zero device models carry it) — robo
+  **Passed** on API 36 (MediumPhone.arm), large-screen smoke Passed on a
+  Pixel Tablet (tangorpro, API 36, landscape). The target-37 behavior
+  changes only activate on Android 17 hardware anyway; Louis's phone is the
+  real check once it runs 17.
+- [x] Release APK published to the file server per `AGENTS.md`; `AGENTS.md`
   updated.
+
+## Landed (2026-08-01)
+
+- `app/build.gradle.kts`: `targetSdk = 36 → 37`. **No permission work** —
+  the Findings above (AOSP `android17-release`, code-verified) show the
+  Tailscale endpoint rides the VPN exemption; nothing else in the app does
+  LAN-classified traffic. No manifest change, no runtime request, no
+  `ConnectionChecker` gating.
+- Verification: `testDebugUnitTest` + `assembleRelease` green; robo Passed
+  on API 36 phone; large-screen adaptive-layout smoke Passed on Pixel
+  Tablet landscape (the target-36/37 sw≥600dp orientation enforcement — the
+  manifest locks nothing, renders fine).
+- Note for future LAN features: any direct-LAN or mDNS use DOES need
+  `ACCESS_LOCAL_NETWORK` at target 37 (multicast rules install per-interface
+  even through a VPN). Blocked TCP = silent drop → connect timeout, no
+  EPERM.
 
 ## Out of scope
 
