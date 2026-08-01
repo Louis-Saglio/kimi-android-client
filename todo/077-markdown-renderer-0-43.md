@@ -44,14 +44,21 @@ Breaking-change review (073's ladder table + release notes 0.38.1 → 0.43.0):
 
 ## Acceptance criteria
 
-- [ ] Catalog at renderer 0.43.0; chat markdown renders as before (code
-  blocks, tables, links, `eolAsNewLine` behavior).
-- [ ] `./gradlew testDebugUnitTest` green.
+- [x] Catalog at renderer 0.43.0; chat markdown renders as before (code
+  blocks, tables, links, `eolAsNewLine` behavior). — `MarkdownBody.kt`
+  compiles unchanged against 0.43.0 (only its doc comment was edited); the
+  `rememberMarkdownState(retainState = true, immediate = true)` and
+  `eolAsNewLine = true` contract is untouched. Visual parity NOT verified —
+  no androidTest/robo run, no on-phone eyeball (see below).
+- [x] `./gradlew testDebugUnitTest` green.
 - [ ] androidTest suites green on Firebase Test Lab (markdown + chat tests
   first: `ChatAutoScrollTest`, `ToolRowExpandScrollTest` — the tests that
-  caught the 073 first-frame regression), plus robo.
-- [ ] Release APK published to the file server per `AGENTS.md`.
-- [ ] `AGENTS.md` updated.
+  caught the 073 first-frame regression), plus robo. — NOT RUN: Test Lab
+  daily quota exhausted on 2026-08-01; run before/at merge.
+- [ ] Release APK published to the file server per `AGENTS.md`. — NOT DONE:
+  parent agent publishes after merging to main (parallel-worktree session,
+  APK naming is branch-based).
+- [x] `AGENTS.md` updated.
 
 ## Out of scope
 
@@ -59,6 +66,27 @@ Breaking-change review (073's ladder table + release notes 0.38.1 → 0.43.0):
   and re-evaluating the 100 ms `DeltaCoalescer` window → 082.
 - On-phone streaming-performance eyeball — Louis on the published APK, as in
   073.
+
+## Landed (2026-08-01, worktree agent/renderer-043)
+
+- `gradle/libs.versions.toml`: `markdownRenderer` 0.38.1 → 0.43.0 (re-verified
+  2026-08-01 against Maven Central metadata: 0.43.0 is still the newest
+  stable, `latest`/`release` both 0.43.0). Adjacent comment block rewritten
+  for the new pin.
+- `MarkdownBody.kt`: NO code change needed — 0.43.0's API surface preserved
+  `rememberMarkdownState(content, retainState = true, immediate = true)`,
+  `markdownTypography(textLink = …)` and
+  `markdownAnnotatorConfig(eolAsNewLine = true)` exactly as used. Only the
+  KDoc was updated (StreamingMarkdownState availability note → ticket 082).
+- `AGENTS.md`: renderer version 0.43.0 + ladder-rung note; DeltaCoalescer
+  paragraph now says incremental `StreamingMarkdownState` is available since
+  0.42.0 on the current stack, adoption tracked in 082.
+- Passed: `testDebugUnitTest` (2m15s, green) and `assembleRelease` (4m17s,
+  green, APK ~3.9 MB) — both with `--no-daemon --max-workers=1` under the
+  gradle flock. Commit `64623dd`.
+- Pending: Firebase Test Lab robo + androidTest (quota exhausted today);
+  release APK publication + push (parent merges first); on-phone streaming
+  eyeball by Louis (out of scope per ticket).
 
 ## Notes
 
