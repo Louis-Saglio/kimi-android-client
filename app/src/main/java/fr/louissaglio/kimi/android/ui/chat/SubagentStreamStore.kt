@@ -149,17 +149,17 @@ class SubagentStreamStore @Inject constructor(
 
     // sessionId → subagentId → stream.
     private val streams = mutableMapOf<String, MutableMap<String, Stream>>()
-    private val _states = MutableStateFlow<Map<String, Map<String, SubagentState>>>(emptyMap())
+    private val states = MutableStateFlow<Map<String, Map<String, SubagentState>>>(emptyMap())
 
     // sessionId → number of open sub-agent pages. One of the two inputs of
     // [reconcileKeepAlive]: a page needs the store fed from the socket.
-    private val _openPages = MutableStateFlow<Map<String, Int>>(emptyMap())
+    private val openPages = MutableStateFlow<Map<String, Int>>(emptyMap())
 
     // Sessions whose chat-screen socket collection is currently running (the other
     // [reconcileKeepAlive] input): while the chat collects it is the feeder, and the
     // store's keep-alive must stay off — two concurrent collections would double-apply
     // replayed events.
-    private val _chatCollecting = MutableStateFlow<Set<String>>(emptySet())
+    private val chatCollecting = MutableStateFlow<Set<String>>(emptySet())
 
     // sessionId → the store-owned keep-alive collection (ticket 064); present only
     // while a page is open AND no chat collection runs.
@@ -168,19 +168,19 @@ class SubagentStreamStore @Inject constructor(
     /** The live entry of one sub-agent; stays null when its `subagent.spawned` was never
      * seen (the app subscribed after the spawn — the page shows its empty state). */
     fun entry(sessionId: String, subagentId: String): Flow<SubagentState?> =
-        _states.map { it[sessionId]?.get(subagentId) }.distinctUntilChanged()
+        states.map { it[sessionId]?.get(subagentId) }.distinctUntilChanged()
 
     /** How many sub-agent pages of [sessionId] are currently open. */
     fun openPageCount(sessionId: String): Flow<Int> =
-        _openPages.map { it[sessionId] ?: 0 }.distinctUntilChanged()
+        openPages.map { it[sessionId] ?: 0 }.distinctUntilChanged()
 
     fun pageOpened(sessionId: String) {
-        _openPages.update { it + (sessionId to (it[sessionId] ?: 0) + 1) }
+        openPages.update { it + (sessionId to (it[sessionId] ?: 0) + 1) }
         reconcileKeepAlive(sessionId)
     }
 
     fun pageClosed(sessionId: String) {
-        _openPages.update { counts ->
+        openPages.update { counts ->
             val count = (counts[sessionId] ?: 1) - 1
             if (count <= 0) counts - sessionId else counts + (sessionId to count)
         }
@@ -191,14 +191,14 @@ class SubagentStreamStore @Inject constructor(
      * now, so the store's keep-alive collection (if any) stops first. Called by
      * ChatViewModel's socket gate before it starts collecting. */
     fun chatCollectionStarted(sessionId: String) {
-        _chatCollecting.update { it + sessionId }
+        chatCollecting.update { it + sessionId }
         reconcileKeepAlive(sessionId)
     }
 
     /** The chat screen's socket collection of [sessionId] ended (its gate closed);
      * the keep-alive takes over when a page is still open. */
     fun chatCollectionStopped(sessionId: String) {
-        _chatCollecting.update { it - sessionId }
+        chatCollecting.update { it - sessionId }
         reconcileKeepAlive(sessionId)
     }
 
@@ -208,7 +208,7 @@ class SubagentStreamStore @Inject constructor(
      * so a cancelled keep-alive collector never applies another event once the chat's
      * collection starts. */
     private fun reconcileKeepAlive(sessionId: String) {
-        val needed = (_openPages.value[sessionId] ?: 0) > 0 && sessionId !in _chatCollecting.value
+        val needed = (openPages.value[sessionId] ?: 0) > 0 && sessionId !in chatCollecting.value
         val running = keepAliveJobs[sessionId]
         if (!needed) {
             running?.cancel()
@@ -246,9 +246,9 @@ class SubagentStreamStore @Inject constructor(
     fun release(sessionId: String) {
         streams.remove(sessionId)?.values?.forEach { it.coalescer.cancel() }
         keepAliveJobs.remove(sessionId)?.cancel()
-        _states.update { it - sessionId }
-        _openPages.update { it - sessionId }
-        _chatCollecting.update { it - sessionId }
+        states.update { it - sessionId }
+        openPages.update { it - sessionId }
+        chatCollecting.update { it - sessionId }
     }
 
     private fun spawn(sessionId: String, event: SessionEvent.SubagentSpawned) {
@@ -413,7 +413,7 @@ class SubagentStreamStore @Inject constructor(
 
     private fun publish(sessionId: String) {
         val sessionStreams = streams[sessionId] ?: return
-        _states.update { it + (sessionId to sessionStreams.mapValues { entry -> entry.value.toState() }) }
+        states.update { it + (sessionId to sessionStreams.mapValues { entry -> entry.value.toState() }) }
     }
 
     /** `key: value` line of an `Agent` result text (version-pinned wire format). */

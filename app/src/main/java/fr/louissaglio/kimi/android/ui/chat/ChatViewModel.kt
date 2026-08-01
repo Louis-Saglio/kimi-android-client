@@ -31,7 +31,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -236,18 +235,18 @@ class ChatViewModel internal constructor(
         data class CompactionFailed(override val message: String) : Effect
     }
 
-    private val _uiState = MutableStateFlow(
-        UiState(
-            sessionId = sessionId,
-            sessionTitle = if (seedTitle != null || seedCwd != null) {
-                displayNameFor(sessionId, seedTitle, seedCwd)
-            } else {
-                null
-            },
-            sessionCwd = seedCwd,
-        ),
-    )
-    val uiState: StateFlow<UiState> = _uiState.asStateFlow()
+    val uiState: StateFlow<UiState>
+        field = MutableStateFlow(
+            UiState(
+                sessionId = sessionId,
+                sessionTitle = if (seedTitle != null || seedCwd != null) {
+                    displayNameFor(sessionId, seedTitle, seedCwd)
+                } else {
+                    null
+                },
+                sessionCwd = seedCwd,
+            ),
+        )
 
     private val _effects = Channel<Effect>(Channel.BUFFERED)
     val effects = _effects.receiveAsFlow()
@@ -260,7 +259,7 @@ class ChatViewModel internal constructor(
         attachmentStore = attachmentStore,
         chatRepository = chatRepository,
         settingsRepository = settingsRepository,
-        updateState = { transform -> _uiState.update(transform) },
+        updateState = { transform -> uiState.update(transform) },
         sendEffect = { effect -> _effects.send(effect) },
     )
 
@@ -271,8 +270,8 @@ class ChatViewModel internal constructor(
         chatRepository = chatRepository,
         settingsRepository = settingsRepository,
         sessionId = sessionId,
-        state = { _uiState.value },
-        updateState = { transform -> _uiState.update(transform) },
+        state = { uiState.value },
+        updateState = { transform -> uiState.update(transform) },
         sendEffect = { effect -> _effects.send(effect) },
     )
 
@@ -325,7 +324,7 @@ class ChatViewModel internal constructor(
     /** Publishes the timeline's current rows+todos — the coalescer's publish point
      * and [applySessionEvent]'s for timeline-bound events. */
     private fun publishTimeline() {
-        _uiState.update { it.copy(items = timeline.items(), todos = timeline.todos()) }
+        uiState.update { it.copy(items = timeline.items(), todos = timeline.todos()) }
     }
 
     /** The delta-coalescing state machine (ticket 065): every timeline-bound socket
@@ -359,7 +358,7 @@ class ChatViewModel internal constructor(
             // flush (ticket 062; mirrors SubagentStreamStore.applyTranscriptPage).
             deltaCoalescer.flush()
             timeline.replaceHistory(page.items, keepLive = keepLive)
-            _uiState.update {
+            uiState.update {
                 it.copy(
                     items = timeline.items(),
                     todos = timeline.todos(),
@@ -374,7 +373,7 @@ class ChatViewModel internal constructor(
         applyOlder = { page ->
             oldestHistoryId = page.items.firstOrNull()?.id ?: oldestHistoryId
             timeline.prependHistory(page.items)
-            _uiState.update {
+            uiState.update {
                 it.copy(
                     items = timeline.items(),
                     hasMoreHistory = page.hasMore,
@@ -382,15 +381,15 @@ class ChatViewModel internal constructor(
             }
         },
         onNewestError = { error ->
-            if (_uiState.value.items.isNullOrEmpty()) {
-                _uiState.update { it.copy(error = error.toUserMessage()) }
+            if (uiState.value.items.isNullOrEmpty()) {
+                uiState.update { it.copy(error = error.toUserMessage()) }
             } else {
                 _effects.send(Effect.RefreshFailed(error.toUserMessage()))
             }
         },
-        hasMore = { _uiState.value.hasMoreHistory },
+        hasMore = { uiState.value.hasMoreHistory },
         cursor = { oldestHistoryId },
-        setLoadingMore = { loading -> _uiState.update { it.copy(isLoadingMoreHistory = loading) } },
+        setLoadingMore = { loading -> uiState.update { it.copy(isLoadingMoreHistory = loading) } },
     )
 
     /** Wired to ON_START: re-syncs history (status-aware — a turn that ended while
@@ -421,12 +420,12 @@ class ChatViewModel internal constructor(
     }
 
     fun onRetry() {
-        _uiState.update { it.copy(error = null) }
+        uiState.update { it.copy(error = null) }
         onScreenStarted()
     }
 
     fun onInputChange(value: String) {
-        _uiState.update { it.copy(inputText = value) }
+        uiState.update { it.copy(inputText = value) }
     }
 
     // --- Attachments (ticket 072): the logic lives in [ChatAttachments] — these are
@@ -456,10 +455,10 @@ class ChatViewModel internal constructor(
      * stays in the field and [Effect.SendFailed] drives a snackbar with Retry.
      */
     fun onSend() {
-        val state = _uiState.value
+        val state = uiState.value
         val text = state.inputText.trim()
         if ((text.isEmpty() && state.attachments.isEmpty()) || state.isSending) return
-        _uiState.update { it.copy(isSending = true) }
+        uiState.update { it.copy(isSending = true) }
         viewModelScope.launch {
             val settings = settingsRepository.current()
             // Upload phase: null = a chip failed its upload, the send aborts here.
@@ -474,12 +473,12 @@ class ChatViewModel internal constructor(
                     // No local echo: the user message arrives inline in the socket's
                     // context.spliced frame (docs/server-api.md), the reply via the
                     // streaming events.
-                    _uiState.update {
+                    uiState.update {
                         it.copy(inputText = "", attachments = emptyList(), isSending = false, isWorking = true)
                     }
                 }
                 .onFailure { error ->
-                    _uiState.update { it.copy(isSending = false) }
+                    uiState.update { it.copy(isSending = false) }
                     _effects.send(Effect.SendFailed(error.toUserMessage()))
                 }
         }
@@ -489,7 +488,7 @@ class ChatViewModel internal constructor(
      * server's turn.ended frame (docs/server-api.md) drives isWorking=false and the
      * history refetch that commits the partial reply, so a dropped socket just retries. */
     fun onStop() {
-        if (!_uiState.value.isWorking) return
+        if (!uiState.value.isWorking) return
         viewModelScope.launch {
             chatRepository.abortPrompt(settingsRepository.current(), sessionId)
                 .onFailure { error -> _effects.send(Effect.AbortFailed(error.toUserMessage())) }
@@ -505,11 +504,11 @@ class ChatViewModel internal constructor(
      * (empty session, web-started turn) surfaces the server's own message.
      */
     fun onCompact() {
-        val state = _uiState.value
+        val state = uiState.value
         if (state.isWorking || state.isCompacting) return
         viewModelScope.launch {
             chatRepository.compact(settingsRepository.current(), sessionId)
-                .onSuccess { _uiState.update { it.copy(isCompacting = true) } }
+                .onSuccess { uiState.update { it.copy(isCompacting = true) } }
                 .onFailure { error -> _effects.send(Effect.CompactionFailed(error.toUserMessage())) }
         }
     }
@@ -522,7 +521,7 @@ class ChatViewModel internal constructor(
      * approval.resolved event — for our own decisions too — so a failed POST leaves the
      * card up and only reports the error. */
     private fun postDecision(approved: Boolean) {
-        val approval = _uiState.value.pendingApprovals.firstOrNull() ?: return
+        val approval = uiState.value.pendingApprovals.firstOrNull() ?: return
         viewModelScope.launch {
             chatRepository.postApprovalDecision(
                 settingsRepository.current(), sessionId, approval.approvalId, approved,
@@ -571,9 +570,9 @@ class ChatViewModel internal constructor(
                         deltaCoalescer.flush()
                         when (event) {
                             SocketEvent.Connected ->
-                                _uiState.update { it.copy(isReconnecting = false) }
+                                uiState.update { it.copy(isReconnecting = false) }
                             SocketEvent.Reconnected -> {
-                                _uiState.update { it.copy(isReconnecting = false) }
+                                uiState.update { it.copy(isReconnecting = false) }
                                 // The cursor resume replays missed events; the
                                 // status-aware resync heals whatever the replay cannot
                                 // cover (ticket 048). It also runs here — not only on
@@ -589,7 +588,7 @@ class ChatViewModel internal constructor(
                                 questions.refresh()
                             }
                             SocketEvent.Disconnected ->
-                                _uiState.update { it.copy(isReconnecting = true) }
+                                uiState.update { it.copy(isReconnecting = true) }
                             // No-op: the history load validates the URL first and owns the
                             // user-facing error.
                             is SocketEvent.Failed -> Unit
@@ -605,7 +604,7 @@ class ChatViewModel internal constructor(
     private suspend fun onSubagentEvent(event: SessionEvent) {
         if (event is SessionEvent.SubagentSpawned) {
             timeline.linkSubagentTool(event.parentToolCallId, event.subagentId)
-            _uiState.update { it.copy(items = timeline.items()) }
+            uiState.update { it.copy(items = timeline.items()) }
         }
         subagentStore.apply(sessionId, event)
     }
@@ -633,14 +632,14 @@ class ChatViewModel internal constructor(
             is SessionEvent.TurnStarted -> {
                 turnSeedGuard.bump()
                 timeline.apply(event)
-                _uiState.update { it.copy(isWorking = true, stepRetry = null, items = timeline.items(), todos = timeline.todos()) }
+                uiState.update { it.copy(isWorking = true, stepRetry = null, items = timeline.items(), todos = timeline.todos()) }
             }
             is SessionEvent.TurnEnded -> {
                 turnSeedGuard.bump()
                 // A turn that ends takes its pending approvals with it (e.g. abort) — but
                 // not its questions: a pending question survives turn.ended and is
                 // re-derived from the questions endpoint instead of being cleared here.
-                _uiState.update { it.copy(isWorking = false, stepRetry = null, pendingApprovals = emptyList()) }
+                uiState.update { it.copy(isWorking = false, stepRetry = null, pendingApprovals = emptyList()) }
                 // Replace live rows with the canonical committed turn.
                 refreshHistory(clearLive = true)
                 questions.refresh()
@@ -649,13 +648,13 @@ class ChatViewModel internal constructor(
             // the retrying frame opens it, the replacement step.started (new stepId),
             // the step's completion, or a turn end closes it. Never a timeline row.
             is SessionEvent.StepRetrying ->
-                _uiState.update {
+                uiState.update {
                     it.copy(stepRetry = StepRetry(event.nextAttempt, event.maxAttempts, event.errorMessage))
                 }
             is SessionEvent.StepStarted, is SessionEvent.StepCompleted ->
-                _uiState.update { it.copy(stepRetry = null) }
+                uiState.update { it.copy(stepRetry = null) }
             is SessionEvent.ApprovalRequested ->
-                _uiState.update {
+                uiState.update {
                     // Deduped: a reconnect replay must not queue the same request twice.
                     it.copy(
                         pendingApprovals = it.pendingApprovals
@@ -664,7 +663,7 @@ class ChatViewModel internal constructor(
                     )
                 }
             is SessionEvent.ApprovalResolved ->
-                _uiState.update {
+                uiState.update {
                     it.copy(pendingApprovals = it.pendingApprovals.filterNot { a -> a.approvalId == event.approvalId })
                 }
             // Question queue, drafts and wizard step: the collaborator owns the whole
@@ -673,7 +672,7 @@ class ChatViewModel internal constructor(
             is SessionEvent.QuestionResolved -> questions.onResolved(event)
             is SessionEvent.ContextUsageUpdated -> {
                 contextUsageSeedGuard.bump()
-                _uiState.update { it.copy(contextUsage = event.contextUsage) }
+                uiState.update { it.copy(contextUsage = event.contextUsage) }
             }
             // Compaction (ticket 056): no turn events fire for it — these frames alone
             // drive the divider and the compacting state. Started also arrives for
@@ -681,11 +680,11 @@ class ChatViewModel internal constructor(
             // not only our POST ack — sets isCompacting.
             is SessionEvent.CompactionStarted -> {
                 timeline.compactionStarted()
-                _uiState.update { it.copy(isCompacting = true, items = timeline.items()) }
+                uiState.update { it.copy(isCompacting = true, items = timeline.items()) }
             }
             is SessionEvent.CompactionCompleted -> {
                 timeline.compactionCompleted(event.summary, event.tokensBefore, event.tokensAfter)
-                _uiState.update { it.copy(isCompacting = false, items = timeline.items()) }
+                uiState.update { it.copy(isCompacting = false, items = timeline.items()) }
                 _effects.send(
                     Effect.CompactionFinished(
                         "Context compacted: ${formatTokenCount(event.tokensBefore)} → " +
@@ -695,7 +694,7 @@ class ChatViewModel internal constructor(
             }
             is SessionEvent.CompactionFailed -> {
                 timeline.compactionFailed()
-                _uiState.update { it.copy(isCompacting = false, items = timeline.items()) }
+                uiState.update { it.copy(isCompacting = false, items = timeline.items()) }
                 _effects.send(Effect.CompactionFailed(event.cause ?: "Compaction failed"))
             }
             is SessionEvent.ToolCallResult -> {
@@ -756,7 +755,7 @@ class ChatViewModel internal constructor(
             val settings = settingsRepository.current()
             chatRepository.getModels(settings)
                 .onSuccess { models ->
-                    _uiState.update {
+                    uiState.update {
                         it.copy(
                             availableModels = models,
                             modelsAvailable = true,
@@ -767,20 +766,20 @@ class ChatViewModel internal constructor(
                     }
                 }
                 .onFailure {
-                    _uiState.update { it.copy(modelsAvailable = false) }
+                    uiState.update { it.copy(modelsAvailable = false) }
                 }
         }
     }
 
     /** Persists the picked model for this session; subsequent prompts carry it. */
     fun onModelSelected(model: String) {
-        _uiState.update { it.copy(sessionModel = model) }
+        uiState.update { it.copy(sessionModel = model) }
         viewModelScope.launch { chatRepository.setSessionModel(sessionId, model) }
     }
 
     /** Persists the picked effort for this session; subsequent prompts carry it. */
     fun onEffortSelected(effort: String) {
-        _uiState.update { it.copy(sessionEffort = effort) }
+        uiState.update { it.copy(sessionEffort = effort) }
         viewModelScope.launch { chatRepository.setSessionEffort(sessionId, effort) }
     }
 
@@ -792,7 +791,7 @@ class ChatViewModel internal constructor(
         viewModelScope.launch {
             sessionsRepository.getSession(settingsRepository.current(), sessionId)
                 .onSuccess { session ->
-                    _uiState.update { it.copy(sessionTitle = session.displayName, sessionCwd = session.cwd) }
+                    uiState.update { it.copy(sessionTitle = session.displayName, sessionCwd = session.cwd) }
                 }
         }
     }
@@ -809,7 +808,7 @@ class ChatViewModel internal constructor(
         viewModelScope.launch {
             chatRepository.getSessionStatus(settingsRepository.current(), sessionId)
                 .onSuccess { status ->
-                    _uiState.update {
+                    uiState.update {
                         it.copy(
                             isWorking = if (!turnSeedGuard.isStale(turnEventsAtSeed)) status.busy else it.isWorking,
                             contextUsage =

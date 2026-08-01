@@ -33,6 +33,10 @@ drift check keeps the two in sync.
 - MVVM: one immutable `UiState` per screen as `StateFlow`, one-shot effects via
   `Channel`. ALL one-shots (snackbars, open-file intents) go through the effect
   channel — composables never call `snackbarHostState` or do I/O directly.
+  ViewModel StateFlows use Kotlin 2.4 explicit backing fields (`val uiState:
+  StateFlow<UiState> field = MutableStateFlow(…)`; inside the class the field
+  smart-casts to `MutableStateFlow`, so mutations hit `uiState` directly) — the
+  `_uiState`/`asStateFlow()` pair is legacy (ticket 084).
 - minSdk 36 (Android 16+ only), targetSdk 36, compileSdk 37, Java 21
   (ticket 079), AGP 9.3.1, Gradle 9.6.1, KSP 2.3.10 (ticket 075). AGP 9's
   built-in Kotlin compiles the Kotlin sources — `org.jetbrains.kotlin.android`

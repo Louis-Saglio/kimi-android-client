@@ -10,7 +10,6 @@ import javax.inject.Inject
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -40,8 +39,8 @@ class SettingsViewModel @Inject constructor(
         data object SettingsSaved : Effect
     }
 
-    private val _uiState = MutableStateFlow(UiState())
-    val uiState: StateFlow<UiState> = _uiState.asStateFlow()
+    val uiState: StateFlow<UiState>
+        field = MutableStateFlow(UiState())
 
     private val _effects = Channel<Effect>(Channel.BUFFERED)
     val effects = _effects.receiveAsFlow()
@@ -49,7 +48,7 @@ class SettingsViewModel @Inject constructor(
     init {
         viewModelScope.launch {
             val stored = settingsRepository.current()
-            _uiState.update {
+            uiState.update {
                 it.copy(
                     serverUrl = stored.serverUrl,
                     token = stored.token,
@@ -60,10 +59,10 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun onServerUrlChange(value: String) =
-        _uiState.update { it.copy(serverUrl = value, testResult = null) }
+        uiState.update { it.copy(serverUrl = value, testResult = null) }
 
     fun onTokenChange(value: String) =
-        _uiState.update { it.copy(token = value, testResult = null) }
+        uiState.update { it.copy(token = value, testResult = null) }
 
     fun onSave() {
         viewModelScope.launch {
@@ -74,13 +73,13 @@ class SettingsViewModel @Inject constructor(
 
     fun onTestConnection() {
         viewModelScope.launch {
-            _uiState.update { it.copy(isTestingConnection = true, testResult = null) }
+            uiState.update { it.copy(isTestingConnection = true, testResult = null) }
             val testResult = connectionChecker.check(fieldSettings()).toTestResult()
-            _uiState.update { it.copy(isTestingConnection = false, testResult = testResult) }
+            uiState.update { it.copy(isTestingConnection = false, testResult = testResult) }
         }
     }
 
-    private fun fieldSettings(): ServerSettings = _uiState.value.let {
+    private fun fieldSettings(): ServerSettings = uiState.value.let {
         ServerSettings(serverUrl = it.serverUrl.trim(), token = it.token.trim())
     }
 

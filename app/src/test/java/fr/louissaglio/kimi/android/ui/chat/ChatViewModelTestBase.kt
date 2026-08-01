@@ -366,7 +366,7 @@ abstract class ChatViewModelTestBase {
      * order — the observable trace of the delta conflation. Cancel the job in finally.
      *
      * The recorder LAGS the StateFlow by design (ticket 049): its Unconfined collector
-     * is resumed from `_uiState.update` calls that themselves run inside the socket
+     * is resumed from `uiState.update` calls that themselves run inside the socket
      * collect's inline resume on the OkHttp reader thread; `executeUnconfined` then
      * ENQUEUES the collector to that thread's unconfined queue (stack-overflow
      * avoidance) instead of running it inline, so the append lands only when the frame

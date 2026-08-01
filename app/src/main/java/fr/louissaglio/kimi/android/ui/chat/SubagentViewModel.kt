@@ -13,7 +13,6 @@ import fr.louissaglio.kimi.android.navigation.Subagent
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -72,8 +71,8 @@ class SubagentViewModel internal constructor(
         val isLoadingMoreHistory: Boolean = false,
     )
 
-    private val _uiState = MutableStateFlow(UiState(subagentId = subagentId))
-    val uiState: StateFlow<UiState> = _uiState.asStateFlow()
+    val uiState: StateFlow<UiState>
+        field = MutableStateFlow(UiState(subagentId = subagentId))
 
     /** Last status the entry collector observed — the reconcile trigger's edge detector. */
     private var lastSeenStatus: SubagentStatus? = null
@@ -91,18 +90,18 @@ class SubagentViewModel internal constructor(
             )
         },
         onNewestStart = {
-            val showLoading = _uiState.value.items.isEmpty() && _uiState.value.status == null
-            if (showLoading) _uiState.update { it.copy(isLoading = true) }
+            val showLoading = uiState.value.items.isEmpty() && uiState.value.status == null
+            if (showLoading) uiState.update { it.copy(isLoading = true) }
         },
         applyNewest = { page, keepLive ->
             subagentStore.applyTranscriptPage(sessionId, subagentId, page, keepLive)
-            _uiState.update { it.copy(isLoading = false, error = null) }
+            uiState.update { it.copy(isLoading = false, error = null) }
         },
         applyOlder = { page ->
             subagentStore.prependTranscriptPage(sessionId, subagentId, page)
         },
         onNewestError = { error ->
-            _uiState.update {
+            uiState.update {
                 it.copy(
                     isLoading = false,
                     // With nothing to show the fetch is the page's only data
@@ -113,9 +112,9 @@ class SubagentViewModel internal constructor(
                 )
             }
         },
-        hasMore = { _uiState.value.hasMoreHistory },
+        hasMore = { uiState.value.hasMoreHistory },
         cursor = { subagentStore.oldestTurnId(sessionId, subagentId) },
-        setLoadingMore = { loading -> _uiState.update { it.copy(isLoadingMoreHistory = loading) } },
+        setLoadingMore = { loading -> uiState.update { it.copy(isLoadingMoreHistory = loading) } },
     )
 
     init {
@@ -123,7 +122,7 @@ class SubagentViewModel internal constructor(
         // visible): collect from init, not from ON_START.
         viewModelScope.launch {
             subagentStore.entry(sessionId, subagentId).collect { entry ->
-                _uiState.update {
+                uiState.update {
                     it.copy(
                         name = entry?.name,
                         description = entry?.description,
@@ -161,7 +160,7 @@ class SubagentViewModel internal constructor(
 
     /** Retry of the failed initial load (the error state is the whole screen). */
     fun onRetry() {
-        _uiState.update { it.copy(error = null) }
+        uiState.update { it.copy(error = null) }
         historyPager.refresh(keepLive = true)
     }
 

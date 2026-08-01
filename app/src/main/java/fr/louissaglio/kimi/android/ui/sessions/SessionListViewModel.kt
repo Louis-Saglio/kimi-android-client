@@ -13,7 +13,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -49,8 +48,8 @@ class SessionListViewModel @Inject constructor(
         data class SessionCreated(val session: Session) : Effect
     }
 
-    private val _uiState = MutableStateFlow(UiState())
-    val uiState: StateFlow<UiState> = _uiState.asStateFlow()
+    val uiState: StateFlow<UiState>
+        field = MutableStateFlow(UiState())
 
     private val _effects = Channel<Effect>(Channel.BUFFERED)
     val effects = _effects.receiveAsFlow()
@@ -71,15 +70,15 @@ class SessionListViewModel @Inject constructor(
      * near the end, and state updates are not visible synchronously across dispatches.
      */
     fun onEndReached() {
-        val state = _uiState.value
+        val state = uiState.value
         if (state.isLoading || state.isRefreshing || !state.hasMore) return
         if (loadMoreJob?.isActive == true) return
         val beforeId = state.sessions?.lastOrNull()?.id ?: return
         loadMoreJob = viewModelScope.launch {
-            _uiState.update { it.copy(isLoadingMore = true, loadMoreError = null) }
+            uiState.update { it.copy(isLoadingMore = true, loadMoreError = null) }
             sessionsRepository.listSessions(settingsRepository.current(), beforeId = beforeId)
                 .onSuccess { page ->
-                    _uiState.update {
+                    uiState.update {
                         it.copy(
                             isLoadingMore = false,
                             sessions = (it.sessions.orEmpty() + page.items).distinctBy(Session::id),
@@ -89,13 +88,13 @@ class SessionListViewModel @Inject constructor(
                 }
                 .onFailure { error ->
                     // The loaded list stays visible; the footer offers a retry.
-                    _uiState.update { it.copy(isLoadingMore = false, loadMoreError = error.toUserMessage()) }
+                    uiState.update { it.copy(isLoadingMore = false, loadMoreError = error.toUserMessage()) }
                 }
         }
     }
 
     fun onNewSessionClick() {
-        _uiState.update {
+        uiState.update {
             it.copy(
                 showCreateDialog = true,
                 newSessionCwd = DEFAULT_NEW_SESSION_CWD,
@@ -110,7 +109,7 @@ class SessionListViewModel @Inject constructor(
             sessionsRepository.listWorkspaces(settingsRepository.current())
                 .onSuccess { workspaces ->
                     if (workspaces.isEmpty()) return@onSuccess
-                    _uiState.update {
+                    uiState.update {
                         if (!it.showCreateDialog) return@update it
                         it.copy(
                             workspaces = workspaces,
@@ -127,37 +126,37 @@ class SessionListViewModel @Inject constructor(
         }
     }
 
-    fun onCreateDialogDismiss() = _uiState.update { it.copy(showCreateDialog = false) }
+    fun onCreateDialogDismiss() = uiState.update { it.copy(showCreateDialog = false) }
 
     fun onNewSessionCwdChange(value: String) =
-        _uiState.update { it.copy(newSessionCwd = value, newSessionCwdError = null) }
+        uiState.update { it.copy(newSessionCwd = value, newSessionCwdError = null) }
 
     fun onNewSessionTitleChange(value: String) =
-        _uiState.update { it.copy(newSessionTitle = value) }
+        uiState.update { it.copy(newSessionTitle = value) }
 
     fun onCreateSessionConfirm() {
-        val cwd = _uiState.value.newSessionCwd.trim()
+        val cwd = uiState.value.newSessionCwd.trim()
         val validationError = when {
             cwd.isEmpty() -> "Enter a working directory"
             !cwd.startsWith("/") -> "Path must be absolute"
             else -> null
         }
         if (validationError != null) {
-            _uiState.update { it.copy(newSessionCwdError = validationError) }
+            uiState.update { it.copy(newSessionCwdError = validationError) }
             return
         }
         viewModelScope.launch {
-            _uiState.update { it.copy(isCreating = true) }
+            uiState.update { it.copy(isCreating = true) }
             sessionsRepository.createSession(
                 settings = settingsRepository.current(),
                 cwd = cwd,
-                title = _uiState.value.newSessionTitle.trim().ifBlank { null },
+                title = uiState.value.newSessionTitle.trim().ifBlank { null },
             ).onSuccess { session ->
-                _uiState.update { it.copy(isCreating = false, showCreateDialog = false) }
+                uiState.update { it.copy(isCreating = false, showCreateDialog = false) }
                 _effects.send(Effect.SessionCreated(session))
             }.onFailure { error ->
                 // Inputs are kept so the user can fix and retry after the snackbar.
-                _uiState.update { it.copy(isCreating = false) }
+                uiState.update { it.copy(isCreating = false) }
                 _effects.send(Effect.CreateFailed(error.toUserMessage()))
             }
         }
@@ -168,8 +167,8 @@ class SessionListViewModel @Inject constructor(
         loadJob?.cancel()
         loadMoreJob?.cancel()
         loadJob = viewModelScope.launch {
-            val hadSessions = _uiState.value.sessions != null
-            _uiState.update {
+            val hadSessions = uiState.value.sessions != null
+            uiState.update {
                 it.copy(
                     isLoading = !hadSessions,
                     isRefreshing = hadSessions,
@@ -180,7 +179,7 @@ class SessionListViewModel @Inject constructor(
             }
             sessionsRepository.listSessions(settingsRepository.current())
                 .onSuccess { page ->
-                    _uiState.update {
+                    uiState.update {
                         it.copy(
                             isLoading = false,
                             isRefreshing = false,
@@ -193,10 +192,10 @@ class SessionListViewModel @Inject constructor(
                 .onFailure { error ->
                     val message = error.toUserMessage()
                     if (hadSessions) {
-                        _uiState.update { it.copy(isLoading = false, isRefreshing = false) }
+                        uiState.update { it.copy(isLoading = false, isRefreshing = false) }
                         _effects.send(Effect.RefreshFailed(message))
                     } else {
-                        _uiState.update { it.copy(isLoading = false, isRefreshing = false, error = message) }
+                        uiState.update { it.copy(isLoading = false, isRefreshing = false, error = message) }
                     }
                 }
         }
