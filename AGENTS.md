@@ -42,9 +42,8 @@ drift check keeps the two in sync.
   Escape hatches until AGP 10: `android.builtInKotlin=false`,
   `android.newDsl=false`. The VPS cmdline-tools are too stale to see new SDK
   packages — let AGP auto-install platforms at build time (android-37.0 got
-  installed that way). On the VPS, build with `--max-workers=1`: the first
-  parallel build on this toolchain exceeded the 5 GB kimi-web cgroup and was
-  OOM-killed.
+  installed that way). Build memory rules for the VPS: see "Building on the
+  VPS: OOM avoidance" below — they are load-bearing, not advisory.
 - Crash reporting: Firebase Crashlytics in the default VPS project
   (`kimi-code-android-client`, Android app `fr.louissaglio.kimi.android`,
   `app/google-services.json` committed). The SDK auto-initializes — no app
@@ -52,6 +51,28 @@ drift check keeps the two in sync.
   https://console.firebase.google.com/project/kimi-code-android-client/crashlytics
   and are deobfuscated because the Crashlytics Gradle plugin uploads the R8
   mapping on every release build.
+
+## Building on the VPS: OOM avoidance
+
+The 5 GB `MemoryMax` cgroup of `kimi-web.service` (see `~/administration.md`,
+2026-07-31) covers the server AND every Gradle/Kotlin daemon that agent
+sessions spawn. A cgroup-local OOM kill takes down the build (and, via lost
+background tasks, can wedge the calling session) — the server survives, but
+the work dies. Hard-won rules from the 2026-08-01 wave-1 incidents:
+
+- Always build with `--max-workers=1` on the VPS.
+- When several agents build in parallel worktrees, serialize execution
+  fleet-wide: `flock /tmp/kimi-android-gradle.lock ./gradlew <args>`.
+- Parallel builds must also use `--no-daemon`. `flock` alone does NOT prevent
+  OOM: daemons are per-worktree and linger after their build — three idle
+  daemon sets plus one active build blew the cgroup (2026-08-01 04:17 UTC).
+  A single-use JVM exits at build end, so nothing accumulates.
+- NEVER run `./gradlew --stop` while other agents may be building: it is
+  per-user, not per-project — it kills sibling worktrees' in-flight builds
+  (one `assembleRelease` died mid-R8 this way). With `--no-daemon` it is
+  unnecessary anyway.
+- Incident details and rationale: `~/administration.md` (2026-07-31 and
+  2026-08-01 entries).
 
 ## Querying Crashlytics from the VPS
 
