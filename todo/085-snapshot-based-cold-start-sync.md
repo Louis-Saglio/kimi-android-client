@@ -52,6 +52,31 @@ The within-process resume path (ticket 048: cursor replay + `/status`-driven
 refetch) is sound by design and stays as-is — only the two paths that have no
 replay (cold start, `resync_required`) move to the snapshot.
 
+Follow-up analysis (2026-08-01, same findings applied to the sub-agent stream)
+sharpened the design's placement. The sub-agent page's cold path is independent
+of `ChatViewModel` by design (ticket 064: after process death with a page on
+top, the chat ViewModel is never recreated — the store's own keep-alive
+collection feeds it). A roster seed living only in `ChatViewModel` would never
+run on that path, and the stream's cold state is degraded in its own right:
+
+- the store entry exists only via `subagent.spawned` — cold-opens get a
+  blank-identity placeholder (`name`/`description` empty, `runInBackground`
+  false, no `seededPrompt` — `SubagentStreamStore.applyTranscriptPage`);
+- cold status is a heuristic (last transcript turn Running → Working, else
+  Completed) that misreports **Failed** and **Suspended** runs as Completed
+  (`SubagentStreamStore.kt`), and never populates `resultSummary`;
+- live frames for an unknown sub-agent are dropped until the first transcript
+  page lands ("spawn missed").
+
+The roster heals all three for foreground sub-agents (identity, precise phase,
+`output_preview` summary) — so the fetch+seed must be owned at session scope,
+shared by both screens, not inside `ChatViewModel`. For the window the roster
+cannot cover (it resets to `[]` when the main agent's next turn starts), the
+transcript turn states already distinguish `completed`/`cancelled`/`failed`
+(real since 0.31.1) — the store's heuristic just doesn't use them; that
+precision fix is part of this ticket. Louis confirmed folding these
+implications into 085 in place rather than a follow-up ticket.
+
 ## Description
 
 **Data layer** (`data/chat/`):
@@ -80,39 +105,67 @@ replay (cold start, `resync_required`) move to the snapshot.
 **Socket** (`SessionSocket`): add `seedCursor(sessionId, seq, epoch)` writing the
 instance-level cursor map, so the first subscribe of a cold collection resumes
 AT the snapshot watermark — gapless stitching, no missed window between the
-REST fetch and the subscribe. Note: a seeded first connect currently emits
+REST fetch and the subscribe. This serves whichever collection opens first for
+the session (the socket is a shared `@Singleton`): the chat gate's or the
+store's keep-alive. Note: a seeded first connect currently emits
 `SocketEvent.Reconnected` (cursor present) which triggers
 `resyncHistoryAfterDrop` — suppress that one redundant resync when the snapshot
 apply just landed (e.g. remember the applied watermark and skip the resync whose
 subscribe cursor matches it).
 
-**ViewModel** (`ChatViewModel`, per the collaborator convention of ticket 072 —
-a new `internal` logic holder, e.g. `SnapshotSync`, with UiState/Effect staying
-in the ViewModel and updates reported through constructor callbacks):
+**Snapshot ownership — session scope, NOT `ChatViewModel`** (the follow-up
+analysis' core correction): a new session-scoped sync holder (e.g. a
+`@Singleton SnapshotSync` keyed by session, next to `SubagentStreamStore`)
+owns the fetch and the shared apply, so both cold paths — chat open AND
+process-death restore with a sub-agent page on top (ticket 064: no
+`ChatViewModel` exists there) — run the same rebuild:
 
-- Cold start (initial load, no stored cursor): replace the `/messages` +
-  `/status` + `/questions` burst with one snapshot fetch, then apply:
-  - `timeline.replaceHistory(snapshot.messages, keepLive = false)`;
-    `oldestHistoryId`/`hasMoreHistory` from the page;
-  - `isWorking = snapshot.busy`, `contextUsage`;
-  - `pendingApprovals` → UiState queue (dedup by approval id);
-  - questions → `QuestionWizard`;
-  - roster: `timeline.linkSubagentTool(parent_tool_call_id, id)` per entry, plus
-    a new `SubagentStreamStore.seedFromSnapshot(sessionId, entries)` that seeds
-    stream entries with identity (`subagent_type`, `description`) and status
-    mapped from `subagent_phase` (working/queued → Working, suspended →
-    Suspended, completed → Completed with `output_preview` as resultSummary,
-    failed → Failed) — idempotent, never overwriting a live-fed entry;
-  - `SessionSocket.seedCursor(sessionId, asOfSeq, epoch)` BEFORE the socket
-    gate can open its first collection.
-- `resync_required` path: run the same snapshot apply (keepLive decided by the
-  snapshot's `busy`, same semantics as today's status check) and re-seed the
-  cursor from the new watermark. The socket connection stays open; subsequent
-  live frames carry fresh cursors.
-- Failure handling: none beyond the ordinary load-error path — a failed snapshot
-  fetch surfaces the same error state a failed initial history load does today.
-  No fallback to the legacy burst: the app only ever runs against the latest
-  server version and never keeps compatibility shims (project convention).
+- The fetch runs BEFORE the session's first socket subscribe (the chat's gate
+  awaits it on its first opening; `SubagentStreamStore.pageOpened`'s keep-alive
+  launch awaits it likewise), once per cold start per session (idempotent while
+  already fresh); `resync_required` re-runs it.
+- On success it seeds `SessionSocket.seedCursor(sessionId, asOfSeq, epoch)`,
+  applies the roster into the store (below), and hands the chat-side bundle to
+  `ChatViewModel` when one exists (below).
+- Failure handling: none beyond the ordinary load-error path — a failed
+  snapshot fetch surfaces the same error state a failed initial load does
+  today. No fallback to the legacy burst: the app only ever runs against the
+  latest server version and never keeps compatibility shims (project
+  convention).
+
+**Store seed** (`SubagentStreamStore.seedFromSnapshot(sessionId, rosterEntries)`):
+
+- Creates missing entries with identity from the roster (`subagent_type`,
+  `description`, `run_in_background`) and status mapped precisely from
+  `subagent_phase`: queued → Queued, working → Working, suspended → Suspended,
+  completed → Completed (with `output_preview` as `resultSummary`),
+  failed → Failed.
+- Idempotent, never overwriting a live-fed (spawn/event-fed) entry; roster-
+  seeded entries count as lifecycle-seen (`sawLifecycle = true` — the roster IS
+  authoritative lifecycle), so the transcript heuristic below can never regress
+  a roster-precise status.
+- Because the entry exists before the first subscribe, the "spawn missed"
+  frame-drop window closes: live frames accumulate from the start.
+
+**Transcript status precision** (`SubagentStreamStore.applyTranscriptPage`):
+replace the Running/else heuristic's terminal branch with the real turn states
+(`completed` → Completed; `cancelled`/`failed` → Failed; still Running →
+Working) — turn states are real since 0.31.1. This is the cold-status source
+when the roster cannot help (it resets to `[]` on the main agent's next turn).
+
+**ChatViewModel cold start + `resync_required`** (consumes the chat-side bundle
+via the shared owner; UiState/Effect stay in the ViewModel per ticket 072):
+
+- `timeline.replaceHistory(snapshot.messages, keepLive = false)`;
+  `oldestHistoryId`/`hasMoreHistory` from the page;
+- `isWorking = snapshot.busy`, `contextUsage`;
+- `pendingApprovals` → UiState queue (dedup by approval id);
+- questions → `QuestionWizard`;
+- roster → `timeline.linkSubagentTool(parent_tool_call_id, id)` per entry (the
+  store seed is the owner's job, above — the row link is the chat timeline's);
+- `resync_required`: the same apply with keepLive decided by the snapshot's
+  `busy` (same semantics as today's status check); the socket connection stays
+  open, subsequent live frames carry fresh cursors.
 
 **Docs**: extend the thin snapshot coverage in `docs/server-api.md` with the
 live-verified shapes (full top-level key list, `pending_approvals` item,
@@ -133,6 +186,17 @@ captures, and keep `scripts/protocol-update-prompt.md` aligned.
 - [ ] Snapshot `pending_questions` items render the question card on cold open
   (same card the live `event.question.requested` shows); a failed snapshot
   request surfaces the ordinary load-error state (no legacy-burst fallback).
+- [ ] Page-on-top cold restore (the 064 path — no `ChatViewModel` in the test):
+  opening a sub-agent page with the snapshot serving a working roster entry
+  seeds the store BEFORE the keep-alive subscribes (identity, Working status,
+  live frames accumulate from the first one — no "spawn missed" drop), and the
+  keep-alive's subscribe carries the snapshot watermark cursor.
+- [ ] Roster-seeded `suspended`/`failed` phases surface as Suspended/Failed
+  (not Completed), `completed` carries `output_preview` as the summary, and a
+  later transcript page never regresses a roster-seeded status.
+- [ ] Transcript-only cold open (roster empty): a terminal turn state of
+  `failed`/`cancelled` maps to Failed, `completed` to Completed — no more
+  blanket-Completed heuristic.
 - [ ] Existing suite green — in particular tickets 048 (resync), 060 (session
   filter), 064 (keep-alive): the within-process resume path is untouched.
 - [ ] `./gradlew :app:assembleDebug` (VPS rules: `flock /tmp/kimi-android-gradle.lock`,
@@ -148,7 +212,13 @@ captures, and keep `scripts/protocol-update-prompt.md` aligned.
 - **Background sub-agent cold relink**: impossible with current server APIs —
   the roster is foreground-only and REST `/tasks` carries no
   `parent_tool_call_id` (`docs/server-api.md`). This is an upstream gap, not an
-  app bug; revisit if the server ever exposes the link.
+  app bug; revisit if the server ever exposes the link. (A background sub-agent
+  *page* could still be cold-seeded from `/tasks` + transcript — deferred; no
+  user-visible defect reported there yet.)
+- **Cold-restored page's task-prompt bubble** (`Stream.seededPrompt`): its only
+  source is the main timeline's `Agent` row args, reachable chat-side via
+  history; the roster does not carry the prompt. A page restored before the
+  chat ever opens keeps an absent prompt bubble — cosmetic, deferred.
 - **Consuming `in_flight_turn`** (assistant_text/thinking_text/running_tools of
   the active turn): the in-flight turn's content already reaches the timeline
   via history (verified: the running Agent call appears in the messages page
@@ -194,4 +264,15 @@ captures, and keep `scripts/protocol-update-prompt.md` aligned.
   item is the legacy shape, so the app's existing legacy decode is the right
   reuse), 072 (collaborator convention), 074 (shared HistoryPager).
 - Server-side roster lifecycle: dropped when the main agent starts its next
-  turn — harmless, finished rows relink from the `agent_id:` result marker.
+  turn — the transcript turn-state precision fix covers that window (turn
+  states `running`/`completed`/`cancelled`/`failed` are real since 0.31.1);
+  finished chat rows relink from the `agent_id:` result marker regardless.
+- Sub-agent-stream findings that moved the roster seed to session scope
+  (2026-08-01): the store entry exists only via `subagent.spawned` — a cold
+  open gets a blank-identity placeholder (`SubagentStreamStore.applyTranscriptPage`,
+  `name`/`description` empty, `runInBackground = false`, no `seededPrompt`);
+  cold status maps any non-Running last turn to Completed, misreporting
+  Failed/Suspended; live frames for an unknown sub-agent are dropped as
+  "spawn missed" until the first transcript page lands; and the page's cold
+  path (ticket 064 keep-alive) deliberately never recreates `ChatViewModel`,
+  so any `ChatViewModel`-only seed would never run there.
