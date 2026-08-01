@@ -40,8 +40,8 @@ drift check keeps the two in sync.
   StateFlow<UiState> field = MutableStateFlow(…)`; inside the class the field
   smart-casts to `MutableStateFlow`, so mutations hit `uiState` directly) — the
   `_uiState`/`asStateFlow()` pair is legacy (ticket 084).
-- minSdk 36 (Android 16+ only), targetSdk 36, compileSdk 37, Java 21
-  (ticket 079), AGP 9.3.1, Gradle 9.6.1, KSP 2.3.10 (ticket 075). AGP 9's
+- minSdk 36 (Android 16+ only), targetSdk 37, compileSdk 37, Java 21
+  (tickets 079/080), AGP 9.3.1, Gradle 9.6.1, KSP 2.3.10 (ticket 075). AGP 9's
   built-in Kotlin compiles the Kotlin sources — `org.jetbrains.kotlin.android`
   is NOT applied (applying it errors out); KGP 2.4.10/KSP 2.3.10 are pinned
   via a `buildscript { classpath(...) }` block in the root `build.gradle.kts`

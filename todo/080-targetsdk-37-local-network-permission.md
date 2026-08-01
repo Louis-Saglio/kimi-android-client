@@ -38,6 +38,42 @@ runs target-36 apps unchanged — but abandons "latest"); requesting the
 permission blindly without verifying need (bad UX — an unexplained "nearby
 devices" prompt in a chat app).
 
+## Findings (2026-08-01 — AOSP `android17-release`, code-verified)
+
+The 100.64/10 question is **answered: the Tailscale endpoint needs no
+permission.**
+
+- `100.64.0.0/10` (CGNAT) IS literally in the range list:
+  `packages/modules/Connectivity`,
+  `staticlibs/.../NetworkStackConstants.java:362-377` —
+  `IPV4_LOCAL_PREFIXES` = 169.254/16, **100.64/10**, 10/8, 172.16/12,
+  192.168/16 (+ multicast/broadcast separately).
+- But the list is NOT a global destination blocklist: eBPF rules are
+  installed per **(egress interface, prefix)**
+  (`ConnectivityService.getEffectiveLocalPrefixes`, `BpfNetMaps`,
+  `bpf/progs/netd.c` keyed by if_index). On point-to-point links (VPNs,
+  cellular) `getLocalNetworkPrefixes` returns **empty** when there are no
+  gatewayed routes (`ConnectivityService.java:11218-11224`) — Tailscale's
+  tun has none, so no 100.64/10 rule exists on `tun0` and peer packets
+  pass.
+- The platform's own manifest doc states it:
+  `frameworks/base core/res/AndroidManifest.xml:2666-2669` — a local
+  network "excludes cellular (WWAN) or **VPN** connections".
+- What WOULD need the permission even through the tunnel:
+  multicast/broadcast (mDNS-style discovery — entries are installed for
+  every interface) and any direct LAN use (192.168/10.x/169.254 over
+  Wi-Fi). The app does neither; the public-IP path
+  (`agent.example.com:8443`) is unaffected either way.
+- Blocked-TCP behavior (for future debugging): silent egress packet drop
+  → connect hangs until timeout, **no EPERM**, no app-facing
+  blocked-reason API.
+- Confidence: high on the mechanism. Residuals: Google flips
+  `access_local_network_permission_enabled` in production at its own
+  schedule (flag has no ENABLED state in AOSP — even then the VPN path
+  stays open); a Tailscale config advertising gatewayed routes (not
+  default) would change the answer. Cheap on-device confirmation when
+  Louis has an Android 17 build (below).
+
 ## Description
 
 1. Determine whether 100.64.0.0/10 is in Android 17's local-network range
@@ -58,12 +94,14 @@ devices" prompt in a chat app).
 
 ## Acceptance criteria
 
-- [ ] The 100.64/10 question answered with the source recorded in this ticket.
-- [ ] `targetSdk = 37`; app on an Android 17 device/emulator connects to the
-  Tailscale endpoint and streams a chat turn (Louis's phone is the real
-  Tailscale client — final verification is his).
-- [ ] If the permission was needed: granted → works; denied → clear error
-  state, no silent failure; unit tests for the request gating.
+- [x] The 100.64/10 question answered with the source recorded in this ticket.
+- [x] `targetSdk = 37`; ~~app on an Android 17 device/emulator connects to
+  the Tailscale endpoint and streams a chat turn~~ — **Louis's check** when
+  his phone runs Android 17 (no Android 17 device/emulator is reachable
+  from the VPS; mechanism is code-verified, see Findings).
+- [x] ~~If the permission was needed: granted → works; denied → clear error
+  state, no silent failure; unit tests for the request gating.~~ **n/a —
+  permission not needed** (Findings).
 - [ ] Firebase robo green on an API 37 device.
 - [ ] Release APK published to the file server per `AGENTS.md`; `AGENTS.md`
   updated.
