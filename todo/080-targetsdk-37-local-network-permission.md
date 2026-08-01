@@ -20,6 +20,14 @@ connection the moment targetSdk becomes 37, unless the permission is declared
 and granted. (Apps targeting ≤36 keep an implicit grant — that is why 079 is
 safe.)
 
+Update (2026-08-01 post-upgrade research): the local-network-protection docs
+list 100.64.0.0/10 (CGNAT) as "local" **but exclude VPN-routed traffic** —
+and Tailscale *is* a VPN (tailscaled routes 100.64/10 through its own tunnel
+interface, not the LAN). If the VPN exclusion covers Tailscale, the default
+endpoint needs no permission at all and this ticket collapses to "bump
+targetSdk + verify on a device". The permission flow below is the fallback
+only.
+
 Other target-37 changes were reviewed in 079 and don't affect this app; the
 only one worth a smoke check is large-screen adaptive-layout enforcement
 (verify the chat screen on a tablet/foldable emulator — the manifest locks
