@@ -25,11 +25,14 @@ drift check keeps the two in sync.
   Kotlin 2.4 / Compose 1.11 / Java 21 / compileSdk 37, all landed in 075/076/079).
   Stack: Kotlin 2.4.10,
   Compose BOM 2026.06.01, Hilt 2.60.1 (2.51.1's KSP processor crashes under
-  KSP2; 2.57.x's Gradle plugin predates AGP 9 — don't downgrade either). `MarkdownBody` parses the INITIAL content
-  synchronously (`rememberMarkdownState(immediate = true)`) so MessageList's
-  bottom pin measures real first-frame row heights; content changes (streaming)
-  still re-parse asynchronously, with `retainState` keeping the previous
-  snapshot on screen.
+  KSP2; 2.57.x's Gradle plugin predates AGP 9 — don't downgrade either).
+  `MarkdownBody` (ticket 082) renders via the renderer's append-only
+  `StreamingMarkdownState`: stable blocks parse once, only the growing tail
+  re-parses per append. The timeline's full snapshots are adapted by
+  `StreamingMarkdownFeed` (append/no-op/reset; resets re-seed via a
+  generation key); the INITIAL content is seeded synchronously (`runBlocking`
+  in composition, same cost as the old `immediate = true`) so MessageList's
+  bottom pin keeps measuring real first-frame row heights.
 - MVVM: one immutable `UiState` per screen as `StateFlow`, one-shot effects via
   `Channel`. ALL one-shots (snackbars, open-file intents) go through the effect
   channel — composables never call `snackbarHostState` or do I/O directly.
@@ -191,10 +194,10 @@ also the regression signal for "verified fixed" tickets.
   deltas through the shared `DeltaCoalescer` (ui/chat, internal — ticket 065):
   leading edge immediately, then one emission per ~100 ms window, flushed before any
   non-delta event (`onEvent` carries the invariant) and before REST refetches
-  (`flush()`), because each new text snapshot still costs one full re-parse in
-  `MarkdownBody` (renderer 0.43.0 memoizes unchanged content; incremental
-  `StreamingMarkdownState` is available since 0.42.0 on the Kotlin 2.4 stack —
-  adopting it is ticket 082). The
+  (`flush()`). With `StreamingMarkdownState` adopted (082), a published
+  snapshot costs a tail-only re-parse, so the 100 ms window now bounds
+  recomposition/layout churn rather than parse cost — the value stays
+  (no regression measured; phone-frame eyeball is Louis's). The
   window is injectable (`streamCoalesceWindowMillis`; 0 in unit tests).
 
 ## Distribution: put the release APK on the file server

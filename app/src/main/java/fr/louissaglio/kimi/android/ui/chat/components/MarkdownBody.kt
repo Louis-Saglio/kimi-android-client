@@ -3,6 +3,14 @@ package fr.louissaglio.kimi.android.ui.chat
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.SpanStyle
@@ -18,7 +26,8 @@ import com.mikepenz.markdown.model.markdownAnnotator
 import com.mikepenz.markdown.model.markdownAnnotatorConfig
 import com.mikepenz.markdown.model.markdownExtendedSpans
 import com.mikepenz.markdown.model.markdownPadding
-import com.mikepenz.markdown.model.rememberMarkdownState
+import com.mikepenz.markdown.model.rememberStreamingMarkdownState
+import kotlinx.coroutines.runBlocking
 
 /**
  * Message-body markdown (ticket 020), themed for web parity (ticket 021):
@@ -27,29 +36,51 @@ import com.mikepenz.markdown.model.rememberMarkdownState
  * `MarkdownCode`), heading scale capped so a `#`/`##` does not fill the screen,
  * accent-colored underlined links.
  *
- * Streaming cost (ticket 073): since renderer 0.33.0 the parse is asynchronous
- * (`Dispatchers.Default`) and memoized — recomposing with unchanged text no
- * longer re-parses. `retainState` keeps the previous snapshot on screen while a
- * changed text re-parses, so streamed emissions never flash the blank loading
- * slot. Each new text snapshot still costs one full re-parse of the document
- * (incremental `StreamingMarkdownState` exists since 0.42.0 but is not adopted
- * yet — ticket 082), so the `DeltaCoalescer` 100 ms window still bounds the
- * re-parse rate during streaming.
+ * Streaming cost (tickets 073, 082): the renderer 0.42+ `StreamingMarkdownState`
+ * parses INCREMENTALLY — stable blocks parse once, only the still-growing tail
+ * re-parses per append, replacing the old full-document re-parse per streamed
+ * snapshot. The timeline publishes full text snapshots, the state is append-only,
+ * so [StreamingMarkdownFeed] classifies each snapshot as append/no-op/reset
+ * (message swap in this slot, history replace) and the state is re-seeded via the
+ * [generation] key on reset. The `DeltaCoalescer` 100 ms window stays: it now
+ * bounds recomposition/layout churn per emission, not parse cost.
  */
 @Composable
 internal fun MarkdownBody(text: String, modifier: Modifier = Modifier) {
     // Alpha-black so chips/code surfaces read as a subtle darkening of whatever
     // bubble they sit in — a fixed dark color was a hard near-black blob.
     val codeSurface = Color.Black.copy(alpha = 0.3f)
-    // immediate: parse the initial content synchronously in composition (as
-    // 0.26.0 always did), so the first frame already has real row heights —
-    // MessageList's bottom pin measures against them, and a zero-height loading
-    // placeholder would let LazyColumn clamp the initial scroll and detach the
-    // pin. Content CHANGES (streaming) still re-parse asynchronously through the
-    // state's LaunchedEffect, so retainState below stays meaningful.
-    val state = rememberMarkdownState(content = text, retainState = true, immediate = true)
+    var generation by remember { mutableIntStateOf(0) }
+    val feed = remember(generation) { StreamingMarkdownFeed() }
+    if (feed.classify(text) == StreamingMarkdownFeed.Action.Reset) {
+        generation++ // converges next frame: the fresh feed classifies the same text as Append
+    }
+    val state = key(generation) { rememberStreamingMarkdownState() }
+    if (feed.fed.isEmpty() && text.isNotEmpty()) {
+        // Fresh state: seed synchronously in composition (the 073 first-frame
+        // contract — MessageList's bottom pin measures real row heights, a
+        // zero-height first frame would detach it). Same cost profile as the old
+        // immediate=true: one full parse of the initial content.
+        runBlocking { state.append(text) }
+        feed.markFed(text)
+    }
+    val latestText by rememberUpdatedState(text)
+    LaunchedEffect(state) {
+        // Streaming appends: sequential (never cancelled mid-append), latest-wins
+        // (snapshotFlow conflates; skipped snapshots are prefixes of the latest).
+        // No-op once the synchronous seed has fed the current text.
+        snapshotFlow { latestText }.collect { target ->
+            when (val action = feed.classify(target)) {
+                is StreamingMarkdownFeed.Action.Append -> {
+                    state.append(action.chunk)
+                    feed.markFed(target)
+                }
+                else -> Unit // Reset is handled by the generation bump in composition
+            }
+        }
+    }
     Markdown(
-        markdownState = state,
+        streamingMarkdownState = state,
         modifier = modifier,
         colors = markdownColor(
             text = LocalContentColor.current,
