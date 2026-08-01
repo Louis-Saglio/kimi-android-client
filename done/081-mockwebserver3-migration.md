@@ -88,3 +88,10 @@ touch this codebase's 11 MockWebServer test files:
 - Changelog with the full breaking-change list:
   https://square.github.io/okhttp/changelogs/changelog/ (5.0.0 and
   5.0.0-alpha.17 entries).
+
+## Verification update (2026-08-01, post-merge)
+
+- Firebase robo **Passed** (MediumPhone.arm, API 36) on merged main.
+- Instrumented androidTest **42/42 passed** (MediumPhone.arm, API 36),
+  including `SettingsFlowTest` on mockwebserver3 on-device.
+- Release APK published to the file server (`kimi-android-client-main.apk`).

@@ -93,3 +93,12 @@ Breaking-change review (073's ladder table + release notes 0.38.1 → 0.43.0):
 - Ticket 073 documents the full renderer/Kotlin/Compose ladder and the
   first-frame `immediate = true` rationale — read it before touching
   `MarkdownBody.kt`.
+
+## Verification update (2026-08-01, post-merge)
+
+- Firebase robo **Passed** (MediumPhone.arm, API 36) on merged main.
+- Instrumented androidTest **42/42 passed** (MediumPhone.arm, API 36),
+  including the 073 first-frame guards `ChatAutoScrollTest` ×3 and
+  `ToolRowExpandScrollTest` ×3 against renderer 0.43.0.
+- Release APK published to the file server (`kimi-android-client-main.apk`).
+- On-phone streaming eyeball: Louis's, on the published APK.

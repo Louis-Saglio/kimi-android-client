@@ -88,3 +88,12 @@ interceptor/timeout fixes, and years of HTTP/2 + WebSocket bug fixes.
 - Changelog: https://square.github.io/okhttp/changelogs/changelog/ (5.0.0
   entry documents the coordinate split and the "old artifact still
   published" policy).
+
+## Verification update (2026-08-01, post-merge)
+
+- Firebase robo **Passed** (MediumPhone.arm, API 36) on merged main.
+- Instrumented androidTest **42/42 passed** (MediumPhone.arm, API 36),
+  including `SettingsFlowTest` against an on-device MockWebServer.
+- Release APK published to the file server (`kimi-android-client-main.apk`).
+- Real-server smoke (connect, stream a turn, resume after backgrounding):
+  Louis's, on the published APK.

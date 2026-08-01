@@ -105,3 +105,13 @@ Guardrails from 073 that must survive any refactor:
 
 - 065 (DeltaCoalescer), 073 (renderer ladder + first-frame rationale) are
   required reading before starting.
+
+## Verification update (2026-08-01, post-merge)
+
+- Firebase robo **Passed** (MediumPhone.arm, API 36) on merged main.
+- Instrumented androidTest **42/42 passed** (MediumPhone.arm, API 36),
+  including the first-frame guards `ChatAutoScrollTest` ×3 and
+  `ToolRowExpandScrollTest` ×3 against `StreamingMarkdownState`.
+- Release APK published to the file server (`kimi-android-client-main.apk`).
+- Phone-frame streaming eyeball (long markdown-heavy session): Louis's, on
+  the published APK.

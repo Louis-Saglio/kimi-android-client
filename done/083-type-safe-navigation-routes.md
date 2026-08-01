@@ -110,3 +110,12 @@ identical:
   current `SavedStateHandle["sessionId"]` reads may keep compiling — switch
   to `toRoute<T>()` anyway; that's the point of the migration.
 - Official guide: https://developer.android.com/guide/navigation/design/type-safety
+
+## Verification update (2026-08-01, post-merge)
+
+- Firebase robo **Passed** (MediumPhone.arm, API 36) on merged main.
+- Instrumented androidTest **42/42 passed** (MediumPhone.arm, API 36).
+- Release APK published to the file server (`kimi-android-client-main.apk`).
+- On-device navigation-flow check (sessions → chat → sub-agent → nested,
+  settings, back): Louis's, on the published APK — robo crawls but cannot
+  meaningfully assert the flows.
