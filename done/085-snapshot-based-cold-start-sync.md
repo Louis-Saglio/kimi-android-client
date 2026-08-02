@@ -174,38 +174,43 @@ captures, and keep `scripts/protocol-update-prompt.md` aligned.
 
 ## Acceptance criteria
 
-- [ ] Regression test for the reported bug on `ChatViewModelTestBase`: cold open
+- [x] Regression test for the reported bug on `ChatViewModelTestBase`: cold open
   with the snapshot serving a running roster entry whose `parent_tool_call_id`
   matches a running `Agent` row → the row's `subagentId` is set (tappable, opens
   the page) and the store entry is seeded with status Working — all before any
-  result/`agent_id:` marker exists.
-- [ ] Snapshot `pending_approvals` item renders the approval card on cold open
+  result/`agent_id:` marker exists. (`SnapshotColdStartTest.cold open links a
+  running sub-agent row from the snapshot roster`)
+- [x] Snapshot `pending_approvals` item renders the approval card on cold open
   (same card the live `event.approval.requested` shows).
-- [ ] The first client subscribe frame after a cold start carries the snapshot
+- [x] The first client subscribe frame after a cold start carries the snapshot
   watermark cursor (`seq`/`epoch`), asserted via `clientFrames`.
-- [ ] Snapshot `pending_questions` items render the question card on cold open
+- [x] Snapshot `pending_questions` items render the question card on cold open
   (same card the live `event.question.requested` shows); a failed snapshot
   request surfaces the ordinary load-error state (no legacy-burst fallback).
-- [ ] Page-on-top cold restore (the 064 path — no `ChatViewModel` in the test):
+- [x] Page-on-top cold restore (the 064 path — no `ChatViewModel` in the test):
   opening a sub-agent page with the snapshot serving a working roster entry
   seeds the store BEFORE the keep-alive subscribes (identity, Working status,
   live frames accumulate from the first one — no "spawn missed" drop), and the
   keep-alive's subscribe carries the snapshot watermark cursor.
-- [ ] Roster-seeded `suspended`/`failed` phases surface as Suspended/Failed
+  (`SubagentStreamStoreKeepAliveTest.the keep-alive cold start seeds the store
+  from the snapshot roster before subscribing`)
+- [x] Roster-seeded `suspended`/`failed` phases surface as Suspended/Failed
   (not Completed), `completed` carries `output_preview` as the summary, and a
   later transcript page never regresses a roster-seeded status.
-- [ ] Transcript-only cold open (roster empty): a terminal turn state of
+- [x] Transcript-only cold open (roster empty): a terminal turn state of
   `failed`/`cancelled` maps to Failed, `completed` to Completed — no more
-  blanket-Completed heuristic.
-- [ ] Existing suite green — in particular tickets 048 (resync), 060 (session
+  blanket-Completed heuristic. (`TranscriptState.Failed`; store + mapper tests)
+- [x] Existing suite green — in particular tickets 048 (resync), 060 (session
   filter), 064 (keep-alive): the within-process resume path is untouched.
-- [ ] `./gradlew :app:assembleDebug` (VPS rules: `flock /tmp/kimi-android-gradle.lock`,
+  (329 tests, 0 failures)
+- [x] `./gradlew :app:assembleDebug` (VPS rules: `flock /tmp/kimi-android-gradle.lock`,
   `--max-workers=1`, `--no-daemon` when parallel) and unit tests pass.
 - [ ] Live verification on the VPS server: cold-open (fresh app process) a
   session with a running foreground sub-agent → tapping the Agent row opens the
   sub-agent page immediately; after the fix lands also verify a pending approval
-  card survives a process kill.
-- [ ] `docs/server-api.md` snapshot section documents the verified shapes.
+  card survives a process kill. — **pending Louis on-device** (APK on the file
+  server; server-side scenarios staged + shapes verified live, see below)
+- [x] `docs/server-api.md` snapshot section documents the verified shapes.
 
 ## Out of scope
 
@@ -276,3 +281,46 @@ captures, and keep `scripts/protocol-update-prompt.md` aligned.
   "spawn missed" until the first transcript page lands; and the page's cold
   path (ticket 064 keep-alive) deliberately never recreates `ChatViewModel`,
   so any `ChatViewModel`-only seed would never run there.
+
+## Landed (2026-08-01, main checkout)
+
+- Data layer: `Snapshot.kt` (`SessionSnapshot`, `SnapshotApproval`,
+  `SubagentRosterEntry`/`SubagentRosterPhase`, `InFlightTurn` — decoded, not
+  consumed), DTOs in `ChatDtos.kt`, mapping in `ChatMessageMapper`,
+  `ChatApi.snapshot`, `ChatRepository.getSnapshot`/`seedSessionCursor`.
+  `session.usage` carries the context fill as `context_tokens`/`context_limit`
+  (NOT the `/status` `max_context_tokens` naming — live-verified).
+- `SessionSocket.seedCursor` (never moves a same-epoch cursor backward) +
+  `SocketEvent.Reconnected(seq, epoch)` carries the cursor the subscribe
+  actually resumed with; the chat skips the 048 resync when it matches the
+  applied snapshot's watermark (the apply already healed that window).
+- `SnapshotSync` (ui/chat, session-scoped singleton): one fetch per session per
+  process, awaited before the session's first subscribe by the chat's gate AND
+  the store's keep-alive (page-on-top path); seeds cursor + roster store-side,
+  hands the bundle to the calling ChatViewModel (`Outcome.Fresh`); joiners get
+  `AlreadyFresh` (roster for idempotent row links only — a process-lifetime
+  cached roster re-seeding a released store would freeze stale phases behind
+  `sawLifecycle`). `resync_required` re-fetches. Failed fetch = ordinary
+  load-error state, removed from the cache so retry refetches; no legacy burst.
+- Store: `seedFromSnapshot` (roster → identity + precise phase, `sawLifecycle`
+  = the roster is authoritative lifecycle, `output_preview` → resultSummary;
+  never overwrites live-fed entries); transcript cold status reads the real
+  turn states (`TranscriptState.Failed` for `failed`/`cancelled`, 0.31.1).
+- ChatViewModel: first gate opening = the snapshot IS the initial load
+  (history page, busy/contextUsage, approvals queue replace, questions via
+  `QuestionWizard.applySnapshot`, roster row links); keepLive follows the
+  snapshot's `busy` with the turn-guard downgrade — the ticket's
+  `keepLive=false` and the resync's busy-driven rule converge on a fresh
+  timeline, and busy-driven is strictly safer on the retry-over-live-socket
+  path. Second+ ON_STARTs keep the 048 resume set untouched. Approval/question
+  applies are SeedGuard-guarded against live events overtaking the fetch.
+- Tests: new `SnapshotColdStartTest` (5), keep-alive cold-start test, store
+  roster/precision tests, mapper turn-state test; existing 048-path tests
+  re-pointed to the within-process resume (second ON_START) where they
+  exercise the /status seed guards. Suite: 329 tests, 0 failures.
+- Live re-verified on 0.31.1 (2026-08-01, throwaway sessions): full top-level
+  key list, busy `in_flight_turn` verbatim, roster working vs completed
+  (`output_preview` tail), `pending_approvals` item (manual-mode prompt).
+- Docs: `docs/server-api.md` gained the full Session snapshot section (Sessions)
+  + running/terminal roster captures (Sub-agents); verification-log entry;
+  `scripts/protocol-update-prompt.md` aligned; `AGENTS.md` convention bullets.
