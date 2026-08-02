@@ -34,7 +34,10 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
@@ -122,9 +125,14 @@ abstract class ChatViewModelTestBase {
 
     /** The default snapshot: [messagesBody]'s page + [statusBody]'s busy/usage (the
      * snapshot's session.usage names the limit `context_limit`), empty roster and
-     * pending lists, watermark seq 1 — read at response time, like the other bodies. */
+     * pending lists, watermark seq 1 — read at response time, like the other bodies.
+     * The server serves the SAME page in opposite orders (live-verified on 0.31.1,
+     * 2026-08-02): `/messages` items are newest-first, the snapshot's OLDEST-first —
+     * tests seed [messagesBody] in `/messages` wire order, so the derivation flips it. */
     private fun defaultSnapshotBody(): String {
-        val messagesData = testJson.parseToJsonElement(messagesBody).jsonObject.getValue("data")
+        val messagesData = testJson.parseToJsonElement(messagesBody).jsonObject.getValue("data").jsonObject
+        val oldestFirst = JsonArray(messagesData["items"]?.jsonArray?.reversed().orEmpty())
+        val snapshotMessages = JsonObject(messagesData + ("items" to oldestFirst))
         val statusData = testJson.parseToJsonElement(statusBody).jsonObject.getValue("data").jsonObject
         val busy = statusData["busy"]?.jsonPrimitive?.booleanOrNull == true
         val contextTokens = statusData["context_tokens"]?.jsonPrimitive?.longOrNull ?: 0
@@ -132,7 +140,7 @@ abstract class ChatViewModelTestBase {
         return """{"code":0,"msg":"success","data":{"as_of_seq":1,"epoch":"ep_1",""" +
             """"session":{"id":"session_1","busy":$busy,""" +
             """"usage":{"context_tokens":$contextTokens,"context_limit":$contextLimit}},""" +
-            """"messages":$messagesData,"in_flight_turn":null,"subagents":[],""" +
+            """"messages":$snapshotMessages,"in_flight_turn":null,"subagents":[],""" +
             """"pending_approvals":[],"pending_questions":[]},"request_id":"r"}"""
     }
 

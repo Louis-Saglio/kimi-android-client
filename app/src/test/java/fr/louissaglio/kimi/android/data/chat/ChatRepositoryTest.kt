@@ -170,6 +170,50 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun `snapshot messages page keeps its oldest-first wire order`() = runBlocking {
+        // Regression (Louis, 2026-08-02): unlike /messages (newest-first on the wire),
+        // the snapshot's messages.items come OLDEST-first — live-verified on 0.31.1
+        // (item ids and created_at ascend across the page). Mapping them with the
+        // /messages reversal inverted the cold-start timeline: the bottom pin landed
+        // mid-session, tool results flattened BEFORE their calls (orphan done rows,
+        // calls stuck Running), and the paging cursor became the newest id.
+        server.enqueue(
+            MockResponse(body =
+                """
+                {"code":0,"msg":"success","data":{
+                  "as_of_seq":7,"epoch":"ep_1",
+                  "session":{"id":"session_1","busy":false,
+                    "usage":{"context_tokens":0,"context_limit":1048576}},
+                  "messages":{"items":[
+                    {"id":"msg_1","session_id":"session_1","role":"user",
+                     "content":[{"type":"text","text":"run it"}],
+                     "created_at":"2026-08-01T10:00:00.000Z"},
+                    {"id":"msg_2","session_id":"session_1","role":"assistant",
+                     "content":[{"type":"tool_use","tool_call_id":"tool_1","tool_name":"Edit",
+                                 "input":{"path":"docs/server-api.md"}}],
+                     "created_at":"2026-08-01T10:00:01.000Z"},
+                    {"id":"msg_3","session_id":"session_1","role":"tool",
+                     "content":[{"type":"tool_result","tool_call_id":"tool_1","output":"ok","is_error":false}],
+                     "created_at":"2026-08-01T10:00:02.000Z"}
+                  ],"has_more":true},
+                  "in_flight_turn":null,"subagents":[],
+                  "pending_approvals":[],"pending_questions":[]},
+                 "request_id":"01KX"}
+                """.trimIndent(),
+            ),
+        )
+
+        val snapshot = repository.getSnapshot(settings(), "session_1").getOrThrow()
+
+        assertEquals("/api/v1/sessions/session_1/snapshot", server.takeRequest().target)
+        // Wire order preserved — NOT reversed like a /messages page.
+        assertEquals(listOf("msg_1", "msg_2", "msg_3"), snapshot.messages.items.map { it.id })
+        assertTrue(snapshot.messages.hasMore)
+        assertEquals(7, snapshot.asOfSeq)
+        assertEquals("ep_1", snapshot.epoch)
+    }
+
+    @Test
     fun `messages next page sends before_id and parses has_more`() = runBlocking {
         // First page (no cursor): has_more true — paging backwards continues (ticket 043).
         server.enqueue(

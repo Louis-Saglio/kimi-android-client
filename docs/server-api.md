@@ -333,8 +333,10 @@ verified live on 0.31.1 (2026-08-01). Top-level keys of `data`:
   Note the context fill lives at `session.usage.context_tokens` /
   `session.usage.context_limit` — NOT the `/status` naming
   (`context_tokens`/`max_context_tokens`). Idle sessions zero both.
-- `messages`: the newest history page, same shape as `/messages` (`items`
-  newest-first + `has_more`; ~100 items per page).
+- `messages`: the newest history page (~100 items per page) with `has_more` —
+  same item shape as `/messages` but **opposite order: `items` are OLDEST-first**
+  (ascending ids/`created_at`; live-verified on 0.31.1, 2026-08-02 — `/messages`
+  pages are newest-first). Do not reverse them client-side.
 - `in_flight_turn`: `null` when idle; while a turn runs, its live tail —
   verbatim busy capture (2026-08-01):
 
@@ -1994,13 +1996,26 @@ selected option and free text both re-verified 2026-07-23:
 
 ## Verification log
 
+- 2026-08-02 snapshot `messages` order re-verified on `0.31.1` (real session
+  `session_428cd0bf-...`, 375+ messages, after Louis's inverted-timeline bug
+  report): `/messages` newest page returns items newest-first (`..._000375` →
+  `..._000326`, descending ids/`created_at`), while `/snapshot`'s `messages`
+  returns the SAME newest page OLDEST-first (`..._000276` → `..._000375`,
+  ascending ids/`created_at`, page size ~100 vs ~50 there). The 085 mapping had
+  assumed `/messages` order and reversed the snapshot page — root cause of the
+  cold-open inverted timeline (bottom pin mid-session, tool results orphaned
+  before their Running calls, newest-id paging cursor). Fixed app-side
+  (ChatMessageMapper keeps the snapshot wire order) and inline above.
+
 - 2026-08-01 snapshot deep-dive on `0.31.1` (throwaway sessions in
   `/home/ubuntu/spike`; the Android app adopted `/snapshot` as its
   cold-start/resync entry point — ticket 085). Captured inline (Sessions →
   Session snapshot): the full top-level key list; `session.usage` carries the
   context fill as `context_tokens`/`context_limit` (NOT the `/status`
-  `max_context_tokens` naming); `messages` is the newest-first page with
-  `has_more` (~100 items); `in_flight_turn` verbatim while busy (`turn_id`,
+  `max_context_tokens` naming); `messages` is the newest page with
+  `has_more` (~100 items) but OLDEST-first item order — unlike `/messages`
+  (newest-first); misreading it as newest-first inverted the Android cold-start
+  timeline (ticket 085 follow-up, fixed 2026-08-02); `in_flight_turn` verbatim while busy (`turn_id`,
   `assistant_text`, `thinking_text`, `running_tools[{tool_call_id,name,args,
   description,display}]`, `current_prompt_id`), `null` when idle;
   `pending_approvals` items are the legacy `event.approval.requested` payload

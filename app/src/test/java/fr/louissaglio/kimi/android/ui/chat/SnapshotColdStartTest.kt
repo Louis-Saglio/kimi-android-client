@@ -123,6 +123,43 @@ class SnapshotColdStartTest : ChatViewModelTestBase() {
     }
 
     @Test
+    fun `cold open keeps the snapshot page's oldest-first order`() = runBlocking {
+        // The reported regression (Louis, 2026-08-02): the snapshot's messages.items
+        // come OLDEST-first on the wire (unlike /messages). The mapper's reversal
+        // inverted the cold-start timeline — the chat opened pinned mid-session with
+        // the tail at the top ("last messages missing"), and every tool result
+        // flattened BEFORE its call: orphan "tool" rows done, calls stuck Running.
+        snapshotBody = snapshotBundle(
+            messages = """{"items":[""" +
+                """{"id":"msg_1","session_id":"session_1","role":"user",""" +
+                """"content":[{"type":"text","text":"run it"}],""" +
+                """"created_at":"2026-08-01T10:00:00.000Z"},""" +
+                """{"id":"msg_2","session_id":"session_1","role":"assistant",""" +
+                """"content":[{"type":"text","text":"running it"},""" +
+                """{"type":"tool_use","tool_call_id":"tool_1","tool_name":"Edit",""" +
+                """"input":{"path":"docs/server-api.md"}}],""" +
+                """"created_at":"2026-08-01T10:00:01.000Z"},""" +
+                """{"id":"msg_3","session_id":"session_1","role":"tool",""" +
+                """"content":[{"type":"tool_result","tool_call_id":"tool_1","output":"ok","is_error":false}],""" +
+                """"created_at":"2026-08-01T10:00:02.000Z"},""" +
+                """{"id":"msg_4","session_id":"session_1","role":"assistant",""" +
+                """"content":[{"type":"text","text":"all done"}],""" +
+                """"created_at":"2026-08-01T10:00:03.000Z"}""" +
+                """],"has_more":false}""",
+        )
+
+        viewModel.onScreenStarted()
+
+        // Chronological order, newest row last; the result joined its call (no orphan
+        // row — a wrong order would add a fifth row and leave the call Running).
+        awaitState(viewModel.uiState) { it.items?.map(ChatItem::id) == listOf("msg_1", "msg_2", "tool_1", "msg_4") }
+        val tool = viewModel.uiState.value.items!!.filterIsInstance<ChatItem.ToolGroup>().single().tools.single()
+        assertEquals("Edit", tool.name)
+        assertEquals(ToolStatus.Done, tool.status)
+        assertEquals("ok", tool.output)
+    }
+
+    @Test
     fun `a failed snapshot surfaces the load error and no legacy burst fires`() = runBlocking {
         snapshotBody = """{"code":50000,"msg":"boom","data":null,"request_id":"r"}"""
 

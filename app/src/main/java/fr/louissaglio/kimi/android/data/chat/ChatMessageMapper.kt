@@ -114,15 +114,19 @@ class ChatMessageMapper @Inject constructor(json: Json) {
     )
 
     /** Session snapshot (docs/server-api.md, Session snapshot — ticket 085): the
-     * cold-start bundle. The messages page maps exactly like a `/messages` page
-     * (wire order newest-first → domain oldest-first). */
+     * cold-start bundle. The messages page is already domain-ordered: unlike
+     * `/messages` (wire newest-first → reversed here), the snapshot's `items`
+     * come OLDEST-first on the wire (live-verified on 0.31.1, 2026-08-02, against
+     * a long session: item ids and `created_at` ascend across the page) — reversing
+     * them inverts the whole cold-start timeline (calls stuck Running behind orphan
+     * result rows, the bottom pin landing mid-session, a newest-id paging cursor). */
     fun toDomain(dto: SnapshotData): SessionSnapshot = SessionSnapshot(
         asOfSeq = dto.asOfSeq,
         epoch = dto.epoch,
         busy = dto.session?.busy == true,
         contextUsage = dto.session?.usage?.let { ContextUsage(it.contextTokens, it.contextLimit) },
         messages = MessagePage(
-            items = dto.messages?.items.orEmpty().asReversed().map { toDomain(it) },
+            items = dto.messages?.items.orEmpty().map { toDomain(it) },
             hasMore = dto.messages?.hasMore == true,
         ),
         pendingApprovals = dto.pendingApprovals.map {
