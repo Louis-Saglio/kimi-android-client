@@ -10,16 +10,16 @@ import fr.louissaglio.kimi.android.data.toUserMessage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
-/** True when every item of the head question has an answer (option picked or other text). */
+/** True when every item of the head question has an answer (option ticked or other text). */
 internal val ChatViewModel.UiState.isQuestionSubmittable: Boolean
     get() = pendingQuestions.firstOrNull()?.items?.all { item ->
-        questionOtherTexts[item.id]?.isNotBlank() == true || questionSelections.containsKey(item.id)
+        questionOtherTexts[item.id]?.isNotBlank() == true || questionSelections[item.id]?.isNotEmpty() == true
     } == true
 
 /** True when the item at [ChatViewModel.UiState.questionStep] has an answer — gates the wizard's Next. */
 internal val ChatViewModel.UiState.isQuestionStepAnswered: Boolean
     get() = pendingQuestions.firstOrNull()?.items?.getOrNull(questionStep)?.let { item ->
-        questionOtherTexts[item.id]?.isNotBlank() == true || questionSelections.containsKey(item.id)
+        questionOtherTexts[item.id]?.isNotBlank() == true || questionSelections[item.id]?.isNotEmpty() == true
     } == true
 
 /**
@@ -47,13 +47,32 @@ internal class QuestionWizard(
      * a response that a newer question event has already overtaken. */
     private val seedGuard = SeedGuard()
 
-    /** Picks (or re-picks) the option answering one item of the head question. */
+    /** Picks (or re-picks) the option answering one single-select item of the head question. */
     fun onOptionPicked(itemId: String, optionId: String) {
-        updateState { it.copy(questionSelections = it.questionSelections + (itemId to optionId)) }
+        updateState { it.copy(questionSelections = it.questionSelections + (itemId to setOf(optionId))) }
     }
 
-    /** Free-text answer for one item (only rendered when the item allows it). A non-blank
-     * text wins over a picked option for that item. */
+    /** Ticks/unticks one option of a multi-select item (ticket 090). Unticking the last
+     * option drops the item's entry, which un-answers it unless its Other text is set.
+     * No-ops for an option id the item does not carry — the server does not validate
+     * ids, so the client is the only guard. */
+    fun onOptionToggled(itemId: String, optionId: String) {
+        val item = state().pendingQuestions.firstOrNull()?.items?.firstOrNull { it.id == itemId } ?: return
+        if (item.options.none { it.id == optionId }) return
+        updateState {
+            val current = it.questionSelections[itemId].orEmpty()
+            val next = if (optionId in current) current - optionId else current + optionId
+            it.copy(
+                questionSelections =
+                    if (next.isEmpty()) it.questionSelections - itemId
+                    else it.questionSelections + (itemId to next),
+            )
+        }
+    }
+
+    /** Free-text answer for one item (only rendered when the item allows it). For a
+     * single-select item a non-blank text wins over the picked option; for a
+     * multi-select item (090) it combines with the ticks into a multi_with_other answer. */
     fun onOtherTextChange(itemId: String, text: String) {
         updateState { it.copy(questionOtherTexts = it.questionOtherTexts + (itemId to text)) }
     }
@@ -152,9 +171,20 @@ internal class QuestionWizard(
         val question = current.pendingQuestions.firstOrNull() ?: return
         if (!current.isQuestionSubmittable) return
         val answers = question.items.map { item ->
-            current.questionOtherTexts[item.id]?.takeIf { it.isNotBlank() }
-                ?.let { QuestionAnswer.Other(item.id, it.trim()) }
-                ?: QuestionAnswer.OptionPick(item.id, current.questionSelections.getValue(item.id))
+            val otherText = current.questionOtherTexts[item.id]?.takeIf { it.isNotBlank() }?.trim()
+            // The server does not validate option ids (090): only emit ids the item
+            // actually carries, in the item's wire order.
+            val picks = item.options.map { it.id }.filter { it in current.questionSelections[item.id].orEmpty() }
+            when {
+                // Multi-select mapping (090): text + ticks → multi_with_other; text
+                // alone → other; ticks only → multi. Single-select keeps the old
+                // behavior: a non-blank text wins over the picked option.
+                item.multiSelect && otherText != null && picks.isNotEmpty() ->
+                    QuestionAnswer.MultiWithOther(item.id, picks, otherText)
+                otherText != null -> QuestionAnswer.Other(item.id, otherText)
+                item.multiSelect -> QuestionAnswer.Multi(item.id, picks)
+                else -> QuestionAnswer.OptionPick(item.id, picks.first())
+            }
         }
         scope().launch {
             chatRepository.answerQuestion(

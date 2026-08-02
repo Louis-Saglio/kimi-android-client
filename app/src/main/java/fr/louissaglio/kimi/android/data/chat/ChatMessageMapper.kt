@@ -49,6 +49,7 @@ class ChatMessageMapper @Inject constructor(json: Json) {
                 text = item.question,
                 options = item.options.map { PendingQuestion.Option(it.id, it.label, it.description) },
                 allowOther = item.allowOther,
+                multiSelect = item.multiSelect,
             )
         },
     )

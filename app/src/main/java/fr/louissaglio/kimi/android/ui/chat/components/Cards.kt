@@ -20,6 +20,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -81,20 +82,25 @@ internal fun ApprovalCard(
  * height-capped item area is the safety net for a single item with a long option list.
  *
  * Read-only mode (ticket 089): a resolved question viewed from its timeline row —
- * radios disabled with the given answer checked, the free-text answer in a disabled
- * field, no Dismiss/Submit (Back/Next paginate without gating), the header's button
- * becomes a close (X) and its label states the outcome. [note] carries the dismissal
- * note for dismissed questions. */
+ * radios/checkboxes disabled with the given answers checked, the free-text answer in a
+ * disabled field, no Dismiss/Submit (Back/Next paginate without gating), the header's
+ * button becomes a close (X) and its label states the outcome. [note] carries the
+ * dismissal note for dismissed questions.
+ *
+ * Multi-select items (ticket 090) render Checkbox rows toggling the item's selection
+ * set; single-select items keep RadioButton rows. Same row layout, labels and
+ * descriptions either way. */
 @Composable
 internal fun QuestionCard(
     question: PendingQuestion,
     queueSize: Int,
     step: Int,
-    selections: Map<String, String>,
+    selections: Map<String, Set<String>>,
     otherTexts: Map<String, String>,
     isStepAnswered: Boolean,
     isSubmittable: Boolean,
     onOptionPicked: (itemId: String, optionId: String) -> Unit,
+    onOptionToggled: (itemId: String, optionId: String) -> Unit,
     onOtherTextChange: (itemId: String, text: String) -> Unit,
     onNext: () -> Unit,
     onBack: () -> Unit,
@@ -164,17 +170,26 @@ internal fun QuestionCard(
                 }
                 Text(text = item.text, style = MaterialTheme.typography.titleSmall)
                 item.options.forEach { option ->
+                    val toggle = { onOptionToggled(item.id, option.id) }
+                    val pick = { onOptionPicked(item.id, option.id) }
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(MaterialTheme.shapes.small)
-                            .clickable(enabled = !readOnly) { onOptionPicked(item.id, option.id) },
+                            .clickable(enabled = !readOnly) { if (item.multiSelect) toggle() else pick() },
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        RadioButton(
-                            selected = selections[item.id] == option.id,
-                            onClick = if (readOnly) null else ({ onOptionPicked(item.id, option.id) }),
-                        )
+                        if (item.multiSelect) {
+                            Checkbox(
+                                checked = option.id in selections[item.id].orEmpty(),
+                                onCheckedChange = if (readOnly) null else ({ toggle() }),
+                            )
+                        } else {
+                            RadioButton(
+                                selected = option.id in selections[item.id].orEmpty(),
+                                onClick = if (readOnly) null else pick,
+                            )
+                        }
                         Column {
                             Text(text = option.label, style = MaterialTheme.typography.bodyMedium)
                             option.description?.takeIf { it.isNotBlank() }?.let {

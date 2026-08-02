@@ -276,6 +276,8 @@ data class QuestionItemDto(
     val header: String = "",
     val options: List<QuestionOptionDto> = emptyList(),
     @SerialName("allow_other") val allowOther: Boolean = false,
+    // Present in both forms on every question surface (ticket 090); absent = false.
+    @SerialName("multi_select") val multiSelect: Boolean = false,
 )
 
 @Serializable

@@ -131,8 +131,9 @@ class ChatViewModel internal constructor(
         val pendingApprovals: List<PendingApproval> = emptyList(),
         /** Question queue in arrival order; the card shows the head and the size. */
         val pendingQuestions: List<PendingQuestion> = emptyList(),
-        /** Draft answers for the head question: item id → picked option id. */
-        val questionSelections: Map<String, String> = emptyMap(),
+        /** Draft answers for the head question: item id → ticked option ids. A
+         * single-select item holds a 1-element set; a multi-select item (090) any subset. */
+        val questionSelections: Map<String, Set<String>> = emptyMap(),
         /** Draft free-text answers for the head question: item id → typed text. */
         val questionOtherTexts: Map<String, String> = emptyMap(),
         /** Wizard step (ticket 035): index into the head question's items shown by the card. */
@@ -700,6 +701,8 @@ class ChatViewModel internal constructor(
     // the screen-facing intents, kept as one-line delegates. --------------------------
 
     fun onQuestionOptionPicked(itemId: String, optionId: String) = questions.onOptionPicked(itemId, optionId)
+
+    fun onQuestionOptionToggled(itemId: String, optionId: String) = questions.onOptionToggled(itemId, optionId)
 
     fun onQuestionOtherTextChange(itemId: String, text: String) = questions.onOtherTextChange(itemId, text)
 

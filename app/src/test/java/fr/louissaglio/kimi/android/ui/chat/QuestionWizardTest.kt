@@ -118,6 +118,119 @@ class QuestionWizardTest : ChatViewModelTestBase() {
     }
 
     @Test
+    fun `multi_select flag parses true false and absent as false`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(multiFlagQuestionRequestedFrame(id = "tool_q1"))
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
+
+        assertEquals(
+            listOf(true, false, false),
+            viewModel.uiState.value.pendingQuestions.single().items.map { it.multiSelect },
+        )
+    }
+
+    @Test
+    fun `toggle ticks and unticks options of a multi item`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(multiSelectQuestionRequestedFrame(id = "tool_q1"))
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
+        assertFalse(viewModel.uiState.value.isQuestionStepAnswered)
+
+        viewModel.onQuestionOptionToggled("q_0", "opt_0_0")
+        viewModel.onQuestionOptionToggled("q_0", "opt_0_2")
+        assertEquals(setOf("opt_0_0", "opt_0_2"), viewModel.uiState.value.questionSelections["q_0"])
+        assertTrue(viewModel.uiState.value.isQuestionStepAnswered)
+
+        viewModel.onQuestionOptionToggled("q_0", "opt_0_0")
+        assertEquals(setOf("opt_0_2"), viewModel.uiState.value.questionSelections["q_0"])
+
+        // Unticking the last option drops the entry and un-answers the item.
+        viewModel.onQuestionOptionToggled("q_0", "opt_0_2")
+        assertNull(viewModel.uiState.value.questionSelections["q_0"])
+        assertFalse(viewModel.uiState.value.isQuestionStepAnswered)
+        assertFalse(viewModel.uiState.value.isQuestionSubmittable)
+    }
+
+    @Test
+    fun `toggle no-ops for an option id the item does not carry`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(multiSelectQuestionRequestedFrame(id = "tool_q1"))
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
+
+        viewModel.onQuestionOptionToggled("q_0", "opt_bogus")
+
+        assertNull(viewModel.uiState.value.questionSelections["q_0"])
+        assertFalse(viewModel.uiState.value.isQuestionStepAnswered)
+    }
+
+    @Test
+    fun `multi item is answered by non-blank other text alone`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(multiSelectQuestionRequestedFrame(id = "tool_q1"))
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
+
+        viewModel.onQuestionOtherTextChange("q_0", "Purple")
+
+        assertTrue(viewModel.uiState.value.isQuestionStepAnswered)
+        assertTrue(viewModel.uiState.value.isQuestionSubmittable)
+    }
+
+    @Test
+    fun `submit of ticked multi options posts kind multi in wire order`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(multiSelectQuestionRequestedFrame(id = "tool_q1"))
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
+
+        // Toggled out of order: the body must follow the item's option order.
+        viewModel.onQuestionOptionToggled("q_0", "opt_0_2")
+        viewModel.onQuestionOptionToggled("q_0", "opt_0_0")
+        viewModel.onSubmitQuestion()
+
+        val request = awaitRequest("/questions/")
+        assertEquals(
+            """{"answers":{"q_0":{"kind":"multi","option_ids":["opt_0_0","opt_0_2"]}}}""",
+            request.body!!.utf8(),
+        )
+    }
+
+    @Test
+    fun `submit of ticks plus other text posts kind multi_with_other`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(multiSelectQuestionRequestedFrame(id = "tool_q1"))
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
+
+        viewModel.onQuestionOptionToggled("q_0", "opt_0_0")
+        viewModel.onQuestionOtherTextChange("q_0", "Purple")
+        viewModel.onSubmitQuestion()
+
+        val request = awaitRequest("/questions/")
+        assertEquals(
+            """{"answers":{"q_0":{"kind":"multi_with_other","option_ids":["opt_0_0"],"other_text":"Purple"}}}""",
+            request.body!!.utf8(),
+        )
+    }
+
+    @Test
+    fun `other text alone on a multi item posts kind other`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(multiSelectQuestionRequestedFrame(id = "tool_q1"))
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
+
+        viewModel.onQuestionOtherTextChange("q_0", "Purple")
+        viewModel.onSubmitQuestion()
+
+        val request = awaitRequest("/questions/")
+        assertEquals("""{"answers":{"q_0":{"kind":"other","text":"Purple"}}}""", request.body!!.utf8())
+    }
+
+    @Test
     fun `submit is a no-op while an item is unanswered`() = runBlocking {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
@@ -184,7 +297,7 @@ class QuestionWizardTest : ChatViewModelTestBase() {
 
         viewModel.onQuestionBack()
         assertEquals(0, viewModel.uiState.value.questionStep)
-        assertEquals("opt_0_1", viewModel.uiState.value.questionSelections["q_0"])
+        assertEquals(setOf("opt_0_1"), viewModel.uiState.value.questionSelections["q_0"])
 
         // Back on the first item is a no-op.
         viewModel.onQuestionBack()
@@ -222,11 +335,11 @@ class QuestionWizardTest : ChatViewModelTestBase() {
         // Minimize is purely local: nothing is posted, the queue and drafts are kept.
         delay(200)
         assertEquals(1, viewModel.uiState.value.pendingQuestions.size)
-        assertEquals("opt_0_1", viewModel.uiState.value.questionSelections["q_0"])
+        assertEquals(setOf("opt_0_1"), viewModel.uiState.value.questionSelections["q_0"])
 
         viewModel.onReopenQuestion()
         assertFalse(viewModel.uiState.value.questionCardMinimized)
-        assertEquals("opt_0_1", viewModel.uiState.value.questionSelections["q_0"])
+        assertEquals(setOf("opt_0_1"), viewModel.uiState.value.questionSelections["q_0"])
         assertEquals(1, viewModel.uiState.value.pendingQuestions.size)
     }
 
@@ -361,7 +474,7 @@ class QuestionWizardTest : ChatViewModelTestBase() {
         val view = viewModel.uiState.value.resolvedQuestionView!!
         assertEquals("tool_old", view.toolCallId)
         assertNull(view.note)
-        assertEquals("blue", view.items.single().selectedLabel)
+        assertEquals(listOf("blue"), view.items.single().selectedLabels)
         assertEquals(0, viewModel.uiState.value.resolvedQuestionStep)
     }
 
@@ -473,6 +586,30 @@ class QuestionWizardTest : ChatViewModelTestBase() {
             """{"id":"q_2","question":"Yes or no?","header":"Confirm",""" +
             """"options":[{"id":"opt_2_0","label":"yes","description":"go ahead"},""" +
             """{"id":"opt_2_1","label":"no","description":"stop"}],"allow_other":false}],""" +
+            """"created_at":"2026-07-20T06:06:49.808Z","agentId":"main","sessionId":"session_1"}}"""
+
+    /** One multi-select item with three options and Other allowed (ticket 090). */
+    private fun multiSelectQuestionRequestedFrame(id: String): String =
+        """{"type":"event.question.requested","seq":9,"epoch":"ep_1","session_id":"session_1",""" +
+            """"timestamp":"2026-07-20T06:06:49.808Z","payload":{"type":"event.question.requested",""" +
+            """"question_id":"$id","session_id":"session_1","turn_id":0,"tool_call_id":"$id",""" +
+            """"questions":[{"id":"q_0","question":"Colors?","header":"Palette",""" +
+            """"options":[{"id":"opt_0_0","label":"Red"},{"id":"opt_0_1","label":"Green"},""" +
+            """{"id":"opt_0_2","label":"Blue"}],"allow_other":true,"multi_select":true}],""" +
+            """"created_at":"2026-07-20T06:06:49.808Z","agentId":"main","sessionId":"session_1"}}"""
+
+    /** Three items carrying `multi_select` as true, false and absent (090 parsing). */
+    private fun multiFlagQuestionRequestedFrame(id: String): String =
+        """{"type":"event.question.requested","seq":9,"epoch":"ep_1","session_id":"session_1",""" +
+            """"timestamp":"2026-07-20T06:06:49.808Z","payload":{"type":"event.question.requested",""" +
+            """"question_id":"$id","session_id":"session_1","turn_id":0,"tool_call_id":"$id",""" +
+            """"questions":[""" +
+            """{"id":"q_0","question":"Multi?","header":"M",""" +
+            """"options":[{"id":"opt_0_0","label":"a"}],"allow_other":false,"multi_select":true},""" +
+            """{"id":"q_1","question":"Single?","header":"S",""" +
+            """"options":[{"id":"opt_1_0","label":"b"}],"allow_other":false,"multi_select":false},""" +
+            """{"id":"q_2","question":"Absent?","header":"A",""" +
+            """"options":[{"id":"opt_2_0","label":"c"}],"allow_other":false}],""" +
             """"created_at":"2026-07-20T06:06:49.808Z","agentId":"main","sessionId":"session_1"}}"""
 
     private fun questionAnsweredFrame(id: String): String =

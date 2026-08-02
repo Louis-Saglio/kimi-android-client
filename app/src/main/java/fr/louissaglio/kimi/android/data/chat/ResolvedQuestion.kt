@@ -18,10 +18,12 @@ import kotlinx.serialization.json.jsonPrimitive
  *   free text>"}}`, or `{"answers":{},"note":"..."}` when dismissed (shapes per
  *   docs/server-api.md, Questions).
  *
- * Answer values resolve to an option by whole-string label match; anything
- * unmatched is the free-text ("Other") answer. Multi-select results (comma-joined
- * labels) are not resolved into multiple selections — they render as free text
- * (out of scope for 089; our flow never submits them).
+ * Answer values resolve to options by label match; anything unmatched is the free-text
+ * ("Other") answer. Single-select items (`multi_select: false`) match the whole string.
+ * Multi-select items (ticket 090) come back flattened as labels joined with `", "`
+ * (`"Red, Blue"`, free text appended the same way for `multi_with_other`): the value is
+ * split on `", "`, segments matching an option label mark it selected, unmatched
+ * segments rejoin as the Other text.
  */
 data class ResolvedQuestion(
     val toolCallId: String,
@@ -33,9 +35,12 @@ data class ResolvedQuestion(
         val header: String,
         val text: String,
         val options: List<Option>,
-        /** The matched option label when the answer was an option pick; null otherwise. */
-        val selectedLabel: String?,
-        /** The free-text answer when no option label matched; null otherwise. */
+        /** True when the item was asked multi-select (090); absent in the input = false. */
+        val multiSelect: Boolean,
+        /** The matched option labels of the answer, in answer order; empty when none matched. */
+        val selectedLabels: List<String>,
+        /** The free-text answer (the unmatched `", "`-joined segments for a multi item);
+         * null when every segment matched an option. */
         val otherText: String?,
     )
 
@@ -50,7 +55,7 @@ data class ResolvedQuestion(
  * prefilled with the given answers. */
 data class ResolvedQuestionCardModel(
     val question: PendingQuestion,
-    val selections: Map<String, String>,
+    val selections: Map<String, Set<String>>,
     val otherTexts: Map<String, String>,
 )
 
@@ -66,12 +71,18 @@ fun ResolvedQuestion.asCardModel(): ResolvedQuestionCardModel {
                     PendingQuestion.Option("opt_${i}_$o", option.label, option.description)
                 },
                 allowOther = item.otherText != null,
+                multiSelect = item.multiSelect,
             )
         },
     )
     val selections = items.mapIndexedNotNull { i, item ->
-        item.selectedLabel?.let { label ->
-            "q_$i" to "opt_${i}_${item.options.indexOfFirst { it.label == label }}"
+        item.selectedLabels.takeIf { it.isNotEmpty() }?.let { labels ->
+            val ids = labels.mapNotNull { label ->
+                item.options.indexOfFirst { it.label == label }
+                    .takeIf { it >= 0 }
+                    ?.let { "opt_${i}_$it" }
+            }
+            if (ids.isEmpty()) null else "q_$i" to ids.toSet()
         }
     }.toMap()
     val otherTexts = items.mapIndexedNotNull { i, item ->
@@ -98,6 +109,7 @@ object ResolvedQuestionParser {
             val q = (element as? JsonObject) ?: return null
             val text = q["question"]?.jsonPrimitive?.contentOrNull ?: return null
             val header = q["header"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val multiSelect = q["multi_select"]?.jsonPrimitive?.contentOrNull == "true"
             val options = (q["options"] as? JsonArray)?.map { optionElement ->
                 val option = (optionElement as? JsonObject) ?: return null
                 ResolvedQuestion.Option(
@@ -110,14 +122,31 @@ object ResolvedQuestionParser {
             // fallback as the web client's askUserToolParse).
             val value = answers[text]?.jsonPrimitive?.contentOrNull
                 ?: answers["q_${questions.indexOf(element)}"]?.jsonPrimitive?.contentOrNull
-            val selectedLabel = value?.takeIf { v -> options.any { it.label == v } }
-            ResolvedQuestion.Item(
-                header = header,
-                text = text,
-                options = options,
-                selectedLabel = selectedLabel,
-                otherText = value?.takeIf { selectedLabel == null },
-            )
+            if (multiSelect) {
+                // Multi answers come back flattened: labels joined with ", ", the
+                // multi_with_other free text appended the same way (090). Segments
+                // matching an option label select it; the rest rejoins as Other.
+                val segments = value?.split(", ")?.filter { it.isNotEmpty() }.orEmpty()
+                val (matched, unmatched) = segments.partition { s -> options.any { it.label == s } }
+                ResolvedQuestion.Item(
+                    header = header,
+                    text = text,
+                    options = options,
+                    multiSelect = true,
+                    selectedLabels = matched,
+                    otherText = unmatched.takeIf { it.isNotEmpty() }?.joinToString(", "),
+                )
+            } else {
+                val selectedLabel = value?.takeIf { v -> options.any { it.label == v } }
+                ResolvedQuestion.Item(
+                    header = header,
+                    text = text,
+                    options = options,
+                    multiSelect = false,
+                    selectedLabels = listOfNotNull(selectedLabel),
+                    otherText = value?.takeIf { selectedLabel == null },
+                )
+            }
         }
         return ResolvedQuestion(toolCallId, items, note)
     }

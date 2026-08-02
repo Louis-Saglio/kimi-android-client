@@ -220,7 +220,9 @@ class ChatApi @Inject constructor(
     /**
      * Posts the user's answers for one question
      * (`POST /api/v1/sessions/{id}/questions/{questionId}`, docs/server-api.md): keys are
-     * the per-question item ids, values carry `kind` plus `option_id` or `text`. The ack
+     * the per-question item ids, values are a discriminated union on `kind` (`single` /
+     * `other` / `multi` / `multi_with_other`, the last two for multi-select items —
+     * ticket 090). The ack
      * only confirms the answers were registered; the pending UI clears when the
      * `event.question.answered` frame arrives over the WebSocket.
      */
@@ -242,6 +244,15 @@ class ChatApi @Inject constructor(
                             is QuestionAnswer.Other -> {
                                 put("kind", "other")
                                 put("text", answer.text)
+                            }
+                            is QuestionAnswer.Multi -> {
+                                put("kind", "multi")
+                                putJsonArray("option_ids") { answer.optionIds.forEach { add(it) } }
+                            }
+                            is QuestionAnswer.MultiWithOther -> {
+                                put("kind", "multi_with_other")
+                                putJsonArray("option_ids") { answer.optionIds.forEach { add(it) } }
+                                put("other_text", answer.otherText)
                             }
                         }
                     }

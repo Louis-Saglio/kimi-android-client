@@ -1452,6 +1452,66 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun `answerQuestion serializes the multi-select answer kinds`() = runBlocking {
+        // Ticket 090: verified live against server 0.31.1 (docs/server-api.md).
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"resolved":true,"resolved_at":"2026-07-20T06:08:12.548Z"},"request_id":"01KX"}""",
+            ),
+        )
+
+        val result = repository.answerQuestion(
+            settings(),
+            "session_1",
+            "tool_q1",
+            listOf(
+                QuestionAnswer.Multi("q_0", listOf("opt_0_0", "opt_0_2")),
+                QuestionAnswer.MultiWithOther("q_1", listOf("opt_1_0"), "Fish"),
+            ),
+        )
+
+        assertTrue(result.isSuccess)
+        assertEquals(
+            """{"answers":{"q_0":{"kind":"multi","option_ids":["opt_0_0","opt_0_2"]},""" +
+                """"q_1":{"kind":"multi_with_other","option_ids":["opt_1_0"],"other_text":"Fish"}}}""",
+            server.takeRequest().body!!.utf8(),
+        )
+    }
+
+    @Test
+    fun `pending questions poll parses multi_select and defaults it to false`() = runBlocking {
+        server.enqueue(
+            MockResponse(body =
+                """
+                {"code":0,"msg":"success","data":{"items":[
+                  {"type":"event.question.requested","question_id":"tool_q1","session_id":"session_1",
+                   "turn_id":0,"tool_call_id":"tool_q1",
+                   "questions":[
+                     {"id":"q_0","question":"Colors?","header":"Palette",
+                      "options":[{"id":"opt_0_0","label":"red"}],
+                      "allow_other":true,"multi_select":true},
+                     {"id":"q_1","question":"Mode?","header":"Mode",
+                      "options":[{"id":"opt_1_0","label":"fast"}],
+                      "allow_other":false,"multi_select":false},
+                     {"id":"q_2","question":"Confirm?","header":"Confirm",
+                      "options":[{"id":"opt_2_0","label":"yes"}],
+                      "allow_other":false}
+                   ],
+                   "created_at":"2026-07-20T06:06:49.808Z","agentId":"main","sessionId":"session_1"}
+                ]},"request_id":"01KX"}
+                """.trimIndent(),
+            ),
+        )
+
+        val result = repository.getPendingQuestions(settings(), "session_1")
+
+        assertEquals(
+            listOf(true, false, false),
+            result.getOrThrow().single().items.map { it.multiSelect },
+        )
+    }
+
+    @Test
     fun `answerQuestion maps an already-resolved question to Api error`() = runBlocking {
         server.enqueue(
             MockResponse(body = """{"code":40405,"msg":"question tool_q1 not found","data":null,"request_id":"01KX"}"""),

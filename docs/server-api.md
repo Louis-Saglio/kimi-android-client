@@ -366,8 +366,8 @@ verified live on 0.31.1 (2026-08-01). Top-level keys of `data`:
   byte-identical to the `/questions?status=pending` poll's `items[]` entries
   (verified live with a live question, 2026-08-01): `question_id` ==
   `tool_call_id`, `session_id`, `questions[]` with
-  `id`/`question`/`options[{id,label}]`/`header`/`allow_other`, `created_at`,
-  `turn_id`.
+  `id`/`question`/`options[{id,label}]`/`header`/`allow_other`/`multi_select`,
+  `created_at`, `turn_id`.
 
 ## Workspaces
 
@@ -1109,9 +1109,23 @@ session's default permission mode.
    404, `{"statusCode":404,"error":"Not Found",...}` — re-verified 2026-07-23)
    — the single-question shape only exists inside the list item / WS event
    payload.
+
+**Multi-select questions** (verified live 2026-08-02 on 0.31.1, against
+`packages/protocol/src/question.ts` in the upstream repo): every question item
+carries a **`multi_select` boolean** — present in both `true` and `false` form
+in the `event.question.requested` payload, the `/questions?status=pending`
+poll, and the session snapshot (treat absence as `false`; the protocol schema
+marks it optional). The history (`GET .../messages`) `tool_use` input for
+`AskUserQuestion` also carries `multi_select` per question, but its options
+are **label-only** (no ids). The `skipped` answer kind and the optional
+`method`/`note` body fields exist in the protocol schema (`skipped` omits the
+item from the flattened `answers`; all-skipped degrades to the dismiss shape)
+— source-verified only, never observed live.
+
 4. Answer — `POST /api/v1/sessions/{id}/questions/{qid}`. `answers` keys are
-   the per-question item ids from the request payload (`q_0`); values carry
-   `kind` plus `option_id` (selected option) or `text` (free text):
+   the per-question item ids from the request payload (`q_0`); values are a
+   discriminated union on `kind` (single/other re-verified 2026-07-23, multi
+   kinds verified live 2026-08-02 on 0.31.1):
 
 ```bash
 # selected option (re-verified 2026-07-23)
@@ -1124,16 +1138,40 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../quest
   -H "Authorization: Bearer <token>" \
   -H 'Content-Type: application/json; charset=utf-8' \
   -d '{"answers":{"q_0":{"kind":"other","text":"ramen"}}}'
+# multi-select, two options (verified live 2026-08-02 on 0.31.1)
+curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_28ba6c7b.../questions/tool_t4BQ8GpCUJGg32O6PTAPEpdy \
+  -H "Authorization: Bearer <token>" \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  -d '{"answers":{"q_0":{"kind":"multi","option_ids":["opt_0_0","opt_0_2"]}}}'
+# multi-select + free text combined (verified live 2026-08-02 on 0.31.1)
+curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_28ba6c7b.../questions/tool_qRyyocUhF4wX6gCV6DqagJgx \
+  -H "Authorization: Bearer <token>" \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  -d '{"answers":{"q_0":{"kind":"multi_with_other","option_ids":["opt_0_0"],"other_text":"Fish"}}}'
 ```
 
-Both returned HTTP 200
+All four kinds return HTTP 200
 `{"code":0,"msg":"success","data":{"resolved":true,"resolved_at":"..."},...}`.
 On the wire: `event.session.work_changed` (`pending_interaction` back to
 `"none"`) → `event.question.answered` → `tool.result` whose output is
-`{"answers":{"<question text>":"<option label or free text>"}}` → the turn
-continues. Answering an already-resolved question returns
+`{"answers":{"<question text>":"<flattened answer>"}}` → the turn
+continues. The flattened value is the option label for `single`, the raw text
+for `other`, the selected labels **joined with `", "`** for `multi`
+(`"Red, Blue"`, verified live 2026-08-02) and the labels followed by the free
+text, same join, for `multi_with_other` (`"Dog, Fish"`, verified live
+2026-08-02). Answering an already-resolved question returns
 `{"code":40902,"msg":"question <qid> already resolved","data":{"resolved":false},...}`
 (re-verified 2026-07-23; 0.27.0 returned `40405` "not found").
+
+Two multi-answer caveats (both verified live 2026-08-02 on 0.31.1):
+
+- `{"kind":"multi","option_ids":[]}` is refused with envelope code `40001`
+  (`answers.q_0.option_ids: Too small: expected array to have >=1 items`) and
+  the question **stays pending** — a multi answer needs at least one option.
+- Option ids are **not validated** against the question's options: a bogus id
+  resolves the question and flattens verbatim into the answer value
+  (`{"answers":{"Which colors do you like?":"opt_0_9"}}`). Clients must
+  validate selections themselves.
 
 5. Dismiss — `POST /api/v1/sessions/{id}/questions/{qid}:dismiss`, body `{}`:
 
@@ -1151,10 +1189,6 @@ envelope code `40909`** — do not gate success on `code == 0` here; check
 `tool.result` with output
 `{"answers":{},"note":"User dismissed the question without answering."}` → the
 turn continues.
-
-The web bundle hints at further answer kinds (`multi`, `multi_with_other`,
-`skipped`) and optional `method`/`note` body fields — **not verified live**;
-treat as leads only.
 
 ## Todos
 
@@ -1957,7 +1991,8 @@ payload).
 **`question_id` == `tool_call_id`** — no v2 duplicate). `options[].description`
 is omitted when the option has none; `header` is optional and was absent
 entirely from the 2026-07-23 captures (key order is not stable either — never
-rely on it):
+rely on it). `multi_select` is present per item in both `true` and `false`
+form (verified live 2026-08-02 on 0.31.1):
 
 ```json
 {"type":"event.question.requested","seq":52,
@@ -1972,7 +2007,9 @@ rely on it):
 ```
 
 **Question answered** (`event.question.answered`; `answers` is keyed by
-**question text**, values are option labels or free text). Unchanged —
+**question text**, values are option labels or free text — multi-select
+answers flatten to labels joined with `", "`, free text appended the same way
+for `multi_with_other`; verified live 2026-08-02). Single/other unchanged —
 selected option and free text both re-verified 2026-07-23:
 
 ```json
