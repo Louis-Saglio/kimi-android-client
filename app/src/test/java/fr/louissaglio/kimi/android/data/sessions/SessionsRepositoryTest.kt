@@ -40,7 +40,9 @@ class SessionsRepositoryTest {
                    "metadata":{"cwd":"/home/ubuntu/kimi-android-client"},
                    "usage":{"input_tokens":0},"permission_rules":[],"message_count":0,"last_seq":0},
                   {"id":"session_2","title":"","updated_at":"2026-07-16T10:00:00.000Z",
-                   "busy":false,"metadata":{"cwd":"/tmp/spike"}}
+                   "busy":false,"metadata":{"cwd":"/tmp/spike"}},
+                  {"id":"session_3","title":"Question pending","updated_at":"2026-07-16T11:00:00.000Z",
+                   "busy":true,"pending_interaction":"question","metadata":{"cwd":"/tmp/q"}}
                 ],"has_more":true},"request_id":"01KX"}
                 """.trimIndent(),
             ),
@@ -53,7 +55,7 @@ class SessionsRepositoryTest {
         assertEquals("/api/v1/sessions", server.takeRequest().target)
         assertTrue(page.hasMore)
         val sessions = page.items
-        assertEquals(2, sessions.size)
+        assertEquals(3, sessions.size)
         assertEquals(
             Session(
                 id = "session_1",
@@ -61,15 +63,18 @@ class SessionsRepositoryTest {
                 cwd = "/home/ubuntu/kimi-android-client",
                 updatedAt = Instant.parse("2026-07-17T03:48:31.606Z"),
                 isRunning = true,
-                isAwaitingApproval = true,
+                isAwaitingInteraction = true,
             ),
             sessions[0],
         )
         // Blank title maps to null so the UI falls back to the cwd; busy maps to isRunning.
         assertNull(sessions[1].title)
         assertEquals(false, sessions[1].isRunning)
-        // No pending_interaction in the payload defaults to "none" — no approval flag.
-        assertFalse(sessions[1].isAwaitingApproval)
+        // No pending_interaction in the payload defaults to "none" — no badge.
+        assertFalse(sessions[1].isAwaitingInteraction)
+        // A pending question sets the badge too: approvals AND questions read as
+        // "needs me" (ticket 087 — one rule for the REST mapping and the WS patch).
+        assertTrue(sessions[2].isAwaitingInteraction)
     }
 
     @Test
@@ -149,7 +154,7 @@ class SessionsRepositoryTest {
                 cwd = "/tmp/spike-008",
                 updatedAt = Instant.parse("2026-07-19T05:29:30.815Z"),
                 isRunning = false,
-                isAwaitingApproval = false,
+                isAwaitingInteraction = false,
             ),
             result.getOrThrow(),
         )

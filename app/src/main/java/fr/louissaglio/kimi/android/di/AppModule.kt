@@ -14,6 +14,8 @@ import fr.louissaglio.kimi.android.data.attachments.AndroidAttachmentStore
 import fr.louissaglio.kimi.android.data.attachments.AttachmentStore
 import fr.louissaglio.kimi.android.data.network.ApiClient
 import fr.louissaglio.kimi.android.data.network.BearerTokenInterceptor
+import fr.louissaglio.kimi.android.data.sessions.OkHttpSessionListSocket
+import fr.louissaglio.kimi.android.data.sessions.SessionListSocket
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import java.util.concurrent.TimeUnit
 import javax.inject.Qualifier
@@ -66,6 +68,10 @@ object AppModule {
     @Provides
     @Singleton
     fun provideAttachmentStore(impl: AndroidAttachmentStore): AttachmentStore = impl
+
+    @Provides
+    @Singleton
+    fun provideSessionListSocket(impl: OkHttpSessionListSocket): SessionListSocket = impl
 
     @Provides
     @Singleton

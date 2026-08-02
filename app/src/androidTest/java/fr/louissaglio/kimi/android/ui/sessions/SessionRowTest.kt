@@ -11,14 +11,14 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** Semantics tests for the session-row status indicators (ticket 016). */
+/** Semantics tests for the session-row status indicators (tickets 016/087). */
 @RunWith(AndroidJUnit4::class)
 class SessionRowTest {
 
     @get:Rule
     val composeTestRule = createComposeRule()
 
-    private fun row(isRunning: Boolean, isAwaitingApproval: Boolean) {
+    private fun row(isRunning: Boolean, isAwaitingInteraction: Boolean) {
         composeTestRule.setContent {
             KimiTheme {
                 SessionRow(
@@ -28,7 +28,7 @@ class SessionRowTest {
                         cwd = "/tmp/spike",
                         updatedAt = Instant.now(),
                         isRunning = isRunning,
-                        isAwaitingApproval = isAwaitingApproval,
+                        isAwaitingInteraction = isAwaitingInteraction,
                     ),
                     onClick = {},
                 )
@@ -37,26 +37,26 @@ class SessionRowTest {
     }
 
     @Test
-    fun approvalPendingShowsApprovalBadgeNotRunningDot() {
-        row(isRunning = true, isAwaitingApproval = true)
+    fun pendingInteractionShowsNeedsAttentionBadgeNotRunningDot() {
+        row(isRunning = true, isAwaitingInteraction = true)
 
-        composeTestRule.onNodeWithContentDescription("Approval needed").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Needs attention").assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription("Session running").assertDoesNotExist()
     }
 
     @Test
     fun noPendingInteractionShowsNoBadge() {
-        row(isRunning = false, isAwaitingApproval = false)
+        row(isRunning = false, isAwaitingInteraction = false)
 
-        composeTestRule.onNodeWithContentDescription("Approval needed").assertDoesNotExist()
+        composeTestRule.onNodeWithContentDescription("Needs attention").assertDoesNotExist()
         composeTestRule.onNodeWithContentDescription("Session running").assertDoesNotExist()
     }
 
     @Test
-    fun busyWithoutApprovalShowsRunningDotOnly() {
-        row(isRunning = true, isAwaitingApproval = false)
+    fun busyWithoutInteractionShowsRunningDotOnly() {
+        row(isRunning = true, isAwaitingInteraction = false)
 
         composeTestRule.onNodeWithContentDescription("Session running").assertIsDisplayed()
-        composeTestRule.onNodeWithContentDescription("Approval needed").assertDoesNotExist()
+        composeTestRule.onNodeWithContentDescription("Needs attention").assertDoesNotExist()
     }
 }

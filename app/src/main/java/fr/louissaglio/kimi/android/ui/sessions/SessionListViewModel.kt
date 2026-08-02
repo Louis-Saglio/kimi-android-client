@@ -6,14 +6,19 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import fr.louissaglio.kimi.android.data.toUserMessage
 import fr.louissaglio.kimi.android.data.sessions.Session
 import fr.louissaglio.kimi.android.data.sessions.SessionActivityStore
+import fr.louissaglio.kimi.android.data.sessions.SessionListEvent
+import fr.louissaglio.kimi.android.data.sessions.SessionListSocket
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
 import fr.louissaglio.kimi.android.data.sessions.Workspace
+import fr.louissaglio.kimi.android.data.sessions.isAwaitingInteraction
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import javax.inject.Inject
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -23,6 +28,7 @@ class SessionListViewModel @Inject constructor(
     private val sessionsRepository: SessionsRepository,
     private val settingsRepository: SettingsRepository,
     private val activityStore: SessionActivityStore,
+    private val sessionListSocket: SessionListSocket,
 ) : ViewModel() {
 
     /** [sessions] is null until the first successful load; [error] is shown only when there is no list to display. */
@@ -58,12 +64,70 @@ class SessionListViewModel @Inject constructor(
 
     private var loadJob: Job? = null
     private var loadMoreJob: Job? = null
+    private var socketJob: Job? = null
 
     fun onScreenStarted() {
         bumpPendingActivity()
         // With a list already loaded the refresh runs silently — no spinner, no
         // visible disturbance (ticket 086); otherwise this is the visible initial load.
         if (uiState.value.sessions != null) silentRefresh() else reload()
+        startSocket()
+    }
+
+    /** ON_STOP (chat opened, app backgrounded): the live connection closes with the
+     * screen — it only ever runs while the list is visible (ticket 087). */
+    fun onScreenStopped() {
+        socketJob?.cancel()
+        socketJob = null
+    }
+
+    /**
+     * Collects the sessions-list socket for the life of the screen (ticket 087): rows
+     * patch in place on work_changed / meta.updated, a reconnect heals via one silent
+     * refresh. The loaded ids ride a derived flow, so page loads while connected
+     * re-subscribe on their own. Restart-safe: ON_START/ON_STOP pair up, but a repeat
+     * start never opens a second collection.
+     */
+    private fun startSocket() {
+        if (socketJob?.isActive == true) return
+        val sessionIds = uiState
+            .map { state -> state.sessions?.mapTo(LinkedHashSet(), Session::id).orEmpty() }
+            .distinctUntilChanged()
+        socketJob = viewModelScope.launch {
+            sessionListSocket.observe(settingsRepository.current(), sessionIds).collect(::onSocketEvent)
+        }
+    }
+
+    private fun onSocketEvent(event: SessionListEvent) {
+        when (event) {
+            // The connection dropped and came back: events in the gap are lost, so
+            // re-sync the whole list once (same path as the ON_START silent refresh).
+            SessionListEvent.Reconnected -> silentRefresh()
+            is SessionListEvent.WorkChanged -> patchRow(event.sessionId) {
+                it.copy(
+                    isRunning = event.busy,
+                    isAwaitingInteraction = isAwaitingInteraction(event.pendingInteraction),
+                )
+            }
+            is SessionListEvent.MetaUpdated -> patchRow(event.sessionId) {
+                // Same blank-title rule as the REST mapping: fall back to the cwd.
+                it.copy(title = event.title?.takeIf(String::isNotBlank))
+            }
+        }
+    }
+
+    /**
+     * Applies [transform] to the row of [sessionId] in place (ticket 087): the row
+     * never moves — ordering stays owned by the silent/initial refresh. An unknown id
+     * is ignored; the next refresh reconciles.
+     */
+    private inline fun patchRow(sessionId: String, transform: (Session) -> Session) {
+        uiState.update { state ->
+            val sessions = state.sessions ?: return@update state
+            val index = sessions.indexOfFirst { it.id == sessionId }
+            if (index < 0) return@update state
+            state.copy(sessions = sessions.toMutableList().apply { this[index] = transform(sessions[index]) })
+        }
     }
 
     fun onRetry() = reload()

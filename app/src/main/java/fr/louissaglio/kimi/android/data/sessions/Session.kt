@@ -10,9 +10,16 @@ data class Session(
     val cwd: String?,
     val updatedAt: Instant,
     val isRunning: Boolean,
-    /** True while the session is blocked on a permission approval (`pending_interaction == "approval"`). */
-    val isAwaitingApproval: Boolean,
+    /** True while the session is blocked on an approval or a question (see [isAwaitingInteraction]). */
+    val isAwaitingInteraction: Boolean,
 )
+
+/**
+ * The one "needs me" badge rule (ticket 087): the REST mapping and the WebSocket
+ * patch must agree, so both go through this — approvals AND questions read as
+ * awaiting interaction.
+ */
+fun isAwaitingInteraction(pendingInteraction: String): Boolean = pendingInteraction != "none"
 
 /**
  * Label for one session: title → cwd basename → id, shared by the session list row

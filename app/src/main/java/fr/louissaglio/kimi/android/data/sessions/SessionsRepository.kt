@@ -78,7 +78,7 @@ class SessionsRepository @Inject constructor(
         cwd = metadata?.cwd,
         updatedAt = runCatching { Instant.parse(updatedAt) }.getOrDefault(Instant.EPOCH),
         isRunning = busy,
-        isAwaitingApproval = pendingInteraction == "approval",
+        isAwaitingInteraction = isAwaitingInteraction(pendingInteraction),
     )
 
     private fun WorkspaceDto.toDomain(): Workspace = Workspace(

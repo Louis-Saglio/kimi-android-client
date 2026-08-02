@@ -12,7 +12,7 @@ class SessionTest {
         cwd = cwd,
         updatedAt = Instant.EPOCH,
         isRunning = false,
-        isAwaitingApproval = false,
+        isAwaitingInteraction = false,
     )
 
     @Test

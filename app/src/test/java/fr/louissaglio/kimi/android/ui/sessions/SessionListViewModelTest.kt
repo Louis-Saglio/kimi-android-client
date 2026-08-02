@@ -3,9 +3,11 @@ package fr.louissaglio.kimi.android.ui.sessions
 import androidx.datastore.preferences.core.preferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
 import fr.louissaglio.kimi.android.data.sessions.SessionActivityStore
+import fr.louissaglio.kimi.android.data.sessions.SessionListEvent
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
+import fr.louissaglio.kimi.android.fakes.FakeSessionListSocket
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.awaitState
 import fr.louissaglio.kimi.android.testutil.testSessionsRepository
@@ -46,6 +48,7 @@ class SessionListViewModelTest {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
     private lateinit var viewModel: SessionListViewModel
     private lateinit var activityStore: SessionActivityStore
+    private lateinit var fakeSocket: FakeSessionListSocket
 
     @Before
     fun setUp() {
@@ -58,15 +61,20 @@ class SessionListViewModelTest {
             appScope,
         )
         activityStore = SessionActivityStore()
+        fakeSocket = FakeSessionListSocket()
         viewModel = SessionListViewModel(
             testSessionsRepository(),
             settingsRepository,
             activityStore,
+            fakeSocket,
         )
     }
 
     @After
     fun tearDown() {
+        // Stop the socket collection so no viewModelScope job outlives the test class:
+        // a leaked job resuming on Dispatchers.Main races the next class's setMain.
+        viewModel.onScreenStopped()
         Dispatchers.resetMain()
         appScope.cancel()
         server.close()
@@ -346,7 +354,7 @@ class SessionListViewModelTest {
     }
 
     @Test
-    fun `approval flag comes from the latest fetched payload only`() = runBlocking {
+    fun `interaction flag comes from the latest fetched payload only`() = runBlocking {
         server.enqueue(
             MockResponse(body = 
                 """{"code":0,"msg":"success","data":{"items":[
@@ -360,16 +368,16 @@ class SessionListViewModelTest {
         viewModel.onScreenStarted()
 
         awaitState(viewModel.uiState) { it.sessions != null }
-        assertTrue(viewModel.uiState.value.sessions!![0].isAwaitingApproval)
-        assertFalse(viewModel.uiState.value.sessions!![1].isAwaitingApproval)
+        assertTrue(viewModel.uiState.value.sessions!![0].isAwaitingInteraction)
+        assertFalse(viewModel.uiState.value.sessions!![1].isAwaitingInteraction)
 
         // After the approval is resolved, the next refresh must clear the badge — the
         // state carries the server value only, nothing is latched locally.
         server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1", "session_2")))
         viewModel.onPullToRefresh()
 
-        awaitState(viewModel.uiState) { it.sessions?.none { s -> s.isAwaitingApproval } == true }
-        assertFalse(viewModel.uiState.value.sessions!![0].isAwaitingApproval)
+        awaitState(viewModel.uiState) { it.sessions?.none { s -> s.isAwaitingInteraction } == true }
+        assertFalse(viewModel.uiState.value.sessions!![0].isAwaitingInteraction)
     }
 
     @Test
@@ -578,6 +586,102 @@ class SessionListViewModelTest {
 
         server.enqueue(MockResponse(body = pageBody(hasMore = true, "session_1")))
         awaitState(viewModel.uiState) { it.hasMore }
+    }
+
+    // --- Live socket patches (ticket 087, FakeSessionListSocket) ---
+
+    @Test
+    fun `a work_changed event lights the running dot and clears it, without any refresh`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1", "session_2")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+
+        fakeSocket.events.tryEmit(SessionListEvent.WorkChanged("session_2", busy = true, pendingInteraction = "none"))
+        awaitState(viewModel.uiState) { it.sessions!![1].isRunning }
+        // The row patched in place: order untouched.
+        assertEquals(listOf("session_1", "session_2"), viewModel.uiState.value.sessions!!.map { it.id })
+
+        fakeSocket.events.tryEmit(SessionListEvent.WorkChanged("session_2", busy = false, pendingInteraction = "none"))
+        awaitState(viewModel.uiState) { it.sessions!!.none { s -> s.isRunning } }
+        // Both patches were pure WebSocket: no REST call beyond the initial load.
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun `approvals and questions light the needs-me badge, none clears it`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+
+        fakeSocket.events.tryEmit(SessionListEvent.WorkChanged("session_1", busy = true, pendingInteraction = "question"))
+        awaitState(viewModel.uiState) { it.sessions!![0].isAwaitingInteraction }
+
+        fakeSocket.events.tryEmit(SessionListEvent.WorkChanged("session_1", busy = true, pendingInteraction = "none"))
+        awaitState(viewModel.uiState) { !it.sessions!![0].isAwaitingInteraction }
+
+        fakeSocket.events.tryEmit(SessionListEvent.WorkChanged("session_1", busy = true, pendingInteraction = "approval"))
+        awaitState(viewModel.uiState) { it.sessions!![0].isAwaitingInteraction }
+
+        fakeSocket.events.tryEmit(SessionListEvent.WorkChanged("session_1", busy = false, pendingInteraction = "none"))
+        awaitState(viewModel.uiState) { !it.sessions!![0].isAwaitingInteraction && !it.sessions[0].isRunning }
+    }
+
+    @Test
+    fun `a meta updated event patches the row title live`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+
+        fakeSocket.events.tryEmit(SessionListEvent.MetaUpdated("session_1", "Auto-titled by the server"))
+        awaitState(viewModel.uiState) { it.sessions!![0].title == "Auto-titled by the server" }
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun `events for sessions not in the list are ignored`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1", "session_2")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        val loaded = viewModel.uiState.value.sessions
+
+        fakeSocket.events.tryEmit(SessionListEvent.WorkChanged("session_unknown", busy = true, pendingInteraction = "approval"))
+        fakeSocket.events.tryEmit(SessionListEvent.MetaUpdated("session_unknown", "Ghost"))
+        delay(200) // let any (wrong) patch land
+
+        // Not even a state update: the same list instance.
+        assertSame(loaded, viewModel.uiState.value.sessions)
+    }
+
+    @Test
+    fun `a reconnect triggers exactly one silent refresh`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1", "session_2")))
+        fakeSocket.events.tryEmit(SessionListEvent.Reconnected)
+
+        assertEquals("/api/v1/sessions", server.takeRequest(5, TimeUnit.SECONDS)!!.target)
+        awaitState(viewModel.uiState) { it.sessions?.size == 2 }
+        // The heal is a one-shot: no further request.
+        assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun `the socket collection starts on ON_START and stops on ON_STOP`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1")))
+        viewModel.onScreenStarted()
+        awaitCondition { fakeSocket.collections == 1 }
+
+        viewModel.onScreenStopped()
+        awaitCondition { fakeSocket.completions == 1 }
+
+        // The next ON_START (back from chat) opens a fresh collection.
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1")))
+        viewModel.onScreenStarted()
+        awaitCondition { fakeSocket.collections == 2 }
     }
 
     private fun pageBody(hasMore: Boolean, vararg ids: String): String {
