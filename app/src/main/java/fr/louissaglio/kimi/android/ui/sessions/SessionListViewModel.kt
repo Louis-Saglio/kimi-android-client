@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import fr.louissaglio.kimi.android.data.toUserMessage
 import fr.louissaglio.kimi.android.data.sessions.Session
+import fr.louissaglio.kimi.android.data.sessions.SessionActivityStore
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
 import fr.louissaglio.kimi.android.data.sessions.Workspace
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
@@ -21,6 +22,7 @@ import kotlinx.coroutines.launch
 class SessionListViewModel @Inject constructor(
     private val sessionsRepository: SessionsRepository,
     private val settingsRepository: SettingsRepository,
+    private val activityStore: SessionActivityStore,
 ) : ViewModel() {
 
     /** [sessions] is null until the first successful load; [error] is shown only when there is no list to display. */
@@ -57,22 +59,50 @@ class SessionListViewModel @Inject constructor(
     private var loadJob: Job? = null
     private var loadMoreJob: Job? = null
 
-    fun onScreenStarted() = reload()
+    fun onScreenStarted() {
+        bumpPendingActivity()
+        // With a list already loaded the refresh runs silently — no spinner, no
+        // visible disturbance (ticket 086); otherwise this is the visible initial load.
+        if (uiState.value.sessions != null) silentRefresh() else reload()
+    }
 
     fun onRetry() = reload()
 
     fun onPullToRefresh() = reload()
 
     /**
+     * Applies the recorded chat activity synchronously, before the refresh fires
+     * (ticket 086): messaged sessions move to the top, most recent activity first,
+     * with [Session.updatedAt] set to the recorded instant — matching the server-side
+     * `updated_at` bump a sent message causes, so the refresh lands with the same
+     * ordering. Entries outside the loaded page are dropped: the refresh places them
+     * via server ordering. Nothing recorded → the list is untouched.
+     */
+    private fun bumpPendingActivity() {
+        val pending = activityStore.consumeAll()
+        if (pending.isEmpty()) return
+        uiState.update { state ->
+            val sessions = state.sessions ?: return@update state
+            val bumped = pending.entries
+                .sortedByDescending { (_, at) -> at }
+                .mapNotNull { (id, at) -> sessions.find { it.id == id }?.copy(updatedAt = at) }
+            if (bumped.isEmpty()) return@update state
+            val bumpedIds = bumped.mapTo(HashSet()) { it.id }
+            state.copy(sessions = bumped + sessions.filter { it.id !in bumpedIds })
+        }
+    }
+
+    /**
      * Loads the next page when the list scrolls near its end. No-op while any load is
      * in flight or once the server reported no more pages. The job check (not the
      * state flag) is the re-entrancy guard: the UI calls this on every recomposition
      * near the end, and state updates are not visible synchronously across dispatches.
+     * [loadJob] is checked too: the silent refresh (ticket 086) sets no flag.
      */
     fun onEndReached() {
         val state = uiState.value
         if (state.isLoading || state.isRefreshing || !state.hasMore) return
-        if (loadMoreJob?.isActive == true) return
+        if (loadJob?.isActive == true || loadMoreJob?.isActive == true) return
         val beforeId = state.sessions?.lastOrNull()?.id ?: return
         loadMoreJob = viewModelScope.launch {
             uiState.update { it.copy(isLoadingMore = true, loadMoreError = null) }
@@ -152,13 +182,54 @@ class SessionListViewModel @Inject constructor(
                 cwd = cwd,
                 title = uiState.value.newSessionTitle.trim().ifBlank { null },
             ).onSuccess { session ->
-                uiState.update { it.copy(isCreating = false, showCreateDialog = false) }
+                // Cancel in-flight loads first so a stale page landing after the
+                // insert cannot drop the new row (ticket 086).
+                loadJob?.cancel()
+                loadMoreJob?.cancel()
+                uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        isRefreshing = false,
+                        isLoadingMore = false,
+                        loadMoreError = null,
+                        isCreating = false,
+                        showCreateDialog = false,
+                        sessions = listOf(session) + it.sessions.orEmpty().filter { s -> s.id != session.id },
+                    )
+                }
                 _effects.send(Effect.SessionCreated(session))
             }.onFailure { error ->
                 // Inputs are kept so the user can fix and retry after the snackbar.
                 uiState.update { it.copy(isCreating = false) }
                 _effects.send(Effect.CreateFailed(error.toUserMessage()))
             }
+        }
+    }
+
+    /**
+     * ON_START refresh with a list already loaded (ticket 086): never sets
+     * [UiState.isLoading]/[UiState.isRefreshing]; on success replaces the list; on
+     * failure the old list stays and no [Effect.RefreshFailed] is emitted — no
+     * snackbar on every return while offline. Pull-to-refresh keeps the visible
+     * behavior via [reload].
+     */
+    private fun silentRefresh() {
+        loadJob?.cancel()
+        loadMoreJob?.cancel()
+        loadJob = viewModelScope.launch {
+            uiState.update { it.copy(isLoadingMore = false, loadMoreError = null) }
+            sessionsRepository.listSessions(settingsRepository.current())
+                .onSuccess { page ->
+                    uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            isRefreshing = false,
+                            sessions = page.items,
+                            hasMore = page.hasMore,
+                            error = null,
+                        )
+                    }
+                }
         }
     }
 

@@ -1,5 +1,6 @@
 package fr.louissaglio.kimi.android.data.chat
 
+import fr.louissaglio.kimi.android.data.sessions.SessionActivityStore
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -8,7 +9,8 @@ import kotlinx.coroutines.flow.Flow
 /**
  * Thin public facade of the chat data layer: delegates the REST verbs to [ChatApi],
  * the WebSocket stream to [SessionSocket], the per-session model/effort prefs to
- * [SessionPrefsStore] and the models/config fetches to [ModelsRepository], keeping
+ * [SessionPrefsStore], the models/config fetches to [ModelsRepository] and the
+ * user-message activity recording to [SessionActivityStore] (ticket 086), keeping
  * only the send-path glue (model/effort resolution) here. The collaborators come
  * from the Hilt graph (ticket 067). This is the error boundary: failures come back
  * as [Result.failure] of
@@ -20,6 +22,7 @@ class ChatRepository @Inject constructor(
     private val models: ModelsRepository,
     private val prefs: SessionPrefsStore,
     private val socket: SessionSocket,
+    private val activity: SessionActivityStore,
 ) {
 
     /**
@@ -59,7 +62,8 @@ class ChatRepository @Inject constructor(
      * acknowledges the prompt: the user message and the agent's reply arrive over the
      * WebSocket (docs/server-api.md), so success carries no payload.
      * [attachments] (already uploaded, ticket 033) go into the content array before the
-     * text item; [text] may be blank when attachments are present.
+     * text item; [text] may be blank when attachments are present. Success records
+     * [sessionId] in the [SessionActivityStore] so the session list bumps its row.
      */
     suspend fun sendPrompt(
         settings: ServerSettings,
@@ -70,6 +74,7 @@ class ChatRepository @Inject constructor(
         val model = promptModel(settings, sessionId)
         return chatApi.postPrompt(settings, sessionId, text, attachments, model, promptThinking(settings, sessionId, model))
             .map { }
+            .onSuccess { activity.record(sessionId) }
     }
 
     /**
@@ -77,6 +82,7 @@ class ChatRepository @Inject constructor(
      * posted as usual — while busy the server queues it — then `prompts:steer` injects the
      * queued prompt into the active turn. The steered user message echoes over the
      * WebSocket (context.spliced) like a regular one, so success carries no payload.
+     * Success records [sessionId] in the [SessionActivityStore] like [sendPrompt].
      */
     suspend fun steer(
         settings: ServerSettings,
@@ -88,6 +94,7 @@ class ChatRepository @Inject constructor(
         val promptId = chatApi.postPrompt(settings, sessionId, text, attachments, model, promptThinking(settings, sessionId, model))
             .getOrElse { return Result.failure(it) }
         return chatApi.postSteer(settings, sessionId, promptId)
+            .onSuccess { activity.record(sessionId) }
     }
 
     /**

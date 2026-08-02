@@ -13,6 +13,7 @@ import fr.louissaglio.kimi.android.data.chat.SessionSocket
 import fr.louissaglio.kimi.android.data.chat.TodoParser
 import fr.louissaglio.kimi.android.data.network.ApiClient
 import fr.louissaglio.kimi.android.data.network.ConnectionChecker
+import fr.louissaglio.kimi.android.data.sessions.SessionActivityStore
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
@@ -38,7 +39,10 @@ fun testTodoParser(): TodoParser = TodoParser(Json { ignoreUnknownKeys = true })
 fun testChatTimeline(historyBacked: Boolean = true): ChatTimeline =
     ChatTimeline(testTodoParser(), historyBacked)
 
-fun testChatRepository(dataStore: DataStore<Preferences>): ChatRepository {
+fun testChatRepository(
+    dataStore: DataStore<Preferences>,
+    activityStore: SessionActivityStore = SessionActivityStore(),
+): ChatRepository {
     val json = Json { ignoreUnknownKeys = true }
     val api = ApiClient(OkHttpClient(), json)
     val mapper = ChatMessageMapper(json)
@@ -47,6 +51,7 @@ fun testChatRepository(dataStore: DataStore<Preferences>): ChatRepository {
         ModelsRepository(api),
         SessionPrefsStore(dataStore),
         SessionSocket(OkHttpClient(), json, mapper),
+        activityStore,
     )
 }
 

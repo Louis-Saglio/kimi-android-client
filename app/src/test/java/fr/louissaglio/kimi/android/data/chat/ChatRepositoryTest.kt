@@ -2,6 +2,7 @@ package fr.louissaglio.kimi.android.data.chat
 
 import androidx.datastore.preferences.core.emptyPreferences
 import fr.louissaglio.kimi.android.data.DataError
+import fr.louissaglio.kimi.android.data.sessions.SessionActivityStore
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
 import fr.louissaglio.kimi.android.testutil.awaitCondition
@@ -34,7 +35,8 @@ import org.junit.Test
 class ChatRepositoryTest {
 
     private val server = MockWebServer()
-    private val repository = testChatRepository(FakePreferencesDataStore(emptyPreferences()))
+    private val activityStore = SessionActivityStore()
+    private val repository = testChatRepository(FakePreferencesDataStore(emptyPreferences()), activityStore)
 
     @Before
     fun setUp() = server.start()
@@ -528,6 +530,56 @@ class ChatRepositoryTest {
         assertEquals("/api/v1/config", server.takeRequest().target)
         assertEquals("/api/v1/sessions/session_1/prompts", server.takeRequest().target)
         assertNull(server.takeRequest(200, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun `sendPrompt success records the session activity`() = runBlocking {
+        enqueueConfigWithoutDefaultModel()
+        enqueuePromptAck()
+
+        repository.sendPrompt(settings(), "session_1", "hello").getOrThrow()
+
+        assertEquals(setOf("session_1"), activityStore.consumeAll().keys)
+    }
+
+    @Test
+    fun `sendPrompt failure records no activity`() = runBlocking {
+        enqueueConfigWithoutDefaultModel()
+        server.enqueue(
+            MockResponse(body = """{"code":40401,"msg":"session session_1 does not exist","data":null,"request_id":"01KX"}"""),
+        )
+
+        repository.sendPrompt(settings(), "session_1", "hello")
+
+        assertTrue(activityStore.consumeAll().isEmpty())
+    }
+
+    @Test
+    fun `steer success records the session activity`() = runBlocking {
+        enqueueConfigWithoutDefaultModel()
+        enqueuePromptAck()
+        server.enqueue(
+            MockResponse(body = 
+                """{"code":0,"msg":"success","data":{"steered":true,"prompt_ids":["msg_1"]},"request_id":"01KX"}""",
+            ),
+        )
+
+        repository.steer(settings(), "session_1", "Stop counting").getOrThrow()
+
+        assertEquals(setOf("session_1"), activityStore.consumeAll().keys)
+    }
+
+    @Test
+    fun `steer failure records no activity`() = runBlocking {
+        enqueueConfigWithoutDefaultModel()
+        enqueuePromptAck()
+        server.enqueue(
+            MockResponse(body = """{"code":40402,"msg":"no active prompt to steer into","data":null,"request_id":"01KX"}"""),
+        )
+
+        repository.steer(settings(), "session_1", "too late")
+
+        assertTrue(activityStore.consumeAll().isEmpty())
     }
 
     @Test

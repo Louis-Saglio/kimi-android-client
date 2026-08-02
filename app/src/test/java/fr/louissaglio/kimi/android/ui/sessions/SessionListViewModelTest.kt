@@ -2,12 +2,14 @@ package fr.louissaglio.kimi.android.ui.sessions
 
 import androidx.datastore.preferences.core.preferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
+import fr.louissaglio.kimi.android.data.sessions.SessionActivityStore
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.awaitState
 import fr.louissaglio.kimi.android.testutil.testSessionsRepository
+import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
@@ -27,6 +29,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -42,6 +45,7 @@ class SessionListViewModelTest {
     private val server = MockWebServer()
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
     private lateinit var viewModel: SessionListViewModel
+    private lateinit var activityStore: SessionActivityStore
 
     @Before
     fun setUp() {
@@ -53,9 +57,11 @@ class SessionListViewModelTest {
             ),
             appScope,
         )
+        activityStore = SessionActivityStore()
         viewModel = SessionListViewModel(
             testSessionsRepository(),
             settingsRepository,
+            activityStore,
         )
     }
 
@@ -364,6 +370,214 @@ class SessionListViewModelTest {
 
         awaitState(viewModel.uiState) { it.sessions?.none { s -> s.isAwaitingApproval } == true }
         assertFalse(viewModel.uiState.value.sessions!![0].isAwaitingApproval)
+    }
+
+    @Test
+    fun `create success inserts the new session at the top of the loaded list`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1", "session_2")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+        // The workspaces fetch fails so the dialog stays on the fallback field.
+        server.enqueue(MockResponse(code = 500))
+        server.enqueue(
+            MockResponse(body = 
+                """{"code":0,"msg":"success","data":{"id":"session_new","title":"New session",""" +
+                    """"updated_at":"2026-08-02T06:00:00.000Z","busy":false,""" +
+                    """"metadata":{"cwd":"/home/ubuntu"}},"request_id":"r"}""",
+            ),
+        )
+        viewModel.onNewSessionClick()
+        server.takeRequest(5, TimeUnit.SECONDS) // workspaces fetch
+
+        viewModel.onCreateSessionConfirm()
+
+        awaitState(viewModel.uiState) { it.sessions?.firstOrNull()?.id == "session_new" }
+        assertEquals(
+            listOf("session_new", "session_1", "session_2"),
+            viewModel.uiState.value.sessions!!.map { it.id },
+        )
+        val request = server.takeRequest(5, TimeUnit.SECONDS)!!
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/sessions", request.target)
+    }
+
+    @Test
+    fun `an in-flight refresh when the create succeeds cannot drop the inserted session`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+
+        // A silent refresh starts; its stale page is delayed past the create below.
+        server.enqueue(
+            MockResponse(body = pageBody(hasMore = false, "session_stale"))
+                .newBuilder()
+                .bodyDelay(500, TimeUnit.MILLISECONDS)
+                .build(),
+        )
+        server.enqueue(MockResponse(code = 500)) // workspaces fetch
+        server.enqueue(
+            MockResponse(body = 
+                """{"code":0,"msg":"success","data":{"id":"session_new","title":"New session",""" +
+                    """"updated_at":"2026-08-02T06:00:00.000Z","busy":false,""" +
+                    """"metadata":{"cwd":"/home/ubuntu"}},"request_id":"r"}""",
+            ),
+        )
+        viewModel.onScreenStarted()
+        server.takeRequest(5, TimeUnit.SECONDS) // the silent refresh request
+        viewModel.onNewSessionClick()
+        server.takeRequest(5, TimeUnit.SECONDS) // workspaces fetch
+
+        viewModel.onCreateSessionConfirm()
+
+        awaitState(viewModel.uiState) { it.sessions?.firstOrNull()?.id == "session_new" }
+        server.takeRequest(5, TimeUnit.SECONDS) // create POST
+        assertEquals(listOf("session_new", "session_1"), viewModel.uiState.value.sessions!!.map { it.id })
+
+        // The delayed stale page now lands on the cancelled refresh job: discarded.
+        delay(700)
+        assertEquals(listOf("session_new", "session_1"), viewModel.uiState.value.sessions!!.map { it.id })
+    }
+
+    @Test
+    fun `ON_START with a loaded list refreshes without any loading flag or effect`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+
+        val states = CopyOnWriteArrayList<SessionListViewModel.UiState>()
+        val stateJob = launch { viewModel.uiState.collect { states += it } }
+        val effects = CopyOnWriteArrayList<SessionListViewModel.Effect>()
+        val effectJob = launch { viewModel.effects.collect { effects += it } }
+        try {
+            server.enqueue(MockResponse(body = pageBody(hasMore = true, "session_2")))
+            viewModel.onScreenStarted()
+
+            // The silent refresh launched eagerly: the flags must be unset already.
+            assertFalse(viewModel.uiState.value.isLoading)
+            assertFalse(viewModel.uiState.value.isRefreshing)
+
+            awaitState(viewModel.uiState) { it.hasMore }
+            assertEquals(listOf("session_2"), viewModel.uiState.value.sessions!!.map { it.id })
+            assertTrue(states.none { it.isLoading || it.isRefreshing })
+            assertTrue(effects.isEmpty())
+        } finally {
+            stateJob.cancel()
+            effectJob.cancel()
+        }
+    }
+
+    @Test
+    fun `ON_START refresh failure keeps the old list and emits nothing`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+
+        val effects = CopyOnWriteArrayList<SessionListViewModel.Effect>()
+        val effectJob = launch { viewModel.effects.collect { effects += it } }
+        try {
+            server.enqueue(MockResponse(code = 500))
+            viewModel.onScreenStarted()
+            server.takeRequest(5, TimeUnit.SECONDS) // the silent refresh request
+            delay(300) // let the 500 land
+
+            assertEquals(listOf("session_1"), viewModel.uiState.value.sessions!!.map { it.id })
+            assertNull(viewModel.uiState.value.error)
+            assertTrue(effects.isEmpty())
+        } finally {
+            effectJob.cancel()
+        }
+    }
+
+    @Test
+    fun `pull-to-refresh still sets isRefreshing and emits RefreshFailed on failure`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+
+        val effects = CopyOnWriteArrayList<SessionListViewModel.Effect>()
+        val effectJob = launch { viewModel.effects.collect { effects += it } }
+        try {
+            server.enqueue(MockResponse(code = 500).newBuilder().bodyDelay(200, TimeUnit.MILLISECONDS).build())
+            viewModel.onPullToRefresh()
+
+            // The spinner flag is set synchronously by the eager launch.
+            assertTrue(viewModel.uiState.value.isRefreshing)
+            awaitCondition { effects.isNotEmpty() }
+            assertTrue(effects.single() is SessionListViewModel.Effect.RefreshFailed)
+            // The loaded list survives the failed refresh.
+            assertEquals(listOf("session_1"), viewModel.uiState.value.sessions!!.map { it.id })
+            assertFalse(viewModel.uiState.value.isRefreshing)
+        } finally {
+            effectJob.cancel()
+        }
+    }
+
+    @Test
+    fun `a sent message bumps its session to the top with the recorded timestamp`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1", "session_2")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+
+        val sentAt = Instant.parse("2026-08-02T06:00:00.000Z")
+        activityStore.record("session_2", sentAt)
+        // The refresh response is enqueued only after the bump assertions: the
+        // in-flight refresh request waits for it inside MockWebServer.
+        viewModel.onScreenStarted()
+
+        // The bump is applied synchronously, before the refresh fires...
+        val bumped = viewModel.uiState.value.sessions!!
+        assertEquals(listOf("session_2", "session_1"), bumped.map { it.id })
+        assertEquals(sentAt, bumped.first().updatedAt)
+
+        // ...then the silent refresh lands with the same server ordering — no jump back.
+        server.enqueue(MockResponse(body = pageBody(hasMore = true, "session_2", "session_1")))
+        awaitState(viewModel.uiState) { it.hasMore }
+        assertEquals(listOf("session_2", "session_1"), viewModel.uiState.value.sessions!!.map { it.id })
+    }
+
+    @Test
+    fun `several bumped sessions order most-recent-activity first`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1", "session_2", "session_3")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+
+        activityStore.record("session_3", Instant.parse("2026-08-02T05:00:00.000Z"))
+        activityStore.record("session_1", Instant.parse("2026-08-02T06:00:00.000Z"))
+        // Activity for a session outside the loaded page is dropped.
+        activityStore.record("session_other", Instant.parse("2026-08-02T07:00:00.000Z"))
+        viewModel.onScreenStarted()
+
+        val bumped = viewModel.uiState.value.sessions!!
+        assertEquals(listOf("session_1", "session_3", "session_2"), bumped.map { it.id })
+        assertEquals(Instant.parse("2026-08-02T06:00:00.000Z"), bumped[0].updatedAt)
+        assertEquals(Instant.parse("2026-08-02T05:00:00.000Z"), bumped[1].updatedAt)
+
+        server.enqueue(MockResponse(body = pageBody(hasMore = true, "session_1", "session_3", "session_2")))
+        awaitState(viewModel.uiState) { it.hasMore }
+    }
+
+    @Test
+    fun `no recorded activity leaves the loaded list untouched until the refresh lands`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+        val loaded = viewModel.uiState.value.sessions
+
+        viewModel.onScreenStarted()
+
+        // Nothing recorded → not even a state update: the same list instance.
+        assertSame(loaded, viewModel.uiState.value.sessions)
+
+        server.enqueue(MockResponse(body = pageBody(hasMore = true, "session_1")))
+        awaitState(viewModel.uiState) { it.hasMore }
     }
 
     private fun pageBody(hasMore: Boolean, vararg ids: String): String {

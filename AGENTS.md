@@ -132,8 +132,11 @@ also the regression signal for "verified fixed" tickets.
   ticket 048; a refused cursor acks as `resync_required` → snapshot re-sync,
   ticket 085),
   `ModelsRepository`,
-  `SessionPrefsStore` (per-session model/effort prefs), and `ChatMessageMapper`
-  (DTO→domain). New chat endpoints belong in a collaborator, not the facade.
+  `SessionPrefsStore` (per-session model/effort prefs), `ChatMessageMapper`
+  (DTO→domain), and `SessionActivityStore` (`data/sessions/` — process-lifetime
+  record of successfully sent prompts/steers; the session list consumes it on
+  return to bump those rows before its silent refresh, ticket 086). New chat
+  endpoints belong in a collaborator, not the facade.
 - `data/attachments/` — `AttachmentStore` owns all platform file I/O (content
   resolver reads capped at 256 MiB — a client-side guard; the server removed
   its own upload cap in 0.31.0, see ticket 059; cache writes;
