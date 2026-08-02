@@ -136,4 +136,62 @@ class ToolRowTest {
         composeTestRule.onNodeWithContentDescription("Open sub-agent").performClick()
         assertEquals("agent-12", opened)
     }
+
+    /** Ticket 088: the pending question's row toggles the card on tap (minimize while
+     * open, reopen while minimized). */
+    @Test
+    fun pendingQuestionRowTogglesCardOnTapAndChevronKeepsDetails() {
+        var toggled = false
+        composeTestRule.setContent {
+            KimiTheme {
+                ToolRow(
+                    ChatItem.ToolActivity(
+                        "tool_q1",
+                        "AskUserQuestion",
+                        ToolStatus.Running,
+                        preview = "Red or blue?",
+                        input = "{\n    \"questions\": []\n}",
+                    ),
+                    toggleableQuestionId = "tool_q1",
+                    onToggleQuestion = { toggled = true },
+                )
+            }
+        }
+
+        // The row tap toggles the card instead of expanding…
+        composeTestRule.onNodeWithText("AskUserQuestion").performClick()
+        assertEquals(true, toggled)
+        composeTestRule.onNodeWithText("{\n    \"questions\": []\n}").assertDoesNotExist()
+
+        // …and the chevron keeps the details expansion.
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+        composeTestRule.onNodeWithText("{\n    \"questions\": []\n}").assertIsDisplayed()
+    }
+
+    /** Ticket 088: a row that matches no pending question (already resolved) keeps
+     * the plain expand behavior. */
+    @Test
+    fun resolvedQuestionRowKeepsExpandBehavior() {
+        var toggled = false
+        composeTestRule.setContent {
+            KimiTheme {
+                ToolRow(
+                    ChatItem.ToolActivity(
+                        "tool_q1",
+                        "AskUserQuestion",
+                        ToolStatus.Done,
+                        preview = "Red or blue?",
+                        input = "{\n    \"questions\": []\n}",
+                        output = "{\"answers\":{}}",
+                    ),
+                    toggleableQuestionId = null,
+                    onToggleQuestion = { toggled = true },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("AskUserQuestion").performClick()
+        assertEquals(false, toggled)
+        composeTestRule.onNodeWithText("{\n    \"questions\": []\n}").assertIsDisplayed()
+    }
 }

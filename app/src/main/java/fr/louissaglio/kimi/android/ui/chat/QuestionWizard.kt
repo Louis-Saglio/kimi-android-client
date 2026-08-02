@@ -74,6 +74,24 @@ internal class QuestionWizard(
         }
     }
 
+    /** Ticket 088: hides the card so the user can read the timeline. Purely local —
+     * unlike [onDismiss] nothing is posted; drafts are kept and the pending
+     * AskUserQuestion tool row reopens the card via [onReopen]. */
+    fun onMinimize() {
+        updateState { it.copy(questionCardMinimized = true) }
+    }
+
+    /** Ticket 088: brings a minimized card back (the AskUserQuestion tool-row tap). */
+    fun onReopen() {
+        updateState { it.copy(questionCardMinimized = false) }
+    }
+
+    /** Ticket 088: the pending AskUserQuestion tool-row tap toggles the card —
+     * minimizes it while open, reopens it while minimized. */
+    fun onToggle() {
+        updateState { it.copy(questionCardMinimized = !it.questionCardMinimized) }
+    }
+
     /** POSTs the drafted answers for the head question. No-ops while an item is
      * unanswered. The card clears on the server's question.answered event — for our own
      * answers too — so a failed POST leaves the card up and only reports the error. */
@@ -178,22 +196,20 @@ internal class QuestionWizard(
     }
 
     /** Drops draft answers whose item id belongs to no pending question anymore, and
-     * resets the wizard step (ticket 035) when the queue head changed or shrank past it. */
+     * resets the wizard step (ticket 035) and the minimized flag (ticket 088) when the
+     * queue head changed or shrank past it — a newly surfaced question always shows
+     * expanded, never inheriting the previous head's minimized state. */
     private fun ChatViewModel.UiState.prunedQuestionDrafts(previous: ChatViewModel.UiState): ChatViewModel.UiState {
         val itemIds = pendingQuestions.flatMap { q -> q.items.map { item -> item.id } }.toSet()
         val head = pendingQuestions.firstOrNull()
-        val step =
-            if (head == null || head.questionId != previous.pendingQuestions.firstOrNull()?.questionId ||
-                questionStep > head.items.lastIndex
-            ) {
-                0
-            } else {
-                questionStep
-            }
+        val headChanged =
+            head == null || head.questionId != previous.pendingQuestions.firstOrNull()?.questionId
+        val step = if (headChanged || questionStep > head.items.lastIndex) 0 else questionStep
         return copy(
             questionSelections = questionSelections.filterKeys { it in itemIds },
             questionOtherTexts = questionOtherTexts.filterKeys { it in itemIds },
             questionStep = step,
+            questionCardMinimized = if (headChanged) false else questionCardMinimized,
         )
     }
 }

@@ -209,6 +209,75 @@ class QuestionWizardTest : ChatViewModelTestBase() {
     }
 
     @Test
+    fun `minimize and reopen keep the question and its drafts`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(questionRequestedFrame(id = "tool_q1"))
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
+
+        viewModel.onQuestionOptionPicked("q_0", "opt_0_1")
+        viewModel.onMinimizeQuestion()
+        assertTrue(viewModel.uiState.value.questionCardMinimized)
+
+        // Minimize is purely local: nothing is posted, the queue and drafts are kept.
+        delay(200)
+        assertEquals(1, viewModel.uiState.value.pendingQuestions.size)
+        assertEquals("opt_0_1", viewModel.uiState.value.questionSelections["q_0"])
+
+        viewModel.onReopenQuestion()
+        assertFalse(viewModel.uiState.value.questionCardMinimized)
+        assertEquals("opt_0_1", viewModel.uiState.value.questionSelections["q_0"])
+        assertEquals(1, viewModel.uiState.value.pendingQuestions.size)
+    }
+
+    @Test
+    fun `toggle flips the minimized flag both ways`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(questionRequestedFrame(id = "tool_q1"))
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
+
+        viewModel.onToggleQuestionCard()
+        assertTrue(viewModel.uiState.value.questionCardMinimized)
+        viewModel.onToggleQuestionCard()
+        assertFalse(viewModel.uiState.value.questionCardMinimized)
+    }
+
+    @Test
+    fun `minimized flag survives a queued-behind request but resets when the head changes`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(questionRequestedFrame(id = "tool_q1"))
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
+        viewModel.onMinimizeQuestion()
+
+        // A question queueing behind the head does not surface: the minimized card is
+        // still the head's, so the flag stays.
+        socket.send(questionRequestedFrame(id = "tool_q2"))
+        awaitState(viewModel.uiState) { it.pendingQuestions.size == 2 }
+        assertTrue(viewModel.uiState.value.questionCardMinimized)
+
+        // The head resolves and the queued question slides in — always expanded.
+        socket.send(questionAnsweredFrame("tool_q1"))
+        awaitState(viewModel.uiState) { it.pendingQuestions.map { q -> q.questionId } == listOf("tool_q2") }
+        assertFalse(viewModel.uiState.value.questionCardMinimized)
+    }
+
+    @Test
+    fun `minimized flag resets when the head question resolves`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(questionRequestedFrame(id = "tool_q1"))
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
+        viewModel.onMinimizeQuestion()
+        assertTrue(viewModel.uiState.value.questionCardMinimized)
+
+        socket.send(questionAnsweredFrame("tool_q1"))
+        awaitState(viewModel.uiState) { it.pendingQuestions.isEmpty() }
+        assertFalse(viewModel.uiState.value.questionCardMinimized)
+    }
+
+    @Test
     fun `dismiss posts to the dismiss endpoint and the card clears on dismissed`() = runBlocking {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()

@@ -136,6 +136,11 @@ class ChatViewModel internal constructor(
         val questionOtherTexts: Map<String, String> = emptyMap(),
         /** Wizard step (ticket 035): index into the head question's items shown by the card. */
         val questionStep: Int = 0,
+        /** Ticket 088: true while the user minimized the question card to read the
+         * timeline. Purely local (unlike dismiss); drafts are kept, the pending
+         * AskUserQuestion tool row reopens the card, and any head-question change
+         * resets it. */
+        val questionCardMinimized: Boolean = false,
         /** Models the server offers; empty until the fetch lands (or after it failed). */
         val availableModels: List<ServerModel> = emptyList(),
         /** True once the models fetch succeeded — false while loading and after a
@@ -697,6 +702,12 @@ class ChatViewModel internal constructor(
     fun onSubmitQuestion() = questions.onSubmit()
 
     fun onDismissQuestion() = questions.onDismiss()
+
+    fun onMinimizeQuestion() = questions.onMinimize()
+
+    fun onReopenQuestion() = questions.onReopen()
+
+    fun onToggleQuestionCard() = questions.onToggle()
 
     /**
      * Collects the session socket (one run per socket-gate opening; cancelled when the

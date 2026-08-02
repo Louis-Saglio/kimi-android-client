@@ -9,9 +9,13 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -89,6 +93,7 @@ internal fun QuestionCard(
     onBack: () -> Unit,
     onSubmit: () -> Unit,
     onDismiss: () -> Unit,
+    onMinimize: () -> Unit,
 ) {
     val item = question.items.getOrNull(step) ?: return
     Card(
@@ -101,15 +106,31 @@ internal fun QuestionCard(
             modifier = Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text(
-                text = buildString {
-                    append("Question from Kimi")
-                    if (queueSize > 1) append(" — 1 of $queueSize")
-                    if (question.items.size > 1) append(" · item ${step + 1} of ${question.items.size}")
-                },
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSecondaryContainer,
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = buildString {
+                        append("Question from Kimi")
+                        if (queueSize > 1) append(" — 1 of $queueSize")
+                        if (question.items.size > 1) append(" · item ${step + 1} of ${question.items.size}")
+                    },
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+                // Ticket 088: minimize hides the card (drafts kept); the pending
+                // AskUserQuestion tool row in the timeline reopens it. Unlike Dismiss
+                // this is purely local.
+                IconButton(onClick = onMinimize) {
+                    Icon(
+                        imageVector = Icons.Filled.KeyboardArrowDown,
+                        contentDescription = "Minimize question",
+                        tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                    )
+                }
+            }
             Column(
                 modifier = Modifier
                     .fillMaxWidth()

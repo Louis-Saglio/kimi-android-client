@@ -140,6 +140,8 @@ fun ChatScreen(
         onQuestionBack = viewModel::onQuestionBack,
         onSubmitQuestion = viewModel::onSubmitQuestion,
         onDismissQuestion = viewModel::onDismissQuestion,
+        onMinimizeQuestion = viewModel::onMinimizeQuestion,
+        onToggleQuestionCard = viewModel::onToggleQuestionCard,
         onModelSelected = viewModel::onModelSelected,
         onEffortSelected = viewModel::onEffortSelected,
         onAttach = onAttach,
@@ -207,6 +209,8 @@ private fun ChatContent(
     onQuestionBack: () -> Unit,
     onSubmitQuestion: () -> Unit,
     onDismissQuestion: () -> Unit,
+    onMinimizeQuestion: () -> Unit,
+    onToggleQuestionCard: () -> Unit,
     onModelSelected: (String) -> Unit,
     onEffortSelected: (String) -> Unit,
     onAttach: () -> Unit,
@@ -297,22 +301,27 @@ private fun ChatContent(
                 }
                 // Questions are input, not a yes/no guard: the card collects the
                 // answers and stays until the matching question.answered/dismissed event.
-                uiState.pendingQuestions.firstOrNull()?.let { question ->
-                    QuestionCard(
-                        question = question,
-                        queueSize = uiState.pendingQuestions.size,
-                        step = uiState.questionStep,
-                        selections = uiState.questionSelections,
-                        otherTexts = uiState.questionOtherTexts,
-                        isStepAnswered = uiState.isQuestionStepAnswered,
-                        isSubmittable = uiState.isQuestionSubmittable,
-                        onOptionPicked = onQuestionOptionPicked,
-                        onOtherTextChange = onQuestionOtherTextChange,
-                        onNext = onQuestionNext,
-                        onBack = onQuestionBack,
-                        onSubmit = onSubmitQuestion,
-                        onDismiss = onDismissQuestion,
-                    )
+                // Minimized (ticket 088): nothing renders — the pending AskUserQuestion
+                // tool row in the timeline reopens the card.
+                if (!uiState.questionCardMinimized) {
+                    uiState.pendingQuestions.firstOrNull()?.let { question ->
+                        QuestionCard(
+                            question = question,
+                            queueSize = uiState.pendingQuestions.size,
+                            step = uiState.questionStep,
+                            selections = uiState.questionSelections,
+                            otherTexts = uiState.questionOtherTexts,
+                            isStepAnswered = uiState.isQuestionStepAnswered,
+                            isSubmittable = uiState.isQuestionSubmittable,
+                            onOptionPicked = onQuestionOptionPicked,
+                            onOtherTextChange = onQuestionOtherTextChange,
+                            onNext = onQuestionNext,
+                            onBack = onQuestionBack,
+                            onSubmit = onSubmitQuestion,
+                            onDismiss = onDismissQuestion,
+                            onMinimize = onMinimizeQuestion,
+                        )
+                    }
                 }
                 // The agent's todo list (ticket 042) sits directly above the composer;
                 // its TodoList tool calls no longer appear as timeline rows.
@@ -382,6 +391,11 @@ private fun ChatContent(
                     onOpenAttachment = onOpenAttachment,
                     loadImageBytes = loadImageBytes,
                     onOpenSubagent = onOpenSubagent,
+                    // Ticket 088: the pending AskUserQuestion row (id == questionId)
+                    // toggles the question card — minimizes it while open, reopens it
+                    // while minimized.
+                    toggleableQuestionId = uiState.pendingQuestions.firstOrNull()?.questionId,
+                    onToggleQuestion = onToggleQuestionCard,
                     isLoadingMoreHistory = uiState.isLoadingMoreHistory,
                     onHistoryTopReached = onHistoryTopReached,
                     scrollToBottomTick = scrollToBottomTick,
@@ -549,6 +563,8 @@ private fun ChatContentPreview() {
             onQuestionBack = {},
             onSubmitQuestion = {},
             onDismissQuestion = {},
+            onMinimizeQuestion = {},
+            onToggleQuestionCard = {},
             onModelSelected = {},
             onEffortSelected = {},
             onAttach = {},

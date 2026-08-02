@@ -60,6 +60,12 @@ internal fun MessageList(
     loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray? = { null },
     /** Invoked with the subagentId when a linked `Agent` tool row is tapped (ticket 045). */
     onOpenSubagent: (String) -> Unit = {},
+    /** Ticket 088: the pending head question's id (null when no question is pending).
+     * An `AskUserQuestion` tool row whose id matches toggles the question card
+     * ([onToggleQuestion]) on tap — minimize while open, reopen while minimized —
+     * instead of toggling its details. */
+    toggleableQuestionId: String? = null,
+    onToggleQuestion: () -> Unit = {},
     /** Top-anchored history pagination (ticket 046 on the sub-agent page; the 043
      * mechanics): a small overlay spinner shows while an older page loads and
      * [onHistoryTopReached] fires when the scroll position nears the top. Prepending
@@ -161,11 +167,11 @@ internal fun MessageList(
                             loadImageBytes = loadImageBytes,
                         )
                     is ChatItem.AssistantMessage -> AssistantBubble(item)
-                    is ChatItem.ToolGroup -> ToolGroupCard(item, onOpenSubagent)
+                    is ChatItem.ToolGroup -> ToolGroupCard(item, onOpenSubagent, toggleableQuestionId, onToggleQuestion)
                     is ChatItem.CompactionDivider -> CompactionDividerRow(item)
                     // Bare rows are not produced by ChatTimeline anymore (ticket 037) but
                     // stay renderable for tests and previews.
-                    is ChatItem.ToolActivity -> ToolRow(item, onOpenSubagent)
+                    is ChatItem.ToolActivity -> ToolRow(item, onOpenSubagent, toggleableQuestionId, onToggleQuestion)
                 }
             }
         }
