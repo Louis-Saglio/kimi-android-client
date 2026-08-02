@@ -354,6 +354,100 @@ class QuestionWizardTest : ChatViewModelTestBase() {
         assertEquals(listOf("tool_q1"), viewModel.uiState.value.pendingQuestions.map { it.questionId })
     }
 
+    @Test
+    fun `resolved row tap opens the read-only view with the answer marked`() = runBlocking {
+        viewModel.onQuestionRowTapped("tool_old", resolvedInput, resolvedOutput)
+
+        val view = viewModel.uiState.value.resolvedQuestionView!!
+        assertEquals("tool_old", view.toolCallId)
+        assertNull(view.note)
+        assertEquals("blue", view.items.single().selectedLabel)
+        assertEquals(0, viewModel.uiState.value.resolvedQuestionStep)
+    }
+
+    @Test
+    fun `re-tapping the view's own row closes it and an unparseable row no-ops`() = runBlocking {
+        viewModel.onQuestionRowTapped("tool_old", resolvedInput, resolvedOutput)
+        assertTrue(viewModel.uiState.value.resolvedQuestionView != null)
+
+        viewModel.onQuestionRowTapped("tool_old", resolvedInput, resolvedOutput)
+        assertNull(viewModel.uiState.value.resolvedQuestionView)
+
+        // Background-question plain-text result: nothing to show, nothing happens.
+        viewModel.onQuestionRowTapped("tool_bg", resolvedInput, "task_id: 1\nstatus: running")
+        assertNull(viewModel.uiState.value.resolvedQuestionView)
+    }
+
+    @Test
+    fun `resolved view paginates without answer gating`() = runBlocking {
+        viewModel.onQuestionRowTapped("tool_old", multiItemResolvedInput, multiItemResolvedOutput)
+        assertEquals(0, viewModel.uiState.value.resolvedQuestionStep)
+
+        viewModel.onResolvedQuestionNext()
+        assertEquals(1, viewModel.uiState.value.resolvedQuestionStep)
+        viewModel.onResolvedQuestionNext()
+        assertEquals(1, viewModel.uiState.value.resolvedQuestionStep)
+        viewModel.onResolvedQuestionBack()
+        assertEquals(0, viewModel.uiState.value.resolvedQuestionStep)
+
+        viewModel.onCloseResolvedQuestion()
+        assertNull(viewModel.uiState.value.resolvedQuestionView)
+        assertEquals(0, viewModel.uiState.value.resolvedQuestionStep)
+    }
+
+    @Test
+    fun `resolved view hides the live card which returns on close`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(questionRequestedFrame(id = "tool_q1"))
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
+
+        viewModel.onQuestionRowTapped("tool_old", resolvedInput, resolvedOutput)
+        assertTrue(viewModel.uiState.value.resolvedQuestionView != null)
+        // The live question is untouched behind the view.
+        assertEquals(listOf("tool_q1"), viewModel.uiState.value.pendingQuestions.map { it.questionId })
+
+        // Tapping the pending row while the view is open surfaces the live card.
+        viewModel.onQuestionRowTapped("tool_q1", "ignored", "ignored")
+        assertNull(viewModel.uiState.value.resolvedQuestionView)
+        assertEquals(listOf("tool_q1"), viewModel.uiState.value.pendingQuestions.map { it.questionId })
+        assertFalse(viewModel.uiState.value.questionCardMinimized)
+    }
+
+    @Test
+    fun `a newly surfaced question closes the resolved view and shows expanded`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        viewModel.onQuestionRowTapped("tool_old", resolvedInput, resolvedOutput)
+        assertTrue(viewModel.uiState.value.resolvedQuestionView != null)
+
+        socket.send(questionRequestedFrame(id = "tool_q1"))
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
+        assertNull(viewModel.uiState.value.resolvedQuestionView)
+        assertFalse(viewModel.uiState.value.questionCardMinimized)
+    }
+
+    @Test
+    fun `pending row tap still toggles the live card`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(questionRequestedFrame(id = "tool_q1"))
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
+
+        viewModel.onQuestionRowTapped("tool_q1", "ignored", "ignored")
+        assertTrue(viewModel.uiState.value.questionCardMinimized)
+        viewModel.onQuestionRowTapped("tool_q1", "ignored", "ignored")
+        assertFalse(viewModel.uiState.value.questionCardMinimized)
+    }
+
+    private val resolvedInput = """{"questions":[{"question":"Red or blue?","header":"Color",""" +
+        """"options":[{"label":"red"},{"label":"blue"}],"multi_select":false}]}"""
+    private val resolvedOutput = """{"answers":{"Red or blue?":"blue"}}"""
+    private val multiItemResolvedInput = """{"questions":[""" +
+        """{"question":"Red or blue?","header":"Color","options":[{"label":"red"},{"label":"blue"}],"multi_select":false},""" +
+        """{"question":"Fast or safe?","header":"Mode","options":[{"label":"fast"},{"label":"safe"}],"multi_select":false}]}"""
+    private val multiItemResolvedOutput = """{"answers":{"Red or blue?":"red","Fast or safe?":"fast"}}"""
+
     /** Verbatim 0.27.0 shape (docs/server-api.md, "Core event payloads"). */
     private fun questionRequestedFrame(id: String): String =
         """{"type":"event.question.requested","seq":9,"epoch":"ep_1","session_id":"session_1",""" +

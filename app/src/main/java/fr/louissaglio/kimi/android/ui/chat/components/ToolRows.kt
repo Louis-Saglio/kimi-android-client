@@ -80,8 +80,7 @@ private fun ToolStatusIcon(status: ToolStatus, runningDescription: String, modif
 internal fun ToolGroupCard(
     group: ChatItem.ToolGroup,
     onOpenSubagent: (String) -> Unit = {},
-    toggleableQuestionId: String? = null,
-    onToggleQuestion: () -> Unit = {},
+    onQuestionRowTapped: (toolCallId: String, input: String, output: String) -> Unit = { _, _, _ -> },
 ) {
     val status = when {
         group.tools.any { it.status == ToolStatus.Running } -> ToolStatus.Running
@@ -117,7 +116,7 @@ internal fun ToolGroupCard(
             group.tools.forEachIndexed { index, tool ->
                 // 1dp outlineVariant hairline between rows, like the web's row separators.
                 if (index > 0) HorizontalDivider()
-                ToolRow(tool, onOpenSubagent, toggleableQuestionId, onToggleQuestion)
+                ToolRow(tool, onOpenSubagent, onQuestionRowTapped)
             }
         }
     }
@@ -138,22 +137,22 @@ internal fun ToolGroupCard(
  * page already shows everything the details would, so tapping the row navigates to
  * that page, as does the trailing open button (chevron-right, own tap target).
  *
- * The row of the pending question (ticket 088): an `AskUserQuestion` row whose id
- * matches [toggleableQuestionId] (row id == tool call id == question id) toggles the
- * question card on tap — minimizes it while open, reopens it while minimized —
- * instead of toggling details. The details expansion stays on the chevron, which
- * gets its own tap target on such rows. */
+ * `AskUserQuestion` rows (tickets 088/089) never expand either and show no chevron:
+ * the raw JSON is superseded by the card UI. The tap is forwarded as
+ * [onQuestionRowTapped] with the row's id (= tool call id = question id), input and
+ * output — the collaborator decides: the pending row toggles the live card, a
+ * resolved row opens/closes its read-only view. */
 @Composable
 internal fun ToolRow(
     activity: ChatItem.ToolActivity,
     onOpenSubagent: (String) -> Unit = {},
-    toggleableQuestionId: String? = null,
-    onToggleQuestion: () -> Unit = {},
+    onQuestionRowTapped: (toolCallId: String, input: String, output: String) -> Unit = { _, _, _ -> },
 ) {
     val detailColor = MaterialTheme.colorScheme.onSurfaceVariant
     val linkedSubagentId = activity.subagentId
-    val toggleable = activity.name == "AskUserQuestion" && activity.id == toggleableQuestionId
-    val expandable = linkedSubagentId == null && (activity.input.isNotBlank() || activity.output.isNotBlank())
+    val isQuestionRow = activity.name == "AskUserQuestion"
+    val expandable = !isQuestionRow && linkedSubagentId == null &&
+        (activity.input.isNotBlank() || activity.output.isNotBlank())
     var expanded by rememberSaveable { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth()) {
         Row(
@@ -161,8 +160,8 @@ internal fun ToolRow(
                 .fillMaxWidth()
                 // M3: the whole row is the tap target, at least 48dp tall.
                 .heightIn(min = 48.dp)
-                .clickable(enabled = expandable || linkedSubagentId != null || toggleable) {
-                    if (toggleable) onToggleQuestion()
+                .clickable(enabled = expandable || linkedSubagentId != null || isQuestionRow) {
+                    if (isQuestionRow) onQuestionRowTapped(activity.id, activity.input, activity.output)
                     else if (expandable) expanded = !expanded
                     else linkedSubagentId?.let(onOpenSubagent)
                 },
@@ -207,30 +206,14 @@ internal fun ToolRow(
             ToolStatusIcon(activity.status, runningDescription = "Tool running", modifier = Modifier.size(12.dp))
             if (expandable) {
                 val chevronRotation by animateFloatAsState(if (expanded) 180f else 0f, label = "chevron")
-                val chevronDescription = if (expanded) "Collapse tool details" else "Expand tool details"
-                if (toggleable) {
-                    // The row tap toggles the question card, so the details expansion
-                    // gets its own tap target here (ticket 088).
-                    IconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(40.dp)) {
-                        Icon(
-                            imageVector = Icons.Filled.KeyboardArrowDown,
-                            contentDescription = chevronDescription,
-                            modifier = Modifier
-                                .size(16.dp)
-                                .rotate(chevronRotation),
-                            tint = detailColor,
-                        )
-                    }
-                } else {
-                    Icon(
-                        imageVector = Icons.Filled.KeyboardArrowDown,
-                        contentDescription = chevronDescription,
-                        modifier = Modifier
-                            .size(16.dp)
-                            .rotate(chevronRotation),
-                        tint = detailColor,
-                    )
-                }
+                Icon(
+                    imageVector = Icons.Filled.KeyboardArrowDown,
+                    contentDescription = if (expanded) "Collapse tool details" else "Expand tool details",
+                    modifier = Modifier
+                        .size(16.dp)
+                        .rotate(chevronRotation),
+                    tint = detailColor,
+                )
             }
             if (linkedSubagentId != null) {
                 IconButton(

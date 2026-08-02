@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -77,7 +78,13 @@ internal fun ApprovalCard(
 /** One item per step (ticket 035): stacking every item pushed the card past the screen
  * for multi-item questions, clipping the top options. The wizard paginates the items —
  * Back/Next walk them, Submit replaces Next on the last one — and the scrollable,
- * height-capped item area is the safety net for a single item with a long option list. */
+ * height-capped item area is the safety net for a single item with a long option list.
+ *
+ * Read-only mode (ticket 089): a resolved question viewed from its timeline row —
+ * radios disabled with the given answer checked, the free-text answer in a disabled
+ * field, no Dismiss/Submit (Back/Next paginate without gating), the header's button
+ * becomes a close (X) and its label states the outcome. [note] carries the dismissal
+ * note for dismissed questions. */
 @Composable
 internal fun QuestionCard(
     question: PendingQuestion,
@@ -94,6 +101,9 @@ internal fun QuestionCard(
     onSubmit: () -> Unit,
     onDismiss: () -> Unit,
     onMinimize: () -> Unit,
+    readOnly: Boolean = false,
+    note: String? = null,
+    onClose: () -> Unit = {},
 ) {
     val item = question.items.getOrNull(step) ?: return
     Card(
@@ -113,6 +123,7 @@ internal fun QuestionCard(
                 Text(
                     text = buildString {
                         append("Question from Kimi")
+                        if (readOnly) append(if (note != null) " · dismissed" else " · answered")
                         if (queueSize > 1) append(" — 1 of $queueSize")
                         if (question.items.size > 1) append(" · item ${step + 1} of ${question.items.size}")
                     },
@@ -120,15 +131,25 @@ internal fun QuestionCard(
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSecondaryContainer,
                 )
-                // Ticket 088: minimize hides the card (drafts kept); the pending
-                // AskUserQuestion tool row in the timeline reopens it. Unlike Dismiss
-                // this is purely local.
-                IconButton(onClick = onMinimize) {
-                    Icon(
-                        imageVector = Icons.Filled.KeyboardArrowDown,
-                        contentDescription = "Minimize question",
-                        tint = MaterialTheme.colorScheme.onSecondaryContainer,
-                    )
+                if (readOnly) {
+                    IconButton(onClick = onClose) {
+                        Icon(
+                            imageVector = Icons.Filled.Close,
+                            contentDescription = "Close",
+                            tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                        )
+                    }
+                } else {
+                    // Ticket 088: minimize hides the card (drafts kept); the pending
+                    // AskUserQuestion tool row in the timeline reopens it. Unlike Dismiss
+                    // this is purely local.
+                    IconButton(onClick = onMinimize) {
+                        Icon(
+                            imageVector = Icons.Filled.KeyboardArrowDown,
+                            contentDescription = "Minimize question",
+                            tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                        )
+                    }
                 }
             }
             Column(
@@ -147,12 +168,12 @@ internal fun QuestionCard(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(MaterialTheme.shapes.small)
-                            .clickable { onOptionPicked(item.id, option.id) },
+                            .clickable(enabled = !readOnly) { onOptionPicked(item.id, option.id) },
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         RadioButton(
                             selected = selections[item.id] == option.id,
-                            onClick = { onOptionPicked(item.id, option.id) },
+                            onClick = if (readOnly) null else ({ onOptionPicked(item.id, option.id) }),
                         )
                         Column {
                             Text(text = option.label, style = MaterialTheme.typography.bodyMedium)
@@ -173,6 +194,14 @@ internal fun QuestionCard(
                         modifier = Modifier.fillMaxWidth(),
                         placeholder = { Text("Other answer…") },
                         singleLine = true,
+                        enabled = !readOnly,
+                    )
+                }
+                note?.let {
+                    Text(
+                        text = it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
@@ -180,14 +209,24 @@ internal fun QuestionCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
             ) {
-                OutlinedButton(onClick = onDismiss) { Text("Dismiss") }
-                if (step > 0) {
-                    OutlinedButton(onClick = onBack) { Text("‹ Back") }
-                }
-                if (step < question.items.lastIndex) {
-                    Button(onClick = onNext, enabled = isStepAnswered) { Text("Next ›") }
+                if (readOnly) {
+                    // Read-only (089): pagination only — nothing to submit or dismiss.
+                    if (step > 0) {
+                        OutlinedButton(onClick = onBack) { Text("‹ Back") }
+                    }
+                    if (step < question.items.lastIndex) {
+                        Button(onClick = onNext) { Text("Next ›") }
+                    }
                 } else {
-                    Button(onClick = onSubmit, enabled = isSubmittable) { Text("Submit") }
+                    OutlinedButton(onClick = onDismiss) { Text("Dismiss") }
+                    if (step > 0) {
+                        OutlinedButton(onClick = onBack) { Text("‹ Back") }
+                    }
+                    if (step < question.items.lastIndex) {
+                        Button(onClick = onNext, enabled = isStepAnswered) { Text("Next ›") }
+                    } else {
+                        Button(onClick = onSubmit, enabled = isSubmittable) { Text("Submit") }
+                    }
                 }
             }
         }

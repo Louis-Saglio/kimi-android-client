@@ -4,6 +4,7 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -54,6 +55,7 @@ import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.data.chat.ServerModel
+import fr.louissaglio.kimi.android.data.chat.asCardModel
 import fr.louissaglio.kimi.android.ui.common.EmptyState
 import fr.louissaglio.kimi.android.ui.common.ErrorState
 import fr.louissaglio.kimi.android.ui.common.LoadingState
@@ -124,6 +126,9 @@ fun ChatScreen(
     }
     // Scroll-to-top loads the next older history page (ticket 043).
     val onHistoryTopReached = remember(viewModel) { viewModel::onHistoryTopReached }
+    // AskUserQuestion rows (088/089): pending row toggles the live card, resolved
+    // row opens/closes its read-only view — decided by the ViewModel.
+    val onQuestionRowTapped = remember(viewModel) { viewModel::onQuestionRowTapped }
     ChatContent(
         uiState = uiState,
         snackbarHostState = snackbarHostState,
@@ -141,7 +146,10 @@ fun ChatScreen(
         onSubmitQuestion = viewModel::onSubmitQuestion,
         onDismissQuestion = viewModel::onDismissQuestion,
         onMinimizeQuestion = viewModel::onMinimizeQuestion,
-        onToggleQuestionCard = viewModel::onToggleQuestionCard,
+        onCloseResolvedQuestion = viewModel::onCloseResolvedQuestion,
+        onResolvedQuestionNext = viewModel::onResolvedQuestionNext,
+        onResolvedQuestionBack = viewModel::onResolvedQuestionBack,
+        onQuestionRowTapped = onQuestionRowTapped,
         onModelSelected = viewModel::onModelSelected,
         onEffortSelected = viewModel::onEffortSelected,
         onAttach = onAttach,
@@ -210,7 +218,10 @@ private fun ChatContent(
     onSubmitQuestion: () -> Unit,
     onDismissQuestion: () -> Unit,
     onMinimizeQuestion: () -> Unit,
-    onToggleQuestionCard: () -> Unit,
+    onCloseResolvedQuestion: () -> Unit,
+    onResolvedQuestionNext: () -> Unit,
+    onResolvedQuestionBack: () -> Unit,
+    onQuestionRowTapped: (toolCallId: String, input: String, output: String) -> Unit,
     onModelSelected: (String) -> Unit,
     onEffortSelected: (String) -> Unit,
     onAttach: () -> Unit,
@@ -224,6 +235,8 @@ private fun ChatContent(
 ) {
     var showModelPicker by rememberSaveable { mutableStateOf(false) }
     var showTodos by rememberSaveable { mutableStateOf(false) }
+    // Ticket 089: system back closes the read-only resolved view before navigating.
+    BackHandler(enabled = uiState.resolvedQuestionView != null) { onCloseResolvedQuestion() }
     // Explicit "go to the newest" intent (ticket 051): the send wrapper below
     // bumps the tick that MessageList watches. Bumping is a plain state write —
     // the scroll itself runs inside MessageList, which owns the LazyListState
@@ -299,11 +312,35 @@ private fun ChatContent(
                         onDeny = onDeny,
                     )
                 }
+                // Ticket 089: a resolved question viewed read-only from its timeline
+                // row occupies the dock — a live pending card waits behind it.
+                uiState.resolvedQuestionView?.let { view ->
+                    val card = view.asCardModel()
+                    QuestionCard(
+                        question = card.question,
+                        queueSize = 1,
+                        step = uiState.resolvedQuestionStep,
+                        selections = card.selections,
+                        otherTexts = card.otherTexts,
+                        isStepAnswered = true,
+                        isSubmittable = false,
+                        onOptionPicked = { _, _ -> },
+                        onOtherTextChange = { _, _ -> },
+                        onNext = onResolvedQuestionNext,
+                        onBack = onResolvedQuestionBack,
+                        onSubmit = {},
+                        onDismiss = {},
+                        onMinimize = {},
+                        readOnly = true,
+                        note = view.note,
+                        onClose = onCloseResolvedQuestion,
+                    )
+                }
                 // Questions are input, not a yes/no guard: the card collects the
                 // answers and stays until the matching question.answered/dismissed event.
                 // Minimized (ticket 088): nothing renders — the pending AskUserQuestion
                 // tool row in the timeline reopens the card.
-                if (!uiState.questionCardMinimized) {
+                if (uiState.resolvedQuestionView == null && !uiState.questionCardMinimized) {
                     uiState.pendingQuestions.firstOrNull()?.let { question ->
                         QuestionCard(
                             question = question,
@@ -391,11 +428,9 @@ private fun ChatContent(
                     onOpenAttachment = onOpenAttachment,
                     loadImageBytes = loadImageBytes,
                     onOpenSubagent = onOpenSubagent,
-                    // Ticket 088: the pending AskUserQuestion row (id == questionId)
-                    // toggles the question card — minimizes it while open, reopens it
-                    // while minimized.
-                    toggleableQuestionId = uiState.pendingQuestions.firstOrNull()?.questionId,
-                    onToggleQuestion = onToggleQuestionCard,
+                    // Tickets 088/089: AskUserQuestion rows never expand — the pending
+                    // row toggles the live card, a resolved row opens its read-only view.
+                    onQuestionRowTapped = onQuestionRowTapped,
                     isLoadingMoreHistory = uiState.isLoadingMoreHistory,
                     onHistoryTopReached = onHistoryTopReached,
                     scrollToBottomTick = scrollToBottomTick,
@@ -564,7 +599,10 @@ private fun ChatContentPreview() {
             onSubmitQuestion = {},
             onDismissQuestion = {},
             onMinimizeQuestion = {},
-            onToggleQuestionCard = {},
+            onCloseResolvedQuestion = {},
+            onResolvedQuestionNext = {},
+            onResolvedQuestionBack = {},
+            onQuestionRowTapped = { _, _, _ -> },
             onModelSelected = {},
             onEffortSelected = {},
             onAttach = {},

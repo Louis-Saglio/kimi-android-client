@@ -13,6 +13,7 @@ import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
 import fr.louissaglio.kimi.android.data.chat.MessagePage
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
+import fr.louissaglio.kimi.android.data.chat.ResolvedQuestion
 import fr.louissaglio.kimi.android.data.chat.ServerModel
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.SessionSnapshot
@@ -141,6 +142,13 @@ class ChatViewModel internal constructor(
          * AskUserQuestion tool row reopens the card, and any head-question change
          * resets it. */
         val questionCardMinimized: Boolean = false,
+        /** Ticket 089: the resolved (answered/dismissed) question being viewed
+         * read-only in the dock, rebuilt from the tapped row's input/output. While
+         * set it occupies the card slot — a live pending card waits behind it. */
+        val resolvedQuestionView: ResolvedQuestion? = null,
+        /** Wizard step of the read-only resolved view (089); separate from the live
+         * [questionStep], which keeps the live card's drafts untouched. */
+        val resolvedQuestionStep: Int = 0,
         /** Models the server offers; empty until the fetch lands (or after it failed). */
         val availableModels: List<ServerModel> = emptyList(),
         /** True once the models fetch succeeded — false while loading and after a
@@ -708,6 +716,15 @@ class ChatViewModel internal constructor(
     fun onReopenQuestion() = questions.onReopen()
 
     fun onToggleQuestionCard() = questions.onToggle()
+
+    fun onQuestionRowTapped(toolCallId: String, input: String, output: String) =
+        questions.onRowTapped(toolCallId, input, output)
+
+    fun onCloseResolvedQuestion() = questions.onCloseResolvedQuestion()
+
+    fun onResolvedQuestionNext() = questions.onResolvedNext()
+
+    fun onResolvedQuestionBack() = questions.onResolvedBack()
 
     /**
      * Collects the session socket (one run per socket-gate opening; cancelled when the

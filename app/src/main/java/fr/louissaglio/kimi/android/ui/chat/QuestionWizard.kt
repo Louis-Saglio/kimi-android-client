@@ -3,6 +3,7 @@ package fr.louissaglio.kimi.android.ui.chat
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.data.chat.QuestionAnswer
+import fr.louissaglio.kimi.android.data.chat.ResolvedQuestionParser
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.data.toUserMessage
@@ -90,6 +91,57 @@ internal class QuestionWizard(
      * minimizes it while open, reopens it while minimized. */
     fun onToggle() {
         updateState { it.copy(questionCardMinimized = !it.questionCardMinimized) }
+    }
+
+    /** Ticket 089: any AskUserQuestion tool-row tap. The pending head's row toggles
+     * the live card (088); a resolved row opens its read-only view — or closes it
+     * when it is the view's own row. Rows whose input/output don't parse (e.g.
+     * background-question plain-text results) no-op. */
+    fun onRowTapped(toolCallId: String, input: String, output: String) {
+        val current = state()
+        if (toolCallId == current.pendingQuestions.firstOrNull()?.questionId) {
+            // The pending row always surfaces the live card: with the read-only view
+            // open (which hides the dock's live card), close the view and unminimize;
+            // otherwise toggle (088).
+            if (current.resolvedQuestionView != null) {
+                updateState {
+                    it.copy(resolvedQuestionView = null, resolvedQuestionStep = 0, questionCardMinimized = false)
+                }
+            } else {
+                onToggle()
+            }
+            return
+        }
+        if (current.resolvedQuestionView?.toolCallId == toolCallId) {
+            onCloseResolvedQuestion()
+            return
+        }
+        val resolved = ResolvedQuestionParser.parse(toolCallId, input, output) ?: return
+        updateState { it.copy(resolvedQuestionView = resolved, resolvedQuestionStep = 0) }
+    }
+
+    /** Ticket 089: closes the read-only resolved view (header X, system back, or a
+     * re-tap of its row). A live pending card waiting behind it reappears. */
+    fun onCloseResolvedQuestion() {
+        updateState { it.copy(resolvedQuestionView = null, resolvedQuestionStep = 0) }
+    }
+
+    /** Advances the read-only resolved view (089) to the next item. No answer gating
+     * — unlike the live wizard there is nothing to answer. */
+    fun onResolvedNext() {
+        updateState { state ->
+            val lastIndex = state.resolvedQuestionView?.items?.lastIndex ?: return@updateState state
+            if (state.resolvedQuestionStep >= lastIndex) state
+            else state.copy(resolvedQuestionStep = state.resolvedQuestionStep + 1)
+        }
+    }
+
+    /** Steps the read-only resolved view (089) back to the previous item. */
+    fun onResolvedBack() {
+        updateState { state ->
+            if (state.resolvedQuestionStep > 0) state.copy(resolvedQuestionStep = state.resolvedQuestionStep - 1)
+            else state
+        }
     }
 
     /** POSTs the drafted answers for the head question. No-ops while an item is
@@ -198,7 +250,8 @@ internal class QuestionWizard(
     /** Drops draft answers whose item id belongs to no pending question anymore, and
      * resets the wizard step (ticket 035) and the minimized flag (ticket 088) when the
      * queue head changed or shrank past it — a newly surfaced question always shows
-     * expanded, never inheriting the previous head's minimized state. */
+     * expanded, never inheriting the previous head's minimized state. A head change
+     * also closes the read-only resolved view (089): live input always wins the dock. */
     private fun ChatViewModel.UiState.prunedQuestionDrafts(previous: ChatViewModel.UiState): ChatViewModel.UiState {
         val itemIds = pendingQuestions.flatMap { q -> q.items.map { item -> item.id } }.toSet()
         val head = pendingQuestions.firstOrNull()
@@ -210,6 +263,8 @@ internal class QuestionWizard(
             questionOtherTexts = questionOtherTexts.filterKeys { it in itemIds },
             questionStep = step,
             questionCardMinimized = if (headChanged) false else questionCardMinimized,
+            resolvedQuestionView = if (headChanged) null else resolvedQuestionView,
+            resolvedQuestionStep = if (headChanged) 0 else resolvedQuestionStep,
         )
     }
 }

@@ -137,11 +137,11 @@ class ToolRowTest {
         assertEquals("agent-12", opened)
     }
 
-    /** Ticket 088: the pending question's row toggles the card on tap (minimize while
-     * open, reopen while minimized). */
+    /** Tickets 088/089: question rows never expand and show no chevron — the tap is
+     * forwarded with the row's id (= tool call id = question id), input and output. */
     @Test
-    fun pendingQuestionRowTogglesCardOnTapAndChevronKeepsDetails() {
-        var toggled = false
+    fun questionRowForwardsTapAndShowsNoChevron() {
+        var tapped: Triple<String, String, String>? = null
         composeTestRule.setContent {
             KimiTheme {
                 ToolRow(
@@ -152,27 +152,22 @@ class ToolRowTest {
                         preview = "Red or blue?",
                         input = "{\n    \"questions\": []\n}",
                     ),
-                    toggleableQuestionId = "tool_q1",
-                    onToggleQuestion = { toggled = true },
+                    onQuestionRowTapped = { id, input, output -> tapped = Triple(id, input, output) },
                 )
             }
         }
 
-        // The row tap toggles the card instead of expanding…
+        composeTestRule.onNodeWithContentDescription("Expand tool details").assertDoesNotExist()
         composeTestRule.onNodeWithText("AskUserQuestion").performClick()
-        assertEquals(true, toggled)
+        assertEquals(Triple("tool_q1", "{\n    \"questions\": []\n}", ""), tapped)
+        // No expansion: the raw input never renders.
         composeTestRule.onNodeWithText("{\n    \"questions\": []\n}").assertDoesNotExist()
-
-        // …and the chevron keeps the details expansion.
-        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
-        composeTestRule.onNodeWithText("{\n    \"questions\": []\n}").assertIsDisplayed()
     }
 
-    /** Ticket 088: a row that matches no pending question (already resolved) keeps
-     * the plain expand behavior. */
+    /** Ticket 089: a resolved question row is equally chevron-free — its details are
+     * the read-only card, not raw JSON. */
     @Test
-    fun resolvedQuestionRowKeepsExpandBehavior() {
-        var toggled = false
+    fun resolvedQuestionRowShowsNoChevron() {
         composeTestRule.setContent {
             KimiTheme {
                 ToolRow(
@@ -184,14 +179,10 @@ class ToolRowTest {
                         input = "{\n    \"questions\": []\n}",
                         output = "{\"answers\":{}}",
                     ),
-                    toggleableQuestionId = null,
-                    onToggleQuestion = { toggled = true },
                 )
             }
         }
 
-        composeTestRule.onNodeWithText("AskUserQuestion").performClick()
-        assertEquals(false, toggled)
-        composeTestRule.onNodeWithText("{\n    \"questions\": []\n}").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Expand tool details").assertDoesNotExist()
     }
 }
