@@ -205,9 +205,10 @@ class ChatViewModelTest : ChatViewModelTestBase() {
 
         // The re-subscribe resumes with the cursor stored before backgrounding
         // (turnStarted's seq 20 — the volatile delta must not move it): the missed
-        // window replays instead of being lost.
-        awaitCondition { clientFrames.any { "\"cursors\"" in it } }
-        val resume = clientFrames.first { "\"cursors\"" in it }
+        // window replays instead of being lost. (The LAST cursors frame: the cold
+        // start's first subscribe already carried the snapshot watermark, ticket 085.)
+        awaitCondition { clientFrames.any { "\"seq\":20" in it } }
+        val resume = clientFrames.last { "\"cursors\"" in it }
         assertTrue(resume, resume.contains("\"seq\":20"))
         assertTrue(resume, resume.contains("\"epoch\":\"ep_1\""))
 
@@ -359,23 +360,23 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     }
 
     @Test
-    fun `a resync_required ack re-syncs from REST`() = runBlocking {
+    fun `a resync_required ack re-syncs from a fresh snapshot`() = runBlocking {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         awaitState(viewModel.uiState) { it.items != null }
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
         // The subscribe ack refuses the resume (replay buffer overrun,
-        // docs/server-api.md): the missed window heals from REST — a fresh
-        // /status-driven resync refetch.
+        // docs/server-api.md): the missed window heals from a fresh snapshot fetch
+        // (ticket 085) — the /status+/messages pair of the 048 path stays out of it.
         socket.send(
             """{"type":"ack","id":"c_1","code":0,"msg":"success","payload":{"accepted":[],""" +
                 """"not_found":[],"resync_required":["session_1"],"cursors":{}}}""",
         )
 
-        awaitRequest("/status")
-        awaitRequest("/messages")
-        Unit
+        awaitRequest("/snapshot")
+        delay(300)
+        assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
     }
 
     @Test
@@ -572,7 +573,9 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     }
 
     @Test
-    fun `status poll seeds the context usage ring`() = runBlocking {
+    fun `the cold-start snapshot seeds the context usage ring`() = runBlocking {
+        // The snapshot's session.usage is the ring's cold-start source (ticket 085);
+        // the harness derives the default snapshot from this statusBody.
         statusBody =
             """{"code":0,"msg":"success","data":{"busy":false,"context_tokens":25050,""" +
             """"max_context_tokens":1048576,"context_usage":0.0239},"request_id":"r"}"""
@@ -587,7 +590,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     fun `usage frames grow the ring live, phase frames leave it untouched`() = runBlocking {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
-        // The /status seed plants the baseline (the current server always sends counts).
+        // The cold-start snapshot plants the baseline (the current server always sends counts).
         awaitState(viewModel.uiState) { it.contextUsage != null }
         assertEquals(ContextUsage(0, 1048576), viewModel.uiState.value.contextUsage)
 
@@ -746,6 +749,15 @@ class ChatViewModelTest : ChatViewModelTestBase() {
 
     @Test
     fun `status seed in flight does not clear a turn that just started`() = runBlocking {
+        // The cold start owns the first start's seeds (ticket 085), so the /status
+        // seed this guards runs on the within-process resume (second ON_START).
+        viewModel.onScreenStarted()
+        awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+        serverSocket = null
+        viewModel.onScreenStopped()
+
         val gate = CountDownLatch(1)
         statusResponseGate = gate
         viewModel.onScreenStarted()
@@ -885,11 +897,12 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     @Test
     fun `nav arguments seed the top bar before the session fetch lands`() {
         val seeded = ChatViewModel(
-            testChatRepository(dataStore),
+            chatRepository,
             testSessionsRepository(),
             settingsRepository,
             FakeAttachmentStore(),
             subagentStore,
+            snapshotSync,
             Chat("session_1", title = "Fix the bug", cwd = "/home/ubuntu/kimi-android-client"),
             todoParser = testTodoParser(),
         )
@@ -901,11 +914,12 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     @Test
     fun `nav arguments with only a cwd seed the basename`() {
         val seeded = ChatViewModel(
-            testChatRepository(dataStore),
+            chatRepository,
             testSessionsRepository(),
             settingsRepository,
             FakeAttachmentStore(),
             subagentStore,
+            snapshotSync,
             Chat("session_1", cwd = "/home/ubuntu/kimi-android-client"),
             todoParser = testTodoParser(),
         )
@@ -991,11 +1005,12 @@ class ChatViewModelTest : ChatViewModelTestBase() {
 
         // Recreation over the same DataStore: the choice is reloaded, not lost.
         val recreated = ChatViewModel(
-            testChatRepository(dataStore),
+            chatRepository,
             testSessionsRepository(),
             settingsRepository,
             FakeAttachmentStore(),
             subagentStore,
+            snapshotSync,
             Chat("session_1"),
             todoParser = testTodoParser(),
         )
@@ -1022,11 +1037,12 @@ class ChatViewModelTest : ChatViewModelTestBase() {
 
         // Recreation over the same DataStore: the choice is reloaded, not lost.
         val recreated = ChatViewModel(
-            testChatRepository(dataStore),
+            chatRepository,
             testSessionsRepository(),
             settingsRepository,
             FakeAttachmentStore(),
             subagentStore,
+            snapshotSync,
             Chat("session_1"),
             todoParser = testTodoParser(),
         )

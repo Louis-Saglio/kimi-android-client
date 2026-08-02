@@ -87,6 +87,10 @@ class SubagentViewModelTest {
                     } else {
                         MockResponse(body = transcriptBody)
                     }
+                } else if (path == "/api/v1/sessions/session_1/snapshot") {
+                    // The keep-alive's cold start (ticket 085) awaits the snapshot
+                    // before subscribing: empty session, no roster.
+                    MockResponse(body = SNAPSHOT_BODY)
                 } else if (path.startsWith("/api/v1/ws")) {
                     // The store's keep-alive collection (ticket 064, started by
                     // onScreenStarted → pageOpened) idles on an open upgrade.
@@ -306,6 +310,13 @@ class SubagentViewModelTest {
     }
 
     private companion object {
+        /** An empty cold-start snapshot (ticket 085): no roster, no pending anything. */
+        const val SNAPSHOT_BODY =
+            """{"code":0,"msg":"success","data":{"as_of_seq":1,"epoch":"ep_1",""" +
+                """"session":{"id":"session_1","busy":false,"usage":{"context_tokens":0,"context_limit":1048576}},""" +
+                """"messages":{"items":[],"has_more":false},"in_flight_turn":null,"subagents":[],""" +
+                """"pending_approvals":[],"pending_questions":[]},"request_id":"r"}"""
+
         /** An empty transcript page — the server's answer for an unknown agent_id, or
          * for a spawned sub-agent that has not started its first turn (0.29.2). */
         const val EMPTY_TRANSCRIPT_BODY =

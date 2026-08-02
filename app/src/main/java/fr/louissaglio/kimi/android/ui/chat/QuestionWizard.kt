@@ -1,6 +1,7 @@
 package fr.louissaglio.kimi.android.ui.chat
 
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
+import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.data.chat.QuestionAnswer
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
@@ -159,6 +160,21 @@ internal class QuestionWizard(
                     }
                 }
         }
+    }
+
+    /** Guard capture for [applySnapshot] (ticket 085): taken when the snapshot fetch
+     * fires, so a live question event landing mid-fetch drops the stale apply. */
+    fun captureEvents(): Int = seedGuard.capture()
+
+    /**
+     * Applies the session snapshot's pending questions (ticket 085) — the cold-start
+     * / `resync_required` queue rebuild, with [seed]'s guarded semantics: a live
+     * requested/resolved event newer than the fetch ([eventsAtFetch]) wins over the
+     * snapshot's queue.
+     */
+    fun applySnapshot(questions: List<PendingQuestion>, eventsAtFetch: Int) {
+        if (seedGuard.isStale(eventsAtFetch)) return
+        updateState { it.copy(pendingQuestions = questions).prunedQuestionDrafts(it) }
     }
 
     /** Drops draft answers whose item id belongs to no pending question anymore, and

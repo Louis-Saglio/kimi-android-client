@@ -17,7 +17,9 @@ import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
 import fr.louissaglio.kimi.android.ui.chat.ChatTimeline
+import fr.louissaglio.kimi.android.ui.chat.SnapshotSync
 import fr.louissaglio.kimi.android.ui.chat.SubagentStreamStore
+import javax.inject.Provider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -62,6 +64,7 @@ fun testSubagentStreamStore(
     streamCoalesceWindowMillis: Long,
     chatRepository: ChatRepository? = null,
     settingsRepository: SettingsRepository? = null,
+    snapshotSync: SnapshotSync? = null,
 ): SubagentStreamStore {
     val json = Json { ignoreUnknownKeys = true }
     // Fallback data layer for tests that never open a sub-agent page: the store's
@@ -71,12 +74,26 @@ fun testSubagentStreamStore(
     val dataStore = FakePreferencesDataStore(
         preferencesOf(stringPreferencesKey("server_url") to "http://127.0.0.1:1/"),
     )
+    val repository = chatRepository ?: testChatRepository(dataStore)
+    val settings = settingsRepository
+        ?: SettingsRepository(dataStore, CoroutineScope(SupervisorJob() + Dispatchers.Unconfined))
+    lateinit var store: SubagentStreamStore
     return SubagentStreamStore(
         json,
         TodoParser(json),
-        chatRepository ?: testChatRepository(dataStore),
-        settingsRepository
-            ?: SettingsRepository(dataStore, CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)),
+        repository,
+        settings,
+        // Tests sharing one cold start per session (the production singleton shape)
+        // pass the same SnapshotSync to the store AND the ViewModels.
+        snapshotSync ?: SnapshotSync(repository, settings, Provider { store }),
         streamCoalesceWindowMillis,
-    )
+    ).also { store = it }
 }
+
+/** The hand-built twin of the production [SnapshotSync] singleton: tests sharing one
+ * cold start per session pass the SAME instance to the store and the ViewModels. */
+fun testSnapshotSync(
+    chatRepository: ChatRepository,
+    settingsRepository: SettingsRepository,
+    storeProvider: () -> SubagentStreamStore,
+): SnapshotSync = SnapshotSync(chatRepository, settingsRepository, Provider { storeProvider() })

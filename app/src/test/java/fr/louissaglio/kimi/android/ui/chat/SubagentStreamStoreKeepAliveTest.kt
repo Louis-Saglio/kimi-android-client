@@ -12,6 +12,7 @@ import fr.louissaglio.kimi.android.navigation.Chat
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.testChatRepository
 import fr.louissaglio.kimi.android.testutil.testSessionsRepository
+import fr.louissaglio.kimi.android.testutil.testSnapshotSync
 import fr.louissaglio.kimi.android.testutil.testSubagentStreamStore
 import fr.louissaglio.kimi.android.testutil.webSocketUpgradeResponse
 import fr.louissaglio.kimi.android.testutil.testTodoParser
@@ -41,6 +42,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -67,6 +69,16 @@ class SubagentStreamStoreKeepAliveTest {
     /** Shared by the store and the ChatViewModel (the production singleton shape):
      * one SessionSocket, one cursor map — the hand-off resumes, never replays twice. */
     private lateinit var repository: ChatRepository
+
+    /** The session's cold-start owner (ticket 085), shared by the store's keep-alive
+     * and the ChatViewModels — one snapshot sync per session per process. */
+    private lateinit var snapshotSync: SnapshotSync
+
+    /** The served /snapshot body (ticket 085): the keep-alive's cold start awaits it
+     * before subscribing. Default: empty roster, watermark seq 18 (just below the
+     * tests' first frame, seq 19). */
+    @Volatile
+    private var snapshotBody = SNAPSHOT_BODY
 
     @Volatile
     private var serverSocket: WebSocket? = null
@@ -97,6 +109,7 @@ class SubagentStreamStoreKeepAliveTest {
                     // hand-off test; none of these bodies touches the sub-agent store.
                     path == "/api/v1/sessions/session_1" && request.method == "GET" ->
                         MockResponse(body = SESSION_BODY)
+                    path == "/api/v1/sessions/session_1/snapshot" -> MockResponse(body = snapshotBody)
                     path.startsWith("/api/v1/sessions/session_1/messages") ->
                         MockResponse(body = MESSAGES_BODY)
                     path == "/api/v1/sessions/session_1/status" -> MockResponse(body = STATUS_BODY)
@@ -125,10 +138,12 @@ class SubagentStreamStoreKeepAliveTest {
         )
         repository = testChatRepository(dataStore)
         settingsRepository = SettingsRepository(dataStore, appScope)
+        snapshotSync = testSnapshotSync(repository, settingsRepository) { store }
         store = testSubagentStreamStore(
             streamCoalesceWindowMillis = 0,
             chatRepository = repository,
             settingsRepository = settingsRepository,
+            snapshotSync = snapshotSync,
         )
     }
 
@@ -247,12 +262,52 @@ class SubagentStreamStoreKeepAliveTest {
         assertNull(store.keepAliveJob(SESSION_ID))
     }
 
+    @Test
+    fun `the keep-alive cold start seeds the store from the snapshot roster before subscribing`() = runBlocking {
+        // Process death with the page on top (ticket 064 path — no ChatViewModel
+        // exists): the store's keep-alive runs the snapshot sync (ticket 085) BEFORE
+        // its first subscribe, so a running roster entry lands the identity, the
+        // precise Working status and the resume cursor first.
+        snapshotBody = """{"code":0,"msg":"success","data":{"as_of_seq":18,"epoch":"ep_1",""" +
+            """"session":{"id":"session_1","busy":true,"usage":{"context_tokens":0,"context_limit":1048576}},""" +
+            """"messages":{"items":[],"has_more":false},"in_flight_turn":null,""" +
+            """"subagents":[{"id":"agent-12","kind":"subagent","subagent_phase":"working",""" +
+            """"subagent_type":"explore","description":"doc-verify","parent_tool_call_id":"tool_agent",""" +
+            """"run_in_background":false,"created_at":"2026-08-01T10:00:00.000Z",""" +
+            """"started_at":"2026-08-01T10:00:00.100Z"}],""" +
+            """"pending_approvals":[],"pending_questions":[]},"request_id":"r"}"""
+
+        store.pageOpened(SESSION_ID)
+
+        // The subscribe frame carrying the snapshot watermark proves the sync (cursor
+        // seed AND roster seed) completed before it — gapless stitching.
+        awaitCondition { clientFrames.isNotEmpty() }
+        val subscribe = clientFrames.first()
+        assertTrue(subscribe, subscribe.contains("\"seq\":18"))
+        assertTrue(subscribe, subscribe.contains("\"epoch\":\"ep_1\""))
+        val seeded = entry("agent-12")!!
+        assertEquals("explore", seeded.name)
+        assertEquals("doc-verify", seeded.description)
+        assertEquals(SubagentStatus.Working, seeded.status)
+
+        // Live frames accumulate from the very first one — no "spawn missed" drop.
+        val socket = awaitServerSocket()
+        socket.send(subAssistantDeltaFrame("from frame one", seq = 23))
+        awaitCondition {
+            entry("agent-12")?.items ==
+                listOf(ChatItem.AssistantMessage("live_0", "from frame one", thinking = ""))
+        }
+
+        store.pageClosed(SESSION_ID)
+    }
+
     private fun newChatViewModel(): ChatViewModel = ChatViewModel(
         repository,
         testSessionsRepository(),
         settingsRepository,
         FakeAttachmentStore(),
         store,
+        snapshotSync,
         Chat("session_1"),
         todoParser = testTodoParser(),
         streamCoalesceWindowMillis = 0,
@@ -291,6 +346,11 @@ class SubagentStreamStoreKeepAliveTest {
 
     private companion object {
         const val SESSION_ID = "session_1"
+
+        const val SNAPSHOT_BODY = """{"code":0,"msg":"success","data":{"as_of_seq":18,"epoch":"ep_1",""" +
+            """"session":{"id":"session_1","busy":false,"usage":{"context_tokens":0,"context_limit":1048576}},""" +
+            """"messages":{"items":[],"has_more":false},"in_flight_turn":null,"subagents":[],""" +
+            """"pending_approvals":[],"pending_questions":[]},"request_id":"r"}"""
 
         const val SESSION_BODY = """{"code":0,"msg":"success","data":{"id":"session_1","title":"Fix the bug",""" +
             """"updated_at":"2026-07-20T00:00:00.000Z","busy":false,""" +

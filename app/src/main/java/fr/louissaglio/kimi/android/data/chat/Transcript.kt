@@ -15,8 +15,9 @@ data class TranscriptPage(
     val hasMore: Boolean,
 )
 
-/** Turn/step states observed on the wire: "running", "completed". */
-enum class TranscriptState { Running, Completed, Other }
+/** Turn/step states observed on the wire: "running", "completed", and (real since
+ * 0.31.1) "failed"/"cancelled" — both terminal-failure states read as [Failed]. */
+enum class TranscriptState { Running, Completed, Failed, Other }
 
 data class TranscriptTurn(
     /** Wire `turnId` ("t0", "t1", …); the `before_turn`/`after_turn` cursor unit. */

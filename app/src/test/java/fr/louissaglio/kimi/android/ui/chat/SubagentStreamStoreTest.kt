@@ -2,6 +2,8 @@ package fr.louissaglio.kimi.android.ui.chat
 
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
+import fr.louissaglio.kimi.android.data.chat.SubagentRosterEntry
+import fr.louissaglio.kimi.android.data.chat.SubagentRosterPhase
 import fr.louissaglio.kimi.android.data.chat.TranscriptFrame
 import fr.louissaglio.kimi.android.data.chat.TranscriptPage
 import fr.louissaglio.kimi.android.data.chat.TranscriptState
@@ -341,6 +343,112 @@ class SubagentStreamStoreTest {
             ),
             state.items,
         )
+    }
+
+    // --- Snapshot roster seed (ticket 085) ---------------------------------------------
+
+    private fun rosterEntry(
+        id: String,
+        phase: SubagentRosterPhase,
+        outputPreview: String? = null,
+    ) = SubagentRosterEntry(
+        id = id,
+        subagentType = "explore",
+        description = "doc-verify",
+        phase = phase,
+        parentToolCallId = "tool_1",
+        runInBackground = false,
+        outputPreview = outputPreview,
+    )
+
+    @Test
+    fun `the snapshot roster seeds identity and the precise phase`() = runBlocking {
+        store.seedFromSnapshot(
+            SESSION_ID,
+            listOf(
+                rosterEntry("agent-12", SubagentRosterPhase.Working),
+                rosterEntry("agent-13", SubagentRosterPhase.Suspended),
+                rosterEntry("agent-14", SubagentRosterPhase.Failed),
+                rosterEntry("agent-15", SubagentRosterPhase.Completed, outputPreview = "the tail of the result"),
+                rosterEntry("agent-16", SubagentRosterPhase.Queued),
+            ),
+        )
+
+        val working = entry("agent-12")!!
+        assertEquals("explore", working.name)
+        assertEquals("doc-verify", working.description)
+        assertEquals(SubagentStatus.Working, working.status)
+        assertEquals(SubagentStatus.Suspended, entry("agent-13")!!.status)
+        assertEquals(SubagentStatus.Failed, entry("agent-14")!!.status)
+        val completed = entry("agent-15")!!
+        assertEquals(SubagentStatus.Completed, completed.status)
+        assertEquals("the tail of the result", completed.resultSummary)
+        assertEquals(SubagentStatus.Queued, entry("agent-16")!!.status)
+    }
+
+    @Test
+    fun `a roster seed never overwrites a live-fed entry`() = runBlocking {
+        store.apply(SESSION_ID, spawned("agent-12"))
+        store.apply(SESSION_ID, SessionEvent.SubagentStarted("agent-12"))
+        store.apply(SESSION_ID, SessionEvent.AssistantDelta("live text", "agent-12"))
+
+        store.seedFromSnapshot(
+            SESSION_ID,
+            listOf(rosterEntry("agent-12", SubagentRosterPhase.Completed, outputPreview = "stale summary")),
+        )
+
+        val untouched = entry("agent-12")!!
+        assertEquals(SubagentStatus.Working, untouched.status)
+        assertEquals(null, untouched.resultSummary)
+        assertEquals(
+            listOf(ChatItem.AssistantMessage("live_0", "live text", thinking = "")),
+            untouched.items,
+        )
+    }
+
+    @Test
+    fun `a roster-seeded entry accumulates live frames from the first one`() = runBlocking {
+        // The seed exists before the subscribe (ticket 085): no "spawn missed" drop.
+        store.seedFromSnapshot(SESSION_ID, listOf(rosterEntry("agent-12", SubagentRosterPhase.Working)))
+
+        store.apply(SESSION_ID, SessionEvent.AssistantDelta("frame one", "agent-12"))
+
+        assertEquals(
+            listOf(ChatItem.AssistantMessage("live_0", "frame one", thinking = "")),
+            entry("agent-12")!!.items,
+        )
+    }
+
+    @Test
+    fun `a transcript page never regresses a roster-seeded status`() = runBlocking {
+        // The roster IS authoritative lifecycle: the seeded entry counts as
+        // lifecycle-seen, so the transcript-derived status never applies to it.
+        store.seedFromSnapshot(SESSION_ID, listOf(rosterEntry("agent-12", SubagentRosterPhase.Working)))
+
+        store.applyTranscriptPage(SESSION_ID, "agent-12", transcriptPage(listOf(finishedTurn("t0", 0, "committed"))), keepLive = false)
+
+        val state = entry("agent-12")!!
+        assertEquals(SubagentStatus.Working, state.status)
+        assertEquals(listOf(ChatItem.AssistantMessage("t0.1.f1", "committed", thinking = "")), state.items)
+    }
+
+    @Test
+    fun `a transcript-only cold open maps terminal turn states precisely`() = runBlocking {
+        // Roster empty (it resets on the main agent's next turn): the real turn states
+        // (0.31.1) are the cold-status source — no more blanket-Completed heuristic.
+        store.applyTranscriptPage(
+            SESSION_ID, "agent-12",
+            TranscriptPage("agent-12", listOf(TranscriptTurn("t0", 0, TranscriptState.Failed, null, emptyList())), hasMore = false),
+            keepLive = false,
+        )
+        assertEquals(SubagentStatus.Failed, entry("agent-12")!!.status)
+
+        store.applyTranscriptPage(
+            SESSION_ID, "agent-13",
+            TranscriptPage("agent-13", listOf(TranscriptTurn("t0", 0, TranscriptState.Completed, null, emptyList())), hasMore = false),
+            keepLive = false,
+        )
+        assertEquals(SubagentStatus.Completed, entry("agent-13")!!.status)
     }
 
     private fun agentRow(

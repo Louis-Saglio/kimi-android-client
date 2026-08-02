@@ -179,8 +179,10 @@ sealed interface SocketEvent {
     data object Connected : SocketEvent
 
     /** Re-connected after a drop — or a fresh collection resuming with the stored
-     * cursor (ticket 048); the server replays events newer than the resume cursor. */
-    data object Reconnected : SocketEvent
+     * cursor (ticket 048); the server replays events newer than the resume cursor.
+     * [seq]/[epoch] are the cursor the subscribe carried — a snapshot-seeded cursor
+     * (ticket 085) lets the collector skip the resync its apply already covered. */
+    data class Reconnected(val seq: Long, val epoch: String) : SocketEvent
 
     /** The server refused the resume cursor (subscribe ack's `resync_required`,
      * ticket 048): no replay will come — the collector must re-sync from REST. */

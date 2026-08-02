@@ -129,7 +129,8 @@ also the regression signal for "verified fixed" tickets.
 - `data/chat/` — `ChatRepository` is a thin facade over `ChatApi` (REST verbs),
   `SessionSocket` (WebSocket, reconnect, per-session resume cursor held at
   instance level so it survives the ON_STOP/ON_START collection restarts —
-  ticket 048; a refused cursor acks as `resync_required` → REST re-sync),
+  ticket 048; a refused cursor acks as `resync_required` → snapshot re-sync,
+  ticket 085),
   `ModelsRepository`,
   `SessionPrefsStore` (per-session model/effort prefs), and `ChatMessageMapper`
   (DTO→domain). New chat endpoints belong in a collaborator, not the facade.
@@ -155,6 +156,22 @@ also the regression signal for "verified fixed" tickets.
   scope provider). New chat features grow a collaborator from day one instead
   of landing in `ChatViewModel`. Feature tests sit next to the collaborator on
   the shared `ChatViewModelTestBase` harness.
+- Cold start / resync (085): `GET .../snapshot` is the single entry point —
+  `SnapshotSync` (ui/chat, session-scoped singleton like the store, so the
+  page-on-top restore path with no ChatViewModel runs the same rebuild) owns
+  the one fetch per session per process, taken BEFORE the session's first
+  socket subscribe (the chat's gate and the store's keep-alive both await it).
+  It seeds `SessionSocket.seedCursor` with the `as_of_seq`/`epoch` watermark
+  (gapless first subscribe; the matching `Reconnected` skips the redundant 048
+  resync) and the store's roster (`seedFromSnapshot` — identity, precise
+  `subagent_phase` status counting as lifecycle-seen, `output_preview`
+  summary), and hands the chat-side bundle (history page, busy/contextUsage,
+  pending approvals/questions, roster row links) to the calling ChatViewModel.
+  `resync_required` re-runs it (keepLive per the snapshot's `busy`); a failed
+  fetch is the ordinary load-error state, never a legacy-burst fallback. The
+  within-process resume (048's cursor replay + /status resync) is untouched.
+  The transcript cold status reads the real turn states (`cancelled`/`failed`
+  → Failed, 0.31.1) for the window the roster cannot cover.
 - Sub-agent streams (045): `SessionSocket` tags transcript events with the
   emitting `agentId`; sub-agent-scoped events route to `SubagentStreamStore`
   (ui/chat, session-scoped singleton keyed by session, one `ChatTimeline` per

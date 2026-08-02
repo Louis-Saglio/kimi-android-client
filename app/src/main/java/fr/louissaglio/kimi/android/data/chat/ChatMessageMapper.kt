@@ -113,6 +113,51 @@ class ChatMessageMapper @Inject constructor(json: Json) {
         hasMore = dto.hasMore,
     )
 
+    /** Session snapshot (docs/server-api.md, Session snapshot — ticket 085): the
+     * cold-start bundle. The messages page maps exactly like a `/messages` page
+     * (wire order newest-first → domain oldest-first). */
+    fun toDomain(dto: SnapshotData): SessionSnapshot = SessionSnapshot(
+        asOfSeq = dto.asOfSeq,
+        epoch = dto.epoch,
+        busy = dto.session?.busy == true,
+        contextUsage = dto.session?.usage?.let { ContextUsage(it.contextTokens, it.contextLimit) },
+        messages = MessagePage(
+            items = dto.messages?.items.orEmpty().asReversed().map { toDomain(it) },
+            hasMore = dto.messages?.hasMore == true,
+        ),
+        pendingApprovals = dto.pendingApprovals.map {
+            SnapshotApproval(it.approvalId, it.toolName, summary(it))
+        },
+        pendingQuestions = dto.pendingQuestions.map { toDomain(it) },
+        subagents = dto.subagents.map { entry ->
+            SubagentRosterEntry(
+                id = entry.id,
+                subagentType = entry.subagentType,
+                description = entry.description,
+                phase = when (entry.subagentPhase) {
+                    "queued" -> SubagentRosterPhase.Queued
+                    "working" -> SubagentRosterPhase.Working
+                    "suspended" -> SubagentRosterPhase.Suspended
+                    "completed" -> SubagentRosterPhase.Completed
+                    "failed" -> SubagentRosterPhase.Failed
+                    else -> SubagentRosterPhase.Unknown
+                },
+                parentToolCallId = entry.parentToolCallId,
+                runInBackground = entry.runInBackground,
+                outputPreview = entry.outputPreview?.takeIf { it.isNotBlank() },
+            )
+        },
+        inFlightTurn = dto.inFlightTurn?.let { turn ->
+            InFlightTurn(
+                turnId = turn.turnId,
+                assistantText = turn.assistantText,
+                thinkingText = turn.thinkingText,
+                runningTools = turn.runningTools.map { RunningTool(it.toolCallId, it.name, it.args, it.display) },
+                currentPromptId = turn.currentPromptId,
+            )
+        },
+    )
+
     private fun toDomain(dto: TranscriptItemDto): TranscriptTurn = TranscriptTurn(
         id = dto.turnId,
         ordinal = dto.ordinal,
@@ -159,6 +204,9 @@ class ChatMessageMapper @Inject constructor(json: Json) {
     private fun transcriptState(state: String): TranscriptState = when (state) {
         "running" -> TranscriptState.Running
         "completed" -> TranscriptState.Completed
+        // Real on the wire since 0.31.1 (docs/server-api.md, Transcript) — ticket 085
+        // consumes them for the sub-agent's cold status.
+        "failed", "cancelled" -> TranscriptState.Failed
         else -> TranscriptState.Other
     }
 

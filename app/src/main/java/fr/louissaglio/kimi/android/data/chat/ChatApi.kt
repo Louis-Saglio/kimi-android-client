@@ -288,6 +288,18 @@ class ChatApi @Inject constructor(
             api.json.decodeFromString<Envelope<JsonObject>>(body).toAckResult()
         }
 
+    /**
+     * Fetches the session snapshot (`GET /api/v1/sessions/{id}/snapshot`,
+     * docs/server-api.md, Session snapshot — ticket 085): the whole session state as
+     * one atomic bundle at an event-stream watermark — the single cold-start/resync
+     * entry point. Everything the event stream never replays (sub-agent roster,
+     * pending approvals/questions) or never persisted arrives here.
+     */
+    suspend fun snapshot(settings: ServerSettings, sessionId: String): Result<SessionSnapshot> =
+        api.get(settings, "/api/v1/sessions/$sessionId/snapshot") { body ->
+            api.json.decodeFromString<Envelope<SnapshotData>>(body).toResult().map(mapper::toDomain)
+        }
+
     /** Lightweight live status (`GET /api/v1/sessions/{id}/status`): the mid-turn flag
      * and the context window fill (ticket 041). A data-less success envelope degrades
      * to "not busy, fill unknown" (see SessionStatus). */

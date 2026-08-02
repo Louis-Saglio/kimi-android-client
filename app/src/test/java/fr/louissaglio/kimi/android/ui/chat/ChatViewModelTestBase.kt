@@ -12,6 +12,7 @@ import fr.louissaglio.kimi.android.navigation.Chat
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.testChatRepository
 import fr.louissaglio.kimi.android.testutil.testSessionsRepository
+import fr.louissaglio.kimi.android.testutil.testSnapshotSync
 import fr.louissaglio.kimi.android.testutil.testSubagentStreamStore
 import fr.louissaglio.kimi.android.testutil.webSocketUpgradeResponse
 import fr.louissaglio.kimi.android.testutil.testTodoParser
@@ -32,6 +33,11 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
@@ -65,6 +71,14 @@ abstract class ChatViewModelTestBase {
     /** 0 ms window: sub-agent frames apply on arrival, no flush timer involved. */
     protected val subagentStore = testSubagentStreamStore(streamCoalesceWindowMillis = 0)
 
+    /** Shared by the ViewModels and the snapshot sync (the production singleton shape):
+     * one ChatRepository — one SessionSocket, one cursor map — so the seeded resume
+     * cursor lands on the very socket the ViewModel collects. */
+    protected lateinit var chatRepository: ChatRepository
+
+    /** The session's cold-start owner (ticket 085), shared by every started ViewModel. */
+    protected lateinit var snapshotSync: SnapshotSync
+
     @Volatile
     protected var approvalsSucceed = true
 
@@ -87,6 +101,40 @@ abstract class ChatViewModelTestBase {
     @Volatile
     protected var messagesBody =
         """{"code":0,"msg":"success","data":{"items":[],"has_more":false},"request_id":"r"}"""
+
+    /**
+     * The served `/snapshot` body (ticket 085 — the cold-start bundle, fetched before
+     * the session's first socket subscribe). When null (the default), the body is
+     * DERIVED from [messagesBody] and [statusBody]: the snapshot is the cold-start
+     * history/status source now, so tests seeding those see them at first start
+     * without snapshot-specific setup. Set explicitly to exercise the roster,
+     * pending approvals/questions, or the watermark.
+     */
+    @Volatile
+    protected var snapshotBody: String? = null
+
+    /** Same as [statusResponseGate], for the /snapshot fetch: parks the response so a
+     * test can make a socket event win over the in-flight sync on purpose. */
+    @Volatile
+    protected var snapshotResponseGate: CountDownLatch? = null
+
+    private val testJson = Json { ignoreUnknownKeys = true }
+
+    /** The default snapshot: [messagesBody]'s page + [statusBody]'s busy/usage (the
+     * snapshot's session.usage names the limit `context_limit`), empty roster and
+     * pending lists, watermark seq 1 — read at response time, like the other bodies. */
+    private fun defaultSnapshotBody(): String {
+        val messagesData = testJson.parseToJsonElement(messagesBody).jsonObject.getValue("data")
+        val statusData = testJson.parseToJsonElement(statusBody).jsonObject.getValue("data").jsonObject
+        val busy = statusData["busy"]?.jsonPrimitive?.booleanOrNull == true
+        val contextTokens = statusData["context_tokens"]?.jsonPrimitive?.longOrNull ?: 0
+        val contextLimit = statusData["max_context_tokens"]?.jsonPrimitive?.longOrNull ?: 0
+        return """{"code":0,"msg":"success","data":{"as_of_seq":1,"epoch":"ep_1",""" +
+            """"session":{"id":"session_1","busy":$busy,""" +
+            """"usage":{"context_tokens":$contextTokens,"context_limit":$contextLimit}},""" +
+            """"messages":$messagesData,"in_flight_turn":null,"subagents":[],""" +
+            """"pending_approvals":[],"pending_questions":[]},"request_id":"r"}"""
+    }
 
     /** Served for /messages requests carrying a `before_id` cursor (ticket 043). */
     @Volatile
@@ -203,6 +251,10 @@ abstract class ChatViewModelTestBase {
                 return when {
                     path == "/api/v1/sessions/session_1" && request.method == "GET" ->
                         MockResponse(body = sessionBody)
+                    path == "/api/v1/sessions/session_1/snapshot" -> {
+                        snapshotResponseGate?.await(5, TimeUnit.SECONDS)
+                        MockResponse(body = snapshotBody ?: defaultSnapshotBody())
+                    }
                     path.startsWith("/api/v1/sessions/session_1/messages") ->
                         MockResponse(body = if ("before_id" in path) olderMessagesBody else messagesBody)
                     path == "/api/v1/sessions/session_1/status" -> {
@@ -314,12 +366,15 @@ abstract class ChatViewModelTestBase {
             preferencesOf(stringPreferencesKey("server_url") to server.url("/").toString()),
         )
         settingsRepository = SettingsRepository(dataStore, appScope)
+        chatRepository = testChatRepository(dataStore)
+        snapshotSync = testSnapshotSync(chatRepository, settingsRepository) { subagentStore }
         viewModel = ChatViewModel(
-            testChatRepository(dataStore),
+            chatRepository,
             testSessionsRepository(),
             settingsRepository,
             FakeAttachmentStore(),
             subagentStore,
+            snapshotSync,
             Chat("session_1"),
             todoParser = testTodoParser(),
             // The suite asserts per-event application: 0 publishes every delta on
@@ -353,11 +408,12 @@ abstract class ChatViewModelTestBase {
      * pumps the test scheduler under runBlocking — so flushes are driven by the
      * substantive events each test sends, deterministically. */
     protected fun newViewModel(streamCoalesceWindowMillis: Long): ChatViewModel = ChatViewModel(
-        testChatRepository(dataStore),
+        chatRepository,
         testSessionsRepository(),
         settingsRepository,
         FakeAttachmentStore(),
         subagentStore,
+        snapshotSync,
         Chat("session_1"),
         todoParser = testTodoParser(),
         streamCoalesceWindowMillis = streamCoalesceWindowMillis,

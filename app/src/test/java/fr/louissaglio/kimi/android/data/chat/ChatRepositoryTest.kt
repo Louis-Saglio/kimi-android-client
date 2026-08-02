@@ -1001,8 +1001,9 @@ class ChatRepositoryTest {
 
         assertEquals(SocketEvent.Connected, first.first())
         // A subscribe carrying a stored cursor IS a resume, even as the collection's
-        // first connection — the collector heals via the Reconnected path.
-        assertEquals(SocketEvent.Reconnected, second.first())
+        // first connection — the collector heals via the Reconnected path, and the
+        // event carries the cursor the subscribe resumed with (ticket 085).
+        assertEquals(SocketEvent.Reconnected(5, "ep_1"), second.first())
         val resubscribe = clientFrames.first { "\"cursors\"" in it }
         assertTrue(resubscribe, resubscribe.contains("\"seq\":5"))
         assertTrue(resubscribe, resubscribe.contains("\"epoch\":\"ep_1\""))

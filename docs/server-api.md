@@ -316,6 +316,57 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/session
 session has no model configured. `thinking_level` and `permission` reflect the
 session's current config (`"off"`/`"yolo"` observed on a fresh session).
 
+### Session snapshot — `GET /api/v1/sessions/{id}/snapshot`
+
+The whole session state as one atomic bundle at an event-stream watermark —
+designed as the client's cold-start/resync entry point (adopted by the Android
+app in ticket 085): everything the event stream never replays
+(`subagent.spawned` is never replayed before the resume cursor) or never
+persists into history arrives here, and the watermark seeds the WS resume
+cursor so the first subscribe stitches gaplessly onto the bundle. All shapes
+verified live on 0.31.1 (2026-08-01). Top-level keys of `data`:
+
+- `as_of_seq` (long), `epoch` (string): the watermark the bundle is consistent
+  at — resume the WS subscribe with exactly this cursor.
+- `session`: the rich session object (superset of the list/get one: `busy`,
+  `main_turn_active`, `pending_interaction`, `last_turn_reason`, `usage`, …).
+  Note the context fill lives at `session.usage.context_tokens` /
+  `session.usage.context_limit` — NOT the `/status` naming
+  (`context_tokens`/`max_context_tokens`). Idle sessions zero both.
+- `messages`: the newest history page, same shape as `/messages` (`items`
+  newest-first + `has_more`; ~100 items per page).
+- `in_flight_turn`: `null` when idle; while a turn runs, its live tail —
+  verbatim busy capture (2026-08-01):
+
+  ```json
+  {"turn_id":1,"assistant_text":"","thinking_text":"Simple. Run sleep 60. …",
+   "running_tools":[{"tool_call_id":"tool_eIsX6WQ4HS0YXdIR7yJTtNrQ","name":"Bash",
+     "args":{"command":"sleep 60","timeout":90},"description":"Running: sleep 60",
+     "display":{"kind":"command","command":"sleep 60","cwd":"/home/ubuntu/spike","language":"bash"}}],
+   "current_prompt_id":"msg_01KYYX1AMRSFSE8XAQWGRP8F6N"}
+  ```
+
+- `subagents`: the foreground sub-agent roster at the watermark — see
+  [Session snapshot roster](#session-snapshot-roster) under Sub-agents.
+- `pending_approvals`: the pending permission requests — the ONLY REST read
+  that exists for approvals. Each item is the legacy
+  `event.approval.requested` payload verbatim (`approval_id` ==
+  `tool_call_id`; 2026-08-01 capture):
+
+  ```json
+  {"approval_id":"tool_EYGD…","session_id":"session_…","turn_id":0,
+   "tool_call_id":"tool_EYGD…","tool_name":"Bash","action":"Running: sleep 90",
+   "tool_input_display":{"kind":"command","command":"sleep 90","cwd":"/tmp","language":"bash"},
+   "created_at":"2026-08-01T…","expires_at":"2026-08-01T…"}
+  ```
+
+- `pending_questions`: the pending `AskUserQuestion` requests; each item is
+  byte-identical to the `/questions?status=pending` poll's `items[]` entries
+  (verified live with a live question, 2026-08-01): `question_id` ==
+  `tool_call_id`, `session_id`, `questions[]` with
+  `id`/`question`/`options[{id,label}]`/`header`/`allow_other`, `created_at`,
+  `turn_id`.
+
 ## Workspaces
 
 ### List — `GET /api/v1/workspaces`
@@ -1449,24 +1500,40 @@ The REST shape is thinner than the WS/snapshot one: no `subagent_type`, no
 
 ### Session snapshot roster
 
-`GET /api/v1/sessions/{sid}/snapshot` carries an optional `subagents` array:
-the **foreground** roster at the watermark, so a reconnecting client can
-rebuild the identity metadata (cursor-resume replays nothing earlier than
-the cursor, and `subagent.spawned` is never replayed). Verified 2026-07-28
-right after the foreground run, re-verified 2026-07-30 on 0.31.0 (including
-the reset-to-`[]` behavior described below):
+`GET /api/v1/sessions/{sid}/snapshot` (see Sessions → Session snapshot) carries
+an optional `subagents` array: the **foreground** roster at the watermark, so a
+reconnecting client can rebuild the identity metadata (cursor-resume replays
+nothing earlier than the cursor, and `subagent.spawned` is never replayed).
+Verified 2026-07-28 right after the foreground run, re-verified 2026-07-30 on
+0.31.0 (including the reset-to-`[]` behavior described below); running vs
+terminal entries captured on 0.31.1, 2026-08-01.
+
+While running — `status`/`subagent_phase` read `running`/`working`, and
+`completed_at`/`output_preview` are absent:
 
 ```json
-{"id":"agent-12","session_id":"session_...","kind":"subagent",
- "description":"doc-verify-subagent","status":"completed",
+{"id":"agent-3","session_id":"session_...","kind":"subagent",
+ "description":"Sleep then answer ok","status":"running",
+ "subagent_phase":"working","subagent_type":"explore",
+ "parent_tool_call_id":"tool_GgLCPjSW9Vo2oN0x5SOrB0x9","run_in_background":false,
+ "created_at":"2026-08-01T14:50:09.024Z","started_at":"2026-08-01T14:50:09.026Z"}
+```
+
+Terminal — both state fields flip and the run's result-summary tail arrives:
+
+```json
+{"id":"agent-3","session_id":"session_...","kind":"subagent",
+ "description":"Sleep then answer ok","status":"completed",
  "subagent_phase":"completed","subagent_type":"explore",
- "parent_tool_call_id":"tool_mhF8UXcf5QwvZbh5223tiIng","run_in_background":false,
- "created_at":"2026-07-28T03:37:35.492Z","started_at":"2026-07-28T03:37:35.496Z",
- "completed_at":"2026-07-28T03:37:51.951Z","output_preview":"<resultSummary>"}
+ "parent_tool_call_id":"tool_GgLCPjSW9Vo2oN0x5SOrB0x9","run_in_background":false,
+ "created_at":"2026-08-01T14:50:09.024Z","started_at":"2026-08-01T14:50:09.026Z",
+ "completed_at":"2026-08-01T14:52:38.040Z","output_preview":"## Summary\n\n**Task received:** …"}
 ```
 
 - `subagent_phase`: `queued` | `working` | `suspended` | `completed` |
-  `failed`; `suspended_reason` and `swarm_index` optional.
+  `failed`; `suspended_reason` and `swarm_index` optional. The flatter
+  `status` mirrors it with the `/tasks` vocabulary (`working` → `running`
+  there); `subagent_phase` is the precise one.
 - Background sub-agents are excluded (REST serves them). The roster survives
   the turn's end but is dropped when the main agent starts its **next** turn
   (verified: `[]` after a follow-up prompt).
@@ -1926,6 +1993,23 @@ selected option and free text both re-verified 2026-07-23:
 ```
 
 ## Verification log
+
+- 2026-08-01 snapshot deep-dive on `0.31.1` (throwaway sessions in
+  `/home/ubuntu/spike`; the Android app adopted `/snapshot` as its
+  cold-start/resync entry point — ticket 085). Captured inline (Sessions →
+  Session snapshot): the full top-level key list; `session.usage` carries the
+  context fill as `context_tokens`/`context_limit` (NOT the `/status`
+  `max_context_tokens` naming); `messages` is the newest-first page with
+  `has_more` (~100 items); `in_flight_turn` verbatim while busy (`turn_id`,
+  `assistant_text`, `thinking_text`, `running_tools[{tool_call_id,name,args,
+  description,display}]`, `current_prompt_id`), `null` when idle;
+  `pending_approvals` items are the legacy `event.approval.requested` payload
+  verbatim (`approval_id` == `tool_call_id`); `pending_questions` items are
+  byte-identical to the `/questions?status=pending` poll's `items[]` (verified
+  with a live AskUserQuestion); the `subagents` roster captured both while
+  running (`status:"running"`/`subagent_phase:"working"`, no
+  `completed_at`/`output_preview`) and terminal (both flip, `completed_at` +
+  `output_preview` result-summary tail).
 
 - 2026-07-31 re-verification on `0.31.1` (server 0.31.0 → 0.31.1; throwaway
   sessions `session_1cf6658d-...` / `session_ec77caa8-...` in

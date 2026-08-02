@@ -62,6 +62,19 @@ class SessionSocket @Inject constructor(
     private val cursors = ConcurrentHashMap<String, Cursor>()
 
     /**
+     * Seeds the resume cursor from a session snapshot's watermark (ticket 085): the
+     * first subscribe of a cold collection resumes AT the snapshot, so the window
+     * between the REST fetch and the subscribe replays instead of being lost. Never
+     * moves a cursor of the same epoch BACKWARD — a live frame newer than the
+     * watermark (it can land before the seed on an already-open connection) keeps it.
+     */
+    fun seedCursor(sessionId: String, seq: Long, epoch: String) {
+        cursors.merge(sessionId, Cursor(seq, epoch)) { old, new ->
+            if (old.epoch != new.epoch || new.seq >= old.seq) new else old
+        }
+    }
+
+    /**
      * Streams [SocketEvent]s for [sessionId]. One collection = one socket owned here
      * (not by the UI); cancelling the collection closes it. On a drop the loop retries
      * with exponential backoff (1 s doubling to 30 s) and re-subscribes with the last
@@ -70,7 +83,8 @@ class SessionSocket @Inject constructor(
      * subscribe carrying a cursor emits [SocketEvent.Reconnected], even on its first
      * connection of the collection. When the server refuses the cursor (subscribe
      * ack's `resync_required`), it is dropped and the collector is told via
-     * [SocketEvent.ResyncRequired] so it can re-sync from REST.
+     * [SocketEvent.ResyncRequired] so it can re-sync from a fresh snapshot
+     * (ticket 085).
      */
     fun observe(settings: ServerSettings, sessionId: String): Flow<SocketEvent> = flow {
         val wsUrl = buildWsUrl(settings)
@@ -84,16 +98,19 @@ class SessionSocket @Inject constructor(
         var attempt = 0
         while (currentCoroutineContext().isActive) {
             try {
+                val cursor = cursors[sessionId]
                 runConnection(
                     url = wsUrl.newBuilder().setQueryParameter("client_id", clientId).build(),
                     sessionId = sessionId,
-                    cursor = cursors[sessionId],
+                    cursor = cursor,
                     onOpen = {
                         attempt = 0
                         // A subscribe carrying a stored cursor IS a resume — including
                         // the first connection of a collection after a gate reopen
-                        // (ticket 048): the collector heals via the Reconnected path.
-                        emit(if (cursors.containsKey(sessionId)) SocketEvent.Reconnected else SocketEvent.Connected)
+                        // (ticket 048) or after a snapshot seed (ticket 085): the
+                        // collector heals via the Reconnected path. The cursor the
+                        // subscribe actually carries rides along.
+                        emit(if (cursor != null) SocketEvent.Reconnected(cursor.seq, cursor.epoch) else SocketEvent.Connected)
                     },
                     onCursor = { cursors[sessionId] = it },
                     onResyncRequired = {

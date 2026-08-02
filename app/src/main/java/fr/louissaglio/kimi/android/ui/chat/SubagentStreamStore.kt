@@ -9,6 +9,8 @@ import fr.louissaglio.kimi.android.data.chat.MAIN_AGENT_ID
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.SocketEvent
 import fr.louissaglio.kimi.android.data.chat.SubagentLifecycleEvent
+import fr.louissaglio.kimi.android.data.chat.SubagentRosterEntry
+import fr.louissaglio.kimi.android.data.chat.SubagentRosterPhase
 import fr.louissaglio.kimi.android.data.chat.TodoParser
 import fr.louissaglio.kimi.android.data.chat.TranscriptPage
 import fr.louissaglio.kimi.android.data.chat.TranscriptState
@@ -65,6 +67,10 @@ class SubagentStreamStore @Inject constructor(
     private val todoParser: TodoParser,
     private val chatRepository: ChatRepository,
     private val settingsRepository: SettingsRepository,
+    /** The snapshot cold-start owner (ticket 085): the keep-alive collection awaits
+     * the session's sync before its first subscribe — the roster seed and the resume
+     * cursor land first, so a cold-restored page streams gaplessly from frame one. */
+    private val snapshotSync: SnapshotSync,
     // No default: an all-default @Inject constructor makes Kotlin generate a second,
     // no-arg synthetic constructor, which Dagger rejects (two injected constructors).
     @StreamCoalesceWindowMillis
@@ -74,7 +80,8 @@ class SubagentStreamStore @Inject constructor(
     /** Immutable snapshot of one sub-agent's stream, as rendered by the sub-agent page. */
     data class SubagentState(
         val id: String,
-        /** The subagent type (e.g. "explore"), from subagent.spawned. */
+        /** The subagent type (e.g. "explore"), from subagent.spawned — or the snapshot
+         * roster / Agent-row seed on a cold open (tickets 085/045). */
         val name: String,
         val description: String,
         val runInBackground: Boolean,
@@ -218,10 +225,15 @@ class SubagentStreamStore @Inject constructor(
         }
     }
 
-    /** The store-owned feeder: routes every socket event through [apply] — main-agent
-     * events are ignored there (the chat heals its own side from REST when it next
-     * opens). Connection lifecycle events carry nothing the page renders. */
+    /** The store-owned feeder: awaits the session's snapshot cold start (ticket 085)
+     * BEFORE subscribing — the roster seed and the resume cursor land first, so a
+     * page restored after process death starts gapless (no "spawn missed" drop) —
+     * then routes every socket event through [apply]. A failed sync changes nothing:
+     * the page's transcript fetch owns its error state. Main-agent events are ignored
+     * here (the chat heals its own side from REST when it next opens). Connection
+     * lifecycle events carry nothing the page renders. */
     private suspend fun runKeepAliveCollection(sessionId: String) {
+        snapshotSync.sync(sessionId)
         chatRepository.observeSession(settingsRepository.current(), sessionId).collect { event ->
             (event as? SocketEvent.Event)?.event?.let { apply(sessionId, it) }
         }
@@ -316,6 +328,46 @@ class SubagentStreamStore @Inject constructor(
         publish(sessionId)
     }
 
+    /**
+     * Seeds entries from the session snapshot's sub-agent roster (ticket 085) — the
+     * cold-start linkage source the wire never replays: identity ([SubagentRosterEntry]
+     * fields) and the precise lifecycle phase (the roster IS authoritative lifecycle,
+     * so the entry counts as lifecycle-seen and a later transcript page can never
+     * regress it). A `completed` entry's [SubagentRosterEntry.outputPreview] becomes
+     * the result summary. Because the entry exists before the first subscribe, live
+     * frames accumulate from the start instead of hitting the unknown-sub-agent drop.
+     * Never overwrites an existing entry — live-fed (spawn/event) data always wins.
+     */
+    fun seedFromSnapshot(sessionId: String, roster: List<SubagentRosterEntry>) {
+        var changed = false
+        for (entry in roster) {
+            if (entry.id.isBlank() || stream(sessionId, entry.id) != null) continue
+            val stream = Stream(
+                id = entry.id,
+                sessionId = sessionId,
+                name = entry.subagentType,
+                description = entry.description,
+                runInBackground = entry.runInBackground,
+                todoParser = todoParser,
+                status = when (entry.phase) {
+                    SubagentRosterPhase.Queued -> SubagentStatus.Queued
+                    SubagentRosterPhase.Working -> SubagentStatus.Working
+                    SubagentRosterPhase.Suspended -> SubagentStatus.Suspended
+                    SubagentRosterPhase.Completed -> SubagentStatus.Completed
+                    SubagentRosterPhase.Failed -> SubagentStatus.Failed
+                    // A phase this app predates: the transcript-derived status (now
+                    // precise, below) is a better guess than a roster lie.
+                    SubagentRosterPhase.Unknown -> SubagentStatus.Queued
+                },
+            )
+            stream.sawLifecycle = entry.phase != SubagentRosterPhase.Unknown
+            stream.resultSummary = entry.outputPreview
+            streams.getOrPut(sessionId) { mutableMapOf() }[entry.id] = stream
+            changed = true
+        }
+        if (changed) publish(sessionId)
+    }
+
     /** True once a transcript page landed for [subagentId] (ticket 046) — the page's
      * cue that a cold-open fetch is unnecessary (the socket keeps the entry fresh). */
     fun hasTranscript(sessionId: String, subagentId: String): Boolean =
@@ -349,8 +401,14 @@ class SubagentStreamStore @Inject constructor(
         stream.oldestTurnId = page.turns.firstOrNull()?.id
         stream.hasMoreTurns = page.hasMore
         if (!stream.sawLifecycle && page.turns.isNotEmpty()) {
-            stream.status =
-                if (page.turns.lastOrNull()?.state == TranscriptState.Running) SubagentStatus.Working else SubagentStatus.Completed
+            // The cold-status source when no roster/lifecycle frame can help (ticket
+            // 085): the real turn states (cancelled/failed are on the wire since
+            // 0.31.1), not a blanket-Completed for anything non-Running.
+            stream.status = when (page.turns.lastOrNull()?.state) {
+                TranscriptState.Running -> SubagentStatus.Working
+                TranscriptState.Failed -> SubagentStatus.Failed
+                else -> SubagentStatus.Completed
+            }
         }
         publish(sessionId)
     }

@@ -320,6 +320,72 @@ data class SubagentLifecyclePayload(
     val error: String? = null,
 )
 
+// --- GET /api/v1/sessions/{id}/snapshot (docs/server-api.md, Session snapshot —
+// ticket 085) ------------------------------------------------------------------
+// The cold-start/resync bundle, verified live on 0.31.1 (2026-08-01). The roster is
+// the newest surface of the API: every field stays optional/defensive.
+
+@Serializable
+data class SnapshotData(
+    @SerialName("as_of_seq") val asOfSeq: Long = 0,
+    val epoch: String = "",
+    val session: SnapshotSessionDto? = null,
+    val messages: MessageListData? = null,
+    @SerialName("in_flight_turn") val inFlightTurn: InFlightTurnDto? = null,
+    val subagents: List<SubagentRosterEntryDto> = emptyList(),
+    // The snapshot items are the legacy event.approval.requested /
+    // event.question.requested payload shapes verbatim (verified live), so the
+    // existing payload DTOs decode them.
+    @SerialName("pending_approvals") val pendingApprovals: List<ApprovalRequestedPayload> = emptyList(),
+    @SerialName("pending_questions") val pendingQuestions: List<QuestionRequestedPayload> = emptyList(),
+)
+
+/** The snapshot's rich `session` object; only [busy] and the context fill of [usage]
+ * are consumed (usage carries `context_tokens`/`context_limit` — not the /status
+ * `max_context_tokens` naming). */
+@Serializable
+data class SnapshotSessionDto(
+    val busy: Boolean = false,
+    val usage: SnapshotUsageDto? = null,
+)
+
+@Serializable
+data class SnapshotUsageDto(
+    @SerialName("context_tokens") val contextTokens: Long = 0,
+    @SerialName("context_limit") val contextLimit: Long = 0,
+)
+
+@Serializable
+data class SubagentRosterEntryDto(
+    val id: String = "",
+    @SerialName("subagent_type") val subagentType: String = "",
+    val description: String = "",
+    @SerialName("subagent_phase") val subagentPhase: String = "",
+    @SerialName("parent_tool_call_id") val parentToolCallId: String = "",
+    @SerialName("run_in_background") val runInBackground: Boolean = false,
+    // Present once the run is terminal (the result summary tail).
+    @SerialName("output_preview") val outputPreview: String? = null,
+)
+
+/** The active turn's live tail; decoded for completeness, never consumed (ticket 085,
+ * out of scope). `running_tools` entries also carry a `description` — ignored. */
+@Serializable
+data class InFlightTurnDto(
+    @SerialName("turn_id") val turnId: Long = 0,
+    @SerialName("assistant_text") val assistantText: String = "",
+    @SerialName("thinking_text") val thinkingText: String = "",
+    @SerialName("running_tools") val runningTools: List<RunningToolDto> = emptyList(),
+    @SerialName("current_prompt_id") val currentPromptId: String = "",
+)
+
+@Serializable
+data class RunningToolDto(
+    @SerialName("tool_call_id") val toolCallId: String = "",
+    val name: String = "",
+    val args: JsonObject? = null,
+    val display: JsonObject? = null,
+)
+
 // --- GET /api/v1/sessions/{id}/transcript (docs/server-api.md, Transcript) -----------
 // Turn-granular per-agent history (046), pinned from live 0.29.2 captures. The
 // cold-rebuild path omits the warm-only fields (startedAt/endedAt, usage/timing,

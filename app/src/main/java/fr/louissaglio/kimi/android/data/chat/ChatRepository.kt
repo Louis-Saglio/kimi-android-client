@@ -179,6 +179,16 @@ class ChatRepository @Inject constructor(
     suspend fun getSessionStatus(settings: ServerSettings, sessionId: String): Result<SessionStatus> =
         chatApi.sessionStatus(settings, sessionId)
 
+    /** The session snapshot (`GET /api/v1/sessions/{id}/snapshot` — ticket 085): the
+     * cold-start/resync bundle at an event-stream watermark. */
+    suspend fun getSnapshot(settings: ServerSettings, sessionId: String): Result<SessionSnapshot> =
+        chatApi.snapshot(settings, sessionId)
+
+    /** Seeds the socket's resume cursor from a snapshot watermark (ticket 085), so the
+     * session's next subscribe resumes exactly where the bundle was taken. */
+    fun seedSessionCursor(sessionId: String, seq: Long, epoch: String) =
+        socket.seedCursor(sessionId, seq, epoch)
+
     /**
      * Streams [SocketEvent]s for [sessionId]. One collection = one socket owned here
      * (not by the UI); cancelling the collection closes it. On a drop the stream

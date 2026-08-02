@@ -81,6 +81,24 @@ class ChatMessageMapperTest {
         )
     }
 
+    @Test
+    fun `transcript turn states map the terminal failure states to Failed`() {
+        // Real on the wire since 0.31.1 (ticket 085): the sub-agent page's cold status
+        // reads them — a cancelled/failed run must not blanket-map to Completed.
+        fun stateOf(state: String) = mapper.toDomain(
+            TranscriptData(
+                agentId = "agent-1",
+                items = listOf(TranscriptItemDto(kind = "turn", turnId = "t0", state = state)),
+            ),
+        ).turns.single().state
+
+        assertEquals(TranscriptState.Running, stateOf("running"))
+        assertEquals(TranscriptState.Completed, stateOf("completed"))
+        assertEquals(TranscriptState.Failed, stateOf("failed"))
+        assertEquals(TranscriptState.Failed, stateOf("cancelled"))
+        assertEquals(TranscriptState.Other, stateOf("something-new"))
+    }
+
     private fun transcript(vararg frames: TranscriptFrameDto): TranscriptData = TranscriptData(
         agentId = "agent-1",
         items = listOf(

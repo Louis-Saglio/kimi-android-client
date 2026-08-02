@@ -58,6 +58,14 @@ class QuestionWizardTest : ChatViewModelTestBase() {
 
     @Test
     fun `questions poll in flight does not clear a question that just arrived`() = runBlocking {
+        // The cold start owns the first start's question state (ticket 085), so the
+        // guarded /questions seed this exercises runs on the within-process resume.
+        viewModel.onScreenStarted()
+        awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        serverSocket = null
+        viewModel.onScreenStopped()
+
         val gate = CountDownLatch(1)
         questionsResponseGate = gate
         viewModel.onScreenStarted()
@@ -247,25 +255,26 @@ class QuestionWizardTest : ChatViewModelTestBase() {
 
     @Test
     fun `pending question survives the turn ended refetch`() = runBlocking {
-        // The poll endpoint is the source of truth: it keeps returning the question, so
-        // neither the screen-start load nor the turn.ended re-derivation may drop it.
-        questionsBody = """
-            {"code":0,"msg":"success","data":{"items":[
-              {"type":"event.question.requested","question_id":"tool_q1","session_id":"session_1",
-               "turn_id":0,"tool_call_id":"tool_q1",
-               "questions":[{"id":"q_0","question":"Red or blue?","header":"Color",
-                             "options":[{"id":"opt_0_0","label":"red"},
-                                        {"id":"opt_0_1","label":"blue"}],
-                             "allow_other":false}],
-               "created_at":"2026-07-20T06:06:49.808Z","agentId":"main","sessionId":"session_1"}
-            ]},"request_id":"r"}
-        """.trimIndent()
+        // The snapshot's pending_questions are the cold-start source of the card
+        // (ticket 085 — same item shape as the poll); the poll endpoint stays the
+        // source of truth the turn.ended re-derivation reads, so it keeps returning
+        // the question too.
+        val questionItem = """{"type":"event.question.requested","question_id":"tool_q1","session_id":"session_1",""" +
+            """"turn_id":0,"tool_call_id":"tool_q1",""" +
+            """"questions":[{"id":"q_0","question":"Red or blue?","header":"Color",""" +
+            """"options":[{"id":"opt_0_0","label":"red"},{"id":"opt_0_1","label":"blue"}],"allow_other":false}],""" +
+            """"created_at":"2026-07-20T06:06:49.808Z","agentId":"main","sessionId":"session_1"}"""
+        snapshotBody = """{"code":0,"msg":"success","data":{"as_of_seq":1,"epoch":"ep_1",""" +
+            """"session":{"id":"session_1","busy":false,"usage":{"context_tokens":0,"context_limit":1048576}},""" +
+            """"messages":{"items":[],"has_more":false},"in_flight_turn":null,"subagents":[],""" +
+            """"pending_approvals":[],"pending_questions":[$questionItem]},"request_id":"r"}"""
+        questionsBody = """{"code":0,"msg":"success","data":{"items":[$questionItem]},"request_id":"r"}"""
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
         socket.send(turnStartedFrame())
         awaitState(viewModel.uiState) { it.isWorking }
-        // Drain the history/status/questions/WS requests recorded so far so the next
+        // Drain the snapshot/session/models/WS requests recorded so far so the next
         // questions poll observed is the one turn.ended triggers.
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
