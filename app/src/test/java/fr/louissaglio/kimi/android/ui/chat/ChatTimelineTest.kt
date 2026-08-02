@@ -1620,4 +1620,112 @@ class ChatTimelineTest {
             timeline.items(),
         )
     }
+
+    // --- Prepend-vs-zombie dedup (Crashlytics 159e25351be7042db517f3af684684db) ---------
+    // A late/replayed event for a call whose message is NOT loaded appends a live row
+    // (the "show it anyway" orphan path). Paging back then flattens the same call from
+    // its own page: two rows with the same LazyColumn key — the 2026-08-01/02 crashes
+    // (7 events, `Key "tool_…" was already used`). The prepended page is canonical:
+    // the zombie row goes, future events heal the page row in place.
+
+    @Test
+    fun `a late result for an unloaded call does not duplicate when its history page prepends`() {
+        val timeline = testChatTimeline()
+        // The loaded window covers only the newest messages; the long-running call's
+        // message sits above them (a sleep 300 started a turn ago).
+        timeline.replaceHistory(listOf(userMessage("msg_new", "newer turn")), keepLive = true)
+        // The result arrives late (a long-running call, or a reconnect replay): an
+        // orphan live row — the call's message is nowhere in the loaded rows.
+        timeline.apply(SessionEvent.ToolCallResult("tool_old", false, "slept 300s\n"))
+        assertEquals("tool_old", timeline.items().last().id)
+
+        // Scrolling up pages in the call's own message pair.
+        timeline.prependHistory(
+            listOf(
+                ChatMessage(
+                    "msg_call",
+                    ChatMessage.Role.Assistant,
+                    listOf(ChatMessage.Part.ToolUse("tool_old", "Bash", "sleep 300")),
+                ),
+                ChatMessage(
+                    "msg_res",
+                    ChatMessage.Role.Tool,
+                    listOf(ChatMessage.Part.ToolResult("tool_old", false, "slept 300s\n")),
+                ),
+            ),
+        )
+
+        // One row for the call — the page's — and no duplicate LazyColumn key.
+        assertEquals(
+            listOf(
+                toolGroup(ChatItem.ToolActivity("tool_old", "Bash", ToolStatus.Done, "sleep 300", "", "slept 300s\n")),
+                ChatItem.UserMessage("msg_new", "newer turn"),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `a replayed splice older than the loaded page does not duplicate when its page prepends`() {
+        val timeline = testChatTimeline()
+        timeline.replaceHistory(listOf(userMessage("msg_new", "newer")), keepLive = true)
+        // A reconnect replay delivers a steered message older than the loaded window:
+        // it commits at the tail, unregistered in committedMessageIds.
+        timeline.apply(SessionEvent.ContextSpliced(listOf(userMessage("msg_old", "steered"))))
+
+        // Paging back reaches the page that carries the same message.
+        timeline.prependHistory(listOf(userMessage("msg_old", "steered")))
+
+        assertEquals(
+            listOf(
+                ChatItem.UserMessage("msg_old", "steered"),
+                ChatItem.UserMessage("msg_new", "newer"),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `a sealed sub-agent row does not duplicate when its transcript page prepends`() {
+        val timeline = testChatTimeline(historyBacked = false)
+        // The newest transcript page is loaded; a replayed event for a call of an
+        // older, unloaded turn appends a live row, then turn.started seals it.
+        timeline.replaceTranscript(
+            listOf(
+                transcriptTurn(
+                    "t5",
+                    5,
+                    transcriptStep("t5.1", TranscriptFrame.Text("t5.1.f1", TranscriptFrame.Text.Role.Assistant, "newest")),
+                ),
+            ),
+            keepLive = true,
+        )
+        timeline.apply(SessionEvent.ToolCallStarted("tool_old", "Bash", "sleep 300", agentId = "agent-1"))
+        timeline.apply(SessionEvent.TurnStarted(agentId = "agent-1"))
+
+        // Scrolling up pages in the turn that owns the call.
+        timeline.prependTranscript(
+            listOf(
+                transcriptTurn(
+                    "t4",
+                    4,
+                    transcriptStep(
+                        "t4.1",
+                        TranscriptFrame.Tool(
+                            "t4.1.tool_old", "tool_old", "Bash", running = false,
+                            preview = "sleep 300", input = "", output = "slept 300s\n",
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                toolGroup(ChatItem.ToolActivity("tool_old", "Bash", ToolStatus.Done, "sleep 300", "", "slept 300s\n")),
+                ChatItem.AssistantMessage("t5.1.f1", "newest", thinking = ""),
+            ),
+            timeline.items(),
+        )
+    }
 }

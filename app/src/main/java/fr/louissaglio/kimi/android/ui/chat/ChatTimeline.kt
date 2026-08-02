@@ -218,10 +218,55 @@ class ChatTimeline(
         pruneCoveredLiveRows()
     }
 
-    /** Older pages insert before the loaded rows; the boundary shifts with them. */
+    /** Older pages insert before the loaded rows; the boundary shifts with them.
+     * Rows the page covers are dropped from the EXISTING timeline first (Crashlytics
+     * 159e25351be7042db517f3af684684db): a live-tail zombie — a late/replayed event
+     * for a call whose message was not loaded (the "show it anyway" orphan path) —
+     * or a replayed old splice would otherwise land a duplicate LazyColumn key the
+     * moment its own page prepends. The page is canonical: its rows keep their true
+     * position, and future live events heal them in place ([healTool] searches the
+     * whole timeline). Page-backed committed rows can never collide — the id sets
+     * ([committedMessageIds]/[committedTurnIds]) already filtered them from [head]. */
     private fun prependCommitted(head: List<ChatItem>) {
+        dropRowsCoveredBy(head)
         rows.addAll(0, head)
         liveStart += head.size
+    }
+
+    /** Drops existing rows whose key a [head] row carries: tool groups lose the
+     * covered calls (an emptied group is removed, a shortened one re-keys to its new
+     * first row — the [pruneCoveredLiveRows] convention) and whole rows keyed by a
+     * covered id are removed. Committed-zone removals shift the boundary with them. */
+    private fun dropRowsCoveredBy(head: List<ChatItem>) {
+        val headToolIds = mutableSetOf<String>()
+        val headRowIds = mutableSetOf<String>()
+        head.forEach { item ->
+            when (item) {
+                is ChatItem.ToolGroup -> item.tools.forEach { headToolIds += it.id }
+                // Blank row ids (id-less steer echoes) are not coverage: unrelated
+                // messages share them, so dropping on them would eat live rows.
+                else -> if (item.id.isNotBlank()) headRowIds += item.id
+            }
+        }
+        if (headToolIds.isEmpty() && headRowIds.isEmpty()) return
+        for (index in rows.indices.reversed()) {
+            when (val item = rows[index]) {
+                is ChatItem.ToolGroup -> {
+                    val survivors = item.tools.filterNot { it.id in headToolIds }
+                    if (survivors.size == item.tools.size) continue
+                    if (survivors.isEmpty()) {
+                        rows.removeAt(index)
+                        if (index < liveStart) liveStart--
+                    } else {
+                        rows[index] = ChatItem.ToolGroup(survivors.first().id, survivors)
+                    }
+                }
+                else -> if (item.id in headRowIds) {
+                    rows.removeAt(index)
+                    if (index < liveStart) liveStart--
+                }
+            }
+        }
     }
 
     /** Mid-turn commits (splice echoes) land at the committed tail, above the live
@@ -345,9 +390,15 @@ class ChatTimeline(
     }
 
     /** `compaction.failed`/`cancelled`/`blocked`: the pending divider is removed — the
-     * error snackbar (ViewModel) carries the feedback instead. */
+     * error snackbar (ViewModel) carries the feedback instead. The removal keeps the
+     * committed/live boundary: a divider sealed into the committed zone (a
+     * non-history-backed timeline's turn.started moved it there) shifts [liveStart]
+     * with it, or later boundary walks read past the row list. */
     fun compactionFailed() {
-        rows.removeAll { it.id == LIVE_COMPACTION_DIVIDER_ID }
+        val index = rows.indexOfFirst { it.id == LIVE_COMPACTION_DIVIDER_ID }
+        if (index < 0) return
+        rows.removeAt(index)
+        if (index < liveStart) liveStart--
     }
 
     /** The just-sent user message arrives spliced mid-turn: commit it immediately so
