@@ -8,6 +8,7 @@ import androidx.navigation.toRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
 import fr.louissaglio.kimi.android.data.attachments.AttachmentStore
 import fr.louissaglio.kimi.android.data.toUserMessage
+import fr.louissaglio.kimi.android.data.chat.AGENT_TOOL_NAME
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
@@ -18,7 +19,6 @@ import fr.louissaglio.kimi.android.data.chat.ServerModel
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.SessionSnapshot
 import fr.louissaglio.kimi.android.data.chat.SocketEvent
-import fr.louissaglio.kimi.android.data.chat.SubagentRosterEntry
 import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.TodoParser
 import fr.louissaglio.kimi.android.data.chat.isSubagentScoped
@@ -360,12 +360,13 @@ class ChatViewModel internal constructor(
     /**
      * The one cold start of this chat open: awaits the session's snapshot sync and
      * applies its outcome. A [SnapshotSync.Outcome.Fresh] bundle IS the initial load
-     * (history, busy/context state, pending approvals/questions, roster links); an
-     * [SnapshotSync.Outcome.AlreadyFresh] join means the session already synced in
-     * this process (page-on-top restore, or a previous ViewModel instance) — the
-     * within-process resume set (ticket 048) heals instead, plus the cached roster's
-     * idempotent row links. A failed fetch surfaces the ordinary load-error state —
-     * no fallback to the legacy burst (the app runs against the latest server only).
+     * (history, busy/context state, pending approvals/questions); an
+     * [SnapshotSync.Outcome.AlreadyFresh] join means the session synced since it was
+     * last left (page-on-top restore, or the chat → page → chat round trip) — the
+     * within-process resume set (ticket 048) heals instead, and the sub-agent row
+     * links re-drive from the store's surviving registry (ticket 091). A failed
+     * fetch surfaces the ordinary load-error state — no fallback to the legacy burst
+     * (the app runs against the latest server only).
      */
     private suspend fun runColdStart() {
         val guards = captureSeedGuards()
@@ -380,7 +381,9 @@ class ChatViewModel internal constructor(
         when (outcome) {
             is SnapshotSync.Outcome.Fresh -> applySnapshot(outcome.snapshot, guards)
             is SnapshotSync.Outcome.AlreadyFresh -> {
-                applySnapshotRosterLinks(outcome.roster)
+                // The store kept its records and the session's link registry — only
+                // this ViewModel's timeline died with it: re-drive the links.
+                applySubagentLinks()
                 resyncHistoryAfterDrop()
                 questions.seed()
                 seedSessionStatus()
@@ -411,8 +414,9 @@ class ChatViewModel internal constructor(
      * `resync_required` rebuild. The live tail survives per the snapshot's busy (the
      * same polarity as ticket 048's status check — a finished turn has no legitimate
      * live rows); a turn event landing mid-fetch forces keep-live (it is newer than
-     * the snapshot). The roster's store seed is [SnapshotSync]'s job — here the
-     * roster only links the timeline's `Agent` rows.
+     * the snapshot). The roster and the snapshot's `Agent` calls already reached the
+     * store inside [SnapshotSync]'s fetch — here the rebuilt timeline's rows are
+     * mined and the store's links re-driven onto them (ticket 091).
      */
     private fun applySnapshot(snapshot: SessionSnapshot, guards: SeedCaptures) {
         val turnStale = turnSeedGuard.isStale(guards.turn)
@@ -421,7 +425,7 @@ class ChatViewModel internal constructor(
         deltaCoalescer.flush()
         timeline.replaceHistory(snapshot.messages.items, keepLive = snapshot.busy || turnStale)
         oldestHistoryId = snapshot.messages.items.firstOrNull()?.id
-        applySnapshotRosterLinks(snapshot.subagents)
+        mineAgentRowsIntoStore()
         uiState.update {
             it.copy(
                 items = timeline.items(),
@@ -452,17 +456,17 @@ class ChatViewModel internal constructor(
         // The subscribe resuming exactly at this watermark needs no resync — this
         // apply already healed everything up to it.
         appliedSnapshotCursor = snapshot.asOfSeq to snapshot.epoch
-        // Rows linked by the result marker (background runs are not in the roster)
-        // seed the store from history, like a pager-applied page does.
-        seedSubagentStoreFromLinkedRows()
     }
 
-    /** Registers the roster's `Agent` row links (idempotent — the timeline keeps them
-     * across refetches) without touching anything else. */
-    private fun applySnapshotRosterLinks(roster: List<SubagentRosterEntry>) {
-        for (entry in roster) {
-            if (entry.parentToolCallId.isNotBlank()) timeline.linkSubagentTool(entry.parentToolCallId, entry.id)
+    /** Re-drives the store's session link registry (ticket 091 — spawned / roster /
+     * result marker, one owner) into the timeline's `Agent` rows. Runs after every
+     * store-affecting apply: the timeline's own healing keeps links across refetches,
+     * but only the store's registry survives this ViewModel. Idempotent and cheap. */
+    private fun applySubagentLinks() {
+        subagentStore.linksFor(sessionId).forEach { (toolCallId, subagentId) ->
+            timeline.linkSubagentTool(toolCallId, subagentId)
         }
+        uiState.update { it.copy(items = timeline.items()) }
     }
 
     /** Bumped on every turn.started/turn.ended event, so [seedSessionStatus] and
@@ -528,8 +532,8 @@ class ChatViewModel internal constructor(
                 )
             }
             // History is where cold links come from (the app subscribed after
-            // the spawn): seed the store from the linked Agent rows.
-            seedSubagentStoreFromLinkedRows()
+            // the spawn): mine the page's Agent rows into the store.
+            mineAgentRowsIntoStore()
         },
         applyOlder = { page ->
             oldestHistoryId = page.items.firstOrNull()?.id ?: oldestHistoryId
@@ -540,6 +544,9 @@ class ChatViewModel internal constructor(
                     hasMoreHistory = page.hasMore,
                 )
             }
+            // Rows the links predate (loaded after a spawn/roster link was learned)
+            // gain their open affordance from the store's registry (ticket 091).
+            mineAgentRowsIntoStore()
         },
         onNewestError = { error ->
             if (uiState.value.items.isNullOrEmpty()) {
@@ -793,24 +800,35 @@ class ChatViewModel internal constructor(
             }
     }
 
-    /** Routes one sub-agent-scoped event into the store; a spawn additionally links the
-     * spawning `Agent` tool row to its sub-agent's page (ticket 045). */
+    /** Routes one sub-agent-scoped event into the store (the funnel registers the
+     * spawn's row link in the session registry, ticket 091); a spawn then re-drives
+     * the registry onto the timeline's `Agent` rows. */
     private suspend fun onSubagentEvent(event: SessionEvent) {
-        if (event is SessionEvent.SubagentSpawned) {
-            timeline.linkSubagentTool(event.parentToolCallId, event.subagentId)
-            uiState.update { it.copy(items = timeline.items()) }
-        }
         subagentStore.apply(sessionId, event)
+        if (event is SessionEvent.SubagentSpawned) applySubagentLinks()
     }
 
-    /** Seeds store entries from linked `Agent` rows (cold-open, ticket 045): the row's
-     * args/result carry the identity, lifecycle status and result summary. Idempotent
-     * (the store never overwrites an existing entry) and cheap — linked rows are few. */
-    private fun seedSubagentStoreFromLinkedRows() {
+    /** Mines the timeline's `Agent` rows into the store (ticket 091): the row's
+     * args/result carry the identity, task prompt, lifecycle status and result
+     * summary — the store resolves the sub-agent through its link registry or the
+     * result's `agent_id:` marker, healing existing records per its precedence
+     * table. Then the store's links re-drive onto the rows (a row the link
+     * predates — e.g. one a history page just loaded — gains its open affordance).
+     * Idempotent and cheap — `Agent` rows are few. */
+    private fun mineAgentRowsIntoStore() {
         timeline.items()
             .flatMap { (it as? ChatItem.ToolGroup)?.tools.orEmpty() }
-            .filter { it.subagentId != null }
-            .forEach { subagentStore.seedFromAgentRow(sessionId, it) }
+            .filter { it.name == AGENT_TOOL_NAME }
+            .forEach { row ->
+                subagentStore.applyAgentCall(
+                    sessionId,
+                    toolCallId = row.id,
+                    argsJson = row.input,
+                    resultText = row.output.ifBlank { null },
+                    rowStatus = row.status,
+                )
+            }
+        applySubagentLinks()
     }
 
     /** One event applied+published on its own — the [applySessionEvent] path for
@@ -897,9 +915,9 @@ class ChatViewModel internal constructor(
             }
             is SessionEvent.ToolCallResult -> {
                 applyTimelineEvent(event)
-                // A background Agent result carries the agent_id marker mid-run: seed
+                // A background Agent result carries the agent_id marker mid-run: mine
                 // right away so the page can open and later frames stop dropping.
-                seedSubagentStoreFromLinkedRows()
+                mineAgentRowsIntoStore()
             }
             else -> applyTimelineEvent(event)
         }

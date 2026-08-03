@@ -64,9 +64,11 @@ class ChatTimeline(
     private var liveTodos: List<Todo>? = null
 
     /** Tool-call id → linked sub-agent (ticket 045), learned live (spawned, or a
-     * background run's early result). Kept as reducer state — never pruned — and
-     * re-applied after every refetch: a refetch rebuilds committed rows from history,
-     * where the `agent_id:` result marker only exists once the result is committed too. */
+     * background run's early result) and re-driven from the store's session link
+     * registry by ChatViewModel after every store-affecting apply (ticket 091 — the
+     * store owns the links; this map is the timeline's re-application cache, never
+     * pruned): a refetch rebuilds committed rows from history, where the `agent_id:`
+     * result marker only exists once the result is committed too. */
     private val subagentLinks = mutableMapOf<String, String>()
 
     fun items(): List<ChatItem> = rows.toList()

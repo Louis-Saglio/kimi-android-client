@@ -301,6 +301,38 @@ class SubagentStreamStoreKeepAliveTest {
         store.pageClosed(SESSION_ID)
     }
 
+    @Test
+    fun `the keep-alive cold start recovers the task prompt from the snapshot's Agent call`() = runBlocking {
+        // Page-on-top cold restore (ticket 064's path — no ChatViewModel exists, so no
+        // row mining can ever run): the keep-alive's snapshot sync must seed the record
+        // INCLUDING the prompt, mined from the snapshot's messages page (ticket 091).
+        snapshotBody = """{"code":0,"msg":"success","data":{"as_of_seq":18,"epoch":"ep_1",""" +
+            """"session":{"id":"session_1","busy":true,"usage":{"context_tokens":0,"context_limit":1048576}},""" +
+            """"messages":{"items":[""" +
+            """{"id":"msg_1","session_id":"session_1","role":"assistant",""" +
+            """"content":[{"type":"tool_use","tool_call_id":"tool_agent","tool_name":"Agent",""" +
+            """"input":{"subagent_type":"explore","description":"doc-verify","prompt":"Reply ok"}}],""" +
+            """"created_at":"2026-08-01T10:00:00.000Z"}],"has_more":false},""" +
+            """"in_flight_turn":null,""" +
+            """"subagents":[{"id":"agent-12","kind":"subagent","subagent_phase":"working",""" +
+            """"subagent_type":"explore","description":"doc-verify","parent_tool_call_id":"tool_agent",""" +
+            """"run_in_background":false,"created_at":"2026-08-01T10:00:00.000Z",""" +
+            """"started_at":"2026-08-01T10:00:00.100Z"}],""" +
+            """"pending_approvals":[],"pending_questions":[]},"request_id":"r"}"""
+
+        store.pageOpened(SESSION_ID)
+
+        awaitCondition { entry("agent-12") != null }
+        val seeded = entry("agent-12")!!
+        assertEquals(SubagentStatus.Working, seeded.status)
+        assertEquals(
+            listOf(ChatItem.UserMessage("seeded_prompt", "Reply ok")),
+            seeded.items,
+        )
+
+        store.pageClosed(SESSION_ID)
+    }
+
     private fun newChatViewModel(): ChatViewModel = ChatViewModel(
         repository,
         testSessionsRepository(),

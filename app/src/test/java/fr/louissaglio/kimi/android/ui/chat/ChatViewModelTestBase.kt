@@ -71,8 +71,10 @@ abstract class ChatViewModelTestBase {
     protected lateinit var settingsRepository: SettingsRepository
     protected lateinit var dataStore: FakePreferencesDataStore
 
-    /** 0 ms window: sub-agent frames apply on arrival, no flush timer involved. */
-    protected val subagentStore = testSubagentStreamStore(streamCoalesceWindowMillis = 0)
+    /** 0 ms window: sub-agent frames apply on arrival, no flush timer involved.
+     * Shares the test's ChatRepository/SnapshotSync (the production singleton
+     * shape): its release → forget lands on the SAME sync the ViewModels use. */
+    protected lateinit var subagentStore: SubagentStreamStore
 
     /** Shared by the ViewModels and the snapshot sync (the production singleton shape):
      * one ChatRepository — one SessionSocket, one cursor map — so the seeded resume
@@ -376,6 +378,12 @@ abstract class ChatViewModelTestBase {
         settingsRepository = SettingsRepository(dataStore, appScope)
         chatRepository = testChatRepository(dataStore)
         snapshotSync = testSnapshotSync(chatRepository, settingsRepository) { subagentStore }
+        subagentStore = testSubagentStreamStore(
+            streamCoalesceWindowMillis = 0,
+            chatRepository = chatRepository,
+            settingsRepository = settingsRepository,
+            snapshotSync = snapshotSync,
+        )
         viewModel = ChatViewModel(
             chatRepository,
             testSessionsRepository(),

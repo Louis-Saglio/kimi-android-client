@@ -159,27 +159,45 @@ also the regression signal for "verified fixed" tickets.
   scope provider). New chat features grow a collaborator from day one instead
   of landing in `ChatViewModel`. Feature tests sit next to the collaborator on
   the shared `ChatViewModelTestBase` harness.
-- Cold start / resync (085): `GET .../snapshot` is the single entry point —
-  `SnapshotSync` (ui/chat, session-scoped singleton like the store, so the
-  page-on-top restore path with no ChatViewModel runs the same rebuild) owns
-  the one fetch per session per process, taken BEFORE the session's first
-  socket subscribe (the chat's gate and the store's keep-alive both await it).
-  It seeds `SessionSocket.seedCursor` with the `as_of_seq`/`epoch` watermark
-  (gapless first subscribe; the matching `Reconnected` skips the redundant 048
-  resync) and the store's roster (`seedFromSnapshot` — identity, precise
-  `subagent_phase` status counting as lifecycle-seen, `output_preview`
-  summary), and hands the chat-side bundle (history page, busy/contextUsage,
-  pending approvals/questions, roster row links) to the calling ChatViewModel.
-  `resync_required` re-runs it (keepLive per the snapshot's `busy`); a failed
-  fetch is the ordinary load-error state, never a legacy-burst fallback. The
+- Cold start / resync (085, freshness model 091): `GET .../snapshot` is the single
+  entry point — `SnapshotSync` (ui/chat, session-scoped singleton like the store, so
+  the page-on-top restore path with no ChatViewModel runs the same rebuild) owns the
+  fetch, taken BEFORE the session's first socket subscribe (the chat's gate and the
+  store's keep-alive both await it). It seeds `SessionSocket.seedCursor` with the
+  `as_of_seq`/`epoch` watermark (gapless first subscribe; the matching `Reconnected`
+  skips the redundant 048 resync), applies the roster to the store (`applyRoster`),
+  and mines the snapshot's messages page + `in_flight_turn.running_tools` for
+  `Agent` calls (`applyAgentCall` — chat-independent, so the page-on-top restore
+  recovers prompts/links too), and hands the chat-side bundle (history page,
+  busy/contextUsage, pending approvals/questions) to the calling ChatViewModel.
+  The fetch is cached per session only until the session is LEFT:
+  `SubagentStreamStore.release` calls `SnapshotSync.forget`, so the next entry
+  re-fetches (one cheap GET per entry — no process-lifetime cache of mutable server
+  state) while chat → page → chat costs zero fetches (`AlreadyFresh`).
+  `resync_required` re-runs it (keepLive per the snapshot's `busy`); a failed fetch
+  is the ordinary load-error state, never a legacy-burst fallback. The
   within-process resume (048's cursor replay + /status resync) is untouched.
   The transcript cold status reads the real turn states (`cancelled`/`failed`
   → Failed, 0.31.1) for the window the roster cannot cover.
-- Sub-agent streams (045): `SessionSocket` tags transcript events with the
-  emitting `agentId`; sub-agent-scoped events route to `SubagentStreamStore`
-  (ui/chat, session-scoped singleton keyed by session, one `ChatTimeline` per
-  sub-agent, delta coalescing via the `DeltaCoalescer` shared with ChatViewModel,
-  ticket 065). The store is fed by
+- Sub-agent streams (045, state model reimplemented in 091): `SessionSocket` tags
+  transcript events with the emitting `agentId`; sub-agent-scoped events route to
+  `SubagentStreamStore` (ui/chat, session-scoped singleton keyed by session, one
+  `SubagentRecord` per sub-agent — metadata (identity, task prompt, row link,
+  status) are first-class FIELDS, never rows in the replaceable timeline, so the
+  transcript fetch cannot wipe them; delta coalescing via the `DeltaCoalescer`
+  shared with ChatViewModel, ticket 065). Every source reaches the record through
+  one funnel method per source kind, writing only the fields it is authoritative
+  for (precedence high→low: live lifecycle pins `status` → fresh roster → result
+  text → transcript turn states; identity/prompt/link first-writer-wins): live
+  frames via `apply` (the FIRST turn's first `context.spliced` user message is the
+  task prompt — lifted into `record.prompt`, never a timeline row; later splices
+  stay user bubbles), the snapshot roster via `applyRoster` (re-applicable on every
+  entry — a fresh roster heals non-live-pinned statuses), `Agent` calls from any
+  carrier (history rows, snapshot messages, `running_tools`) via `applyAgentCall`,
+  transcript pages via `applyTranscriptPage`/`prependTranscriptPage`. The
+  `toolCallId → subagentId` link registry lives in the store (learned from
+  spawned/roster/result-marker); ChatViewModel re-drives `store.linksFor` into its
+  timeline after every store-affecting apply. The store is fed by
   exactly ONE session-socket collection at a time (064): the chat's while its
   socket gate holds the session (ChatViewModel signals
   chatCollectionStarted/Stopped), otherwise the store's own keep-alive
@@ -190,10 +208,8 @@ also the regression signal for "verified fixed" tickets.
   runs while a chat collection does; never open a page-owned socket. The
   read-only `SubagentScreen` reuses `MessageList`/`ToolRows`; linked `Agent`
   rows carry `subagentId` — linked rows never expand (the page has all the
-  details); tapping the row or its trailing open button navigates to the page. Cold-open (spawn before
-  subscribe): linked rows seed their store entry from the call args/result
-  (identity, status, `prompt` user bubble + `[summary]` assistant bubble)
-  via `seedFromAgentRow`. Transcript backing (046): the page's history comes
+  details); tapping the row or its trailing open button navigates to the page.
+  Transcript backing (046): the page's history comes
   from `GET .../transcript?agent_id=…` (`ChatApi.transcript` →
   turn/step/frame domain model in `data/chat/Transcript.kt`, NOT
   `ChatMessage`); `SubagentViewModel` fetches the newest page on cold open
@@ -207,8 +223,8 @@ also the regression signal for "verified fixed" tickets.
   each screen parameterizes the fetch (messages vs transcript), the merge
   (`ChatTimeline` directly vs the store's `applyTranscriptPage`/
   `prependTranscriptPage`, each flushing its own `DeltaCoalescer` before a
-  replace), and the cursor/hasMore ownership. The seeded
-  task-prompt bubble lives outside the timeline (`Stream.seededPrompt`) —
+  replace), and the cursor/hasMore ownership. The
+  task-prompt bubble lives outside the timeline (`SubagentRecord.prompt`) —
   the transcript never carries the task prompt.
 - Streaming: `ChatViewModel` and `SubagentStreamStore` conflate assistant/thinking
   deltas through the shared `DeltaCoalescer` (ui/chat, internal — ticket 065):

@@ -1,9 +1,12 @@
 package fr.louissaglio.kimi.android.ui.chat
 
+import androidx.lifecycle.viewModelScope
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.awaitState
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -183,4 +186,92 @@ class SnapshotColdStartTest : ChatViewModelTestBase() {
         awaitRequest("/snapshot")
         awaitState(viewModel.uiState) { it.items != null && it.error == null }
     }
+
+    @Test
+    fun `re-entering the session re-links a running sub-agent row from a fresh roster`() = runBlocking {
+        // Bug 2 (ticket 091): a sub-agent spawned during a visit is still running when
+        // the session is left and re-entered — the spawned link is never replayed, the
+        // result's agent_id: marker does not exist yet, and 085's process-lifetime
+        // snapshot cache served the pre-spawn roster, so the row expanded instead of
+        // opening the page. Now leaving the session forgets the sync (the store's
+        // release), so re-entry re-fetches: the FRESH roster re-creates the record and
+        // the registry link, re-driven onto the new timeline's row.
+        snapshotBody = snapshotBundle(busy = true)
+
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        socket.send(
+            """{"type":"tool.call.started","seq":17,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-28T03:37:35.000Z","payload":{"type":"tool.call.started","turnId":0,""" +
+                """"toolCallId":"tool_agent","name":"Agent","args":{"subagent_type":"explore",""" +
+                """"description":"doc-verify","prompt":"Reply ok"},"agentId":"main","sessionId":"session_1"}}""",
+        )
+        socket.send(subagentSpawnedFrame())
+        socket.send(subagentStartedFrame())
+        awaitCondition { subagentStoreEntry("agent-12")?.status == SubagentStatus.Working }
+
+        // The session is left (the chat ViewModel is cleared — its scope dies — and the
+        // store is released, forgetting the snapshot sync).
+        viewModel.viewModelScope.coroutineContext.job.cancelAndJoin()
+        subagentStore.release("session_1")
+        assertNull(subagentStoreEntry("agent-12"))
+
+        // Re-entry: the roster now serves the running agent, its Agent call is in the
+        // messages page — still no result, hence no agent_id: marker anywhere.
+        snapshotBody = snapshotBundle(
+            busy = true,
+            messages = """{"items":[""" +
+                """{"id":"msg_1","session_id":"session_1","role":"assistant",""" +
+                """"content":[{"type":"tool_use","tool_call_id":"tool_agent","tool_name":"Agent",""" +
+                """"input":{"subagent_type":"explore","description":"doc-verify","prompt":"Reply ok"}}],""" +
+                """"created_at":"2026-08-01T10:00:00.000Z"}],"has_more":false}""",
+            subagents = """[{"id":"agent-12","kind":"subagent","subagent_phase":"working",""" +
+                """"subagent_type":"explore","description":"doc-verify","parent_tool_call_id":"tool_agent",""" +
+                """"run_in_background":false,"created_at":"2026-08-01T10:00:00.000Z",""" +
+                """"started_at":"2026-08-01T10:00:00.100Z"}]""",
+        )
+        val reopened = newViewModel(streamCoalesceWindowMillis = 0)
+        reopened.onScreenStarted()
+
+        // The running row is linked BEFORE any result marker exists, and the store
+        // holds the Working record — prompt backfilled from the snapshot-mined args.
+        awaitState(reopened.uiState) { state ->
+            state.items?.filterIsInstance<ChatItem.ToolGroup>()
+                ?.flatMap { it.tools }
+                ?.any { it.id == "tool_agent" && it.subagentId == "agent-12" } == true
+        }
+        val record = subagentStoreEntry("agent-12")!!
+        assertEquals(SubagentStatus.Working, record.status)
+        assertEquals("explore", record.name)
+        assertEquals(
+            listOf(ChatItem.UserMessage("seeded_prompt", "Reply ok")),
+            record.items,
+        )
+    }
+
+    @Test
+    fun `a screen stop-start round trip performs no extra snapshot fetch`() = runBlocking {
+        // The within-process path (ticket 091's guarded economy): chat → page → chat
+        // never releases the store, so the sync stays fresh and no /snapshot re-fetch
+        // fires — one cheap GET per session ENTRY, not per ON_START.
+        snapshotBody = snapshotBundle()
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.items != null }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        viewModel.onScreenStopped()
+        viewModel.onScreenStarted()
+
+        val paths = mutableListOf<String>()
+        val deadline = System.currentTimeMillis() + 500
+        while (System.currentTimeMillis() < deadline) {
+            server.takeRequest(100, TimeUnit.MILLISECONDS)?.let { paths += it.target.orEmpty() }
+        }
+        assertTrue(paths.toString(), paths.none { it.contains("/snapshot") })
+    }
+
+    /** Non-suspend read of a store entry, for awaitCondition's plain-lambda condition. */
+    private fun subagentStoreEntry(subagentId: String): SubagentStreamStore.SubagentState? =
+        runBlocking { subagentStore.entry("session_1", subagentId).first() }
 }

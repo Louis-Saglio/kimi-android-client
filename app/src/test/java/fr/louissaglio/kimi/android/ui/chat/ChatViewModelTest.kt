@@ -417,13 +417,14 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         assertTrue(mainItems.single() is ChatItem.ToolGroup)
         assertFalse(viewModel.uiState.value.isWorking)
 
-        // The store accumulated the sub-agent's own stream, prompts as user bubbles.
+        // The store accumulated the sub-agent's own stream: the task-turn splice was
+        // lifted into the record's prompt field (ticket 091), the deltas stream below.
         val entry = subagentEntry("agent-12")!!
         assertEquals("explore", entry.name)
         assertEquals(SubagentStatus.Working, entry.status)
         assertEquals(
             listOf(
-                ChatItem.UserMessage("msg_sub", "sub task"),
+                ChatItem.UserMessage("seeded_prompt", "sub task"),
                 ChatItem.AssistantMessage("live_0", "sub reply", thinking = ""),
             ),
             entry.items,
@@ -471,6 +472,45 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             ),
             entry.items,
         )
+    }
+
+    @Test
+    fun `a live spawn link survives the history replace that first commits the row`() = runBlocking {
+        // The link registry (ticket 091): the spawned frame links the row live; the
+        // turn-end refetch then rebuilds the committed rows from history — where the
+        // running call has no agent_id: marker yet — and the store's registry
+        // re-drives the link onto the rebuilt row.
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        socket.send(
+            """{"type":"tool.call.started","seq":17,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-28T03:37:35.000Z","payload":{"type":"tool.call.started","turnId":0,""" +
+                """"toolCallId":"tool_agent","name":"Agent","args":{"subagent_type":"explore",""" +
+                """"description":"doc-verify","prompt":"Reply ok"},"agentId":"main","sessionId":"session_1"}}""",
+        )
+        socket.send(subagentSpawnedFrame())
+        awaitState(viewModel.uiState) { state ->
+            state.items?.filterIsInstance<ChatItem.ToolGroup>()
+                ?.flatMap { it.tools }
+                ?.any { it.id == "tool_agent" && it.subagentId == "agent-12" } == true
+        }
+
+        // The turn ends: history now carries the still-running call (no result, no
+        // marker) — the refetch replaces the committed rows wholesale.
+        messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
+            """{"id":"msg_1","session_id":"session_1","role":"assistant",""" +
+            """"content":[{"type":"tool_use","tool_call_id":"tool_agent","tool_name":"Agent",""" +
+            """"input":{"subagent_type":"explore","description":"doc-verify","prompt":"Reply ok"}}],""" +
+            """"created_at":"2026-07-28T03:37:35.000Z"}""" +
+            """],"has_more":false},"request_id":"r"}"""
+        socket.send(turnEndedFrame("completed"))
+
+        awaitState(viewModel.uiState) { state ->
+            state.items?.filterIsInstance<ChatItem.ToolGroup>()
+                ?.flatMap { it.tools }
+                ?.any { it.id == "tool_agent" && it.subagentId == "agent-12" } == true
+        }
     }
 
     @Test
