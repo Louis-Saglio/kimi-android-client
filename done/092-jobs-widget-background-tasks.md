@@ -130,27 +130,28 @@ tests (list envelope, cancel 40904), ChatViewModel test on
 
 ## Acceptance criteria
 
-- [ ] `ChatApi.listTasks/cancelTask` MockWebServer tests pass: envelope
+- [x] `ChatApi.listTasks/cancelTask` MockWebServer tests pass: envelope
       unwrap, `?status=` query, cancel → `{"cancelled":true}`, terminal-task
       cancel → `40904` surfaced as a typed `DataError`.
-- [ ] `SessionSocket` emits `TaskStarted`/`TaskTerminated` for the verbatim
+- [x] `SessionSocket` emits `TaskStarted`/`TaskTerminated` for the verbatim
       doc frames and ignores `task.notified` + both `background.task.*` aliases
       (unknown-type `Log.w`, no crash, no event).
-- [ ] `JobsStore` tests: REST seed → live `TaskStarted` upsert →
+- [x] `JobsStore` tests: REST seed → live `TaskStarted` upsert →
       `TaskTerminated` maps core status to wire (`killed`→`cancelled`,
       `timed_out`→`failed`); `kind:"tool"` entries never appear; cancel is
       optimistic and a `40904` response still ends in a terminal state.
-- [ ] ChatViewModel test: two `TaskStarted` events → UiState `jobs` has 2
+- [x] ChatViewModel test: two `TaskStarted` events → UiState `jobs` has 2
       running; `TaskTerminated` → count drops to 1 and the finished job lingers.
-- [ ] UI behavior (observable on device / Robo): with zero running jobs no
+- [x] UI behavior (observable on device / Robo): with zero running jobs no
       pill; with 2 running, `Jobs · 2` appears next to Todos; tap → sheet with
       description, kind badge, ticking elapsed time; Stop cancels (server
       confirms via `task.terminated`); tapping a sub-agent row opens its page.
-- [ ] Existing suite green with no behavior-test changes.
-- [ ] `flock /tmp/kimi-android-gradle.lock ./gradlew :app:assembleDebug
+      (verified by Louis on-device, 2026-08-03)
+- [x] Existing suite green with no behavior-test changes.
+- [x] `flock /tmp/kimi-android-gradle.lock ./gradlew :app:assembleDebug
       --max-workers=1` and `:app:testDebugUnitTest` pass (VPS build rules);
       release APK published to the file server per AGENTS.md.
-- [ ] `AGENTS.md` updated (new collaborator + the two new endpoints/events in
+- [x] `AGENTS.md` updated (new collaborator + the two new endpoints/events in
       the data-layer conventions); `docs/server-api.md` untouched (no wire
       change).
 
