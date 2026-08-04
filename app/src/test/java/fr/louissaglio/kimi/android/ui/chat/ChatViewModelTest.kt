@@ -2,6 +2,7 @@ package fr.louissaglio.kimi.android.ui.chat
 
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
+import fr.louissaglio.kimi.android.data.chat.BackgroundTask
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
 import fr.louissaglio.kimi.android.data.chat.ServerModel
 import fr.louissaglio.kimi.android.navigation.Chat
@@ -1287,6 +1288,45 @@ class ChatViewModelTest : ChatViewModelTestBase() {
                 )
             }
             assertFalse(viewModel.uiState.value.isCompacting)
+        }
+    }
+
+    @Test
+    fun `task events feed the jobs list and termination drops the running count`() {
+        runBlocking {
+            viewModel.onScreenStarted()
+            val socket = awaitServerSocket()
+
+            // A background sub-agent and a background bash register in the task store
+            // (docs/server-api.md, Background lifecycle — ticket 092).
+            socket.send(taskStartedFrame(taskId = "agent-7noib8bb", description = "doc-verify-bg"))
+            socket.send(
+                taskStartedFrame(
+                    taskId = "proc-9xk2",
+                    description = "sleep 1000",
+                    kind = "process",
+                    agentId = null,
+                    seq = 53,
+                ),
+            )
+            awaitState(viewModel.uiState) { state -> state.jobs.count { it.isRunning } == 2 }
+
+            // CORE status "killed" maps to the wire "cancelled"; the finished job
+            // lingers for the sheet, the running count drops.
+            socket.send(taskTerminatedFrame(taskId = "agent-7noib8bb", status = "killed"))
+            awaitState(viewModel.uiState) { state -> state.jobs.count { it.isRunning } == 1 }
+
+            val jobs = viewModel.uiState.value.jobs
+            assertEquals(2, jobs.size)
+            val terminated = jobs.first { it.taskId == "agent-7noib8bb" }
+            assertEquals(BackgroundTask.Status.Cancelled, terminated.status)
+            assertEquals(Instant.ofEpochMilli(1785210118804), terminated.endedAt)
+            // info.agentId links the task to its sub-agent page (ticket 092).
+            assertEquals("agent-13", terminated.agentId)
+            val bash = jobs.first { it.taskId == "proc-9xk2" }
+            assertEquals(BackgroundTask.Kind.Bash, bash.kind)
+            assertEquals(BackgroundTask.Status.Running, bash.status)
+            assertNull(bash.agentId)
         }
     }
 

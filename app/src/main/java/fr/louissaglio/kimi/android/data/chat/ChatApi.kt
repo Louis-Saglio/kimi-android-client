@@ -323,4 +323,34 @@ class ChatApi @Inject constructor(
                 )
             }
         }
+
+    /**
+     * Lists the session's background tasks (`GET /api/v1/sessions/{id}/tasks`,
+     * docs/server-api.md, REST /tasks — ticket 092): background sub-agents and bash;
+     * question flows (kind `tool`) are filtered out by the mapper. Terminal tasks stay
+     * listed. [status] is the optional wire filter (`running|completed|failed|
+     * cancelled`); null fetches unfiltered — the jobs sheet's cold-start seed, so
+     * recently finished jobs linger in the list.
+     */
+    suspend fun listTasks(settings: ServerSettings, sessionId: String, status: String? = null): Result<List<BackgroundTask>> {
+        val filter = status?.let { "?status=$it" }.orEmpty()
+        return api.get(settings, "/api/v1/sessions/$sessionId/tasks$filter") { body ->
+            api.json.decodeFromString<Envelope<TaskListData>>(body).toResult().map { data ->
+                data.items.mapNotNull(mapper::toDomain)
+            }
+        }
+    }
+
+    /**
+     * Cancels one background task (`POST /api/v1/sessions/{id}/tasks/{taskId}:cancel`,
+     * docs/server-api.md — ticket 092). A running task acks `{"cancelled":true}`; a
+     * terminal one answers envelope code 40904, which surfaces as the typed
+     * [DataError.Api] so the caller can treat it as already-terminal success. The
+     * teardown (`task.terminated`) arrives over the WebSocket, so success carries no
+     * payload.
+     */
+    suspend fun cancelTask(settings: ServerSettings, sessionId: String, taskId: String): Result<Unit> =
+        api.post(settings, "/api/v1/sessions/$sessionId/tasks/$taskId:cancel", api.jsonBody {}) { body ->
+            api.json.decodeFromString<Envelope<TaskCancelData>>(body).toAckResult()
+        }
 }

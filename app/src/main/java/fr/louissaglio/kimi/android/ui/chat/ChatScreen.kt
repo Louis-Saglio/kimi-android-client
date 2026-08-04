@@ -12,8 +12,10 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -161,6 +163,7 @@ fun ChatScreen(
         onOpenSubagent = onOpenSubagent,
         onHistoryTopReached = onHistoryTopReached,
         onCompact = viewModel::onCompact,
+        onCancelJob = viewModel::onCancelJob,
     )
     fullScreenImage?.let { image ->
         FullScreenImageViewer(
@@ -234,9 +237,11 @@ private fun ChatContent(
     onOpenSubagent: (String) -> Unit = {},
     onHistoryTopReached: () -> Unit = {},
     onCompact: () -> Unit = {},
+    onCancelJob: (String) -> Unit = {},
 ) {
     var showModelPicker by rememberSaveable { mutableStateOf(false) }
     var showTodos by rememberSaveable { mutableStateOf(false) }
+    var showJobs by rememberSaveable { mutableStateOf(false) }
     // Ticket 089: system back closes the read-only resolved view before navigating.
     BackHandler(enabled = uiState.resolvedQuestionView != null) { onCloseResolvedQuestion() }
     // Explicit "go to the newest" intent (ticket 051): the send wrapper below
@@ -364,18 +369,34 @@ private fun ChatContent(
                         )
                     }
                 }
-                // The agent's todo list (ticket 042) sits directly above the composer;
-                // its TodoList tool calls no longer appear as timeline rows.
+                // The agent's todo list (ticket 042) and the background-jobs counter
+                // (ticket 092) sit directly above the composer, sharing the row —
+                // TodosSummaryRow was designed for this (TodosWidget.kt). The jobs
+                // pill hides when nothing is running (web dock parity).
+                val todosVisible = !uiState.todos.isNullOrEmpty()
+                val jobsVisible = uiState.jobs.any { it.isRunning }
                 AnimatedVisibility(
-                    visible = !uiState.todos.isNullOrEmpty(),
+                    visible = todosVisible || jobsVisible,
                     enter = expandVertically() + fadeIn(),
                     exit = shrinkVertically() + fadeOut(),
                 ) {
-                    TodosSummaryRow(
-                        todos = uiState.todos.orEmpty(),
-                        onClick = { showTodos = true },
+                    Row(
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-                    )
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        if (todosVisible) {
+                            TodosSummaryRow(
+                                todos = uiState.todos.orEmpty(),
+                                onClick = { showTodos = true },
+                            )
+                        }
+                        if (jobsVisible) {
+                            JobsSummaryRow(
+                                jobs = uiState.jobs,
+                                onClick = { showJobs = true },
+                            )
+                        }
+                    }
                 }
                 ChatInputBar(
                     text = uiState.inputText,
@@ -465,6 +486,20 @@ private fun ChatContent(
     }
     if (showTodos && !todos.isNullOrEmpty()) {
         TodosSheet(todos = todos, onDismiss = { showTodos = false })
+    }
+    // The jobs sheet (ticket 092) stays open while jobs flip terminal — recently
+    // finished jobs linger in the list by design. Tapping a sub-agent row closes it
+    // and opens the sub-agent page.
+    if (showJobs && uiState.jobs.isNotEmpty()) {
+        JobsSheet(
+            jobs = uiState.jobs,
+            onCancel = onCancelJob,
+            onOpenSubagent = { agentId ->
+                showJobs = false
+                onOpenSubagent(agentId)
+            },
+            onDismiss = { showJobs = false },
+        )
     }
 }
 

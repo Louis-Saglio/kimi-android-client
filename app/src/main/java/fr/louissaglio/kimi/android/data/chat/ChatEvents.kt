@@ -158,6 +158,17 @@ sealed interface SessionEvent {
      * of them ends the compacting state. [cause] is the payload's best-effort message;
      * null when the (unverified) shape carried none. */
     data class CompactionFailed(val kind: String, val cause: String?) : SessionEvent
+
+    /** `task.started` (docs/server-api.md, Background lifecycle — ticket 092): a
+     * background task (sub-agent or bash) registered in the task store — REST-visible
+     * from here. [info] carries the CORE status vocabulary. */
+    data class TaskStarted(val info: TaskInfo) : SessionEvent
+
+    /** `task.terminated`: the task reached its terminal status ([TaskInfo.status] still
+     * core vocabulary — killed/timed_out/lost included; the collector maps it to the
+     * REST wire one). `task.notified` and the legacy `background.task.*` aliases are
+     * deliberately NOT parsed (web parity) — they fall into the unknown-type Log path. */
+    data class TaskTerminated(val info: TaskInfo) : SessionEvent
 }
 
 /** Context window fill of a session: used tokens out of the model's maximum. */

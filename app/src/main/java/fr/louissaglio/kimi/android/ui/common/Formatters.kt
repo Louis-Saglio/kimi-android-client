@@ -1,5 +1,6 @@
 package fr.louissaglio.kimi.android.ui.common
 
+import java.time.Duration
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -36,4 +37,18 @@ internal fun formatFileSize(bytes: Long): String = when {
     bytes >= 1_000_000 -> scaled(bytes, 1_000_000, " MB")
     bytes >= 1_000 -> scaled(bytes, 1_000, " kB")
     else -> "$bytes B"
+}
+
+/** Elapsed duration (ticket 092's jobs sheet): "mm:ss", switching to "h:mm:ss" past
+ * an hour — the web client's task-panel convention. Negative clamps to zero. */
+internal fun formatElapsed(duration: Duration): String {
+    val totalSeconds = duration.seconds.coerceAtLeast(0)
+    val hours = totalSeconds / 3_600
+    val minutes = totalSeconds % 3_600 / 60
+    val seconds = totalSeconds % 60
+    return if (hours > 0) {
+        "%d:%02d:%02d".format(hours, minutes, seconds)
+    } else {
+        "%02d:%02d".format(minutes, seconds)
+    }
 }

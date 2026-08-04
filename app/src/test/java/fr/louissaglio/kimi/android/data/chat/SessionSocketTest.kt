@@ -3,6 +3,7 @@ package fr.louissaglio.kimi.android.data.chat
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.webSocketUpgradeResponse
+import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -59,6 +60,97 @@ class SessionSocketTest {
             job.cancel()
         }
         emitted
+    }
+
+    @Test
+    fun `task started and terminated frames parse into task events`() = runBlocking {
+        val emitted = runSocketEvents(
+            // Same shape as the verbatim task.terminated of docs/server-api.md
+            // (Background lifecycle), with the running status and no endedAt.
+            """{"type":"task.started","seq":52,"epoch":"ep_1","session_id":"session_1",""" +
+                """"payload":{"type":"task.started",""" +
+                """"info":{"taskId":"agent-7noib8bb","description":"doc-verify-bg","status":"running",""" +
+                """"detached":true,"startedAt":1785210101939,"timeoutMs":7200000,""" +
+                """"kind":"agent","agentId":"agent-13","subagentType":"explore"},""" +
+                """"agentId":"main","sessionId":"session_1"}}""",
+            // Verbatim task.terminated of the cancel run (docs/server-api.md:1467-1478):
+            // CORE status "killed", epoch-millis times, the sub-agent link in agentId.
+            """{"type":"task.terminated","seq":109,"epoch":"ep_1","session_id":"session_1",""" +
+                """"payload":{"type":"task.terminated",""" +
+                """"info":{"taskId":"agent-lftjyr4o","description":"doc-verify-cancel",""" +
+                """"status":"killed","detached":true,"startedAt":1785210101939,"endedAt":1785210118804,""" +
+                """"stopReason":"Aborted by the user","timeoutMs":7200000,""" +
+                """"kind":"agent","agentId":"agent-14","subagentType":"agent"},""" +
+                """"agentId":"main","sessionId":"session_1"}}""",
+        )
+
+        assertEquals(
+            listOf(
+                SocketEvent.Event(
+                    SessionEvent.TaskStarted(
+                        TaskInfo(
+                            taskId = "agent-7noib8bb",
+                            description = "doc-verify-bg",
+                            status = TaskInfo.Status.Running,
+                            startedAt = Instant.ofEpochMilli(1785210101939),
+                            kind = TaskInfo.Kind.Agent,
+                            agentId = "agent-13",
+                            subagentType = "explore",
+                        ),
+                    ),
+                ),
+                SocketEvent.Event(
+                    SessionEvent.TaskTerminated(
+                        TaskInfo(
+                            taskId = "agent-lftjyr4o",
+                            description = "doc-verify-cancel",
+                            status = TaskInfo.Status.Killed,
+                            startedAt = Instant.ofEpochMilli(1785210101939),
+                            endedAt = Instant.ofEpochMilli(1785210118804),
+                            stopReason = "Aborted by the user",
+                            kind = TaskInfo.Kind.Agent,
+                            agentId = "agent-14",
+                            subagentType = "agent",
+                        ),
+                    ),
+                ),
+            ),
+            emitted.filterIsInstance<SocketEvent.Event>(),
+        )
+    }
+
+    @Test
+    fun `task notified and the legacy background task aliases are ignored`() = runBlocking {
+        // task.notified and the legacy background.task.* aliases are deliberately NOT
+        // parsed (web parity — ticket 092): they fall into the unknown-type ignore,
+        // so the settle wait must find them delivered with NO event produced.
+        val emitted = runSocketEvents(
+            """{"type":"task.notified","seq":89,"epoch":"ep_1","session_id":"session_1",""" +
+                """"payload":{"type":"task.notified","notificationType":"task.completed","title":"t",""" +
+                """"body":"b","severity":"info","sourceKind":"background_task","sourceId":"agent-7noib8bb",""" +
+                """"agentId":"main","sessionId":"session_1"}}""",
+            """{"type":"background.task.started","seq":53,"epoch":"ep_1","session_id":"session_1",""" +
+                """"payload":{"type":"background.task.started",""" +
+                """"info":{"taskId":"agent-7noib8bb","description":"doc-verify-bg","status":"running",""" +
+                """"startedAt":1785210101939,"kind":"agent","agentId":"agent-13"},""" +
+                """"agentId":"main","sessionId":"session_1"}}""",
+            """{"type":"background.task.terminated","seq":85,"epoch":"ep_1","session_id":"session_1",""" +
+                """"payload":{"type":"background.task.terminated",""" +
+                """"info":{"taskId":"agent-7noib8bb","description":"doc-verify-bg","status":"completed",""" +
+                """"startedAt":1785210101939,"endedAt":1785210118804,"kind":"agent","agentId":"agent-13"},""" +
+                """"agentId":"main","sessionId":"session_1"}}""",
+            // One deliverable event to await; the settle covers the ignored frames.
+            """{"type":"assistant.delta","seq":90,"epoch":"ep_1","volatile":true,"offset":0,""" +
+                """"session_id":"session_1","timestamp":"2026-08-03T00:00:00.000Z",""" +
+                """"payload":{"type":"assistant.delta","turnId":1,"delta":"after","agentId":"main","sessionId":"session_1"}}""",
+            eventCount = 1,
+            settleMillis = 200,
+        )
+
+        assertEquals(
+            listOf(SocketEvent.Event(SessionEvent.AssistantDelta("after"))),
+            emitted.filterIsInstance<SocketEvent.Event>(),
+        )
     }
 
     @Test

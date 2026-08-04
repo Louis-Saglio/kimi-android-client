@@ -30,7 +30,7 @@ import fr.louissaglio.kimi.android.di.StreamCoalesceWindowMillis
 import fr.louissaglio.kimi.android.navigation.Chat
 import fr.louissaglio.kimi.android.ui.common.formatTokenCount
 import javax.inject.Inject
-import kotlinx.coroutines.Job
+import kotlinx.coroutines.Job as CoroutineJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -167,6 +167,11 @@ class ChatViewModel internal constructor(
         /** The agent's latest todo list, mirrored from its TodoList tool calls
          * (ticket 042); null or empty hides the widget above the composer. */
         val todos: List<Todo>? = null,
+        /** Background tasks of the session (ticket 092): background sub-agents and
+         * bash, fed by the JobsStore collaborator (REST seed + task.* events). The
+         * pill above the composer counts the Running ones; terminal jobs linger for
+         * the sheet. */
+        val jobs: List<Job> = emptyList(),
         /** True while older history exists (scroll-to-top loads it, ticket 043). */
         val hasMoreHistory: Boolean = false,
         /** True while an older history page loads; the list shows a header spinner. */
@@ -252,6 +257,10 @@ class ChatViewModel internal constructor(
         /** The compact POST failed (e.g. the empty-session 40910 — the server's own
          * message) or a compaction ended with failed/cancelled/blocked. */
         data class CompactionFailed(override val message: String) : Effect
+
+        /** The task-cancel POST failed (ticket 092): the optimistic flip was reverted,
+         * the job is still running. */
+        data class JobCancelFailed(override val message: String) : Effect
     }
 
     val uiState: StateFlow<UiState>
@@ -285,6 +294,18 @@ class ChatViewModel internal constructor(
     /** The question wizard (ticket 072): pending-question lifecycle, answer submission,
      * dismissal. Same logic-holder contract as [attachments]. */
     private val questions = QuestionWizard(
+        scope = { viewModelScope },
+        chatRepository = chatRepository,
+        settingsRepository = settingsRepository,
+        sessionId = sessionId,
+        state = { uiState.value },
+        updateState = { transform -> uiState.update(transform) },
+        sendEffect = { effect -> _effects.send(effect) },
+    )
+
+    /** The jobs widget's store (ticket 092): background-task list (REST seed +
+     * task.* events), task cancellation. Same logic-holder contract as [questions]. */
+    private val jobsStore = JobsStore(
         scope = { viewModelScope },
         chatRepository = chatRepository,
         settingsRepository = settingsRepository,
@@ -345,13 +366,13 @@ class ChatViewModel internal constructor(
      * seed. The job lives on viewModelScope (not the gate coroutine): a gate flip
      * mid-sync cancels only the join, never the sync.
      */
-    private var coldStartJob: Job? = null
+    private var coldStartJob: CoroutineJob? = null
 
     /** True once a cold-start sync completed (fresh apply or already-fresh join) —
      * the gate from which [onScreenStarted] runs the within-process resume set. */
     private var coldStartDone = false
 
-    private fun ensureColdStart(): Job {
+    private fun ensureColdStart(): CoroutineJob {
         val existing = coldStartJob
         if (existing != null && (existing.isActive || coldStartDone)) return existing
         return viewModelScope.launch { runColdStart() }.also { coldStartJob = it }
@@ -389,6 +410,9 @@ class ChatViewModel internal constructor(
                 seedSessionStatus()
             }
         }
+        // Background tasks (ticket 092): REST is only the cold-start sync — the
+        // socket's task.* events feed the list from here on.
+        jobsStore.seed()
         coldStartDone = true
     }
 
@@ -736,6 +760,12 @@ class ChatViewModel internal constructor(
 
     fun onResolvedQuestionBack() = questions.onResolvedBack()
 
+    // --- Jobs widget (ticket 092): the logic lives in [JobsStore] — this is the
+    // screen-facing intent, kept as a one-line delegate. ----------------------------
+
+    /** Cancels one running background job; the server's task.terminated confirms it. */
+    fun onCancelJob(taskId: String) = jobsStore.cancel(taskId)
+
     /**
      * Collects the session socket (one run per socket-gate opening; cancelled when the
      * gate closes). Main-agent session events route through [deltaCoalescer] (ticket
@@ -886,6 +916,10 @@ class ChatViewModel internal constructor(
             // lifecycle, including the seed guard's bump (ticket 072).
             is SessionEvent.QuestionRequested -> questions.onRequested(event)
             is SessionEvent.QuestionResolved -> questions.onResolved(event)
+            // Background tasks (ticket 092): the collaborator owns the list, including
+            // the core→wire status mapping.
+            is SessionEvent.TaskStarted -> jobsStore.onStarted(event.info)
+            is SessionEvent.TaskTerminated -> jobsStore.onTerminated(event.info)
             is SessionEvent.ContextUsageUpdated -> {
                 contextUsageSeedGuard.bump()
                 uiState.update { it.copy(contextUsage = event.contextUsage) }
@@ -936,7 +970,7 @@ class ChatViewModel internal constructor(
      * the newer call has the newer connection state (and the newer turn-event guard)
      * and cancels the superseded one before it spends a /status round trip.
      */
-    private var resyncJob: Job? = null
+    private var resyncJob: CoroutineJob? = null
 
     private fun resyncHistoryAfterDrop() {
         val turnEventsAtStart = turnSeedGuard.capture()
@@ -968,6 +1002,8 @@ class ChatViewModel internal constructor(
                     }
                 }
         }
+        // No replay will come: task.* events missed in the gap heal from REST too.
+        jobsStore.seed()
     }
 
     /** Newest-page history refetch (initial load, turn-end commit, resync — ticket

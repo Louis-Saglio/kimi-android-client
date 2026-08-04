@@ -1,5 +1,6 @@
 package fr.louissaglio.kimi.android.data.chat
 
+import android.util.Log
 import java.time.Instant
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -219,7 +220,92 @@ class ChatMessageMapper @Inject constructor(json: Json) {
     private fun progressText(progress: JsonObject?): String =
         progress?.get("text")?.let { (it as? JsonPrimitive)?.contentOrNull }.orEmpty()
 
+    /** REST task → domain (ticket 092): kind `tool` (question flows) is excluded by
+     * design — those surface as question cards in chat; unknown kind/status values and
+     * unusable timestamps drop the entry with a Log.w, never crash. */
+    fun toDomain(dto: TaskDto): BackgroundTask? {
+        val kind = when (dto.kind) {
+            "subagent" -> BackgroundTask.Kind.Subagent
+            "bash" -> BackgroundTask.Kind.Bash
+            "tool" -> return null
+            else -> {
+                Log.w(TAG, "Dropping task '${dto.id}' with unknown kind '${dto.kind}'")
+                return null
+            }
+        }
+        val status = when (dto.status) {
+            "running" -> BackgroundTask.Status.Running
+            "completed" -> BackgroundTask.Status.Completed
+            "failed" -> BackgroundTask.Status.Failed
+            "cancelled" -> BackgroundTask.Status.Cancelled
+            else -> {
+                Log.w(TAG, "Dropping task '${dto.id}' with unknown status '${dto.status}'")
+                return null
+            }
+        }
+        // started_at == created_at on the wire (docs/server-api.md); a malformed one
+        // falls back to the other, and both missing drops the entry — the elapsed
+        // column has nothing to show for it.
+        val startedAt = parseInstant(dto.startedAt) ?: parseInstant(dto.createdAt)
+        val createdAt = parseInstant(dto.createdAt) ?: startedAt
+        if (startedAt == null || createdAt == null) {
+            Log.w(TAG, "Dropping task '${dto.id}' with unusable timestamps")
+            return null
+        }
+        return BackgroundTask(
+            id = dto.id,
+            kind = kind,
+            description = dto.description,
+            status = status,
+            createdAt = createdAt,
+            startedAt = startedAt,
+            completedAt = parseInstant(dto.completedAt),
+            agentId = dto.agentId,
+        )
+    }
+
+    /** WS task `info` → domain (ticket 092): the CORE status/kind vocabulary (the
+     * collector maps it to the REST wire one); times are epoch millis, unlike REST's
+     * ISO strings. Unknown values drop the event with a Log.w, never crash. */
+    fun toDomain(dto: TaskInfoDto): TaskInfo? {
+        val status = when (dto.status) {
+            "running" -> TaskInfo.Status.Running
+            "completed" -> TaskInfo.Status.Completed
+            "failed" -> TaskInfo.Status.Failed
+            "timed_out" -> TaskInfo.Status.TimedOut
+            "killed" -> TaskInfo.Status.Killed
+            "lost" -> TaskInfo.Status.Lost
+            else -> {
+                Log.w(TAG, "Dropping task event '${dto.taskId}' with unknown status '${dto.status}'")
+                return null
+            }
+        }
+        val kind = when (dto.kind) {
+            "agent" -> TaskInfo.Kind.Agent
+            "process" -> TaskInfo.Kind.Process
+            else -> {
+                Log.w(TAG, "Dropping task event '${dto.taskId}' with unknown kind '${dto.kind}'")
+                return null
+            }
+        }
+        return TaskInfo(
+            taskId = dto.taskId,
+            description = dto.description,
+            status = status,
+            startedAt = Instant.ofEpochMilli(dto.startedAt),
+            endedAt = dto.endedAt?.let(Instant::ofEpochMilli),
+            stopReason = dto.stopReason,
+            kind = kind,
+            agentId = dto.agentId,
+            subagentType = dto.subagentType,
+        )
+    }
+
+    private fun parseInstant(value: String?): Instant? =
+        value?.let { runCatching { Instant.parse(it) }.getOrNull() }
+
     private companion object {
+        const val TAG = "ChatMessageMapper"
         val DATA_URL_RE = Regex("""^data:([^;,]+);base64,(.*)$""", RegexOption.DOT_MATCHES_ALL)
     }
 }

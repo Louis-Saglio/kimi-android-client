@@ -136,7 +136,15 @@ also the regression signal for "verified fixed" tickets.
   (DTO→domain), and `SessionActivityStore` (`data/sessions/` — process-lifetime
   record of successfully sent prompts/steers; the session list consumes it on
   return to bump those rows before its silent refresh, ticket 086). New chat
-  endpoints belong in a collaborator, not the facade.
+  endpoints belong in a collaborator, not the facade. Background tasks (ticket
+  092): `ChatApi.listTasks/cancelTask` (REST `/tasks`; a terminal-task cancel
+  answers envelope 40904 → typed `DataError.Api`), `task.started`/
+  `task.terminated` WS frames → `SessionEvent.TaskStarted/TaskTerminated` (the
+  shared `TaskInfo` carries the CORE status vocabulary — killed/timed_out/lost —
+  and epoch-millis times, unlike REST's ISO strings; `task.notified` and the
+  legacy `background.task.*` aliases are deliberately unparsed). Domain:
+  `BackgroundTask`/`TaskInfo` in `data/chat/Tasks.kt` — kind `tool` (question
+  flows) is filtered out at the mapping boundary.
 - `data/attachments/` — `AttachmentStore` owns all platform file I/O (content
   resolver reads capped at 256 MiB — a client-side guard; the server removed
   its own upload cap in 0.31.0, see ticket 059; cache writes;
@@ -151,14 +159,17 @@ also the regression signal for "verified fixed" tickets.
 - Chat feature collaborators (the 065 `DeltaCoalescer` pattern, generalized by
   072): a cohesive chat feature gets an `internal` class in `ui/chat`
   (`DeltaCoalescer`, `SeedGuard`, `ChatAttachments`, `QuestionWizard`,
-  `HistoryPager`) owned by the ViewModel. Collaborators are logic holders, NOT
-  second state sources —
+  `HistoryPager`, `JobsStore`) owned by the ViewModel. Collaborators are logic
+  holders, NOT second state sources —
   the screen's `UiState`/`Effect` stay in the ViewModel; intents arrive as
   calls (one-line delegates keep the screen-facing API) and updates report back
   through constructor callbacks (a state-transform sink, an effect sink, a
   scope provider). New chat features grow a collaborator from day one instead
   of landing in `ChatViewModel`. Feature tests sit next to the collaborator on
-  the shared `ChatViewModelTestBase` harness.
+  the shared `ChatViewModelTestBase` harness. `JobsStore` (ticket 092) backs the
+  composer jobs pill/sheet (`UiState.jobs`, event-driven — REST `/tasks` is only
+  the cold-start/`resync_required` seed, never polled; cancel is optimistic,
+  40904 = already-terminal success).
 - Cold start / resync (085, freshness model 091): `GET .../snapshot` is the single
   entry point — `SnapshotSync` (ui/chat, session-scoped singleton like the store, so
   the page-on-top restore path with no ChatViewModel runs the same rebuild) owns the

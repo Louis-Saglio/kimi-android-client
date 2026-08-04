@@ -339,6 +339,17 @@ class SessionSocket @Inject constructor(
                 ?.let { onEvent(SessionEvent.SubagentFailed(it.subagentId, it.error.orEmpty())) }
             "subagent.suspended" -> frame.decodePayload<SubagentLifecyclePayload>()
                 ?.let { onEvent(SessionEvent.SubagentSuspended(it.subagentId)) }
+            // Background tasks (docs/server-api.md, Background lifecycle — ticket 092):
+            // info carries the CORE status vocabulary; an undecodable/unknown info
+            // drops the event with a Log.w in the mapper. task.notified and the legacy
+            // background.task.started/terminated aliases are NOT parsed (web parity) —
+            // they fall into the unknown-type ignore below.
+            "task.started" -> frame.decodePayload<TaskEventPayload>()
+                ?.info?.let { mapper.toDomain(it) }
+                ?.let { onEvent(SessionEvent.TaskStarted(it)) }
+            "task.terminated" -> frame.decodePayload<TaskEventPayload>()
+                ?.info?.let { mapper.toDomain(it) }
+                ?.let { onEvent(SessionEvent.TaskTerminated(it)) }
             // The subscribe ack (docs/server-api.md): a refused resume cursor
             // (resync_required — replay buffer overrun) means no replay will come;
             // the cursor is dropped and the collector re-syncs from REST (ticket 048).

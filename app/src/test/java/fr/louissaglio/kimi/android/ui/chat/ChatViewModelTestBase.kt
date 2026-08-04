@@ -103,6 +103,11 @@ abstract class ChatViewModelTestBase {
     protected var questionsBody =
         """{"code":0,"msg":"success","data":{"items":[]},"request_id":"r"}"""
 
+    /** Served for GET /tasks (ticket 092 — the jobs widget's cold-start seed). */
+    @Volatile
+    protected var tasksBody =
+        """{"code":0,"msg":"success","data":{"items":[]},"request_id":"r"}"""
+
     @Volatile
     protected var messagesBody =
         """{"code":0,"msg":"success","data":{"items":[],"has_more":false},"request_id":"r"}"""
@@ -337,6 +342,15 @@ abstract class ChatViewModelTestBase {
                             MockResponse(body = questionsBody)
                         }
                     }
+                    path.startsWith("/api/v1/sessions/session_1/tasks") ->
+                        if (request.method == "POST") {
+                            // POST .../tasks/{id}:cancel — a running task acks cancelled:true.
+                            MockResponse(body =
+                                """{"code":0,"msg":"success","data":{"cancelled":true},"request_id":"r"}""",
+                            )
+                        } else {
+                            MockResponse(body = tasksBody)
+                        }
                     path == "/api/v1/files" -> {
                         filesResponseGate?.await(5, TimeUnit.SECONDS)
                         if (uploadsSucceed) {
@@ -581,6 +595,42 @@ abstract class ChatViewModelTestBase {
         """{"type":"assistant.delta","seq":23,"epoch":"ep_1","volatile":true,"offset":0,""" +
             """"session_id":"session_1","timestamp":"2026-07-28T03:37:36.100Z",""" +
             """"payload":{"type":"assistant.delta","turnId":0,"delta":"$delta","agentId":"agent-12","sessionId":"session_1"}}"""
+
+    /** Verbatim-shaped 0.31.0 task.started (docs/server-api.md, Background lifecycle —
+     * ticket 092): CORE status vocabulary, epoch-millis times, info.agentId linking a
+     * sub-agent task to its page id (null on bash). */
+    protected fun taskStartedFrame(
+        taskId: String,
+        description: String,
+        kind: String = "agent",
+        agentId: String? = "agent-13",
+        seq: Int = 52,
+    ): String =
+        """{"type":"task.started","seq":$seq,"epoch":"ep_1","session_id":"session_1",""" +
+            """"timestamp":"2026-08-03T00:00:00.000Z","payload":{"type":"task.started",""" +
+            """"info":{"taskId":"$taskId","description":"$description","status":"running",""" +
+            """"detached":true,"startedAt":1785210101939,"timeoutMs":7200000,""" +
+            """"kind":"$kind","agentId":${agentId?.let { "\"$it\"" } ?: "null"},""" +
+            """"subagentType":"explore"},"agentId":"main","sessionId":"session_1"}}"""
+
+    /** Verbatim-shaped 0.31.0 task.terminated (docs/server-api.md — the cancel run's
+     * frame carries status "killed" + stopReason "Aborted by the user"). [status] is
+     * the CORE vocabulary. */
+    protected fun taskTerminatedFrame(
+        taskId: String,
+        status: String,
+        description: String = "doc-verify-bg",
+        kind: String = "agent",
+        agentId: String? = "agent-13",
+        seq: Int = 109,
+    ): String =
+        """{"type":"task.terminated","seq":$seq,"epoch":"ep_1","session_id":"session_1",""" +
+            """"timestamp":"2026-08-03T00:00:01.000Z","payload":{"type":"task.terminated",""" +
+            """"info":{"taskId":"$taskId","description":"$description","status":"$status",""" +
+            """"detached":true,"startedAt":1785210101939,"endedAt":1785210118804,""" +
+            """"stopReason":"Aborted by the user","timeoutMs":7200000,""" +
+            """"kind":"$kind","agentId":${agentId?.let { "\"$it\"" } ?: "null"},""" +
+            """"subagentType":"agent"},"agentId":"main","sessionId":"session_1"}}"""
 
     /** Verbatim 0.30.0 compaction.started (docs/server-api.md, Compact — ticket 056). */
     protected fun compactionStartedFrame(): String =

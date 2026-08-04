@@ -300,6 +300,62 @@ data class QuestionListData(
     val items: List<QuestionRequestedPayload> = emptyList(),
 )
 
+// --- REST /tasks + task.* WS events (docs/server-api.md, Background lifecycle —
+// ticket 092) ------------------------------------------------------------------
+// Background tasks only: background sub-agents, background bash, question flows (the
+// last filtered out at the mapping boundary). Terminal tasks stay listed.
+
+/** `data` of `GET .../tasks?status=…`. */
+@Serializable
+data class TaskListData(
+    val items: List<TaskDto> = emptyList(),
+)
+
+/** One REST task object; thinner than the WS/snapshot shape (no subagent_type, no
+ * parent_tool_call_id, created_at == started_at). Times are ISO-8601 strings. */
+@Serializable
+data class TaskDto(
+    val id: String = "",
+    val kind: String = "",
+    val description: String = "",
+    val status: String = "",
+    @SerialName("created_at") val createdAt: String? = null,
+    @SerialName("started_at") val startedAt: String? = null,
+    @SerialName("completed_at") val completedAt: String? = null,
+    // Not in the documented verbatim shape; decoded defensively for servers that carry
+    // it — the sub-agent page link otherwise arrives via task.started's info.agentId.
+    @SerialName("agent_id") val agentId: String? = null,
+)
+
+/** `data` of `POST .../tasks/{id}:cancel`; a terminal task answers envelope 40904 with
+ * `cancelled:false`. */
+@Serializable
+data class TaskCancelData(
+    val cancelled: Boolean = false,
+)
+
+/** Shared payload shape of `task.started`/`task.terminated` (docs/server-api.md). */
+@Serializable
+data class TaskEventPayload(
+    val info: TaskInfoDto? = null,
+)
+
+/** The WS task `info` object: [status] is the CORE vocabulary (running | completed |
+ * failed | timed_out | killed | lost), times are epoch MILLIS (not REST's ISO strings).
+ * `detached`/`timeoutMs` exist on the wire but are not consumed. */
+@Serializable
+data class TaskInfoDto(
+    val taskId: String = "",
+    val description: String = "",
+    val status: String = "",
+    val startedAt: Long = 0,
+    val endedAt: Long? = null,
+    val stopReason: String? = null,
+    val kind: String = "",
+    val agentId: String? = null,
+    val subagentType: String? = null,
+)
+
 /** `subagent.spawned` payload (docs/server-api.md, Sub-agents): the only frame carrying
  * a sub-agent's identity metadata. `parentToolCallUuid`/`swarmIndex` exist upstream but
  * are not consumed. The frame itself is tagged `agentId:"main"`. */
