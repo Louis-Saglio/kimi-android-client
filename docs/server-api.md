@@ -2,7 +2,7 @@
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
 by Kimi Code Web. Documented and verified against the live server on 2026-08-05
-(server version `0.32.0`, `"backend": "v2"`, WS `protocol_version: 2`).
+(server version `0.33.0`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
@@ -14,14 +14,55 @@ the workspace list used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `0.31.1`
-(verified 2026-07-31; see git history), `0.31.0`
+**Protocol history:** this document previously described server `0.32.0`
+(verified 2026-08-05; see git history), `0.31.1`
+(verified 2026-07-31), `0.31.0`
 (verified 2026-07-30), `0.29.2`
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
-that, `0.27.0` before that, and `0.23.3` before that. The drift from 0.31.1 to
-0.32.0 is again **minor** for the core loop: every shape the Android app
-parses still decodes. The real changes:
+that, `0.27.0` before that, and `0.23.3` before that. The drift from 0.32.0 to
+0.33.0 is again **minor** for the core loop: every shape the Android app
+parses still decodes. An upstream tree-diff of `packages/protocol` and
+`packages/kap-server` between the two tags shows only one protocol file
+(`events.ts`, an optional field on an MCP tool update) and three kap-server
+areas touched (search, sessions-list pagination internals, skills listing).
+The real changes:
+
+- **Search (the only shaped drift):** page tokens are now **v2 keyset
+  cursors** pinned to an index generation (`{"v":2,"f":…,"g":1,"b":[score,
+  time,key]}` — opaque to clients either way); `index_state` gained optional
+  **`stale`** (observed live `true` during an index rebuild) and
+  **`degraded`** (never observed; source-derived); the `incomplete` enum
+  gained `postings_budget`/`deadline` (source-derived, never observed); the
+  `40001` search-error envelopes (`pageToken …`) are Error2 domain errors and
+  carry a `stack` string, unlike schema-validation `40001`s. Details in the
+  Search section.
+- **Sessions list pagination internals rewritten** on the same keyset-cursor
+  machinery — **wire shape unchanged**: same params, same `{items, has_more}`
+  envelope, unknown cursor still answers `{"items":[],"has_more":false}`.
+  Re-verified live (multi-page `before_id`/`after_id` walks).
+- **Tools catalog:** `GET /api/v1/tools` now lists **26** builtin tools —
+  **`ReadMediaFile` is gone** (was 27 since 0.31.0). Content drift, not
+  shape drift.
+- **`lastPrompt` redaction (new):** session-dir absolute paths in the
+  session object's `last_prompt` (REST) and `session.meta.updated`'s
+  `patch.lastPrompt` (WS) are scrubbed by the server to
+  `/home/ubuntu/.[redacted].txt`. `turn.started.prompt`, `context.spliced`
+  and `GET .../messages` history still carry full paths — display-only.
+- **Everything else byte-identical**, re-verified live: auth, meta (incl.
+  `experimental_flags`), models, sessions create/get/status/snapshot,
+  workspaces + trust, messages, transcript, prompts/steer/abort, compact
+  (both variants + all `40910`s), questions, approvals (full manual
+  round-trip), TodoList write contract, files (incl. the attachment rewrite),
+  sub-agents foreground + background, WS hello/ack/cursor-resume/resync.
+- **Upstream, out of the core loop's sight:** the CLI surfaces now default
+  to the agent-core-v2 engine (the kap-server API already ran on it), and
+  `apps/kimi-web` was **deleted** — the web client ships as a prebuilt
+  bundle (`apps/kimi-code/dist-web/`), so the web-client source is no longer
+  a protocol reference from 0.33.0 onward.
+
+The drift from 0.31.1 to 0.32.0 was likewise **minor** for the core loop.
+Its changes:
 
 - **Meta:** `GET /api/v1/meta` gained an **`experimental_flags`** object (the
   effective server-side experiment switches; `{"secondary-model":false,
@@ -173,8 +214,9 @@ Every REST response is JSON wrapped in an envelope:
   over HTTP 200. Error envelopes may also carry `details` (validation errors)
   and a server-side `stack` string — since 0.32.0 `stack` rides on every
   Error2 domain-error envelope (verified on `40401`, `40402`, `40910`,
-  `50001`); validation (`40001`) and `40406` envelopes still omit it. Ignore
-  it either way.
+  `50001`), and since 0.33.0 that includes the search route's `40001`-coded
+  `GlobalSearchError`s (`pageToken …`); schema-validation `40001`s (Zod,
+  with `details`) and `40406` envelopes still omit it. Ignore it either way.
 
 ## Meta
 
@@ -188,16 +230,16 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
 {
   "code": 0, "msg": "success",
   "data": {
-    "server_version": "0.32.0",
+    "server_version": "0.33.0",
     "capabilities": {"websocket": true, "file_upload": true, "fs_query": true, "mcp": true, "tasks": true, "terminal": true},
-    "server_id": "01KZ73PNGDTBCN43CGVDJHKW80",
-    "started_at": "2026-08-04T19:23:42.989Z",
+    "server_id": "01KZ9P3ESZ9RDMQVWSD940VH8P",
+    "started_at": "2026-08-05T19:23:45.343Z",
     "open_in_apps": [],
     "dangerous_bypass_auth": false,
     "backend": "v2",
     "experimental_flags": {"secondary-model": false, "tool-select": false, "persistence_minidb_readmodel": false}
   },
-  "request_id": "01KZ7V26B7HW8KP7GQYS9Y6CWV"
+  "request_id": "01KZ9P45K79DRWGD2PR8J9ZEVA"
 }
 ```
 
@@ -307,7 +349,16 @@ Session object shape (0.31.0, fields truncated for brevity):
 - `message_count` and `last_seq` are still present but observed stuck at `0`
   (re-verified 2026-07-23 after several turns) — do not rely on them.
 - The list envelope carries `has_more` for pagination (verified with
-  `page_size=2&before_id=<last id of page>`).
+  `page_size=2&before_id=<last id of page>`; re-verified 2026-08-05 on
+  0.33.0 after the upstream keyset-cursor rewrite — multi-page
+  `before_id`/`after_id` walks, and an unknown cursor still answers
+  `{"items":[],"has_more":false}`).
+- Since 0.33.0 the server **redacts session-dir absolute paths** in
+  `last_prompt` (and in `session.meta.updated`'s `patch.lastPrompt`):
+  `/home/ubuntu/.kimi-code/sessions/…/attachments/f_…-name.txt` becomes
+  `/home/ubuntu/.[redacted].txt` (verified live 2026-08-05, server-emitted).
+  Display-only — `turn.started.prompt`, `context.spliced` and
+  `GET .../messages` history still carry the full path.
 
 ### Create — `POST /api/v1/sessions`
 
@@ -674,7 +725,9 @@ Out of scope for the app (unused siblings under the same route prefix):
 
 ### Global message search — `POST /api/v1/search`
 
-New in 0.31.0 (verified live 2026-07-30). Global full-text search over user
+New in 0.31.0 (verified live 2026-07-30; re-verified 2026-08-05 on 0.33.0 —
+two-page token walk, same-generation replay, tampered/foreign-fingerprint
+token rejections). Global full-text search over user
 messages, assistant replies and session titles, across all sessions.
 
 Request body (all fields optional except `query`):
@@ -699,18 +752,38 @@ Response `data`:
   `time` is epoch ms; `turn` is 0-based and absent on title hits; `step_id`
   appears on assistant hits; `score` is a float (0 in `literal` mode).
 - `has_more`, `page_token?` — the token is opaque base64 and present only
-  when `has_more` is true.
-- `incomplete?` — e.g. `"candidate_cap"` when the result set was truncated.
+  when `has_more` is true. Since 0.33.0 it is a **v2 keyset cursor** pinned
+  to an index generation (decodes to `{"v":2,"f":"<query fingerprint>",
+  "g":<generation>,"b":[<score>,<time>,<key>]}`); legacy v1 offset tokens
+  (`{"f":…,"s":…}`) are still accepted for a transition window, and responses
+  always issue v2 tokens back. Treat it as opaque either way. Replaying a
+  token within the same generation works (verified live); a token from an
+  older generation is rejected (source-derived — the documented signal to
+  restart the search); a tampered token answers HTTP 200 with
+  `{"code":40001,"msg":"pageToken is malformed"}` (an Error2
+  `GlobalSearchError` — it carries a `stack` string, unlike Zod-validation
+  `40001`s; verified live), and a token whose query fingerprint doesn't
+  match the request answers `40001 "pageToken does not match the query
+  conditions; query conditions must not change mid-pagination"`.
+- `incomplete?` — present when the result set was truncated; one of
+  `"candidate_cap"` | `"postings_budget"` | `"deadline"` (the last two are
+  new in 0.33.0, source-derived — no truncated search occurred live).
 - `index_state` — `{state ("building"|"ready"|"readonly"), indexed_sessions,
-  total_sessions, documents}`.
+  total_sessions, documents}`; since 0.33.0 it can also carry **`stale:
+  true`** (the served page comes from an index generation known to be
+  behind — observed live during a rebuild, absent otherwise) and
+  **`degraded: "<error>"`** (the last background refresh failed; never
+  observed, source-derived).
 - `source` — `"index"` for global searches, `"live"` for container-scoped
   single-session scans.
 
-Verbatim `data` meta (items elided, 2026-07-30):
+Verbatim `data` meta (items elided, verified 2026-08-05 on 0.33.0 — the
+index was mid-rebuild, hence `stale:true`):
 
 ```json
-{"has_more": true, "page_token": "eyJmIjoiNkltSGxYZElpYXNKcW1tOSIsInMiOjIwfQ",
- "index_state": {"state": "ready", "indexed_sessions": 226, "total_sessions": 226, "documents": 3802},
+{"has_more": true, "page_token": "eyJ2IjoyLCJmIjoiU0R1ZlRzcHVzNzJxX056dSIsImciOjEsImIiOlsxLjQz…",
+ "index_state": {"state": "ready", "indexed_sessions": 291, "total_sessions": 291,
+                 "documents": 6313, "stale": true},
  "source": "index"}
 ```
 
@@ -967,7 +1040,11 @@ server — a manual compact produces `compaction.started` /
 ### Compact a session — `POST /api/v1/sessions/{id}:compact`
 
 Body: `{}` or `{"instruction": "..."}` (the body may also be omitted
-entirely — same as `{}`). The endpoint is **fire-and-forget**: it ACKs in
+entirely — same as `{}`, but only when no `Content-Type` header is set;
+posting a truly empty body **with** `Content-Type: application/json` fails
+with `50001 "Body cannot be empty when content-type is set to
+'application/json'"`, a Fastify parser error — verified 2026-08-05 on
+0.33.0). The endpoint is **fire-and-forget**: it ACKs in
 milliseconds with an empty data object and the compaction runs in the
 background (a summarization model call — observed ~8–46 s depending on
 history size).
@@ -1260,7 +1337,8 @@ turn continues.
 
 The agent's todo list has **no dedicated endpoint or WS event** on this
 protocol. Clients derive it from the agent's `TodoList` tool calls, exactly as
-the web client does (`apps/kimi-web/src/composables/latestTodos.ts`). Verified
+the web client did (`apps/kimi-web/src/composables/latestTodos.ts` — path
+valid up to 0.32.0; the folder was deleted in 0.33.0). Verified
 against upstream source on `main` 2026-07-27
 (`packages/agent-core-v2/src/agent/tools/todo-list/todoListTool.ts`,
 `packages/agent-core-v2/src/session/todo/todoItem.ts`) **and captured live on
@@ -1300,14 +1378,17 @@ summary widget.
 ### Tool catalog — `GET /api/v1/tools`
 
 Lists the agent's builtin tools. Undocumented upstream until now; verified
-live on 0.31.0 (2026-07-30) and again on 0.31.1 (2026-07-31). Response
+live on 0.31.0 (2026-07-30) and again on 0.31.1 (2026-07-31) and 0.33.0
+(2026-08-05). Response
 `data.tools[]` entries carry only
 `{name, description, source: "builtin", active: true, input_schema: null}` —
 **input schemas are not exposed** (so tool-parameter drift, e.g. the
-`TaskOutput` `block`/`timeout` removal, is not observable here). 27 builtin
-tools observed: Agent, AgentSwarm, AskUserQuestion, Bash, CreateGoal,
+`TaskOutput` `block`/`timeout` removal, is not observable here). 26 builtin
+tools observed on 0.33.0 (**`ReadMediaFile` was removed** since 0.32.0 —
+the only content change): Agent, AgentSwarm, AskUserQuestion, Bash,
+CreateGoal,
 CronCreate/Delete/List, Edit, EnterPlanMode, ExitPlanMode, FetchURL, GetGoal,
-Glob, Grep, Read, ReadMediaFile, select_tools, SetGoalBudget, Skill, TaskList,
+Glob, Grep, Read, select_tools, SetGoalBudget, Skill, TaskList,
 TaskOutput, TaskStop, TodoList, UpdateGoal, WebSearch, Write.
 
 **Liveness caveat (verified 2026-07-31):** the route resolves the catalog from
@@ -2034,7 +2115,9 @@ it (verified). Note `turn.step.completed.usage` and
 ```
 
 **Session meta** (`session.meta.updated`; `patch` carries `title`,
-`isCustomTitle`, `lastPrompt`). Unchanged:
+`isCustomTitle`, `lastPrompt` — since 0.33.0 with session-dir paths in
+`lastPrompt` redacted to `/home/ubuntu/.[redacted].txt`, see Sessions).
+Otherwise unchanged:
 
 ```json
 {"type":"session.meta.updated","seq":3,
@@ -2142,6 +2225,48 @@ selected option and free text both re-verified 2026-07-23:
 ```
 
 ## Verification log
+
+- 2026-08-05 re-verification on `0.33.0` (server 0.32.0 → 0.33.0; throwaway
+  sessions `session_5921be1f-...` / `session_c9b9588a-...` in
+  `/home/ubuntu/spike`, guided by an upstream tree-diff of
+  `packages/protocol` + `packages/kap-server` between the tags — only
+  `events.ts` (an optional MCP `expiresAt`, out of scope), the search route,
+  the sessions-list pagination internals, and the skills listing changed).
+  Re-verified unchanged, most byte-for-byte: auth/401s, meta (incl.
+  `experimental_flags`), models, sessions create/get/list (multi-page
+  `before_id`/`after_id` walks after the keyset rewrite; unknown cursor →
+  `{"items":[],"has_more":false}`; the `message_count`/`last_seq` stuck-at-0
+  and all-zero `usage` quirks persist), status idle/busy, snapshot (top-level
+  keys, busy `in_flight_turn`, roster), workspaces + trust cycle, messages
+  (incl. the interruption injection), transcript, prompts running/queued,
+  steer (fresh-id splice, `40402`/`40001`), a full manual-approval
+  round-trip (v2 + legacy frames, REST approve), questions (surface, poll,
+  answer, dismiss, `40909`/`40902`/404), TodoList write contract verbatim,
+  foreground + background sub-agent lifecycles (`subagent.*`/`task.*` +
+  legacy aliases, REST `/tasks` list/get/`40406`/cancel→killed/`40904`,
+  snapshot roster), abort (`interruptReason:"user_cancelled"` + reminder
+  splice), compact `{}` and with `instruction` (full WS sequence, summary
+  message without `id`, `40910` ×2, `40401`, `40001`), files
+  upload/download/`Range` 206/delete + the `Attached file "…"` rewrite (em
+  dash intact), WS hello/subscribe/ack, cursor-resume replay (seq 218 →
+  219–231 in order), refused cursor (standalone `resync_required` + ack),
+  zero heartbeat frames. Drift found (all detailed inline): (a) search page
+  tokens are now v2 keyset cursors pinned to an index generation (replay
+  within a generation works; tampered → `40001 "pageToken is malformed"`;
+  legacy v1 tokens still hit the v1 decoder — fingerprint-mismatch `40001`
+  observed, end-to-end v1 acceptance unverifiable client-side);
+  `index_state.stale:true` observed live mid-rebuild; `degraded` and the
+  extended `incomplete` enum rest on the upstream diff; the search `40001`s
+  carry a `stack`; (b) `GET /api/v1/tools` lists 26 tools —
+  `ReadMediaFile` removed; (c) `last_prompt`/`patch.lastPrompt` redact
+  session-dir paths to `/home/ubuntu/.[redacted].txt` (display-only);
+  (d) `:compact` with `Content-Type: application/json` and a truly empty
+  body now fails `50001` (body omitted entirely = no content-type, still
+  fine). Not re-triggered this run: question `multi_select` variants,
+  TodoList read-query, `event.config.warning` (none in force). No app
+  breakage: the app never calls `/api/v1/search` or `/api/v1/tools`, and
+  every other change is additive or already tolerated. No `todo/` tickets
+  filed.
 
 - 2026-08-05 re-verification on `0.32.0` (server 0.31.1 → 0.32.0; throwaway
   sessions `session_61335917-...` / `session_e70e0240-...` /

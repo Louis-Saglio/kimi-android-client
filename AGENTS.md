@@ -32,10 +32,12 @@ sudo chown fileserver:fileserver "/home/fileserver/files/kimi-android-client-${B
 
 ## Web client source reference
 
-The Kimi Code web client source is available at
-<https://github.com/MoonshotAI/kimi-code> in the `apps/kimi-web` folder. It can
-be useful for understanding the HTTP + WebSocket API or for checking what
-changed between two server versions.
+The Kimi Code repo is at <https://github.com/MoonshotAI/kimi-code>. Up to
+server 0.32.0 the web client source lived in `apps/kimi-web`; **from 0.33.0
+that folder is gone** — the web client ships as a prebuilt bundle
+(`apps/kimi-code/dist-web/`, minified). For the HTTP + WebSocket API, diff
+`packages/kap-server` and `packages/protocol` between release tags instead;
+the wire-protocol definitions in `packages/protocol` are the ground truth.
 
 ## References
 
