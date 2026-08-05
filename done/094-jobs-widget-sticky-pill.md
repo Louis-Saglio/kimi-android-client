@@ -56,17 +56,17 @@ ever ran a background task; the sheet doubles as the session's job history.
 
 ## Acceptance criteria
 
-- [ ] With 2 running jobs the pill reads `Jobs · 0/2`; after both complete it
+- [x] With 2 running jobs the pill reads `Jobs · 0/2`; after both complete it
       still shows, reading `Jobs · 2/2`, and the sheet still opens with the
       terminal rows (observable on device — the UiState semantics it consumes,
       terminal jobs lingering while the running count drops, are covered by
       `ChatViewModelTest.task events feed the jobs list…`).
-      (**pending Louis on-device — label polarity amended 2026-08-05**)
-- [ ] Re-entering a session whose background tasks all finished still shows
+      (verified by Louis on-device, 2026-08-05)
+- [x] Re-entering a session whose background tasks all finished still shows
       the pill (REST seed serves terminal tasks) — observable on device.
-      (**pending Louis on-device**)
-- [ ] A session that never ran background tasks shows no pill (regression
-      guard). (**pending Louis on-device**)
+      (verified by Louis on-device, 2026-08-05)
+- [x] A session that never ran background tasks shows no pill (regression
+      guard). (verified by Louis on-device, 2026-08-05)
 - [x] Existing suite green with no behavior-test changes beyond the new
       semantics (no test changes at all — the pre-existing
       `ChatViewModelTest.task events feed the jobs list…` already asserts the
