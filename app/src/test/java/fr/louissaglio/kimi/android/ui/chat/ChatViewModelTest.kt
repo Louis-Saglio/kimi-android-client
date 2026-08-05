@@ -369,15 +369,22 @@ class ChatViewModelTest : ChatViewModelTestBase() {
 
         // The subscribe ack refuses the resume (replay buffer overrun,
         // docs/server-api.md): the missed window heals from a fresh snapshot fetch
-        // (ticket 085) — the /status+/messages pair of the 048 path stays out of it.
+        // (ticket 085) — the /messages refetch of the 048 path stays out of it.
+        // The placeholder bundle's /status convergence re-read (web parity) is the
+        // ring's, not the 048 pair's busy check.
         socket.send(
             """{"type":"ack","id":"c_1","code":0,"msg":"success","payload":{"accepted":[],""" +
                 """"not_found":[],"resync_required":["session_1"],"cursors":{}}}""",
         )
 
         awaitRequest("/snapshot")
+        awaitRequest("/status")
         delay(300)
-        assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
+        val paths = mutableListOf<String>()
+        while (true) {
+            paths += server.takeRequest(100, TimeUnit.MILLISECONDS)?.target?.orEmpty() ?: break
+        }
+        assertTrue(paths.toString(), paths.none { "/messages" in it })
     }
 
     @Test
@@ -614,24 +621,69 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     }
 
     @Test
-    fun `the cold-start snapshot seeds the context usage ring`() = runBlocking {
-        // The snapshot's session.usage is the ring's cold-start source (ticket 085);
-        // the harness derives the default snapshot from this statusBody.
+    fun `the cold start seeds the ring from status when the snapshot usage is the placeholder`() = runBlocking {
+        // The reported bug (Louis, 2026-08-05): opening a past session showed a fake
+        // 0/0 ring until the next message's agent.status.updated. Since 0.32.0 the
+        // snapshot's session.usage is the server's all-zero placeholder on every read
+        // path (live-verified busy + idle) — mapped to "unknown", the ring converges
+        // from a /status re-read instead (web parity). The harness's default snapshot
+        // carries the placeholder; only /status serves the real fill below.
         statusBody =
             """{"code":0,"msg":"success","data":{"busy":false,"context_tokens":25050,""" +
             """"max_context_tokens":1048576,"context_usage":0.0239},"request_id":"r"}"""
 
         viewModel.onScreenStarted()
+        awaitRequest("/status")
         awaitState(viewModel.uiState) { it.contextUsage != null }
 
         assertEquals(ContextUsage(25050, 1048576), viewModel.uiState.value.contextUsage)
     }
 
     @Test
+    fun `a non-placeholder snapshot usage applies without a status re-read`() = runBlocking {
+        // The converse of the placeholder rule: a bundle carrying a real fill (the
+        // pre-0.32.0 wire) is watermark-atomic and needs no convergence re-read.
+        snapshotBody = """{"code":0,"msg":"success","data":{"as_of_seq":1,"epoch":"ep_1",""" +
+            """"session":{"id":"session_1","busy":false,""" +
+            """"usage":{"context_tokens":25050,"context_limit":1048576}},""" +
+            """"messages":{"items":[],"has_more":false},"in_flight_turn":null,"subagents":[],""" +
+            """"pending_approvals":[],"pending_questions":[]},"request_id":"r"}"""
+
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.contextUsage == ContextUsage(25050, 1048576) }
+        awaitServerSocket()
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        delay(200)
+        assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun `a live usage frame overtakes the cold-start status seed`() = runBlocking {
+        // Same guard as the 048 seed: the placeholder-triggered /status GET races the
+        // live stream (it is still in flight when the socket subscribes) — a frame
+        // landing first is newer, so the late response is dropped, not applied.
+        statusBody =
+            """{"code":0,"msg":"success","data":{"busy":false,"context_tokens":25050,""" +
+            """"max_context_tokens":1048576,"context_usage":0.0239},"request_id":"r"}"""
+        statusResponseGate = CountDownLatch(1)
+
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(agentStatusUsageFrame(500, 1000))
+        awaitState(viewModel.uiState) { it.contextUsage == ContextUsage(500, 1000) }
+
+        statusResponseGate!!.countDown()
+        delay(200)
+        assertEquals(ContextUsage(500, 1000), viewModel.uiState.value.contextUsage)
+    }
+
+    @Test
     fun `usage frames grow the ring live, phase frames leave it untouched`() = runBlocking {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
-        // The cold-start snapshot plants the baseline (the current server always sends counts).
+        // The cold-start /status seed plants the baseline (the bundle's usage is the
+        // server's placeholder; /status always carries the counts).
         awaitState(viewModel.uiState) { it.contextUsage != null }
         assertEquals(ContextUsage(0, 1048576), viewModel.uiState.value.contextUsage)
 

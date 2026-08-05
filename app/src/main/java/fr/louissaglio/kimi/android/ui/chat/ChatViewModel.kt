@@ -161,8 +161,10 @@ class ChatViewModel internal constructor(
         val sessionModel: String? = null,
         /** The thinking effort chosen for this session; null = follow the server default. */
         val sessionEffort: String? = null,
-        /** Context window fill for the top-bar ring (ticket 041); null until the first
-         * /status response or live agent.status.updated event arrives. */
+        /** Context window fill for the composer's ring (041, moved into the composer
+         * in 053); null until the first /status response or live agent.status.updated
+         * event arrives — the snapshot's usage is the server's all-zero placeholder
+         * since 0.32.0, so it never seeds a real value. */
         val contextUsage: ContextUsage? = null,
         /** The agent's latest todo list, mirrored from its TodoList tool calls
          * (ticket 042); null or empty hides the widget above the composer. */
@@ -381,7 +383,8 @@ class ChatViewModel internal constructor(
     /**
      * The one cold start of this chat open: awaits the session's snapshot sync and
      * applies its outcome. A [SnapshotSync.Outcome.Fresh] bundle IS the initial load
-     * (history, busy/context state, pending approvals/questions); an
+     * (history, busy state, pending approvals/questions — the ring's context fill
+     * converges from /status, the bundle's usage being the server's placeholder); an
      * [SnapshotSync.Outcome.AlreadyFresh] join means the session synced since it was
      * last left (page-on-top restore, or the chat → page → chat round trip) — the
      * within-process resume set (ticket 048) heals instead, and the sub-agent row
@@ -477,6 +480,11 @@ class ChatViewModel internal constructor(
             )
         }
         questions.applySnapshot(snapshot.pendingQuestions, guards.questions)
+        // The bundle's usage is the server's all-zero placeholder on every read path
+        // since 0.32.0 (mapped to null — web parity: kimi-web re-reads /status on a
+        // placeholder bundle "so the ring converges on the live value"). The seed's
+        // guard drops the late response when a live usage frame overtakes it.
+        if (snapshot.contextUsage == null) seedSessionStatus()
         // The subscribe resuming exactly at this watermark needs no resync — this
         // apply already healed everything up to it.
         appliedSnapshotCursor = snapshot.asOfSeq to snapshot.epoch
@@ -1072,11 +1080,13 @@ class ChatViewModel internal constructor(
     }
 
     /** Seeds the working indicator when opening a session that is already mid-turn
-     * (turn events only fire on transitions), and the top-bar context-usage ring
-     * (ticket 041) from the same /status snapshot. Failure just leaves both untouched.
-     * A turn event or a live context-usage event landing while the GET is in flight is
-     * newer than the seed's snapshot, so the late response is dropped for that field
-     * instead of overriding it. */
+     * (turn events only fire on transitions), and the composer's context-usage ring
+     * (ticket 041) from the same /status snapshot. Also the ring's convergence
+     * re-read after a snapshot apply whose usage was the server's all-zero
+     * placeholder (every read path since 0.32.0 — web parity). Failure just leaves
+     * both untouched. A turn event or a live context-usage event landing while the
+     * GET is in flight is newer than the seed's snapshot, so the late response is
+     * dropped for that field instead of overriding it. */
     private fun seedSessionStatus() {
         val turnEventsAtSeed = turnSeedGuard.capture()
         val contextEventsAtSeed = contextUsageSeedGuard.capture()

@@ -380,9 +380,18 @@ verified live on 0.31.1 (2026-08-01). Top-level keys of `data`:
   at — resume the WS subscribe with exactly this cursor.
 - `session`: the rich session object (superset of the list/get one: `busy`,
   `main_turn_active`, `pending_interaction`, `last_turn_reason`, `usage`, …).
-  Note the context fill lives at `session.usage.context_tokens` /
-  `session.usage.context_limit` — NOT the `/status` naming
-  (`context_tokens`/`max_context_tokens`). Idle sessions zero both.
+  When it carries a real fill, the context numbers live at
+  `session.usage.context_tokens` / `session.usage.context_limit` — NOT the
+  `/status` naming (`context_tokens`/`max_context_tokens`). **0.32.0 drift:**
+  `session.usage` is the server's all-zero placeholder on every read path
+  (every field zeroed — verified live 2026-08-05 on busy AND idle sessions
+  with 48k–121k real context tokens per `/status`; on 0.31.1 only idle
+  sessions zeroed both). kimi-web documents the same
+  (`isPlaceholderSessionUsage`: "both engines return placeholders for the
+  heavy session fields on the list/snapshot read paths"). The context fill's
+  only live sources are `GET .../status` and the WS `agent.status.updated`
+  stream — clients must treat the placeholder as "unknown" (never render a
+  0/0 ring) and re-read `/status` to converge, like both official clients.
 - `messages`: the newest history page (~100 items per page) with `has_more` —
   same item shape as `/messages` but **opposite order: `items` are OLDEST-first**
   (ascending ids/`created_at`; live-verified on 0.31.1, 2026-08-02 — `/messages`
@@ -2167,6 +2176,20 @@ selected option and free text both re-verified 2026-07-23:
   last live capture 0.31.0). No app breakage: every change is additive or
   already tolerated (`ignoreUnknownKeys`, unknown-frame ignore, foreign-
   session drop). No `todo/` tickets filed.
+
+- 2026-08-05 `session.usage` placeholder re-verified on `0.32.0` (real
+  sessions, after Louis's "ring shows 0/0 on cold open" bug report):
+  `/snapshot`'s `session.usage` is the all-zero placeholder on EVERY read path
+  — busy sessions included (`session_4ee7722f-...` busy with 68005 real
+  context tokens per `/status`; idle `session_30836352-...` 48034/262144,
+  `session_7c334bae-...` 121884/262144, both all-zero in the bundle; the
+  sessions LIST's `usage` is likewise all-zero, `turn_count` included). On
+  0.31.1 only idle sessions zeroed the context pair. kimi-web handles this
+  explicitly (`isPlaceholderSessionUsage` + "re-read `/status` so the ring
+  converges on the live value"); the Android app now does the same — the
+  mapper drops a zero-limit usage (unknown, not a real 0/0) and the snapshot
+  apply re-reads `/status`, seed-guarded against live
+  `agent.status.updated` frames.
 
 - 2026-08-02 snapshot `messages` order re-verified on `0.31.1` (real session
   `session_428cd0bf-...`, 375+ messages, after Louis's inverted-timeline bug

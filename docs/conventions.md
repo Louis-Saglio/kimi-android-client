@@ -57,7 +57,11 @@
   and mines the snapshot's messages page + `in_flight_turn.running_tools` for
   `Agent` calls (`applyAgentCall` — chat-independent, so the page-on-top restore
   recovers prompts/links too), and hands the chat-side bundle (history page,
-  busy/contextUsage, pending approvals/questions) to the calling ChatViewModel.
+  busy, pending approvals/questions) to the calling ChatViewModel. The bundle's
+  `session.usage` is the server's all-zero placeholder on every read path since
+  0.32.0 (mapped to null), so the ring's contextUsage converges from a
+  placeholder-conditional /status re-read on apply (seed-guarded — web parity:
+  kimi-web does the same).
   The fetch is cached per session only until the session is LEFT:
   `SubagentStreamStore.release` calls `SnapshotSync.forget`, so the next entry
   re-fetches (one cheap GET per entry — no process-lifetime cache of mutable server

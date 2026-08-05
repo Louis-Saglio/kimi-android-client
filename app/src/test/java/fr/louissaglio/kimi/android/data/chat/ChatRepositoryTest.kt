@@ -213,6 +213,37 @@ class ChatRepositoryTest {
         assertTrue(snapshot.messages.hasMore)
         assertEquals(7, snapshot.asOfSeq)
         assertEquals("ep_1", snapshot.epoch)
+        // A real (non-placeholder) usage maps through — the pre-0.32.0 wire shape.
+        assertEquals(ContextUsage(0, 1048576), snapshot.contextUsage)
+    }
+
+    @Test
+    fun `snapshot placeholder usage maps to no context usage`() = runBlocking {
+        // 0.32.0 (live-verified busy + idle, 2026-08-05): the snapshot's session.usage
+        // is the server's all-zero placeholder on every read path — "unknown", never a
+        // real 0/0 fill (web parity: kimi-web's isPlaceholderSessionUsage). Applied
+        // as-is it showed a fake 0/0 ring on cold open until the next live frame; the
+        // real fill only comes from /status and the WS agent.status.updated stream.
+        server.enqueue(
+            MockResponse(body =
+                """
+                {"code":0,"msg":"success","data":{
+                  "as_of_seq":7,"epoch":"ep_1",
+                  "session":{"id":"session_1","busy":false,
+                    "usage":{"input_tokens":0,"output_tokens":0,"cache_read_tokens":0,
+                             "cache_creation_tokens":0,"total_cost_usd":0,
+                             "context_tokens":0,"context_limit":0,"turn_count":0}},
+                  "messages":{"items":[],"has_more":false},
+                  "in_flight_turn":null,"subagents":[],
+                  "pending_approvals":[],"pending_questions":[]},
+                 "request_id":"01KX"}
+                """.trimIndent(),
+            ),
+        )
+
+        val snapshot = repository.getSnapshot(settings(), "session_1").getOrThrow()
+
+        assertNull(snapshot.contextUsage)
     }
 
     @Test

@@ -40,7 +40,6 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.longOrNull
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
@@ -116,9 +115,11 @@ abstract class ChatViewModelTestBase {
      * The served `/snapshot` body (ticket 085 — the cold-start bundle, fetched before
      * the session's first socket subscribe). When null (the default), the body is
      * DERIVED from [messagesBody] and [statusBody]: the snapshot is the cold-start
-     * history/status source now, so tests seeding those see them at first start
-     * without snapshot-specific setup. Set explicitly to exercise the roster,
-     * pending approvals/questions, or the watermark.
+     * history source now (busy derives from [statusBody]; the wire usage is the
+     * server's placeholder, so the ring converges from the /status re-read), and
+     * tests seeding those see them at first start without snapshot-specific setup.
+     * Set explicitly to exercise the roster, pending approvals/questions, or the
+     * watermark.
      */
     @Volatile
     protected var snapshotBody: String? = null
@@ -130,23 +131,24 @@ abstract class ChatViewModelTestBase {
 
     private val testJson = Json { ignoreUnknownKeys = true }
 
-    /** The default snapshot: [messagesBody]'s page + [statusBody]'s busy/usage (the
-     * snapshot's session.usage names the limit `context_limit`), empty roster and
-     * pending lists, watermark seq 1 — read at response time, like the other bodies.
-     * The server serves the SAME page in opposite orders (live-verified on 0.31.1,
-     * 2026-08-02): `/messages` items are newest-first, the snapshot's OLDEST-first —
-     * tests seed [messagesBody] in `/messages` wire order, so the derivation flips it. */
+    /** The default snapshot: [messagesBody]'s page + [statusBody]'s busy, empty roster
+     * and pending lists, watermark seq 1 — read at response time, like the other
+     * bodies. The usage is the server's all-zero placeholder: since 0.32.0
+     * (live-verified busy + idle) the snapshot's session.usage is zeroed on every
+     * read path, so the ring's fill converges from the /status re-read instead of the
+     * bundle. The server serves the SAME page in opposite orders (live-verified on
+     * 0.31.1, 2026-08-02): `/messages` items are newest-first, the snapshot's
+     * OLDEST-first — tests seed [messagesBody] in `/messages` wire order, so the
+     * derivation flips it. */
     private fun defaultSnapshotBody(): String {
         val messagesData = testJson.parseToJsonElement(messagesBody).jsonObject.getValue("data").jsonObject
         val oldestFirst = JsonArray(messagesData["items"]?.jsonArray?.reversed().orEmpty())
         val snapshotMessages = JsonObject(messagesData + ("items" to oldestFirst))
         val statusData = testJson.parseToJsonElement(statusBody).jsonObject.getValue("data").jsonObject
         val busy = statusData["busy"]?.jsonPrimitive?.booleanOrNull == true
-        val contextTokens = statusData["context_tokens"]?.jsonPrimitive?.longOrNull ?: 0
-        val contextLimit = statusData["max_context_tokens"]?.jsonPrimitive?.longOrNull ?: 0
         return """{"code":0,"msg":"success","data":{"as_of_seq":1,"epoch":"ep_1",""" +
             """"session":{"id":"session_1","busy":$busy,""" +
-            """"usage":{"context_tokens":$contextTokens,"context_limit":$contextLimit}},""" +
+            """"usage":{"context_tokens":0,"context_limit":0}},""" +
             """"messages":$snapshotMessages,"in_flight_turn":null,"subagents":[],""" +
             """"pending_approvals":[],"pending_questions":[]},"request_id":"r"}"""
     }

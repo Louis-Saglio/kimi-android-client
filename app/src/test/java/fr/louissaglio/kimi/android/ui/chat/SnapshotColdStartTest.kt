@@ -15,14 +15,17 @@ import org.junit.Test
 
 /**
  * The snapshot cold start (ticket 085) on the shared [ChatViewModelTestBase] harness:
- * `GET .../snapshot` is the single cold-start entry point — history, busy/context
- * state, pending approvals/questions, the sub-agent roster and the resume cursor all
- * arrive in the one bundle the gate fetches before the first socket subscribe.
+ * `GET .../snapshot` is the single cold-start entry point — history, busy state,
+ * pending approvals/questions, the sub-agent roster and the resume cursor all
+ * arrive in the one bundle the gate fetches before the first socket subscribe
+ * (the ring's context fill converges from /status: the bundle's usage is the
+ * server's all-zero placeholder since 0.32.0).
  */
 class SnapshotColdStartTest : ChatViewModelTestBase() {
 
     /** A /snapshot body with the 085 acceptance knobs; watermark seq 42 / "ep_snap"
-     * stands out from the harness's default (derived) watermark. */
+     * stands out from the harness's default (derived) watermark. The usage is the
+     * server's all-zero placeholder — the live-verified 0.32.0 wire shape. */
     private fun snapshotBundle(
         messages: String = """{"items":[],"has_more":false}""",
         busy: Boolean = false,
@@ -30,7 +33,7 @@ class SnapshotColdStartTest : ChatViewModelTestBase() {
         pendingApprovals: String = "[]",
         pendingQuestions: String = "[]",
     ): String = """{"code":0,"msg":"success","data":{"as_of_seq":42,"epoch":"ep_snap",""" +
-        """"session":{"id":"session_1","busy":$busy,"usage":{"context_tokens":0,"context_limit":1048576}},""" +
+        """"session":{"id":"session_1","busy":$busy,"usage":{"context_tokens":0,"context_limit":0}},""" +
         """"messages":$messages,"in_flight_turn":null,"subagents":$subagents,""" +
         """"pending_approvals":$pendingApprovals,"pending_questions":$pendingQuestions},"request_id":"r"}"""
 

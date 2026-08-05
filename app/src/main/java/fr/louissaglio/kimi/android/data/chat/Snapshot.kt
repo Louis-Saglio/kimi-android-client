@@ -15,7 +15,10 @@ data class SessionSnapshot(
     /** The event-stream watermark the bundle is consistent at — the resume cursor. */
     val asOfSeq: Long,
     val epoch: String,
-    /** From the `session` object: the mid-turn flag and the context window fill. */
+    /** From the `session` object: the mid-turn flag and the context window fill.
+     * [contextUsage] is null when the wire usage is the server's all-zero placeholder
+     * (every read path since 0.32.0) — the ring's live sources are /status and the
+     * WS agent.status.updated stream instead. */
     val busy: Boolean,
     val contextUsage: ContextUsage?,
     /** The newest history page (same message DTOs + `has_more` as `/messages`). */

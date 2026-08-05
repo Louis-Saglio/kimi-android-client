@@ -400,7 +400,10 @@ data class SnapshotData(
 
 /** The snapshot's rich `session` object; only [busy] and the context fill of [usage]
  * are consumed (usage carries `context_tokens`/`context_limit` — not the /status
- * `max_context_tokens` naming). */
+ * `max_context_tokens` naming). Since 0.32.0 the wire usage is the server's all-zero
+ * placeholder on every read path (live-verified busy + idle, 2026-08-05; kimi-web's
+ * isPlaceholderSessionUsage documents the same for list/snapshot) — the mapper drops
+ * it, the live fill comes from /status and the WS agent.status.updated stream. */
 @Serializable
 data class SnapshotSessionDto(
     val busy: Boolean = false,
