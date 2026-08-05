@@ -1575,6 +1575,14 @@ curl -s -X POST -H "Authorization: Bearer <token>" \
   `output_preview` (tail of the stored result, default cap 32768 bytes —
   override with `output_bytes`) and `output_bytes` (byte length of the
   returned preview). Unknown task → `40406`; unknown session → `40401`.
+  For background **bash** tasks this works **while still `running`** —
+  `output_preview` returns the live partial stdout/stderr and grows
+  between polls (verified 2026-08-05 on 0.32.0: a 120-tick loop polled
+  every 4 s returned 67, 71, 75, … 96 ticks with `completed_at` absent).
+  This REST poll is the only way to watch a background command's output:
+  **no `tool.progress` frames are emitted for background bash** (zero
+  observed across two full runs on 0.32.0, 2026-08-05 — the WS stream
+  only carries `task.started`/`task.terminated` lifecycle events).
 - **Cancel** — `POST .../tasks/{task_id}:cancel` → `{"cancelled":true}` on a
   running task; a terminal task answers `40904` with
   `data:{"cancelled":false}` + `details.current_status`. Cancelling a
@@ -1919,7 +1927,10 @@ action, same text as the approval's `action`). Unchanged:
 
 **Tool result** (`tool.result`): unchanged (`toolCallId`, `output`).
 
-**Tool progress** (`tool.progress`, volatile — live tool output). Unchanged:
+**Tool progress** (`tool.progress`, volatile — live tool output). Unchanged.
+**Foreground tool calls only** — a Bash call with `run_in_background=true`
+emits zero `tool.progress` frames (verified 2026-08-05 on 0.32.0); poll
+REST `/tasks/{id}?with_output=true` instead (see REST `/tasks`).
 
 ```json
 {"type":"tool.progress","seq":14,"volatile":true,
