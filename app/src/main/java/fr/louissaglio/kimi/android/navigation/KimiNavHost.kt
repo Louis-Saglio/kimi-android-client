@@ -6,6 +6,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
 import fr.louissaglio.kimi.android.ui.chat.ChatScreen
+import fr.louissaglio.kimi.android.ui.chat.JobDetailScreen
 import fr.louissaglio.kimi.android.ui.chat.SubagentScreen
 import fr.louissaglio.kimi.android.ui.sessions.SessionsScreen
 import fr.louissaglio.kimi.android.ui.settings.SettingsScreen
@@ -30,6 +31,11 @@ data class Chat(val sessionId: String, val title: String? = null, val cwd: Strin
  * through its SavedStateHandle. */
 @Serializable
 data class Subagent(val sessionId: String, val subagentId: String)
+
+/** Background-bash job detail page (ticket 096): information, live output tail and
+ * the Stop action; both ids reach the ViewModel through its SavedStateHandle. */
+@Serializable
+data class JobDetail(val sessionId: String, val taskId: String)
 
 @Composable
 fun KimiNavHost() {
@@ -59,6 +65,11 @@ fun KimiNavHost() {
                         launchSingleTop = true
                     }
                 },
+                onNavigateToJob = { sessionId, taskId ->
+                    navController.navigate(JobDetail(sessionId, taskId)) {
+                        launchSingleTop = true
+                    }
+                },
             )
         }
         composable<Subagent> { entry ->
@@ -73,6 +84,9 @@ fun KimiNavHost() {
                     }
                 },
             )
+        }
+        composable<JobDetail> {
+            JobDetailScreen(onNavigateBack = { navController.popBackStack() })
         }
     }
 }

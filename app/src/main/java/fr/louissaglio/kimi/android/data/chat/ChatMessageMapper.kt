@@ -273,6 +273,9 @@ class ChatMessageMapper @Inject constructor(json: Json) {
             startedAt = startedAt,
             completedAt = parseInstant(dto.completedAt),
             agentId = dto.agentId,
+            command = dto.command,
+            outputPreview = dto.outputPreview,
+            outputBytes = dto.outputBytes,
         )
     }
 

@@ -197,6 +197,12 @@ class ChatRepository @Inject constructor(
     suspend fun getTasks(settings: ServerSettings, sessionId: String, status: String? = null): Result<List<BackgroundTask>> =
         chatApi.listTasks(settings, sessionId, status)
 
+    /** One background task with its stored output tail (`GET .../tasks/{taskId}` —
+     * ticket 096's job screen): the bash preview grows between polls while running.
+     * An unknown task surfaces as the typed DataError.Api(40406). */
+    suspend fun getTask(settings: ServerSettings, sessionId: String, taskId: String): Result<BackgroundTask> =
+        chatApi.getTask(settings, sessionId, taskId)
+
     /** Cancels one background task (`POST .../tasks/{taskId}:cancel` — ticket 092);
      * the `task.terminated` teardown arrives over the WebSocket. A terminal task
      * surfaces as the typed DataError.Api(40904). */

@@ -35,7 +35,10 @@ sealed interface ChatItem {
      * expanded row (ticket 023); either may be blank while the call is still running.
      * While running, [output] accumulates the volatile tool.progress chunks (ticket 025)
      * — the definitive tool.result output replaces them wholesale. [subagentId] links an
-     * `Agent` row to its sub-agent's page (ticket 045); null rows are not tappable. */
+     * `Agent` row to its sub-agent's page (ticket 045); null rows are not tappable.
+     * [bashTaskId] links a background `Bash` row to its job screen (ticket 096) —
+     * parsed from the result's `task_id: bash-…` first line; like the sub-agent link,
+     * a linked row never expands. */
     data class ToolActivity(
         override val id: String,
         val name: String,
@@ -44,6 +47,7 @@ sealed interface ChatItem {
         val input: String = "",
         val output: String = "",
         val subagentId: String? = null,
+        val bashTaskId: String? = null,
     ) : ChatItem
 
     /** A run of consecutive tool calls collapsed into one card (ticket 037), like the

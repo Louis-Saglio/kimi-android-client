@@ -1689,6 +1689,38 @@ Task object (verbatim):
 The REST shape is thinner than the WS/snapshot one: no `subagent_type`, no
 `parent_tool_call_id`, and `created_at` == `started_at`.
 
+Background **bash** tasks live in their own id namespace (`bash-…`, vs
+`agent-…` for sub-agents) and carry the shell **`command`** on the wire
+(0.32.0, verified 2026-08-05):
+
+```json
+{"id":"bash-xbje00tt","session_id":"session_...","kind":"bash",
+ "description":"tick counter loop","status":"completed",
+ "created_at":"…","started_at":"…","completed_at":"…",
+ "command":"for i in …"}
+```
+
+plus `output_preview`/`output_bytes` with `with_output=true`.
+
+The background Bash tool **result** is an immediate plain-text stub — the
+command's real output lives in the task store (the get-with-output poll
+above); history carries the same text in the `tool_result` part, so the
+`task_id:` link works for live and re-entered sessions alike (verbatim,
+0.32.0, 2026-08-05):
+
+```
+task_id: bash-2q5gu61e
+pid: 502439
+description: tick counter loop (120)
+status: running
+automatic_notification: true
+next_step: …
+```
+
+Background **Agent** results also start with `task_id:` but an `agent-…` id
+(see the spawning tool call subsection) — the `bash-` prefix is what
+distinguishes the two.
+
 ### Session snapshot roster
 
 `GET /api/v1/sessions/{sid}/snapshot` (see Sessions → Session snapshot) carries

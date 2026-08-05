@@ -84,8 +84,8 @@ internal fun JobsSummaryRow(
  * The jobs sheet (ticket 092): every background task of the session — running first
  * (oldest first), then terminal (newest first) — with its kind badge, plain-English
  * status, and ticking elapsed time (startedAt → endedAt ?: now). Running rows get a trailing
- * Stop button; tapping a sub-agent row with a known agentId opens its page. Same
- * transient-detail pattern as TodosSheet.
+ * Stop button; tapping a sub-agent row with a known agentId opens its page, tapping a
+ * bash row opens its job screen (ticket 096). Same transient-detail pattern as TodosSheet.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -93,6 +93,7 @@ internal fun JobsSheet(
     jobs: List<Job>,
     onCancel: (String) -> Unit,
     onOpenSubagent: (String) -> Unit,
+    onOpenJob: (String) -> Unit = {},
     onDismiss: () -> Unit,
 ) {
     // The ticking clock (the web client's taskClock model): ticks only while the
@@ -121,6 +122,7 @@ internal fun JobsSheet(
                     now = now,
                     onCancel = onCancel,
                     onOpenSubagent = onOpenSubagent,
+                    onOpenJob = onOpenJob,
                 )
             }
         }
@@ -130,13 +132,15 @@ internal fun JobsSheet(
 /** One sheet row: description over a "badge · status · elapsed" secondary line,
  * and a trailing Stop for running rows. No status glyph — the plain-English status
  * on the secondary line carries it (Louis's call, ticket 094). Sub-agent rows with
- * a known [Job.agentId] are tappable (the page navigation). */
+ * a known [Job.agentId] are tappable (the page navigation); bash rows are tappable
+ * too (ticket 096's job screen — [Job.taskId] is always known). */
 @Composable
 private fun JobRow(
     job: Job,
     now: Instant,
     onCancel: (String) -> Unit,
     onOpenSubagent: (String) -> Unit,
+    onOpenJob: (String) -> Unit,
 ) {
     val kindLabel = when (job.kind) {
         BackgroundTask.Kind.Subagent -> "sub-agent"
@@ -154,10 +158,12 @@ private fun JobRow(
             .fillMaxWidth()
             .heightIn(min = 48.dp)
             .let {
-                if (job.kind == BackgroundTask.Kind.Subagent && job.agentId != null) {
-                    it.clickable { onOpenSubagent(job.agentId) }
-                } else {
-                    it
+                when {
+                    job.kind == BackgroundTask.Kind.Subagent && job.agentId != null ->
+                        it.clickable { onOpenSubagent(job.agentId) }
+                    job.kind == BackgroundTask.Kind.Bash ->
+                        it.clickable { onOpenJob(job.taskId) }
+                    else -> it
                 }
             }
             .padding(horizontal = 16.dp)

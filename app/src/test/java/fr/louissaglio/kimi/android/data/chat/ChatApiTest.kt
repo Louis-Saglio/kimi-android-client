@@ -116,4 +116,69 @@ class ChatApiTest {
 
         assertEquals(DataError.Api(40904, "task is not running"), error)
     }
+
+    @Test
+    fun `get task unwraps the envelope and parses command and output preview`() = runBlocking {
+        // Verbatim bash task object with with_output (docs/server-api.md, REST /tasks —
+        // ticket 096): bash-kind tasks carry `command`; the preview is the stored tail.
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"id":"bash-xbje00tt","kind":"bash",""" +
+                    """"description":"tick counter loop","status":"completed",""" +
+                    """"created_at":"2026-08-05T10:00:00.000Z","started_at":"2026-08-05T10:00:00.000Z",""" +
+                    """"completed_at":"2026-08-05T10:02:00.000Z","command":"for i in …",""" +
+                    """"output_preview":"tick 118\ntick 119\n","output_bytes":18},""" +
+                    """"request_id":"r"}""",
+            ),
+        )
+
+        val task = api.getTask(settings(), "session_1", "bash-xbje00tt").getOrThrow()
+
+        assertEquals("/api/v1/sessions/session_1/tasks/bash-xbje00tt?with_output=true", server.takeRequest().target)
+        assertEquals(
+            BackgroundTask(
+                id = "bash-xbje00tt",
+                kind = BackgroundTask.Kind.Bash,
+                description = "tick counter loop",
+                status = BackgroundTask.Status.Completed,
+                createdAt = Instant.parse("2026-08-05T10:00:00.000Z"),
+                startedAt = Instant.parse("2026-08-05T10:00:00.000Z"),
+                completedAt = Instant.parse("2026-08-05T10:02:00.000Z"),
+                command = "for i in …",
+                outputPreview = "tick 118\ntick 119\n",
+                outputBytes = 18,
+            ),
+            task,
+        )
+    }
+
+    @Test
+    fun `get task omits the output query when not requested`() = runBlocking {
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"id":"bash-xbje00tt","kind":"bash",""" +
+                    """"description":"tick counter loop","status":"running",""" +
+                    """"created_at":"2026-08-05T10:00:00.000Z","started_at":"2026-08-05T10:00:00.000Z"},""" +
+                    """"request_id":"r"}""",
+            ),
+        )
+
+        api.getTask(settings(), "session_1", "bash-xbje00tt", withOutput = false)
+
+        assertEquals("/api/v1/sessions/session_1/tasks/bash-xbje00tt", server.takeRequest().target)
+    }
+
+    @Test
+    fun `get task of an unknown id surfaces the typed 40406`() = runBlocking {
+        // Envelope-over-200 (docs/server-api.md): an unknown task answers 40406.
+        server.enqueue(
+            MockResponse(body =
+                """{"code":40406,"msg":"task not found","request_id":"r"}""",
+            ),
+        )
+
+        val error = api.getTask(settings(), "session_1", "bash-nope").exceptionOrNull()
+
+        assertEquals(DataError.Api(40406, "task not found"), error)
+    }
 }

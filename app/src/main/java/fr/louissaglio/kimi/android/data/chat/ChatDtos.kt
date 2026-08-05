@@ -312,7 +312,9 @@ data class TaskListData(
 )
 
 /** One REST task object; thinner than the WS/snapshot shape (no subagent_type, no
- * parent_tool_call_id, created_at == started_at). Times are ISO-8601 strings. */
+ * parent_tool_call_id, created_at == started_at). Times are ISO-8601 strings.
+ * [command] rides on bash-kind tasks; [outputPreview]/[outputBytes] only on a
+ * get-with-output read (ticket 096). */
 @Serializable
 data class TaskDto(
     val id: String = "",
@@ -325,6 +327,9 @@ data class TaskDto(
     // Not in the documented verbatim shape; decoded defensively for servers that carry
     // it — the sub-agent page link otherwise arrives via task.started's info.agentId.
     @SerialName("agent_id") val agentId: String? = null,
+    val command: String? = null,
+    @SerialName("output_preview") val outputPreview: String? = null,
+    @SerialName("output_bytes") val outputBytes: Int? = null,
 )
 
 /** `data` of `POST .../tasks/{id}:cancel`; a terminal task answers envelope 40904 with

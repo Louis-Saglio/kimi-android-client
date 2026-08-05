@@ -299,6 +299,106 @@ class ChatTimelineTest {
     }
 
     @Test
+    fun `a background bash result links the row to its job`() {
+        // Verbatim background Bash tool result (docs/server-api.md, REST /tasks —
+        // ticket 096): the first line's `task_id: bash-…` is the row→job link.
+        val output = "task_id: bash-2q5gu61e\npid: 502439\ndescription: tick counter loop (120)\n" +
+            "status: running\nautomatic_notification: true\nnext_step: …\n"
+        val timeline = testChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted())
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "tick counter loop (120)"))
+
+        timeline.apply(SessionEvent.ToolCallResult("tool_1", false, output))
+
+        assertEquals(
+            listOf(
+                toolGroup(
+                    ChatItem.ToolActivity(
+                        "tool_1", "Bash", ToolStatus.Done, "tick counter loop (120)",
+                        output = output,
+                        bashTaskId = "bash-2q5gu61e",
+                    ),
+                ),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `a background agent result does not link the row to a job`() {
+        // Background Agent results also start with `task_id:` but an agent-… id
+        // (docs/server-api.md): those rows navigate via subagentId and must NOT be
+        // re-linked — the bash- prefix requirement is the guard (ticket 096).
+        val output = "task_id: agent-7noib8bb\nstatus: running\nagent_id: agent-13\nactual_subagent_type: explore\n"
+        val timeline = testChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted())
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Agent", "doc-verify-bg"))
+
+        timeline.apply(SessionEvent.ToolCallResult("tool_1", false, output))
+
+        assertEquals(
+            listOf(
+                toolGroup(
+                    ChatItem.ToolActivity(
+                        "tool_1", "Agent", ToolStatus.Done, "doc-verify-bg",
+                        output = output,
+                        subagentId = "agent-13",
+                    ),
+                ),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `a bash result without a task id leaves the row unlinked`() {
+        // Foreground Bash: plain shell output — the row keeps its inline expand.
+        val timeline = testChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted())
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "echo hi"))
+
+        timeline.apply(SessionEvent.ToolCallResult("tool_1", false, "hi\n"))
+
+        assertEquals(
+            listOf(toolGroup(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, "echo hi", output = "hi\n"))),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `a history background bash pair links the row to its job`() {
+        // History carries the same stub text in the tool_result part
+        // (docs/server-api.md), so the row→job link survives a session re-entry.
+        val output = "task_id: bash-2q5gu61e\npid: 502439\ndescription: tick counter loop (120)\nstatus: running\n"
+        val timeline = testChatTimeline()
+
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage(
+                    "msg_1",
+                    ChatMessage.Role.Assistant,
+                    listOf(ChatMessage.Part.ToolUse("tool_1", "Bash", "tick counter loop (120)")),
+                ),
+                ChatMessage("msg_2", ChatMessage.Role.Tool, listOf(ChatMessage.Part.ToolResult("tool_1", false, output))),
+            ),
+            keepLive = false,
+        )
+
+        assertEquals(
+            listOf(
+                toolGroup(
+                    ChatItem.ToolActivity(
+                        "tool_1", "Bash", ToolStatus.Done, "tick counter loop (120)",
+                        output = output,
+                        bashTaskId = "bash-2q5gu61e",
+                    ),
+                ),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
     fun `tool call started fills the running row preview live`() {
         val timeline = testChatTimeline()
         timeline.apply(SessionEvent.TurnStarted())

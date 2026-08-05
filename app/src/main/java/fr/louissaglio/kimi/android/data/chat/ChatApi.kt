@@ -342,6 +342,31 @@ class ChatApi @Inject constructor(
     }
 
     /**
+     * Fetches one background task (`GET /api/v1/sessions/{id}/tasks/{taskId}`,
+     * docs/server-api.md, REST /tasks — ticket 096): the job screen's data source.
+     * [withOutput] adds `output_preview` (the stored stdout/stderr tail — live while
+     * a bash task runs, growing between polls; no `tool.progress` frames exist for
+     * background bash) and `output_bytes`. An unknown task answers envelope 40406,
+     * which surfaces as the typed [DataError.Api].
+     */
+    suspend fun getTask(
+        settings: ServerSettings,
+        sessionId: String,
+        taskId: String,
+        withOutput: Boolean = true,
+    ): Result<BackgroundTask> {
+        val query = if (withOutput) "?with_output=true" else ""
+        return api.get(settings, "/api/v1/sessions/$sessionId/tasks/$taskId$query") { body ->
+            api.json.decodeFromString<Envelope<TaskDto>>(body).toResult().mapCatching { dto ->
+                // A kind/status/timestamp the mapper cannot place drops the entry on
+                // list reads; on a single read that IS the response — fail typed.
+                mapper.toDomain(dto)
+                    ?: throw DataError.MalformedResponse(IllegalStateException("Unusable task '${dto.id}'"))
+            }
+        }
+    }
+
+    /**
      * Cancels one background task (`POST /api/v1/sessions/{id}/tasks/{taskId}:cancel`,
      * docs/server-api.md — ticket 092). A running task acks `{"cancelled":true}`; a
      * terminal one answers envelope code 40904, which surfaces as the typed

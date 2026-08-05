@@ -44,6 +44,12 @@ class SnapshotColdStartTest : ChatViewModelTestBase() {
         // result's agent_id: marker does not exist yet. The roster's
         // parent_tool_call_id is the linkage: the Agent row is tappable (opens the
         // page) and the store entry seeded Working, all before any result lands.
+        //
+        // The snapshot says the session is mid-turn; the /status convergence re-read
+        // (fired because the bundle's usage is the all-zero placeholder) must agree —
+        // the default busy:false would race the apply and flip isWorking back off.
+        statusBody = """{"code":0,"msg":"success","data":{"busy":true,"context_tokens":0,""" +
+            """"max_context_tokens":1048576,"context_usage":0.0},"request_id":"r"}"""
         snapshotBody = snapshotBundle(
             busy = true,
             messages = """{"items":[""" +

@@ -60,6 +60,9 @@ internal fun MessageList(
     loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray? = { null },
     /** Invoked with the subagentId when a linked `Agent` tool row is tapped (ticket 045). */
     onOpenSubagent: (String) -> Unit = {},
+    /** Invoked with the taskId when a linked background `Bash` tool row is tapped
+     * (ticket 096) — the row's `task_id: bash-…` stub navigates to the job screen. */
+    onOpenJob: (String) -> Unit = {},
     /** Tickets 088/089: any `AskUserQuestion` row tap (row id == tool call id ==
      * question id). The pending row toggles the live card; a resolved row opens or
      * closes its read-only view. Question rows never expand — the card is the details. */
@@ -165,11 +168,11 @@ internal fun MessageList(
                             loadImageBytes = loadImageBytes,
                         )
                     is ChatItem.AssistantMessage -> AssistantBubble(item)
-                    is ChatItem.ToolGroup -> ToolGroupCard(item, onOpenSubagent, onQuestionRowTapped)
+                    is ChatItem.ToolGroup -> ToolGroupCard(item, onOpenSubagent, onOpenJob, onQuestionRowTapped)
                     is ChatItem.CompactionDivider -> CompactionDividerRow(item)
                     // Bare rows are not produced by ChatTimeline anymore (ticket 037) but
                     // stay renderable for tests and previews.
-                    is ChatItem.ToolActivity -> ToolRow(item, onOpenSubagent, onQuestionRowTapped)
+                    is ChatItem.ToolActivity -> ToolRow(item, onOpenSubagent, onOpenJob, onQuestionRowTapped)
                 }
             }
         }

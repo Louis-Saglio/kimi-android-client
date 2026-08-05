@@ -11,6 +11,9 @@ import java.time.Instant
  * wire vocabulary (the core one is already mapped server-side). [agentId] links a
  * sub-agent task to the WS sub-agent id for navigation; absent on bash tasks and on
  * servers whose REST shape does not carry it (it arrives via `task.started` instead).
+ * [command] rides on bash-kind tasks; [outputPreview]/[outputBytes] arrive only on a
+ * get-with-output read (ticket 096's job screen) — the stored stdout/stderr tail,
+ * live while a bash task runs.
  */
 data class BackgroundTask(
     val id: String,
@@ -21,6 +24,9 @@ data class BackgroundTask(
     val startedAt: Instant,
     val completedAt: Instant? = null,
     val agentId: String? = null,
+    val command: String? = null,
+    val outputPreview: String? = null,
+    val outputBytes: Int? = null,
 ) {
     /** REST wire vocabulary (docs/server-api.md): core `agent`→Subagent,
      * `process`→Bash. Question flows (`tool`) never reach the domain — filtered at
@@ -55,4 +61,22 @@ data class TaskInfo(
     /** Core vocabulary — a superset of the REST wire one ([TimedOut] and [Lost]
      * surface as Failed there, [Killed] as Cancelled). */
     enum class Status { Running, Completed, Failed, TimedOut, Killed, Lost }
+}
+
+private val BASH_TASK_ID = Regex("""task_id:\s*(\S+)""")
+
+/**
+ * The row→job link of a background Bash call (ticket 096): the call's tool result is
+ * an immediate plain-text stub whose FIRST line is `task_id: bash-…`
+ * (docs/server-api.md, REST /tasks) — the real output lives in the task store, so the
+ * row navigates to the job screen instead of expanding. History carries the same
+ * text, so live and re-entered sessions link alike. The `bash-` prefix requirement is
+ * the guard that keeps background **Agent** results (`task_id: agent-…`) untouched —
+ * those rows already navigate via their subagentId.
+ */
+fun bashTaskIdOf(toolName: String, output: String): String? {
+    if (toolName != "Bash") return null
+    val id = BASH_TASK_ID.find(output.lineSequence().firstOrNull().orEmpty())
+        ?.groupValues?.get(1)
+    return id?.takeIf { it.startsWith("bash-") }
 }

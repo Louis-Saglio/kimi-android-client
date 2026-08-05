@@ -137,6 +137,52 @@ class ToolRowTest {
         assertEquals("agent-12", opened)
     }
 
+    /** Ticket 096: a bash row linked to a background job behaves like a linked Agent
+     * row — it never expands, and the tap navigates to the job detail screen. */
+    @Test
+    fun bashLinkedRowNeverExpandsAndNavigatesOnRowTap() {
+        var opened: String? = null
+        composeTestRule.setContent {
+            KimiTheme {
+                ToolRow(
+                    ChatItem.ToolActivity(
+                        "tool_1",
+                        "Bash",
+                        ToolStatus.Done,
+                        preview = "tick counter loop",
+                        input = "{\n    \"command\": \"for i in …\"\n}",
+                        output = "task_id: bash-1\n…",
+                        bashTaskId = "bash-1",
+                    ),
+                    onOpenJob = { opened = it },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").assertDoesNotExist()
+        composeTestRule.onNodeWithContentDescription("Open job").assertIsDisplayed()
+
+        composeTestRule.onNodeWithText("Bash").performClick()
+        composeTestRule.onNodeWithText("task_id: bash-1\n…").assertDoesNotExist()
+        assertEquals("bash-1", opened)
+    }
+
+    @Test
+    fun bashLinkedRowOpensJobFromTrailingButton() {
+        var opened: String? = null
+        composeTestRule.setContent {
+            KimiTheme {
+                ToolRow(
+                    ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Running, preview = "tick counter loop", bashTaskId = "bash-1"),
+                    onOpenJob = { opened = it },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithContentDescription("Open job").performClick()
+        assertEquals("bash-1", opened)
+    }
+
     /** Tickets 088/089: question rows never expand and show no chevron — the tap is
      * forwarded with the row's id (= tool call id = question id), input and output. */
     @Test

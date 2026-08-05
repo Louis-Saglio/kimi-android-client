@@ -68,6 +68,7 @@ import java.time.Instant
 fun ChatScreen(
     onNavigateBack: () -> Unit,
     onNavigateToSubagent: (sessionId: String, subagentId: String) -> Unit = { _, _ -> },
+    onNavigateToJob: (sessionId: String, taskId: String) -> Unit = { _, _ -> },
     viewModel: ChatViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -126,6 +127,10 @@ fun ChatScreen(
     val onOpenSubagent = remember(onNavigateToSubagent, sessionId) {
         { subagentId: String -> onNavigateToSubagent(sessionId, subagentId) }
     }
+    // Linked background `Bash` rows (ticket 096) open their job screen.
+    val onOpenJob = remember(onNavigateToJob, sessionId) {
+        { taskId: String -> onNavigateToJob(sessionId, taskId) }
+    }
     // Scroll-to-top loads the next older history page (ticket 043).
     val onHistoryTopReached = remember(viewModel) { viewModel::onHistoryTopReached }
     // AskUserQuestion rows (088/089): pending row toggles the live card, resolved
@@ -161,6 +166,7 @@ fun ChatScreen(
         onOpenAttachment = onOpenAttachment,
         loadImageBytes = loadImageBytes,
         onOpenSubagent = onOpenSubagent,
+        onOpenJob = onOpenJob,
         onHistoryTopReached = onHistoryTopReached,
         onCompact = viewModel::onCompact,
         onCancelJob = viewModel::onCancelJob,
@@ -235,6 +241,7 @@ private fun ChatContent(
     onOpenAttachment: (ChatMessage.Part.Attachment) -> Unit,
     loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray?,
     onOpenSubagent: (String) -> Unit = {},
+    onOpenJob: (String) -> Unit = {},
     onHistoryTopReached: () -> Unit = {},
     onCompact: () -> Unit = {},
     onCancelJob: (String) -> Unit = {},
@@ -455,6 +462,7 @@ private fun ChatContent(
                     onOpenAttachment = onOpenAttachment,
                     loadImageBytes = loadImageBytes,
                     onOpenSubagent = onOpenSubagent,
+                    onOpenJob = onOpenJob,
                     // Tickets 088/089: AskUserQuestion rows never expand — the pending
                     // row toggles the live card, a resolved row opens its read-only view.
                     onQuestionRowTapped = onQuestionRowTapped,
@@ -491,7 +499,8 @@ private fun ChatContent(
     }
     // The jobs sheet (ticket 092) stays open while jobs flip terminal — recently
     // finished jobs linger in the list by design. Tapping a sub-agent row closes it
-    // and opens the sub-agent page.
+    // and opens the sub-agent page; tapping a bash row (ticket 096) closes it and
+    // opens the job screen.
     if (showJobs && uiState.jobs.isNotEmpty()) {
         JobsSheet(
             jobs = uiState.jobs,
@@ -499,6 +508,10 @@ private fun ChatContent(
             onOpenSubagent = { agentId ->
                 showJobs = false
                 onOpenSubagent(agentId)
+            },
+            onOpenJob = { taskId ->
+                showJobs = false
+                onOpenJob(taskId)
             },
             onDismiss = { showJobs = false },
         )

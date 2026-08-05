@@ -8,6 +8,7 @@ import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.TodoParser
 import fr.louissaglio.kimi.android.data.chat.TranscriptFrame
 import fr.louissaglio.kimi.android.data.chat.TranscriptTurn
+import fr.louissaglio.kimi.android.data.chat.bashTaskIdOf
 
 /**
  * Pure reducer behind the chat screen: flattens history messages into timeline rows
@@ -151,6 +152,7 @@ class ChatTimeline(
                         input = call.input,
                         output = tool.output.ifBlank { call.output },
                         subagentId = tool.subagentId ?: agentResultSubagentId(call.name, tool.output),
+                        bashTaskId = tool.bashTaskId ?: bashTaskIdOf(call.name, tool.output),
                     )
                 },
             )
@@ -352,6 +354,7 @@ class ChatTimeline(
                         replaceOutput = true,
                     )
                     linkSubagentFromResult(event.toolCallId, event.output)
+                    linkBashTaskFromResult(event.toolCallId, event.output)
                 }
             is SessionEvent.ToolCallProgress ->
                 if (event.toolCallId !in todoCallIds) appendToolProgress(event.toolCallId, event.chunk)
@@ -516,6 +519,16 @@ class ChatTimeline(
         }
     }
 
+    /** Live row→job linkage (ticket 096): a background Bash result's first line
+     * carries `task_id: bash-…`, so the row gains its open affordance. Unlike the
+     * sub-agent links there is no registry: the result text is the only carrier and
+     * history repeats it verbatim, so every rebuild re-derives the link. */
+    private fun linkBashTaskFromResult(toolCallId: String, output: String) {
+        healTool(toolCallId) { row ->
+            if (row.bashTaskId == null) row.copy(bashTaskId = bashTaskIdOf(row.name, output)) else row
+        }
+    }
+
     /** Re-applies live-learned links after a refetch rebuilt the committed rows. */
     private fun reapplySubagentLinks() {
         for (index in 0 until liveStart) {
@@ -595,6 +608,7 @@ class ChatTimeline(
                             status = status,
                             output = existing.output.ifBlank { result.output },
                             subagentId = existing.subagentId ?: agentResultSubagentId(existing.name, result.output),
+                            bashTaskId = existing.bashTaskId ?: bashTaskIdOf(existing.name, result.output),
                         )
                     }
                     if (!found) {

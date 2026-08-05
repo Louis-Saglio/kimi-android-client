@@ -80,6 +80,7 @@ private fun ToolStatusIcon(status: ToolStatus, runningDescription: String, modif
 internal fun ToolGroupCard(
     group: ChatItem.ToolGroup,
     onOpenSubagent: (String) -> Unit = {},
+    onOpenJob: (String) -> Unit = {},
     onQuestionRowTapped: (toolCallId: String, input: String, output: String) -> Unit = { _, _, _ -> },
 ) {
     val status = when {
@@ -116,7 +117,7 @@ internal fun ToolGroupCard(
             group.tools.forEachIndexed { index, tool ->
                 // 1dp outlineVariant hairline between rows, like the web's row separators.
                 if (index > 0) HorizontalDivider()
-                ToolRow(tool, onOpenSubagent, onQuestionRowTapped)
+                ToolRow(tool, onOpenSubagent, onOpenJob, onQuestionRowTapped)
             }
         }
     }
@@ -137,6 +138,11 @@ internal fun ToolGroupCard(
  * page already shows everything the details would, so tapping the row navigates to
  * that page, as does the trailing open button (chevron-right, own tap target).
  *
+ * A background `Bash` row linked to its job (ticket 096, [ChatItem.ToolActivity.bashTaskId])
+ * behaves the same way: its result is only the `task_id:` stub — the command's real
+ * output lives on the job screen, so tapping the row or its trailing "Open job"
+ * chevron navigates there instead of expanding.
+ *
  * `AskUserQuestion` rows (tickets 088/089) never expand either and show no chevron:
  * the raw JSON is superseded by the card UI. The tap is forwarded as
  * [onQuestionRowTapped] with the row's id (= tool call id = question id), input and
@@ -146,12 +152,14 @@ internal fun ToolGroupCard(
 internal fun ToolRow(
     activity: ChatItem.ToolActivity,
     onOpenSubagent: (String) -> Unit = {},
+    onOpenJob: (String) -> Unit = {},
     onQuestionRowTapped: (toolCallId: String, input: String, output: String) -> Unit = { _, _, _ -> },
 ) {
     val detailColor = MaterialTheme.colorScheme.onSurfaceVariant
     val linkedSubagentId = activity.subagentId
+    val linkedBashTaskId = activity.bashTaskId
     val isQuestionRow = activity.name == "AskUserQuestion"
-    val expandable = !isQuestionRow && linkedSubagentId == null &&
+    val expandable = !isQuestionRow && linkedSubagentId == null && linkedBashTaskId == null &&
         (activity.input.isNotBlank() || activity.output.isNotBlank())
     var expanded by rememberSaveable { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth()) {
@@ -160,10 +168,11 @@ internal fun ToolRow(
                 .fillMaxWidth()
                 // M3: the whole row is the tap target, at least 48dp tall.
                 .heightIn(min = 48.dp)
-                .clickable(enabled = expandable || linkedSubagentId != null || isQuestionRow) {
+                .clickable(enabled = expandable || linkedSubagentId != null || linkedBashTaskId != null || isQuestionRow) {
                     if (isQuestionRow) onQuestionRowTapped(activity.id, activity.input, activity.output)
                     else if (expandable) expanded = !expanded
-                    else linkedSubagentId?.let(onOpenSubagent)
+                    else if (linkedSubagentId != null) onOpenSubagent(linkedSubagentId)
+                    else linkedBashTaskId?.let(onOpenJob)
                 },
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -223,6 +232,19 @@ internal fun ToolRow(
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
                         contentDescription = "Open sub-agent",
+                        modifier = Modifier.size(16.dp),
+                        tint = detailColor,
+                    )
+                }
+            }
+            if (linkedBashTaskId != null) {
+                IconButton(
+                    onClick = { onOpenJob(linkedBashTaskId) },
+                    modifier = Modifier.size(40.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = "Open job",
                         modifier = Modifier.size(16.dp),
                         tint = detailColor,
                     )
