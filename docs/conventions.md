@@ -46,7 +46,12 @@
   the shared `ChatViewModelTestBase` harness. `JobsStore` (ticket 092) backs the
   composer jobs pill/sheet (`UiState.jobs`, event-driven — REST `/tasks` is only
   the cold-start/`resync_required` seed, never polled; cancel is optimistic,
-  40904 = already-terminal success).
+  40904 = already-terminal success). The pill is sticky (ticket 094): visible
+  whenever the session has ANY background task (running or terminal — the
+  unfiltered REST seed resurrects it across re-entries), labeled
+  `Jobs · finished/total` (finished = completed/cancelled/failed — the Todos
+  done/total polarity); deliberate divergence from the web dock, whose pills
+  vanish at zero.
 - Cold start / resync (085, freshness model 091): `GET .../snapshot` is the single
   entry point — `SnapshotSync` (ui/chat, session-scoped singleton like the store, so
   the page-on-top restore path with no ChatViewModel runs the same rebuild) owns the

@@ -1,17 +1,13 @@
 package fr.louissaglio.kimi.android.ui.chat
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayArrow
@@ -43,10 +39,14 @@ import kotlinx.coroutines.delay
 
 /**
  * The collapsed jobs widget (ticket 092), pinned in the composer row next to Todos:
- * the RUNNING background-task count only — hidden entirely when zero (web dock
- * parity; a permanent "Jobs · 0" clutters the composer). Same visual recipe as
- * TodosSummaryRow (surfaceContainerHigh, 48.dp target, merged semantics). Terminal
- * jobs don't tick here — the sheet owns the elapsed times.
+ * the finished/total background-task count (`Jobs · 2/4` — finished = completed,
+ * cancelled, or failed; the Todos done/total polarity, Louis's call after on-device
+ * testing of the running/total variant), sticky since ticket 094 — the caller keeps
+ * it visible whenever the session has any background task, running or terminal (the
+ * sheet is the session's job history and this pill is its only entry point;
+ * deliberate divergence from the web dock, whose pills vanish at zero). Same visual
+ * recipe as TodosSummaryRow (surfaceContainerHigh, 48.dp target, merged semantics).
+ * Terminal jobs don't tick here — the sheet owns the elapsed times.
  */
 @Composable
 internal fun JobsSummaryRow(
@@ -54,7 +54,7 @@ internal fun JobsSummaryRow(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val running = jobs.count { it.isRunning }
+    val finished = jobs.count { !it.isRunning }
     Row(
         modifier = modifier
             .clip(MaterialTheme.shapes.medium)
@@ -63,7 +63,7 @@ internal fun JobsSummaryRow(
             .heightIn(min = 48.dp)
             .padding(horizontal = 16.dp)
             .semantics(mergeDescendants = true) {
-                contentDescription = "Jobs, $running running, tap to view"
+                contentDescription = "Jobs, $finished of ${jobs.size} finished, tap to view"
             },
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -74,7 +74,7 @@ internal fun JobsSummaryRow(
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(
-            text = "Jobs · $running",
+            text = "Jobs · $finished/${jobs.size}",
             style = MaterialTheme.typography.labelLarge,
         )
     }
@@ -82,8 +82,8 @@ internal fun JobsSummaryRow(
 
 /**
  * The jobs sheet (ticket 092): every background task of the session — running first
- * (oldest first), then terminal (newest first) — with its kind badge, status glyph,
- * and ticking elapsed time (startedAt → endedAt ?: now). Running rows get a trailing
+ * (oldest first), then terminal (newest first) — with its kind badge, plain-English
+ * status, and ticking elapsed time (startedAt → endedAt ?: now). Running rows get a trailing
  * Stop button; tapping a sub-agent row with a known agentId opens its page. Same
  * transient-detail pattern as TodosSheet.
  */
@@ -127,9 +127,10 @@ internal fun JobsSheet(
     }
 }
 
-/** One sheet row: status glyph, description over a "badge · status · elapsed"
- * secondary line, and a trailing Stop for running rows. Sub-agent rows with a known
- * [Job.agentId] are tappable (the page navigation). */
+/** One sheet row: description over a "badge · status · elapsed" secondary line,
+ * and a trailing Stop for running rows. No status glyph — the plain-English status
+ * on the secondary line carries it (Louis's call, ticket 094). Sub-agent rows with
+ * a known [Job.agentId] are tappable (the page navigation). */
 @Composable
 private fun JobRow(
     job: Job,
@@ -166,7 +167,6 @@ private fun JobRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        JobStatusIcon(job.status)
         Column(Modifier.weight(1f)) {
             Text(
                 text = job.description.ifBlank { job.taskId },
@@ -199,28 +199,5 @@ private fun JobRow(
                 )
             }
         }
-    }
-}
-
-/** Status glyph for a sheet row: a filled primary dot for running, a muted ring for
- * terminal — drawn, like TodoStatusIcon's rings. The description feeds the merged
- * row semantics. */
-@Composable
-private fun JobStatusIcon(status: BackgroundTask.Status) {
-    when (status) {
-        BackgroundTask.Status.Running -> Box(
-            modifier = Modifier
-                .size(20.dp)
-                .semantics { contentDescription = "Running" }
-                .border(2.dp, MaterialTheme.colorScheme.primary, CircleShape)
-                .padding(5.dp)
-                .background(MaterialTheme.colorScheme.primary, CircleShape),
-        )
-        else -> Box(
-            modifier = Modifier
-                .size(20.dp)
-                .semantics { contentDescription = "Finished" }
-                .border(2.dp, MaterialTheme.colorScheme.onSurfaceVariant, CircleShape),
-        )
     }
 }

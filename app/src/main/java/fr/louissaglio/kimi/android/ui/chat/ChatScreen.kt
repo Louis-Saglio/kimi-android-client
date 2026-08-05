@@ -372,9 +372,11 @@ private fun ChatContent(
                 // The agent's todo list (ticket 042) and the background-jobs counter
                 // (ticket 092) sit directly above the composer, sharing the row —
                 // TodosSummaryRow was designed for this (TodosWidget.kt). The jobs
-                // pill hides when nothing is running (web dock parity).
+                // pill is sticky (ticket 094): visible whenever the session has ANY
+                // background task, running or terminal — the sheet is the session's
+                // job history, and the pill is its only entry point.
                 val todosVisible = !uiState.todos.isNullOrEmpty()
-                val jobsVisible = uiState.jobs.any { it.isRunning }
+                val jobsVisible = uiState.jobs.isNotEmpty()
                 AnimatedVisibility(
                     visible = todosVisible || jobsVisible,
                     enter = expandVertically() + fadeIn(),
