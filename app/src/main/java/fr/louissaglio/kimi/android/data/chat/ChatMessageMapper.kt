@@ -36,10 +36,16 @@ class ChatMessageMapper @Inject constructor(json: Json) {
     fun summary(payload: ApprovalRequestedPayload): String =
         payload.toolInputDisplay?.command?.takeIf { it.isNotBlank() } ?: payload.action
 
-    /** The row preview for a started call: the server's display command when it sent
-     * one, else derived from the arguments (ToolPreview). */
-    fun preview(payload: ToolCallPayload): String =
-        payload.display?.command?.takeIf { it.isNotBlank() } ?: ToolPreview.of(payload.args)
+    /** The row preview for a started call: a Bash call's non-blank `description`
+     * argument wins (ticket 095), then the server's display command when it sent one,
+     * else derived from the arguments (ToolPreview). */
+    fun preview(payload: ToolCallPayload): String {
+        if (payload.name == "Bash") {
+            val description = (payload.args?.get("description") as? JsonPrimitive)?.contentOrNull
+            if (!description.isNullOrBlank()) return ToolPreview.of(payload.name, payload.args)
+        }
+        return payload.display?.command?.takeIf { it.isNotBlank() } ?: ToolPreview.of(payload.name, payload.args)
+    }
 
     fun toDomain(payload: QuestionRequestedPayload): PendingQuestion = PendingQuestion(
         questionId = payload.questionId,
@@ -86,7 +92,7 @@ class ChatMessageMapper @Inject constructor(json: Json) {
         "thinking" -> dto.thinking?.let { ChatMessage.Part.Thinking(it) }
         "image" -> dto.source?.let { toDomain(it) }
         "tool_use" -> dto.toolCallId?.let {
-            ChatMessage.Part.ToolUse(it, dto.toolName.orEmpty(), ToolPreview.of(dto.input), formatDetail(dto.input))
+            ChatMessage.Part.ToolUse(it, dto.toolName.orEmpty(), ToolPreview.of(dto.toolName, dto.input), formatDetail(dto.input))
         }
         "tool_result" -> dto.toolCallId?.let {
             ChatMessage.Part.ToolResult(it, dto.isError ?: false, formatDetail(dto.output))
@@ -204,7 +210,7 @@ class ChatMessageMapper @Inject constructor(json: Json) {
                 toolCallId = toolCallId,
                 name = dto.name.orEmpty(),
                 running = dto.state == "running",
-                preview = ToolPreview.of(dto.input),
+                preview = ToolPreview.of(dto.name, dto.input),
                 input = formatDetail(dto.input).ifBlank { dto.inputText.orEmpty() },
                 // The volatile progress tail stands in while no definitive output exists.
                 output = formatDetail(dto.output).ifBlank { progressText(dto.progress) },

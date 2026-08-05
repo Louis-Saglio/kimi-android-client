@@ -1,6 +1,8 @@
 package fr.louissaglio.kimi.android.data.chat
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -8,11 +10,29 @@ import org.junit.Test
  * The transcript mapping's envelope boundary (ticket 068): user-role text frames of an
  * agent transcript go through the same InternalEnvelopes stripping as history messages —
  * a sub-agent's internal prompts/nudges must not render as raw XML on the sub-agent
- * page. Assistant/thinking frames pass through untouched.
+ * page. Assistant/thinking frames pass through untouched. Also covers the live row
+ * preview's precedence (ticket 095).
  */
 class ChatMessageMapperTest {
 
     private val mapper = ChatMessageMapper(Json { ignoreUnknownKeys = true })
+
+    @Test
+    fun `a started bash call's description beats the server display command`() {
+        // ticket 095: the live tool.call.started path prefers display.command — for Bash
+        // a non-blank args.description (the human-written label) must win over it.
+        val payload = ToolCallPayload(
+            toolCallId = "tool_1",
+            name = "Bash",
+            args = buildJsonObject {
+                put("command", "./gradlew test")
+                put("description", "Run the unit tests")
+            },
+            display = ToolInputDisplayDto(kind = "command", command = "./gradlew test"),
+        )
+
+        assertEquals("Run the unit tests", mapper.preview(payload))
+    }
 
     @Test
     fun `a user-role transcript frame is stripped of internal envelopes`() {
