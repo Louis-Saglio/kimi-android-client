@@ -146,13 +146,24 @@ private fun JobRow(
         BackgroundTask.Kind.Subagent -> "sub-agent"
         BackgroundTask.Kind.Bash -> "bash"
     }
-    val statusLabel = when (job.status) {
-        BackgroundTask.Status.Running -> "running"
-        BackgroundTask.Status.Completed -> "completed"
-        BackgroundTask.Status.Failed -> "failed"
-        BackgroundTask.Status.Cancelled -> "cancelled"
+    val statusLabel = when {
+        job.timedOut -> "timed out"
+        else -> when (job.status) {
+            BackgroundTask.Status.Running -> "running"
+            BackgroundTask.Status.Completed -> "completed"
+            BackgroundTask.Status.Failed -> "failed"
+            BackgroundTask.Status.Cancelled -> "cancelled"
+        }
     }
     val elapsed = formatElapsed(Duration.between(job.startedAt, job.endedAt ?: now))
+    // A live-recorded timeout (ticket 097) reads "timed out after <elapsed>" in error
+    // color; a REST-seeded job can't tell timeout from crash and stays plain "failed".
+    val statusText = if (job.timedOut) "timed out after $elapsed" else "$statusLabel · $elapsed"
+    val rowDescription = if (job.timedOut) {
+        "${job.description}, $kindLabel, $statusText"
+    } else {
+        "${job.description}, $kindLabel, $statusLabel, elapsed $elapsed"
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -168,7 +179,7 @@ private fun JobRow(
             }
             .padding(horizontal = 16.dp)
             .semantics(mergeDescendants = true) {
-                contentDescription = "${job.description}, $kindLabel, $statusLabel, elapsed $elapsed"
+                contentDescription = rowDescription
             },
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -190,9 +201,9 @@ private fun JobRow(
                     color = MaterialTheme.colorScheme.primary,
                 )
                 Text(
-                    text = "$statusLabel · $elapsed",
+                    text = statusText,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (job.timedOut) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }

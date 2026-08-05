@@ -610,8 +610,9 @@ class ChatViewModel internal constructor(
     }
 
     /** Wired to ON_STOP: the gate closes the socket unless a sub-agent page of this
-     * session is open. Coalesced deltas flush first, so no received text is ever held
-     * back (or lost with the timer). */
+     * session (or the job screen, ticket 097 — same page count) is open. Coalesced
+     * deltas flush first, so no received text is ever held back (or lost with the
+     * timer). */
     fun onScreenStopped() {
         deltaCoalescer.flush()
         screenVisible.value = false

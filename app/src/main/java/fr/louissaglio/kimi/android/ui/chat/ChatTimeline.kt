@@ -9,6 +9,7 @@ import fr.louissaglio.kimi.android.data.chat.TodoParser
 import fr.louissaglio.kimi.android.data.chat.TranscriptFrame
 import fr.louissaglio.kimi.android.data.chat.TranscriptTurn
 import fr.louissaglio.kimi.android.data.chat.bashTaskIdOf
+import fr.louissaglio.kimi.android.data.chat.bashTimeoutOf
 
 /**
  * Pure reducer behind the chat screen: flattens history messages into timeline rows
@@ -146,6 +147,7 @@ class ChatTimeline(
                 tools = group.tools.map { tool ->
                     val call = headCalls[tool.id] ?: return@map tool
                     adopted += tool.id
+                    val timeout = bashTimeoutOf(call.name, call.input)
                     tool.copy(
                         name = call.name,
                         preview = call.preview,
@@ -153,6 +155,8 @@ class ChatTimeline(
                         output = tool.output.ifBlank { call.output },
                         subagentId = tool.subagentId ?: agentResultSubagentId(call.name, tool.output),
                         bashTaskId = tool.bashTaskId ?: bashTaskIdOf(call.name, tool.output),
+                        timeoutSeconds = tool.timeoutSeconds ?: timeout?.seconds,
+                        timeoutDisabled = tool.timeoutDisabled || (timeout?.disabled == true),
                     )
                 },
             )
@@ -522,10 +526,17 @@ class ChatTimeline(
     /** Live row→job linkage (ticket 096): a background Bash result's first line
      * carries `task_id: bash-…`, so the row gains its open affordance. Unlike the
      * sub-agent links there is no registry: the result text is the only carrier and
-     * history repeats it verbatim, so every rebuild re-derives the link. */
+     * history repeats it verbatim, so every rebuild re-derives the link. The call
+     * input's timeout knobs (ticket 097) ride the same heal — the row's `input`
+     * holds the args by result time. */
     private fun linkBashTaskFromResult(toolCallId: String, output: String) {
         healTool(toolCallId) { row ->
-            if (row.bashTaskId == null) row.copy(bashTaskId = bashTaskIdOf(row.name, output)) else row
+            val timeout = bashTimeoutOf(row.name, row.input)
+            row.copy(
+                bashTaskId = row.bashTaskId ?: bashTaskIdOf(row.name, output),
+                timeoutSeconds = row.timeoutSeconds ?: timeout?.seconds,
+                timeoutDisabled = row.timeoutDisabled || (timeout?.disabled == true),
+            )
         }
     }
 
@@ -604,11 +615,14 @@ class ChatTimeline(
                     var found = false
                     target.updateTool(result.toolCallId) { existing ->
                         found = true
+                        val timeout = bashTimeoutOf(existing.name, existing.input)
                         existing.copy(
                             status = status,
                             output = existing.output.ifBlank { result.output },
                             subagentId = existing.subagentId ?: agentResultSubagentId(existing.name, result.output),
                             bashTaskId = existing.bashTaskId ?: bashTaskIdOf(existing.name, result.output),
+                            timeoutSeconds = existing.timeoutSeconds ?: timeout?.seconds,
+                            timeoutDisabled = existing.timeoutDisabled || (timeout?.disabled == true),
                         )
                     }
                     if (!found) {

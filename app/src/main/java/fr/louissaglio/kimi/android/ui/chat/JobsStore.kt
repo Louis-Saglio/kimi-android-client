@@ -15,7 +15,10 @@ import kotlinx.coroutines.launch
  * store maps the WS core one — `killed`→Cancelled, `timed_out`/`lost`→Failed,
  * `agent`→Subagent, `process`→Bash). [agentId] links a sub-agent job to its page;
  * null on bash jobs and on REST-seeded jobs whose `task.started` predates the
- * subscription. Terminal jobs linger until the session is left — no eviction. */
+ * subscription. [timedOut] retains that the terminal cause was the kill budget
+ * (ticket 097): REST collapses `timed_out` to `failed`, so only a live
+ * `task.terminated` sets it — REST-seeded jobs stay plain Failed (documented
+ * limitation). Terminal jobs linger until the session is left — no eviction. */
 data class Job(
     val taskId: String,
     val kind: BackgroundTask.Kind,
@@ -24,6 +27,7 @@ data class Job(
     val startedAt: Instant,
     val endedAt: Instant? = null,
     val agentId: String? = null,
+    val timedOut: Boolean = false,
 ) {
     val isRunning: Boolean get() = status == BackgroundTask.Status.Running
 }
@@ -70,9 +74,14 @@ internal class JobsStore(
                     updateState { current ->
                         current.copy(
                             jobs = tasks.map { task ->
-                                // REST carries no agentId (the verbatim shape): keep
-                                // the one a live task.started already linked.
-                                task.toJob(agentId = task.agentId ?: current.jobs.firstOrNull { it.taskId == task.id }?.agentId)
+                                val existing = current.jobs.firstOrNull { it.taskId == task.id }
+                                // REST carries no agentId (the verbatim shape) and
+                                // collapses timed_out to failed: keep the link and the
+                                // timed-out flag a live event already recorded.
+                                task.toJob(
+                                    agentId = task.agentId ?: existing?.agentId,
+                                    timedOut = existing?.timedOut == true,
+                                )
                             },
                         )
                     }
@@ -100,7 +109,10 @@ internal class JobsStore(
 
     /** A live `task.terminated`: flips the job to its terminal status — mapped from
      * the CORE vocabulary (`killed`→Cancelled, `timed_out`/`lost`→Failed) — with its
-     * [TaskInfo.endedAt]. An unknown task id still upserts (the start was missed). */
+     * [TaskInfo.endedAt]. A core `timed_out` additionally retains [Job.timedOut]
+     * (ticket 097): the REST collapse to `failed` is unrecoverable, so the live
+     * event is the only carrier of the timeout truth. An unknown task id still
+     * upserts (the start was missed). */
     fun onTerminated(info: TaskInfo) {
         seedGuard.bump()
         upsert(
@@ -112,6 +124,7 @@ internal class JobsStore(
                 startedAt = info.startedAt,
                 endedAt = info.endedAt,
                 agentId = info.agentId,
+                timedOut = info.status == TaskInfo.Status.TimedOut,
             ),
         )
     }
@@ -152,9 +165,16 @@ internal class JobsStore(
         } else {
             current.copy(
                 jobs = current.jobs.mapIndexed { i, existing ->
-                    // The sub-agent page link survives every upsert (a live event
-                    // heals a REST-seeded job, never the reverse).
-                    if (i == index) job.copy(agentId = job.agentId ?: existing.agentId) else existing
+                    // The sub-agent page link and the timed-out flag survive every
+                    // upsert (a live event heals a REST-seeded job, never the reverse).
+                    if (i == index) {
+                        job.copy(
+                            agentId = job.agentId ?: existing.agentId,
+                            timedOut = job.timedOut || existing.timedOut,
+                        )
+                    } else {
+                        existing
+                    }
                 },
             )
         }
@@ -167,8 +187,8 @@ internal class JobsStore(
     }
 }
 
-private fun BackgroundTask.toJob(agentId: String?): Job =
-    Job(id, kind, description, status, startedAt, completedAt, agentId)
+private fun BackgroundTask.toJob(agentId: String?, timedOut: Boolean): Job =
+    Job(id, kind, description, status, startedAt, completedAt, agentId, timedOut)
 
 /** Core→wire kind mapping (docs/server-api.md): `agent`→subagent, `process`→bash. */
 private fun TaskInfo.Kind.toWireKind(): BackgroundTask.Kind = when (this) {

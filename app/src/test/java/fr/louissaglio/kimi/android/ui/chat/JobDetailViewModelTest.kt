@@ -12,6 +12,7 @@ import fr.louissaglio.kimi.android.navigation.JobDetail
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.awaitState
 import fr.louissaglio.kimi.android.testutil.testChatRepository
+import fr.louissaglio.kimi.android.testutil.testSubagentStreamStore
 import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
@@ -52,6 +53,7 @@ class JobDetailViewModelTest {
 
     private lateinit var repository: ChatRepository
     private lateinit var settingsRepository: SettingsRepository
+    private lateinit var subagentStore: SubagentStreamStore
 
     @Volatile
     private var taskBody = RUNNING_TASK_BODY
@@ -80,6 +82,15 @@ class JobDetailViewModelTest {
         )
         repository = testChatRepository(dataStore)
         settingsRepository = SettingsRepository(dataStore, appScope)
+        subagentStore = testSubagentStreamStore(
+            streamCoalesceWindowMillis = 0,
+            chatRepository = repository,
+            settingsRepository = settingsRepository,
+        )
+        // The production shape: the chat (in the back stack) collects the session
+        // socket, so the store's keep-alive must never start from these tests'
+        // pageOpened calls.
+        subagentStore.chatCollectionStarted("session_1")
     }
 
     @After
@@ -88,10 +99,11 @@ class JobDetailViewModelTest {
         Dispatchers.resetMain()
     }
 
-    private fun newViewModel(taskId: String = "bash-1") = JobDetailViewModel(
+    private fun newViewModel(route: JobDetail = JobDetail("session_1", "bash-1")) = JobDetailViewModel(
         repository,
         settingsRepository,
-        JobDetail("session_1", taskId),
+        subagentStore,
+        route,
         pollIntervalMillis = 50,
         pollDispatcher = Dispatchers.Unconfined,
     )
@@ -197,13 +209,35 @@ class JobDetailViewModelTest {
     fun `an unknown task shows the full-screen error state`() = runBlocking {
         taskBody = """{"code":40406,"msg":"task not found","request_id":"r"}"""
 
-        val viewModel = newViewModel("bash-nope")
+        val viewModel = newViewModel(JobDetail("session_1", "bash-nope"))
         awaitState(viewModel.uiState) { it.error != null }
 
         val state = viewModel.uiState.value
         assertEquals(DataError.Api(40406, "task not found").toUserMessage(), state.error)
         assertFalse(state.isLoading)
         assertNull(state.status)
+    }
+
+    @Test
+    fun `the route's budget and timed-out flag seed the state and survive the fetch`() = runBlocking {
+        // Ticket 097: REST never carries either — the route arguments are the only
+        // source, so the poll's state updates must leave them untouched.
+        taskBody = FAILED_TASK_BODY
+
+        val viewModel = newViewModel(
+            JobDetail("session_1", "bash-1", budgetSeconds = 30, budgetIsDefault = false, timedOut = true),
+        )
+        // Seeded synchronously — the first composition already shows them.
+        assertEquals(30, viewModel.uiState.value.budgetSeconds)
+        assertTrue(viewModel.uiState.value.timedOut)
+
+        awaitState(viewModel.uiState) { it.status != null }
+        val state = viewModel.uiState.value
+        // REST answers the collapsed "failed" — the flag is what tells timeout apart.
+        assertEquals(BackgroundTask.Status.Failed, state.status)
+        assertEquals(30, state.budgetSeconds)
+        assertFalse(state.budgetIsDefault)
+        assertTrue(state.timedOut)
     }
 
     private companion object {
@@ -222,6 +256,16 @@ class JobDetailViewModelTest {
                 """"created_at":"2026-08-05T10:00:00.000Z","started_at":"2026-08-05T10:00:00.000Z",""" +
                 """"completed_at":"2026-08-05T10:02:00.000Z","command":"for i in …",""" +
                 """"output_preview":"tick 118\ntick 119\n","output_bytes":18},""" +
+                """"request_id":"r"}"""
+
+        /** A timed-out job as REST serves it (ticket 097): the core `timed_out`
+         * collapses to `failed` — no timeout field anywhere on the wire. */
+        const val FAILED_TASK_BODY =
+            """{"code":0,"msg":"success","data":{"id":"bash-1","kind":"bash",""" +
+                """"description":"tick counter loop","status":"failed",""" +
+                """"created_at":"2026-08-05T10:00:00.000Z","started_at":"2026-08-05T10:00:00.000Z",""" +
+                """"completed_at":"2026-08-05T10:00:30.000Z","command":"for i in …",""" +
+                """"output_preview":"tick 28\n","output_bytes":7},""" +
                 """"request_id":"r"}"""
     }
 }

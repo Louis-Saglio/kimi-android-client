@@ -38,7 +38,9 @@ sealed interface ChatItem {
      * `Agent` row to its sub-agent's page (ticket 045); null rows are not tappable.
      * [bashTaskId] links a background `Bash` row to its job screen (ticket 096) —
      * parsed from the result's `task_id: bash-…` first line; like the sub-agent link,
-     * a linked row never expands. */
+     * a linked row never expands. [timeoutSeconds]/[timeoutDisabled] are the call
+     * input's timeout knobs (ticket 097), parsed at the same link sites — the job
+     * screen's budget display derives from them (REST never exposes the timeout). */
     data class ToolActivity(
         override val id: String,
         val name: String,
@@ -48,6 +50,8 @@ sealed interface ChatItem {
         val output: String = "",
         val subagentId: String? = null,
         val bashTaskId: String? = null,
+        val timeoutSeconds: Int? = null,
+        val timeoutDisabled: Boolean = false,
     ) : ChatItem
 
     /** A run of consecutive tool calls collapsed into one card (ticket 037), like the

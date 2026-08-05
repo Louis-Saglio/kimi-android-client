@@ -18,6 +18,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -34,6 +35,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
@@ -158,51 +160,83 @@ private fun JobDetailContent(uiState: JobDetailViewModel.UiState) {
 }
 
 /** Glyph + plain-English label + elapsed (`mm:ss`, `h:mm:ss` past an hour — the
- * shared [formatElapsed]). */
+ * shared [formatElapsed]). While running with a known kill budget (ticket 097) the
+ * line reads `running · <elapsed> / <budget>` — `· default` appended when the budget
+ * is the harness's 600 s fallback — and a determinate bar fills toward the budget,
+ * state-driven by the 1 s ticker (no infinite animation; the fraction coerces to
+ * 0..1, a job can outlive a stale default). A live-recorded timeout reads
+ * "timed out after <budget-or-elapsed>" in place of "failed"; REST-seeded jobs keep
+ * "failed" (REST collapses the two). Internal for the semantics tests. */
 @Composable
-private fun JobStatusLine(uiState: JobDetailViewModel.UiState, now: Instant) {
+internal fun JobStatusLine(uiState: JobDetailViewModel.UiState, now: Instant) {
     val status = uiState.status ?: return
     val label = when (status) {
         BackgroundTask.Status.Running -> "running"
         BackgroundTask.Status.Completed -> "completed"
-        BackgroundTask.Status.Failed -> "failed"
+        BackgroundTask.Status.Failed -> if (uiState.timedOut) "timed out" else "failed"
         BackgroundTask.Status.Cancelled -> "cancelled"
     }
     val glyphDescription = "Job $label"
-    val elapsed = uiState.startedAt?.let { formatElapsed(Duration.between(it, uiState.completedAt ?: now)) }
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        when (status) {
-            BackgroundTask.Status.Running -> CircularProgressIndicator(
-                modifier = Modifier.size(14.dp).semantics { contentDescription = glyphDescription },
-                strokeWidth = 1.5.dp,
-            )
-            // No success slot in the M3 scheme: a literal green, readable on both themes.
-            BackgroundTask.Status.Completed -> Text(
-                text = "✓",
-                modifier = Modifier.semantics { contentDescription = glyphDescription },
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.successColor,
-            )
-            BackgroundTask.Status.Failed -> Text(
-                text = "✗",
-                modifier = Modifier.semantics { contentDescription = glyphDescription },
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.error,
-            )
-            BackgroundTask.Status.Cancelled -> Text(
-                text = "✗",
-                modifier = Modifier.semantics { contentDescription = glyphDescription },
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+    val elapsedDuration = uiState.startedAt?.let { Duration.between(it, uiState.completedAt ?: now) }
+    val elapsed = elapsedDuration?.let(::formatElapsed)
+    val budget = uiState.budgetSeconds?.let { formatElapsed(Duration.ofSeconds(it.toLong())) }
+    val text = when {
+        status == BackgroundTask.Status.Failed && uiState.timedOut -> {
+            val after = budget ?: elapsed
+            if (after != null) "timed out after $after" else "timed out"
+        }
+        status == BackgroundTask.Status.Running && budget != null && elapsed != null ->
+            "$label · $elapsed / $budget" + if (uiState.budgetIsDefault) " · default" else ""
+        elapsed != null -> "$label · $elapsed"
+        else -> label
+    }
+    Column {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            when (status) {
+                BackgroundTask.Status.Running -> CircularProgressIndicator(
+                    modifier = Modifier.size(14.dp).semantics { contentDescription = glyphDescription },
+                    strokeWidth = 1.5.dp,
+                )
+                // No success slot in the M3 scheme: a literal green, readable on both themes.
+                BackgroundTask.Status.Completed -> Text(
+                    text = "✓",
+                    modifier = Modifier.semantics { contentDescription = glyphDescription },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.successColor,
+                )
+                BackgroundTask.Status.Failed -> Text(
+                    text = "✗",
+                    modifier = Modifier.semantics { contentDescription = glyphDescription },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                BackgroundTask.Status.Cancelled -> Text(
+                    text = "✗",
+                    modifier = Modifier.semantics { contentDescription = glyphDescription },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(
+                text = text,
+                style = MaterialTheme.typography.titleMedium,
+                color = if (uiState.timedOut && status == BackgroundTask.Status.Failed) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    Color.Unspecified
+                },
             )
         }
-        Text(
-            text = if (elapsed != null) "$label · $elapsed" else label,
-            style = MaterialTheme.typography.titleMedium,
-        )
+        if (status == BackgroundTask.Status.Running && uiState.budgetSeconds != null && elapsedDuration != null) {
+            val fraction = (elapsedDuration.toMillis() / (uiState.budgetSeconds * 1_000f)).coerceIn(0f, 1f)
+            LinearProgressIndicator(
+                progress = { fraction },
+                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+            )
+        }
     }
 }
 

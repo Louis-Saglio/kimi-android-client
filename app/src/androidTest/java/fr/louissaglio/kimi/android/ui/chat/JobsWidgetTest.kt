@@ -89,4 +89,27 @@ class JobsWidgetTest {
         assertEquals("agent-9", openedAgent)
         assertEquals(null, openedJob)
     }
+
+    @Test
+    fun timedOutBashRowReadsTimedOutAfterTheElapsed() {
+        // Ticket 097: a live-recorded timeout reads "timed out after <elapsed>" instead
+        // of the plain "failed" a REST-seeded job shows.
+        sheet(
+            jobs = listOf(
+                Job(
+                    taskId = "bash-1",
+                    kind = BackgroundTask.Kind.Bash,
+                    description = "tick counter loop",
+                    status = BackgroundTask.Status.Failed,
+                    startedAt = Instant.now().minusSeconds(5),
+                    endedAt = Instant.now(),
+                    timedOut = true,
+                ),
+            ),
+        )
+
+        composeTestRule
+            .onNodeWithContentDescription("tick counter loop, bash, timed out after", substring = true)
+            .assertIsDisplayed()
+    }
 }

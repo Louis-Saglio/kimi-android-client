@@ -53,6 +53,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import fr.louissaglio.kimi.android.data.chat.BashTimeout
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
@@ -68,7 +69,8 @@ import java.time.Instant
 fun ChatScreen(
     onNavigateBack: () -> Unit,
     onNavigateToSubagent: (sessionId: String, subagentId: String) -> Unit = { _, _ -> },
-    onNavigateToJob: (sessionId: String, taskId: String) -> Unit = { _, _ -> },
+    onNavigateToJob: (sessionId: String, taskId: String, budgetSeconds: Int?, budgetIsDefault: Boolean, timedOut: Boolean) -> Unit =
+        { _, _, _, _, _ -> },
     viewModel: ChatViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -103,7 +105,8 @@ fun ChatScreen(
         }
     }
     // ON_START/ON_STOP feed the socket gate (ticket 045): the session socket stays
-    // collected while this screen is visible OR a sub-agent page of it is open.
+    // collected while this screen is visible OR a sub-agent page (or the job screen,
+    // ticket 097 — same page count) of it is open.
     LifecycleEventEffect(Lifecycle.Event.ON_START) { viewModel.onScreenStarted() }
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) { viewModel.onScreenStopped() }
     // History attachments (ticket 034): images resolve their bytes inline (base64) or
@@ -127,9 +130,26 @@ fun ChatScreen(
     val onOpenSubagent = remember(onNavigateToSubagent, sessionId) {
         { subagentId: String -> onNavigateToSubagent(sessionId, subagentId) }
     }
-    // Linked background `Bash` rows (ticket 096) open their job screen.
-    val onOpenJob = remember(onNavigateToJob, sessionId) {
-        { taskId: String -> onNavigateToJob(sessionId, taskId) }
+    // Linked background `Bash` rows (ticket 096) open their job screen. The timeout
+    // budget (ticket 097) resolves from the matching timeline row — the call input is
+    // the only wire location of the timeout — and the timed-out flag from the jobs
+    // list; an unknown row navigates budget-less (plain elapsed, the 096 behavior).
+    val timelineItems = uiState.items
+    val jobs = uiState.jobs
+    val onOpenJob = remember(onNavigateToJob, sessionId, timelineItems, jobs) {
+        { taskId: String ->
+            val row = timelineItems?.filterIsInstance<ChatItem.ToolGroup>()
+                ?.flatMap { it.tools }
+                ?.firstOrNull { it.bashTaskId == taskId }
+            val timeout = row?.let { BashTimeout(it.timeoutSeconds, it.timeoutDisabled) }
+            onNavigateToJob(
+                sessionId,
+                taskId,
+                timeout?.effectiveSeconds,
+                timeout?.isDefault ?: false,
+                jobs.firstOrNull { it.taskId == taskId }?.timedOut == true,
+            )
+        }
     }
     // Scroll-to-top loads the next older history page (ticket 043).
     val onHistoryTopReached = remember(viewModel) { viewModel::onHistoryTopReached }

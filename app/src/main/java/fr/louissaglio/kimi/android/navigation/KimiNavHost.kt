@@ -33,9 +33,19 @@ data class Chat(val sessionId: String, val title: String? = null, val cwd: Strin
 data class Subagent(val sessionId: String, val subagentId: String)
 
 /** Background-bash job detail page (ticket 096): information, live output tail and
- * the Stop action; both ids reach the ViewModel through its SavedStateHandle. */
+ * the Stop action; both ids reach the ViewModel through its SavedStateHandle. The
+ * timeout budget and the timed-out flag (ticket 097) ride as optional arguments —
+ * REST never exposes the timeout and collapses `timed_out` to `failed`, so the chat
+ * resolves them from its own state at navigation time; absent (deep link, unknown
+ * row), the screen falls back to plain elapsed and "failed". */
 @Serializable
-data class JobDetail(val sessionId: String, val taskId: String)
+data class JobDetail(
+    val sessionId: String,
+    val taskId: String,
+    val budgetSeconds: Int? = null,
+    val budgetIsDefault: Boolean = false,
+    val timedOut: Boolean = false,
+)
 
 @Composable
 fun KimiNavHost() {
@@ -65,8 +75,8 @@ fun KimiNavHost() {
                         launchSingleTop = true
                     }
                 },
-                onNavigateToJob = { sessionId, taskId ->
-                    navController.navigate(JobDetail(sessionId, taskId)) {
+                onNavigateToJob = { sessionId, taskId, budgetSeconds, budgetIsDefault, timedOut ->
+                    navController.navigate(JobDetail(sessionId, taskId, budgetSeconds, budgetIsDefault, timedOut)) {
                         launchSingleTop = true
                     }
                 },

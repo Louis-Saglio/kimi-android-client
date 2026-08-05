@@ -1721,6 +1721,26 @@ Background **Agent** results also start with `task_id:` but an `agent-…` id
 (see the spawning tool call subsection) — the `bash-` prefix is what
 distinguishes the two.
 
+Timeout facts (spiked live on 0.32.0, 2026-08-05 — two throwaway background
+commands, one completing, one with `timeout: 5`):
+
+- **REST never exposes the timeout** — not even when the call set it
+  explicitly (`bash-mm1xr92b`, `timeout: 120`, completed: no timeout field).
+  The only wire location is the **tool call input** (`timeout`, seconds;
+  `disable_timeout`, boolean), present in live args and history `tool_use`
+  parts alike.
+- **A timed-out job collapses to `status:"failed"` on REST** —
+  indistinguishable from a crash (`bash-w662jmuf`, `timeout: 5`: `failed`,
+  `completed_at - started_at` = 5.003 s — the server enforced the budget
+  exactly). Only the live WS path keeps the truth: `task.terminated` core
+  status `timed_out`, plus a `task.notified` with
+  `notificationType:"task.timed_out"` (severity warning).
+- **The 600 s background default and `disable_timeout` semantics are the
+  harness/tool-schema contract** (unset `timeout` ⇒ 600 s for background
+  commands; `disable_timeout: true` ⇒ no kill) — NOT observable on this
+  wire. The app hardcodes the default for its budget display; if the tool
+  schema changes it, this note is the drift flag.
+
 ### Session snapshot roster
 
 `GET /api/v1/sessions/{sid}/snapshot` (see Sessions → Session snapshot) carries

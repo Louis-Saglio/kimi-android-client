@@ -35,11 +35,20 @@ import kotlinx.coroutines.launch
  * ON_START/ON_STOP pair (the SubagentViewModel precedent). The WS `task.terminated`
  * reconciles the composer pill/sheet; this screen's own poll sees the terminal
  * status.
+ *
+ * Ticket 097: the timeout budget and the timed-out flag arrive as route arguments
+ * (resolved from the chat's state at navigation time) — REST never exposes the
+ * timeout and collapses `timed_out` to `failed`, so this screen's poll alone could
+ * show neither. ON_START/ON_STOP also register the page with the socket gate's
+ * session page count (the sub-agent page mechanism): the chat socket stays collected
+ * while this screen is on top, so a live `task.terminated` still reaches the jobs
+ * store — the sheet (and the next entry here) learn the timed-out truth.
  */
 @HiltViewModel
 class JobDetailViewModel internal constructor(
     private val chatRepository: ChatRepository,
     private val settingsRepository: SettingsRepository,
+    private val subagentStore: SubagentStreamStore,
     routeArgs: JobDetail,
     private val pollIntervalMillis: Long = POLL_INTERVAL_MILLIS,
     private val pollDispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
@@ -55,13 +64,18 @@ class JobDetailViewModel internal constructor(
     constructor(
         chatRepository: ChatRepository,
         settingsRepository: SettingsRepository,
+        subagentStore: SubagentStreamStore,
         savedStateHandle: SavedStateHandle,
-    ) : this(chatRepository, settingsRepository, savedStateHandle.toRoute<JobDetail>())
+    ) : this(chatRepository, settingsRepository, subagentStore, savedStateHandle.toRoute<JobDetail>())
 
     private val sessionId: String = routeArgs.sessionId
     private val taskId: String = routeArgs.taskId
 
-    /** [status] null = nothing fetched yet (the entry fetch is running, or failed). */
+    /** [status] null = nothing fetched yet (the entry fetch is running, or failed).
+     * [budgetSeconds]/[budgetIsDefault]/[timedOut] are the ticket-097 route
+     * arguments: the effective kill budget (null = no budget UI), whether it is the
+     * harness's 600 s default (labeled), and whether a live `task.terminated`
+     * recorded the terminal cause as a timeout. */
     data class UiState(
         val taskId: String,
         val description: String? = null,
@@ -70,6 +84,9 @@ class JobDetailViewModel internal constructor(
         val completedAt: Instant? = null,
         val command: String? = null,
         val outputPreview: String? = null,
+        val budgetSeconds: Int? = null,
+        val budgetIsDefault: Boolean = false,
+        val timedOut: Boolean = false,
         /** True while the entry fetch runs with nothing to show yet. */
         val isLoading: Boolean = true,
         /** The entry fetch failed (unknown task / fetch failure) — full-screen error. */
@@ -77,7 +94,14 @@ class JobDetailViewModel internal constructor(
     )
 
     val uiState: StateFlow<UiState>
-        field = MutableStateFlow(UiState(taskId = taskId))
+        field = MutableStateFlow(
+            UiState(
+                taskId = taskId,
+                budgetSeconds = routeArgs.budgetSeconds,
+                budgetIsDefault = routeArgs.budgetIsDefault,
+                timedOut = routeArgs.timedOut,
+            ),
+        )
 
     /** One-shot snackbars (the ChatViewModel.Effect pattern). */
     sealed interface Effect {
@@ -125,14 +149,18 @@ class JobDetailViewModel internal constructor(
         }
     }
 
-    /** Wired to ON_START. */
+    /** Wired to ON_START. Also holds the chat's socket gate open (the sub-agent page
+     * mechanism): a live `task.terminated` keeps reaching the jobs store while this
+     * screen is on top, so the session learns a timeout kill's truth. */
     fun onScreenStarted() {
+        subagentStore.pageOpened(sessionId)
         screenActive = true
         syncPolling()
     }
 
     /** Wired to ON_STOP. */
     fun onScreenStopped() {
+        subagentStore.pageClosed(sessionId)
         screenActive = false
         syncPolling()
     }

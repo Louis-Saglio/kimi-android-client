@@ -148,9 +148,11 @@ class JobsStoreTest {
         val terminated = uiState.jobs.first { it.taskId == "agent-7noib8bb" }
         assertEquals(BackgroundTask.Status.Cancelled, terminated.status)
         assertEquals(Instant.ofEpochMilli(1785210118804), terminated.endedAt)
+        assertEquals(false, terminated.timedOut)
         assertEquals(1, uiState.jobs.count { it.isRunning })
 
-        // timed_out → failed.
+        // timed_out → failed, and the live event retains the timeout cause
+        // (ticket 097 — the REST collapse to "failed" can't).
         store.onTerminated(
             taskInfo(
                 taskId = "proc-9xk2",
@@ -161,13 +163,47 @@ class JobsStoreTest {
                 endedAt = Instant.ofEpochMilli(1785210200000),
             ),
         )
-        assertEquals(
-            BackgroundTask.Status.Failed,
-            uiState.jobs.first { it.taskId == "proc-9xk2" }.status,
-        )
+        val timedOut = uiState.jobs.first { it.taskId == "proc-9xk2" }
+        assertEquals(BackgroundTask.Status.Failed, timedOut.status)
+        assertEquals(true, timedOut.timedOut)
         assertEquals(0, uiState.jobs.count { it.isRunning })
         // Both finished jobs linger in the list.
         assertEquals(2, uiState.jobs.size)
+    }
+
+    @Test
+    fun `a REST seed after a live timed_out keeps the timed-out flag`() = runBlocking {
+        // Ticket 097: REST collapses timed_out to failed — within the session the
+        // live-recorded flag survives reseeds; a fresh seed (re-entered session) has
+        // no live carrier and renders plain "failed" (documented limitation).
+        store.onStarted(
+            taskInfo(taskId = "bash-1", status = TaskInfo.Status.Running, kind = TaskInfo.Kind.Process, agentId = null),
+        )
+        store.onTerminated(
+            taskInfo(
+                taskId = "bash-1",
+                status = TaskInfo.Status.TimedOut,
+                kind = TaskInfo.Kind.Process,
+                agentId = null,
+                endedAt = Instant.ofEpochMilli(1785210200000),
+            ),
+        )
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"items":[""" +
+                    """{"id":"bash-1","session_id":"session_1","kind":"bash","description":"doc-verify",""" +
+                    """"status":"failed","created_at":"2026-07-28T03:41:00.000Z",""" +
+                    """"started_at":"2026-07-28T03:41:00.000Z","completed_at":"2026-07-28T03:41:05.000Z"}""" +
+                    """]},"request_id":"r"}""",
+            ),
+        )
+
+        store.seed()
+        awaitCondition { uiState.jobs.single().endedAt == Instant.parse("2026-07-28T03:41:05.000Z") }
+
+        val reseeded = uiState.jobs.single()
+        assertEquals(BackgroundTask.Status.Failed, reseeded.status)
+        assertEquals(true, reseeded.timedOut)
     }
 
     @Test

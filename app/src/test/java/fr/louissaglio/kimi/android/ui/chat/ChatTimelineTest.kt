@@ -399,6 +399,83 @@ class ChatTimelineTest {
     }
 
     @Test
+    fun `a background bash row keeps the call input's explicit timeout`() {
+        // Ticket 097: the call input is the ONLY wire location of the kill budget —
+        // parsed at the same link site as the result's task_id, live args here.
+        val output = "task_id: bash-2q5gu61e\npid: 502439\nstatus: running\n"
+        val timeline = testChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted())
+        timeline.apply(
+            SessionEvent.ToolCallStarted(
+                "tool_1",
+                "Bash",
+                "tick counter loop (120)",
+                input = """{"command":"for i in …","timeout":30}""",
+            ),
+        )
+
+        timeline.apply(SessionEvent.ToolCallResult("tool_1", false, output))
+
+        val tool = (timeline.items().single() as ChatItem.ToolGroup).tools.single()
+        assertEquals("bash-2q5gu61e", tool.bashTaskId)
+        assertEquals(30, tool.timeoutSeconds)
+        assertEquals(false, tool.timeoutDisabled)
+    }
+
+    @Test
+    fun `a background bash row keeps the call input's disable_timeout`() {
+        val output = "task_id: bash-2q5gu61e\npid: 502439\nstatus: running\n"
+        val timeline = testChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted())
+        timeline.apply(
+            SessionEvent.ToolCallStarted(
+                "tool_1",
+                "Bash",
+                "tick counter loop (120)",
+                input = """{"command":"for i in …","disable_timeout":true}""",
+            ),
+        )
+
+        timeline.apply(SessionEvent.ToolCallResult("tool_1", false, output))
+
+        val tool = (timeline.items().single() as ChatItem.ToolGroup).tools.single()
+        assertEquals(null, tool.timeoutSeconds)
+        assertEquals(true, tool.timeoutDisabled)
+    }
+
+    @Test
+    fun `a history background bash pair keeps the tool_use input's timeout`() {
+        // History tool_use parts carry the same input object, so the budget survives
+        // a session re-entry exactly like the task_id link.
+        val output = "task_id: bash-2q5gu61e\npid: 502439\nstatus: running\n"
+        val timeline = testChatTimeline()
+
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage(
+                    "msg_1",
+                    ChatMessage.Role.Assistant,
+                    listOf(
+                        ChatMessage.Part.ToolUse(
+                            "tool_1",
+                            "Bash",
+                            "tick counter loop (120)",
+                            input = """{"command":"for i in …","timeout":30}""",
+                        ),
+                    ),
+                ),
+                ChatMessage("msg_2", ChatMessage.Role.Tool, listOf(ChatMessage.Part.ToolResult("tool_1", false, output))),
+            ),
+            keepLive = false,
+        )
+
+        val tool = (timeline.items().single() as ChatItem.ToolGroup).tools.single()
+        assertEquals("bash-2q5gu61e", tool.bashTaskId)
+        assertEquals(30, tool.timeoutSeconds)
+        assertEquals(false, tool.timeoutDisabled)
+    }
+
+    @Test
     fun `tool call started fills the running row preview live`() {
         val timeline = testChatTimeline()
         timeline.apply(SessionEvent.TurnStarted())

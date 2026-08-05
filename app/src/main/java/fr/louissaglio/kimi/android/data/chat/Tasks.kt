@@ -1,6 +1,11 @@
 package fr.louissaglio.kimi.android.data.chat
 
 import java.time.Instant
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 // Domain models of the background-task store (docs/server-api.md, Background lifecycle
 // and REST /tasks — ticket 092): background sub-agents and background bash. Question
@@ -79,4 +84,41 @@ fun bashTaskIdOf(toolName: String, output: String): String? {
     val id = BASH_TASK_ID.find(output.lineSequence().firstOrNull().orEmpty())
         ?.groupValues?.get(1)
     return id?.takeIf { it.startsWith("bash-") }
+}
+
+/** The harness's kill budget for a background Bash call whose input sets no explicit
+ * `timeout` (tool-schema contract — NOT observable on the wire, docs/server-api.md). */
+const val DEFAULT_BACKGROUND_BASH_TIMEOUT_SECONDS = 600
+
+/**
+ * The timeout knobs of a Bash tool call's input (ticket 097): [seconds] is the
+ * explicit `timeout` (null when unset), [disabled] mirrors `disable_timeout: true`.
+ * REST never exposes either — the call input (live args / history `tool_use` alike)
+ * is the only wire location.
+ */
+data class BashTimeout(
+    val seconds: Int?,
+    val disabled: Boolean,
+) {
+    /** The effective kill budget: the explicit timeout, else the 600 s background
+     * default, else null when the kill is disabled — null means "no budget UI". */
+    val effectiveSeconds: Int?
+        get() = seconds ?: if (disabled) null else DEFAULT_BACKGROUND_BASH_TIMEOUT_SECONDS
+
+    /** True when [effectiveSeconds] comes from the harness default rather than the
+     * call — the screen labels a default-sourced budget. */
+    val isDefault: Boolean get() = seconds == null && !disabled
+}
+
+private val bashArgsJson = Json { ignoreUnknownKeys = true }
+
+/** Parses [argsJson] (a Bash call's input) into its [BashTimeout]; null for non-Bash
+ * calls and blank/unparseable input (the row then carries no budget information). */
+fun bashTimeoutOf(toolName: String, argsJson: String): BashTimeout? {
+    if (toolName != "Bash" || argsJson.isBlank()) return null
+    val args = runCatching { bashArgsJson.parseToJsonElement(argsJson).jsonObject }.getOrNull() ?: return null
+    return BashTimeout(
+        seconds = args["timeout"]?.jsonPrimitive?.intOrNull,
+        disabled = args["disable_timeout"]?.jsonPrimitive?.booleanOrNull == true,
+    )
 }

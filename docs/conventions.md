@@ -99,7 +99,9 @@
   socket gate holds the session (ChatViewModel signals
   chatCollectionStarted/Stopped), otherwise the store's own keep-alive
   collection while a sub-agent page is open (SubagentViewModel registers via
-  pageOpened/pageClosed) — the keep-alive lives in the store because after
+  pageOpened/pageClosed; the job screen registers the same page count so the
+  socket — and with it the live `task.terminated` truth — survives watching
+  a job) — the keep-alive lives in the store because after
   process death with a page on top the chat ViewModel is never recreated. Two
   concurrent collections would double-feed on replay, so the keep-alive never
   runs while a chat collection does; never open a page-owned socket. The
