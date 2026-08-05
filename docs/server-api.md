@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-07-31
-(server version `0.31.1`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-08-05
+(server version `0.32.0`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
@@ -14,13 +14,55 @@ the workspace list used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `0.31.0`
-(verified 2026-07-30; see git history), `0.29.2`
+**Protocol history:** this document previously described server `0.31.1`
+(verified 2026-07-31; see git history), `0.31.0`
+(verified 2026-07-30), `0.29.2`
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
-that, `0.27.0` before that, and `0.23.3` before that. The drift from 0.31.0 to
-0.31.1 is again **minor** for the core loop: every shape the Android app parses
-still decodes. The real changes:
+that, `0.27.0` before that, and `0.23.3` before that. The drift from 0.31.1 to
+0.32.0 is again **minor** for the core loop: every shape the Android app
+parses still decodes. The real changes:
+
+- **Meta:** `GET /api/v1/meta` gained an **`experimental_flags`** object (the
+  effective server-side experiment switches; `{"secondary-model":false,
+  "tool-select":false,"persistence_minidb_readmodel":false}` here) — additive.
+- **WebSocket (new event):** `event.config.warning` — a **global** frame
+  (`session_id: "__global__"`, its own global epoch) pushed to every
+  connection whenever the set of config warnings (deprecated keys/env vars in
+  use) changes; `warnings: []` means the last warning cleared. Verbatim
+  captures in the WebSocket section. The app's "ignore unknown frame types"
+  rule already covers it.
+- **Error envelopes:** the server-side **`stack`** string now rides on every
+  Error2 domain-error envelope (observed on `40401`, `40402`, `40910`,
+  `50001`; the workspace-trust route was the only one seen leaking it before).
+  Validation (`40001`) and `40406` envelopes still have no `stack`. Additive —
+  ignore it.
+- **Error-code vocabulary:** the upstream enum gained
+  `agent.already_exists`/`already_running`/`not_a_subagent`/`not_owned`/
+  `type_not_allowed`/`max_tokens_exceeded`, `skill.parse_failed`/
+  `nested_too_deep`, `task.limit_exceeded`, `mcp.oauth_failed`,
+  `storage.permission_denied`/`disk_full`, `wire.migration_missing`,
+  `cron.expression_invalid`, `web.invalid_url`/`private_address`/`fetch_failed`
+  (plus `os.*`/`storage.*`/`wire.*` codes the v1 edge already knew). Clients
+  must keep treating unknown codes generically.
+- **Status/token counting:** context-size reporting moved to a new upstream
+  `tokenCounting` service. Observable deltas: a draft session (no model bound)
+  now reports the **default model's** `max_context_tokens` instead of a
+  placeholder, and upstream types make `maxContextTokens` omittable when the
+  limit is unknown (`0` is never pushed) — never observed omitted live; every
+  `/status` and `agent.status.updated` capture below still carries it.
+- **Questions:** `POST .../questions/{qid}` now accepts question ids
+  containing **colons** (some OpenAI-compatible providers emit tool-call ids
+  like `AskUserQuestion:0`; the `:dismiss`-suffix parse used to eat them) —
+  invisible with this provider's ULID ids.
+- **Invisible refactors:** v1 message-history and snapshot assembly moved from
+  the engine into kap-server (upstream #2562) — every affected shape
+  (`/messages`, `/snapshot`, transcript) re-verified byte-for-byte; an
+  agent-core-v2 lifecycle ledger/hook-events wave and a new ACP server
+  (`kimi acp-v2`) landed out of the core loop's sight.
+
+The drift from 0.31.0 to 0.31.1 was likewise **minor** for the core loop:
+every shape the Android app parses still decoded. Its changes:
 
 - **WebSocket:** `turn.ended` gained an optional `interruptReason`
   (`"user_cancelled"` / `"aborted"` / `"max_steps"` / `"error"` / `"filtered"`
@@ -129,7 +171,10 @@ Every REST response is JSON wrapped in an envelope:
   the HTTP status. Example: a non-existent `cwd` on session create returns
   `{"code":40409,"msg":"workspace root /tmp/definitely-not-here-xyz does not exist","data":null,...}`
   over HTTP 200. Error envelopes may also carry `details` (validation errors)
-  and a server-side `stack` string (still present on 0.29.0; ignore it).
+  and a server-side `stack` string — since 0.32.0 `stack` rides on every
+  Error2 domain-error envelope (verified on `40401`, `40402`, `40910`,
+  `50001`); validation (`40001`) and `40406` envelopes still omit it. Ignore
+  it either way.
 
 ## Meta
 
@@ -143,17 +188,22 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
 {
   "code": 0, "msg": "success",
   "data": {
-    "server_version": "0.31.0",
+    "server_version": "0.32.0",
     "capabilities": {"websocket": true, "file_upload": true, "fs_query": true, "mcp": true, "tasks": true, "terminal": true},
-    "server_id": "01KYT7Q10XCKVZQPR5TEDQ1SHM",
-    "started_at": "2026-07-30T19:23:41.469Z",
+    "server_id": "01KZ73PNGDTBCN43CGVDJHKW80",
+    "started_at": "2026-08-04T19:23:42.989Z",
     "open_in_apps": [],
     "dangerous_bypass_auth": false,
-    "backend": "v2"
+    "backend": "v2",
+    "experimental_flags": {"secondary-model": false, "tool-select": false, "persistence_minidb_readmodel": false}
   },
-  "request_id": "01KY6G2SVTVTF380XEWC88EC67"
+  "request_id": "01KZ7V26B7HW8KP7GQYS9Y6CWV"
 }
 ```
+
+- **`experimental_flags` is new in 0.32.0** (additive): the effective
+  server-side experiment switches. All `false` on this server; treat every
+  flag as optional.
 
 ## Models
 
@@ -412,7 +462,9 @@ state, `POST .../trust` marks trusted, `POST .../untrust` revokes; all answer
 reads `{"code":0,"data":{"trusted":false}}`; sessions run fine either way,
 trust only gates project-level MCP config files). Error paths: unknown
 workspace → `40410`; a workspace whose root no longer exists → `50001` whose
-envelope **leaks a `stack` field** (the only route observed doing so).
+envelope **leaks a `stack` field** (the first route observed doing so; since
+0.32.0 every Error2 domain-error envelope carries one — see Response
+envelope).
 
 ## Messages
 
@@ -1040,8 +1092,8 @@ The prefix (verbatim):
 ### Errors
 
 All verified live 2026-07-30 on 0.30.0, re-verified verbatim on 0.31.0 the
-same day (HTTP 200 envelopes; server-side
-`stack` strings omitted):
+same day and again on 0.32.0 (2026-08-05; HTTP 200 envelopes — since 0.32.0
+the Error2 ones carry a server-side `stack` string, shown omitted here):
 
 - Empty/fresh session (also when the body is omitted entirely):
   `{"code":40910,"msg":"No messages to compact in current history.","data":null,...}`
@@ -1090,7 +1142,12 @@ events**; the answer or dismissal is posted back via REST. Re-verified
 2026-07-27 on 0.29.2: surface + selected-option answer + dismiss + polling,
 same session flow as 2026-07-23 on 0.29.0) by prompting a session to call the
 tool — the question surfaced directly, with no approval gate, under the
-session's default permission mode.
+session's default permission mode. Flow re-verified end-to-end on 0.32.0
+(2026-08-05: surface + selected-option answer + dismiss + re-dismiss `40902` +
+pending polling, all byte-identical). Since 0.32.0 the resolve routes also
+accept question ids containing **colons** (upstream #2585 — some
+OpenAI-compatible providers emit tool-call ids like `AskUserQuestion:0`, and
+question id == tool-call id); with this provider's ULID ids nothing changes.
 
 1. Surface sequence: `tool.call.started` (`"name": "AskUserQuestion"`) →
    `event.session.work_changed` with `pending_interaction: "question"` →
@@ -1624,8 +1681,8 @@ its `ack`.
                        "cursors":{"session_b6be6715...":{"seq":2,"epoch":"ep_01KY6G589H3J9XHG6RF1RYAE59"}}}}
 ```
 
-**Resume after disconnect** (re-verified on 0.31.0, 2026-07-30 — durable
-replay; on 0.29.2, 2026-07-27: subscribing
+**Resume after disconnect** (re-verified on 0.32.0, 2026-08-05 — durable
+replay from `seq 2` replayed 3–81 in order; on 0.31.0, 2026-07-30; on 0.29.2, 2026-07-27: subscribing
 from `seq 135` replayed seqs 136–142 in order; on 0.29.0: from `seq 70`
 replayed 71–78, from `seq 78` replayed the later question events):
 
@@ -1634,7 +1691,9 @@ replayed 71–78, from `seq 78` replayed the later question events):
  "cursors":{"session_...":{"seq":70,"epoch":"ep_01KY6G589H3J9XHG6RF1RYAE59"}}}}
 ```
 
-**Refused cursor** (verified on 0.31.0, 2026-07-30): when the cursor cannot be
+**Refused cursor** (re-verified on 0.32.0, 2026-08-05 — a future seq produced
+the standalone frame then the `resync_required` ack, exactly as below; first
+verified on 0.31.0, 2026-07-30): when the cursor cannot be
 served (e.g. a future seq with a matching epoch), the server **first sends a
 standalone frame**, then answers the subscribe with an `ack` that lists the
 session in `resync_required` (the client must then drop its state and re-sync
@@ -1671,6 +1730,37 @@ Every event frame:
   "payload": { "type": "<event type>", "...": "..." }
 }
 ```
+
+### Global events — `event.config.warning` (new in 0.32.0)
+
+A **global** frame pushed to every established connection (no subscribe
+needed) whenever the server's config-warning set (deprecated keys/env vars in
+use, invalid sections) changes. It carries `session_id: "__global__"` and a
+global `epoch` unrelated to any session's, and the payload repeats
+`agentId: "main"` / `sessionId: "__global__"`. Delivery is live-only: late
+joiners are not replayed, and an empty initial warning set publishes nothing —
+silence means no warnings. An empty `warnings` array means the last warning
+cleared. Verbatim captures (2026-08-05 on 0.32.0; triggered by adding the
+deprecated `[loop_control] max_retries_per_step` key to `config.toml` and
+removing it again):
+
+```json
+{"type":"event.config.warning","seq":17,"session_id":"__global__","timestamp":"2026-08-05T02:15:16.806Z",
+ "payload":{"type":"event.config.warning",
+  "warnings":[{"domain":"loopControl","message":"[loop_control] 'max_retries_per_step' is deprecated and no longer used; rename it to 'max_attempts_per_step'. Run /update-config to fix it."}],
+  "agentId":"main","sessionId":"__global__"},
+ "epoch":"ep_01KX01QDWWRZFHBCEEQ8A5SZ8T"}
+```
+
+```json
+{"type":"event.config.warning","seq":18,"session_id":"__global__","timestamp":"2026-08-05T02:15:28.563Z",
+ "payload":{"type":"event.config.warning","warnings":[],"agentId":"main","sessionId":"__global__"},
+ "epoch":"ep_01KX01QDWWRZFHBCEEQ8A5SZ8T"}
+```
+
+Each item is `{domain?: string, message: string}`. Clients that ignore unknown
+frame types (the Android app does) need no change; note the frame would also
+fail any per-session `session_id` filter, which is the correct outcome.
 
 ### Captured round-trips
 
@@ -1754,7 +1844,7 @@ Dismiss path instead of the answer (2026-07-23): `event.session.work_changed`
 (`"none"`) → `event.question.dismissed` → `tool.result` with output
 `{"answers":{},"note":"User dismissed the question without answering."}`.
 
-### Core event payloads (verbatim captures, re-verified 0.31.0)
+### Core event payloads (verbatim captures, re-verified 0.32.0)
 
 **New user message** (`context.spliced`; `messages` carries full message
 objects — `start`/`deleteCount` are splice coordinates into the context).
@@ -2032,6 +2122,51 @@ selected option and free text both re-verified 2026-07-23:
 ```
 
 ## Verification log
+
+- 2026-08-05 re-verification on `0.32.0` (server 0.31.1 → 0.32.0; throwaway
+  sessions `session_61335917-...` / `session_e70e0240-...` /
+  `session_701f76d7-...` in `/home/ubuntu/spike`, verified against the
+  upstream 0.31.1→0.32.0 changelog — 20 commits; the protocol-relevant ones
+  are the `/meta` experimental-flags exposure, the v1 message-history/snapshot
+  move into kap-server, the colon-question-id fix, the Error2 refactor, the
+  config-warning event, and the tokenCounting service). Re-verified unchanged:
+  auth, sessions create/get/list/status (the `message_count`/`last_seq`
+  stuck-at-0 and idle-zeroed `usage` quirks persist exactly as documented),
+  workspaces list, config, models, global search, tools catalog (27 tools),
+  messages history order, snapshot (top-level keys, idle `in_flight_turn:
+  null`, busy `in_flight_turn` verbatim, message page OLDEST-first),
+  transcript (`agents` roster, real turn `state`/`endedAt`/`durationMs`),
+  a full prompt round-trip (TodoList write contract + `AskUserQuestion`
+  surface + selected-option answer + dismiss + `40902` re-dismiss, every
+  event payload byte-identical), prompts queued-while-busy + `prompts:steer`,
+  mid-turn `:abort` (`interruptReason:"user_cancelled"` + interruption
+  reminder splice), compact `{}` and with `instruction` (full WS sequence,
+  context 26993→657), the empty-session and busy-session `40910`s, files
+  upload/download/`Range` 206/delete + the `Attached file "…"` prompt rewrite
+  (em dash intact), foreground sub-agent lifecycle (`agent.created` main +
+  sub, `subagent.spawned`/`started`/`completed`, sub-agent-tagged frames),
+  background sub-agent (`task.started`/`task.terminated` + the
+  `background.task.*` legacy aliases, REST `/tasks` list/get, `:cancel` →
+  `killed`, terminal `:cancel` → `40904`, snapshot roster `[]` for the
+  background run), WS hello/subscribe/ack, cursor-resume replay (seq 2 →
+  3–81 in order) and refused cursor (standalone `resync_required` frame +
+  ack). Drift found (all detailed inline): (a) `/meta` gained
+  `experimental_flags`; (b) new global WS event `event.config.warning`
+  (`session_id:"__global__"`, both the warning-set and the clearing
+  `warnings:[]` frames captured verbatim — triggered by temporarily adding
+  the deprecated `[loop_control] max_retries_per_step` key to `config.toml`,
+  restored byte-identical afterwards); (c) the server-side `stack` string now
+  rides on every Error2 domain-error envelope (`40401`/`40402`/`40910`/
+  `50001` observed; `40001`/`40406` still clean); (d) the error-code enum
+  grew (agent/skill/task/mcp/storage/wire/cron/web codes); (e) upstream
+  internals with no observed shape change: the tokenCounting service
+  (`maxContextTokens` present on every capture; the omittable-when-unknown
+  variant never seen), the message-history/snapshot move, the colon
+  question-id resolve fix. Approvals could NOT be re-verified live (this
+  server's `default_permission_mode` is `yolo` — no approval gate surfaces;
+  last live capture 0.31.0). No app breakage: every change is additive or
+  already tolerated (`ignoreUnknownKeys`, unknown-frame ignore, foreign-
+  session drop). No `todo/` tickets filed.
 
 - 2026-08-02 snapshot `messages` order re-verified on `0.31.1` (real session
   `session_428cd0bf-...`, 375+ messages, after Louis's inverted-timeline bug
