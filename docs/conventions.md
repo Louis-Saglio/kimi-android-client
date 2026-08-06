@@ -19,7 +19,12 @@
   `task.terminated` WS frames → `SessionEvent.TaskStarted/TaskTerminated` (the
   shared `TaskInfo` carries the CORE status vocabulary — killed/timed_out/lost —
   and epoch-millis times, unlike REST's ISO strings; `task.notified` and the
-  legacy `background.task.*` aliases are deliberately unparsed). Domain:
+  legacy `background.task.*` aliases are deliberately unparsed). The payload's
+  `agentId` stamp — the OWNING agent — is parsed onto the events, making them
+  `AgentScopedEvent`s: main-owned tasks feed the chat's `JobsStore`,
+  sub-agent-owned ones route to `SubagentStreamStore` (REST `/tasks` serves
+  only the main agent's store, so a sub-agent's tasks are live-only and not
+  REST-cancellable — docs/server-api.md, Background lifecycle). Domain:
   `BackgroundTask`/`TaskInfo` in `data/chat/Tasks.kt` — kind `tool` (question
   flows) is filtered out at the mapping boundary.
 - `data/attachments/` — `AttachmentStore` owns all platform file I/O (content
@@ -51,7 +56,12 @@
   unfiltered REST seed resurrects it across re-entries), labeled
   `Jobs · finished/total` (finished = completed/cancelled/failed — the Todos
   done/total polarity); deliberate divergence from the web dock, whose pills
-  vanish at zero.
+  vanish at zero. The pills and their sheets are shared UI:
+  `TodoJobsDock` (ui/chat) bundles the pill row, the sheet-open state, the
+  sheets and the sub-agent tap's timeline resolution; the chat mounts it above
+  the composer, the sub-agent page as its bottom bar — there with null
+  cancel/job callbacks, since REST `/tasks` is main-agent-only (a sub-agent's
+  jobs sheet is read-only: no Stop, no bash-row job screen).
 - Cold start / resync (085, freshness model 091): `GET .../snapshot` is the single
   entry point — `SnapshotSync` (ui/chat, session-scoped singleton like the store, so
   the page-on-top restore path with no ChatViewModel runs the same rebuild) owns the
@@ -108,6 +118,13 @@
   read-only `SubagentScreen` reuses `MessageList`/`ToolRows`; linked `Agent`
   rows carry `subagentId` — linked rows never expand (the page has all the
   details); tapping the row or its trailing open button navigates to the page.
+  The record also owns the page's dock data: the sub-agent's own todo list
+  (the record timeline's `todos()` — the chat's ticket-042 mechanism) and its
+  own background tasks (the live `task.*` frames stamped with its id, upserted
+  into `SubagentRecord.jobs` via the shared `TaskInfo.toJob()` mapping — no
+  REST seed exists, REST `/tasks` being main-agent-only); the page mounts the
+  shared `TodoJobsDock` as its bottom bar, read-only (no cancel, no job
+  screen — same REST limitation).
   Transcript backing (046): the page's history comes
   from `GET .../transcript?agent_id=…` (`ChatApi.transcript` →
   turn/step/frame domain model in `data/chat/Transcript.kt`, NOT

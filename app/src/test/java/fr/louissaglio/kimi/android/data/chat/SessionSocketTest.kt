@@ -120,6 +120,38 @@ class SessionSocketTest {
     }
 
     @Test
+    fun `task frames carry the owning agent id from the payload stamp`() = runBlocking {
+        val emitted = runSocketEvents(
+            // A sub-agent-spawned background bash: the payload's agentId stamp names
+            // the OWNING agent (its task store holds the task; REST /tasks serves only
+            // the main agent's). info.agentId stays null on bash kinds.
+            """{"type":"task.started","seq":60,"epoch":"ep_1","session_id":"session_1",""" +
+                """"payload":{"type":"task.started",""" +
+                """"info":{"taskId":"proc-sub1","description":"nested bg bash","status":"running",""" +
+                """"detached":true,"startedAt":1785210101939,"kind":"process"},""" +
+                """"agentId":"agent-12","sessionId":"session_1"}}""",
+        )
+
+        assertEquals(
+            listOf(
+                SocketEvent.Event(
+                    SessionEvent.TaskStarted(
+                        TaskInfo(
+                            taskId = "proc-sub1",
+                            description = "nested bg bash",
+                            status = TaskInfo.Status.Running,
+                            startedAt = Instant.ofEpochMilli(1785210101939),
+                            kind = TaskInfo.Kind.Process,
+                        ),
+                        agentId = "agent-12",
+                    ),
+                ),
+            ),
+            emitted.filterIsInstance<SocketEvent.Event>(),
+        )
+    }
+
+    @Test
     fun `task notified and the legacy background task aliases are ignored`() = runBlocking {
         // task.notified and the legacy background.task.* aliases are deliberately NOT
         // parsed (web parity — ticket 092): they fall into the unknown-type ignore,

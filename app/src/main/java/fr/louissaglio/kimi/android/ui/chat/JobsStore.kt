@@ -94,17 +94,7 @@ internal class JobsStore(
      * sheet's navigation handle; first writer wins. */
     fun onStarted(info: TaskInfo) {
         seedGuard.bump()
-        upsert(
-            Job(
-                taskId = info.taskId,
-                kind = info.kind.toWireKind(),
-                description = info.description,
-                status = info.status.toWireStatus(),
-                startedAt = info.startedAt,
-                endedAt = info.endedAt,
-                agentId = info.agentId,
-            ),
-        )
+        upsert(info.toJob())
     }
 
     /** A live `task.terminated`: flips the job to its terminal status — mapped from
@@ -115,18 +105,7 @@ internal class JobsStore(
      * upserts (the start was missed). */
     fun onTerminated(info: TaskInfo) {
         seedGuard.bump()
-        upsert(
-            Job(
-                taskId = info.taskId,
-                kind = info.kind.toWireKind(),
-                description = info.description,
-                status = info.status.toWireStatus(),
-                startedAt = info.startedAt,
-                endedAt = info.endedAt,
-                agentId = info.agentId,
-                timedOut = info.status == TaskInfo.Status.TimedOut,
-            ),
-        )
+        upsert(info.toJob())
     }
 
     /**
@@ -189,6 +168,22 @@ internal class JobsStore(
 
 private fun BackgroundTask.toJob(agentId: String?, timedOut: Boolean): Job =
     Job(id, kind, description, status, startedAt, completedAt, agentId, timedOut)
+
+/** The live-event [Job] (ticket 092): the CORE→wire kind/status mappings, and the
+ * [Job.timedOut] flag — only a `task.terminated` carrying core `timed_out` sets it
+ * (REST collapses it to `failed`; a `task.started` reads Running, hence false).
+ * Shared with SubagentStreamStore, whose records hold the sub-agent-owned jobs. */
+internal fun TaskInfo.toJob(): Job =
+    Job(
+        taskId = taskId,
+        kind = kind.toWireKind(),
+        description = description,
+        status = status.toWireStatus(),
+        startedAt = startedAt,
+        endedAt = endedAt,
+        agentId = agentId,
+        timedOut = status == TaskInfo.Status.TimedOut,
+    )
 
 /** Core→wire kind mapping (docs/server-api.md): `agent`→subagent, `process`→bash. */
 private fun TaskInfo.Kind.toWireKind(): BackgroundTask.Kind = when (this) {

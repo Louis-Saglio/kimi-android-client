@@ -11,6 +11,8 @@ import fr.louissaglio.kimi.android.data.chat.SocketEvent
 import fr.louissaglio.kimi.android.data.chat.SubagentLifecycleEvent
 import fr.louissaglio.kimi.android.data.chat.SubagentRosterEntry
 import fr.louissaglio.kimi.android.data.chat.SubagentRosterPhase
+import fr.louissaglio.kimi.android.data.chat.TaskInfo
+import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.TodoParser
 import fr.louissaglio.kimi.android.data.chat.TranscriptPage
 import fr.louissaglio.kimi.android.data.chat.TranscriptState
@@ -20,7 +22,6 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,6 +29,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job as CoroutineJob
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonObject
@@ -111,6 +113,13 @@ class SubagentStreamStore @Inject constructor(
         /** True while older transcript turns exist beyond the loaded ones (ticket 046). */
         val hasMoreTurns: Boolean = false,
         val items: List<ChatItem> = emptyList(),
+        /** The sub-agent's own latest todo list, mirrored from its TodoList tool calls
+         * (the same timeline mechanism as the chat's, ticket 042). */
+        val todos: List<Todo>? = null,
+        /** The sub-agent's own background tasks (nested background bash/sub-agents),
+         * fed live by its agent-tagged task.* frames — no REST seed exists: REST
+         * `/tasks` serves only the main agent's task store (docs/server-api.md). */
+        val jobs: List<Job> = emptyList(),
     )
 
     /** Which source a record's status came from — the precedence order among status
@@ -154,6 +163,25 @@ class SubagentStreamStore @Inject constructor(
 
         var resultSummary: String? = null
         var error: String? = null
+
+        /** The sub-agent's own background tasks, keyed by task id (live-only — REST
+         * `/tasks` never serves them). Insertion-ordered; the jobs sheet owns the
+         * running-first/terminal-newest display sort. */
+        private val jobs = LinkedHashMap<String, Job>()
+
+        /** One task.* frame's upsert; the page link and the timed-out flag survive a
+         * later upsert that doesn't carry them (the JobsStore merge rule). */
+        fun upsertJob(job: Job) {
+            val existing = jobs[job.taskId]
+            jobs[job.taskId] = if (existing == null) {
+                job
+            } else {
+                job.copy(
+                    agentId = job.agentId ?: existing.agentId,
+                    timedOut = job.timedOut || existing.timedOut,
+                )
+            }
+        }
 
         val timeline = ChatTimeline(todoParser, historyBacked = false)
 
@@ -217,7 +245,7 @@ class SubagentStreamStore @Inject constructor(
                 .orEmpty()
             return SubagentState(
                 id, name, description, runInBackground, status, resultSummary, error,
-                hasMoreTurns, promptBubble + timeline.items(),
+                hasMoreTurns, promptBubble + timeline.items(), timeline.todos(), jobs.values.toList(),
             )
         }
     }
@@ -248,7 +276,7 @@ class SubagentStreamStore @Inject constructor(
 
     // sessionId → the store-owned keep-alive collection (ticket 064); present only
     // while a page is open AND no chat collection runs.
-    private val keepAliveJobs = mutableMapOf<String, Job>()
+    private val keepAliveJobs = mutableMapOf<String, CoroutineJob>()
 
     /** The live state of one sub-agent; stays null when nothing ever reached the
      * funnel for it (the page shows its empty state). */
@@ -294,9 +322,9 @@ class SubagentStreamStore @Inject constructor(
 
     /** The single-feeder arbiter (ticket 064): the store collects the session socket
      * itself exactly while a page is open AND no chat collection runs. Runs on the
-     * caller's thread — all callers are Main-confined, and [Job.cancel] is immediate,
-     * so a cancelled keep-alive collector never applies another event once the chat's
-     * collection starts. */
+     * caller's thread — all callers are Main-confined, and [CoroutineJob.cancel] is
+     * immediate, so a cancelled keep-alive collector never applies another event once
+     * the chat's collection starts. */
     private fun reconcileKeepAlive(sessionId: String) {
         val needed = (openPages.value[sessionId] ?: 0) > 0 && sessionId !in chatCollecting.value
         val running = keepAliveJobs[sessionId]
@@ -325,13 +353,19 @@ class SubagentStreamStore @Inject constructor(
 
     /** The session's keep-alive collection, for tests (joining it in tearDown keeps a
      * leaked socket coroutine from touching Main after resetMain — ticket 049). */
-    internal fun keepAliveJob(sessionId: String): Job? = keepAliveJobs[sessionId]
+    internal fun keepAliveJob(sessionId: String): CoroutineJob? = keepAliveJobs[sessionId]
 
     /** The live funnel: every sub-agent-scoped socket event reaches the record here. */
     suspend fun apply(sessionId: String, event: SessionEvent) {
         when (event) {
             is SessionEvent.SubagentSpawned -> spawn(sessionId, event)
             is SubagentLifecycleEvent -> onLifecycle(sessionId, event)
+            // Background tasks owned by a sub-agent (the payload's agentId stamp —
+            // task events are agent-scoped since the sub-agent page's jobs widget):
+            // they feed only the owning record's jobs list. Main-owned ones are the
+            // chat's JobsStore business and drop here.
+            is SessionEvent.TaskStarted -> onTaskEvent(sessionId, event.agentId, event.info)
+            is SessionEvent.TaskTerminated -> onTaskEvent(sessionId, event.agentId, event.info)
             is AgentScopedEvent -> if (event.agentId != MAIN_AGENT_ID) onTranscript(sessionId, event.agentId, event)
             else -> Unit
         }
@@ -535,6 +569,20 @@ class SubagentStreamStore @Inject constructor(
             record.oldestTurnId = page.turns.first().id
         }
         record.hasMoreTurns = page.hasMore
+        publish(sessionId)
+    }
+
+    /** One sub-agent-owned task.* frame (started/terminated share the upsert): the
+     * record's jobs list is the sub-agent page's jobs widget. Unknown sub-agent (its
+     * spawn predates the subscription): dropped exactly like its transcript frames. */
+    private fun onTaskEvent(sessionId: String, agentId: String, info: TaskInfo) {
+        if (agentId == MAIN_AGENT_ID) return
+        val record = record(sessionId, agentId)
+        if (record == null) {
+            Log.d(TAG, "Dropping task frame for unknown sub-agent '$agentId' (spawn missed)")
+            return
+        }
+        record.upsertJob(info.toJob())
         publish(sessionId)
     }
 

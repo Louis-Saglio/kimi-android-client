@@ -1,5 +1,6 @@
 package fr.louissaglio.kimi.android.ui.chat
 
+import androidx.compose.ui.test.assertHasNoClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -25,14 +26,15 @@ class JobsWidgetTest {
 
     private fun sheet(
         jobs: List<Job>,
-        onOpenJob: (String) -> Unit = {},
+        onCancel: ((String) -> Unit)? = {},
+        onOpenJob: ((String) -> Unit)? = null,
         onOpenSubagent: (Job) -> Unit = {},
     ) {
         composeTestRule.setContent {
             KimiTheme {
                 JobsSheet(
                     jobs = jobs,
-                    onCancel = {},
+                    onCancel = onCancel,
                     onOpenSubagent = onOpenSubagent,
                     onOpenJob = onOpenJob,
                     onDismiss = {},
@@ -135,5 +137,49 @@ class JobsWidgetTest {
         composeTestRule
             .onNodeWithContentDescription("tick counter loop, bash, timed out after", substring = true)
             .assertIsDisplayed()
+    }
+
+    @Test
+    fun nullOnCancelHidesTheStopButton() {
+        // The sub-agent page's sheet is read-only (REST task cancel serves only the
+        // main agent's store): no Stop affordance on running rows.
+        sheet(
+            jobs = listOf(
+                Job(
+                    taskId = "bash-1",
+                    kind = BackgroundTask.Kind.Bash,
+                    description = "tick counter loop",
+                    status = BackgroundTask.Status.Running,
+                    startedAt = Instant.now().minusSeconds(5),
+                ),
+            ),
+            onCancel = null,
+        )
+
+        composeTestRule
+            .onNodeWithContentDescription("Stop tick counter loop")
+            .assertDoesNotExist()
+    }
+
+    @Test
+    fun nullOnOpenJobLeavesTheBashRowPlain() {
+        // Same read-only sheet: the job screen's fetch is main-agent-only too, so a
+        // bash row gets no tap affordance at all.
+        sheet(
+            jobs = listOf(
+                Job(
+                    taskId = "bash-1",
+                    kind = BackgroundTask.Kind.Bash,
+                    description = "tick counter loop",
+                    status = BackgroundTask.Status.Running,
+                    startedAt = Instant.now().minusSeconds(5),
+                ),
+            ),
+            onOpenJob = null,
+        )
+
+        composeTestRule
+            .onNodeWithContentDescription("tick counter loop, bash, running", substring = true)
+            .assertHasNoClickAction()
     }
 }

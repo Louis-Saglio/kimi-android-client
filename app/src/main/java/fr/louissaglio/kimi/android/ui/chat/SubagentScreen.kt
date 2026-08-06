@@ -34,6 +34,10 @@ import fr.louissaglio.kimi.android.ui.common.LoadingState
  * tool rows — with no composer, no approval cards and no question wizard (a sub-agent
  * cannot be talked to; its questions and approvals stay in the main chat). The list
  * reuses the chat's [MessageList], auto-scroll and history pagination included.
+ * The bottom bar hosts the shared todos/jobs dock (the chat composer's widgets):
+ * the sub-agent's own todo list and its own background tasks. The jobs sheet is
+ * read-only here — no Stop, no bash-row job screen — because REST `/tasks` (cancel
+ * and get alike) serves only the main agent's task store (docs/server-api.md).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -81,6 +85,16 @@ fun SubagentScreen(
                         SubagentStatusChip(status, Modifier.padding(end = 12.dp))
                     }
                 },
+            )
+        },
+        bottomBar = {
+            // The sub-agent's own todos/jobs — the chat's dock, minus the affordances
+            // REST `/tasks` cannot back for a sub-agent (cancel, the job screen).
+            TodoJobsDock(
+                todos = uiState.todos,
+                jobs = uiState.jobs,
+                items = uiState.items,
+                onOpenSubagent = onOpenSubagent,
             )
         },
     ) { innerPadding ->

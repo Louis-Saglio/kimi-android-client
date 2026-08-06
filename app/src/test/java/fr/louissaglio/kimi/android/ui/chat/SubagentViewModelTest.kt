@@ -2,8 +2,11 @@ package fr.louissaglio.kimi.android.ui.chat
 
 import androidx.datastore.preferences.core.preferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
+import fr.louissaglio.kimi.android.data.chat.BackgroundTask
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
+import fr.louissaglio.kimi.android.data.chat.TaskInfo
+import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
 import fr.louissaglio.kimi.android.navigation.Subagent
@@ -11,6 +14,7 @@ import fr.louissaglio.kimi.android.testutil.awaitState
 import fr.louissaglio.kimi.android.testutil.testChatRepository
 import fr.louissaglio.kimi.android.testutil.testSubagentStreamStore
 import fr.louissaglio.kimi.android.testutil.webSocketUpgradeResponse
+import java.time.Instant
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
@@ -147,6 +151,41 @@ class SubagentViewModelTest {
         assertEquals(
             listOf(ChatItem.AssistantMessage("live_0", "hello", thinking = "")),
             viewModel.uiState.value.items,
+        )
+
+        // The dock's data rides the same entry mapping: the sub-agent's own todo list
+        // (its TodoList calls) and its own background tasks (its task.* frames).
+        store.apply(
+            "session_1",
+            SessionEvent.ToolCallStarted(
+                "tool_t", "TodoList",
+                input = """{"todos":[{"title":"write","status":"done"},{"title":"verify","status":"pending"}]}""",
+                agentId = "agent-12",
+            ),
+        )
+        store.apply(
+            "session_1",
+            SessionEvent.TaskStarted(
+                TaskInfo(
+                    "bash-1", "nested bg", TaskInfo.Status.Running,
+                    Instant.ofEpochMilli(1785210101939), kind = TaskInfo.Kind.Process,
+                ),
+                agentId = "agent-12",
+            ),
+        )
+        awaitState(viewModel.uiState) { it.todos != null && it.jobs.isNotEmpty() }
+        assertEquals(
+            listOf(Todo("write", Todo.Status.Done), Todo("verify", Todo.Status.Pending)),
+            viewModel.uiState.value.todos,
+        )
+        assertEquals(
+            listOf(
+                Job(
+                    "bash-1", BackgroundTask.Kind.Bash, "nested bg",
+                    BackgroundTask.Status.Running, Instant.ofEpochMilli(1785210101939),
+                ),
+            ),
+            viewModel.uiState.value.jobs,
         )
     }
 

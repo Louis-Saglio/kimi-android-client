@@ -343,13 +343,13 @@ class SessionSocket @Inject constructor(
             // info carries the CORE status vocabulary; an undecodable/unknown info
             // drops the event with a Log.w in the mapper. task.notified and the legacy
             // background.task.started/terminated aliases are NOT parsed (web parity) —
-            // they fall into the unknown-type ignore below.
+            // they fall into the unknown-type ignore below. The payload's agentId stamp
+            // (the owning agent) routes the event: main-owned tasks feed the composer
+            // jobs widget, sub-agent-owned ones the sub-agent's store record.
             "task.started" -> frame.decodePayload<TaskEventPayload>()
-                ?.info?.let { mapper.toDomain(it) }
-                ?.let { onEvent(SessionEvent.TaskStarted(it)) }
+                ?.let { payload -> payload.info?.let { mapper.toDomain(it) }?.let { onEvent(SessionEvent.TaskStarted(it, payload.agentId)) } }
             "task.terminated" -> frame.decodePayload<TaskEventPayload>()
-                ?.info?.let { mapper.toDomain(it) }
-                ?.let { onEvent(SessionEvent.TaskTerminated(it)) }
+                ?.let { payload -> payload.info?.let { mapper.toDomain(it) }?.let { onEvent(SessionEvent.TaskTerminated(it, payload.agentId)) } }
             // The subscribe ack (docs/server-api.md): a refused resume cursor
             // (resync_required — replay buffer overrun) means no replay will come;
             // the cursor is dropped and the collector re-syncs from REST (ticket 048).

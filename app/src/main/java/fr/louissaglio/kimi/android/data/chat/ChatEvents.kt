@@ -161,14 +161,18 @@ sealed interface SessionEvent {
 
     /** `task.started` (docs/server-api.md, Background lifecycle — ticket 092): a
      * background task (sub-agent or bash) registered in the task store — REST-visible
-     * from here. [info] carries the CORE status vocabulary. */
-    data class TaskStarted(val info: TaskInfo) : SessionEvent
+     * from here. [info] carries the CORE status vocabulary. [agentId] (the envelope
+     * stamp) names the OWNING agent — "main", or the sub-agent that spawned the task
+     * (its tasks never reach REST `/tasks`, which serves only the main agent's store);
+     * `info.agentId` is a different link — the spawned sub-agent's page id. */
+    data class TaskStarted(val info: TaskInfo, override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
 
     /** `task.terminated`: the task reached its terminal status ([TaskInfo.status] still
      * core vocabulary — killed/timed_out/lost included; the collector maps it to the
      * REST wire one). `task.notified` and the legacy `background.task.*` aliases are
-     * deliberately NOT parsed (web parity) — they fall into the unknown-type Log path. */
-    data class TaskTerminated(val info: TaskInfo) : SessionEvent
+     * deliberately NOT parsed (web parity) — they fall into the unknown-type Log path.
+     * [agentId] is the owning agent, exactly as on [TaskStarted]. */
+    data class TaskTerminated(val info: TaskInfo, override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
 }
 
 /** Context window fill of a session: used tokens out of the model's maximum. */

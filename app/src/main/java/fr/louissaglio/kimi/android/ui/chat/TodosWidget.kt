@@ -31,11 +31,12 @@ import androidx.compose.ui.unit.dp
 import fr.louissaglio.kimi.android.data.chat.Todo
 
 /**
- * The collapsed todo widget (ticket 042), pinned directly above the composer: count
+ * The collapsed todo widget (ticket 042), pinned by [TodoJobsDock] above the chat
+ * composer and at the sub-agent page's bottom bar: count
  * only — the user's explicit choice over showing the in-progress task title. Reads as
  * attached to the composer via surfaceContainerHigh, like the approval/question cards.
- * Wraps its content instead of filling the width: future composer widgets (Bash- or
- * subagent-style counters) will share the row.
+ * Wraps its content instead of filling the width: it shares the dock's row with the
+ * jobs pill (ticket 092).
  */
 @Composable
 internal fun TodosSummaryRow(

@@ -1382,4 +1382,54 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         }
     }
 
+    @Test
+    fun `a sub-agent-owned task frame routes to its store record, never the main jobs list`() {
+        runBlocking {
+            viewModel.onScreenStarted()
+            val socket = awaitServerSocket()
+
+            // The spawn landed, then the sub-agent's own background bash registers —
+            // the frame's agentId stamp names the OWNING agent (docs/server-api.md,
+            // Background lifecycle: REST /tasks serves only the main agent's store,
+            // so a sub-agent's tasks arrive live-only, tagged with its id).
+            socket.send(subagentSpawnedFrame())
+            socket.send(
+                taskStartedFrame(
+                    taskId = "proc-sub1",
+                    description = "nested bg bash",
+                    kind = "process",
+                    agentId = null,
+                    seq = 60,
+                    ownerAgentId = "agent-12",
+                ),
+            )
+
+            awaitCondition { subagentEntry("agent-12")?.jobs?.isNotEmpty() == true }
+            val job = subagentEntry("agent-12")!!.jobs.single()
+            assertEquals("proc-sub1", job.taskId)
+            assertEquals(BackgroundTask.Kind.Bash, job.kind)
+            assertEquals(BackgroundTask.Status.Running, job.status)
+            // The composer pill counts only main-owned tasks.
+            assertTrue(viewModel.uiState.value.jobs.isEmpty())
+
+            // Its termination lands on the same record (core timed_out → the wire
+            // Failed + the live-only timed-out flag, ticket 097).
+            socket.send(
+                taskTerminatedFrame(
+                    taskId = "proc-sub1",
+                    status = "timed_out",
+                    kind = "process",
+                    agentId = null,
+                    seq = 61,
+                    ownerAgentId = "agent-12",
+                ),
+            )
+            awaitCondition { subagentEntry("agent-12")?.jobs?.single()?.isRunning == false }
+            val terminated = subagentEntry("agent-12")!!.jobs.single()
+            assertEquals(BackgroundTask.Status.Failed, terminated.status)
+            assertTrue(terminated.timedOut)
+            assertTrue(viewModel.uiState.value.jobs.isEmpty())
+        }
+    }
+
 }

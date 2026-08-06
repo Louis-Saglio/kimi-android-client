@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.navigation.toRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
+import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.TranscriptPage
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.data.toUserMessage
@@ -69,6 +70,10 @@ class SubagentViewModel internal constructor(
         /** True while older transcript turns exist (scroll-to-top loads them). */
         val hasMoreHistory: Boolean = false,
         val isLoadingMoreHistory: Boolean = false,
+        /** The sub-agent's own todo list (its TodoList calls) and its own background
+         * tasks — the dock at the page's bottom bar, same widgets as the chat's. */
+        val todos: List<Todo>? = null,
+        val jobs: List<Job> = emptyList(),
     )
 
     val uiState: StateFlow<UiState>
@@ -129,6 +134,8 @@ class SubagentViewModel internal constructor(
                         status = entry?.status,
                         items = entry?.items.orEmpty(),
                         hasMoreHistory = entry?.hasMoreTurns == true,
+                        todos = entry?.todos,
+                        jobs = entry?.jobs.orEmpty(),
                     )
                 }
                 maybeReconcile(entry?.status)

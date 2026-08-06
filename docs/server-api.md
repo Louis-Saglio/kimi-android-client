@@ -1631,6 +1631,17 @@ below); `kind:"agent"` marks a sub-agent (`process` = background bash).
 "task.killed","title":"...","body":"...","severity":"info" | "warning",
 "sourceKind":"background_task","sourceId":"<taskId>"}`.
 
+Two **different** agent ids ride these frames: the payload-level `agentId`
+(`"main"` above) is the envelope stamp naming the **owning** agent — the one
+whose task store holds the task — while `info.agentId` links a
+sub-agent-kind task to the spawned sub-agent's page id. A background task
+spawned BY a sub-agent is stamped with the sub-agent's id (verified from the
+kap-server source on 0.33.0: every agent's event bus — main and dynamically
+created sub-agents alike — feeds the session broadcaster, which stamps
+`agentId`/`sessionId` onto each payload). Those sub-agent-owned tasks are
+**live-only**: REST `/tasks` resolves only the main agent's task service, so
+they never appear in list/get, and `:cancel` answers `40406` for them.
+
 ### REST `/tasks` — background tasks only
 
 All envelope-over-HTTP-200 (verified 2026-07-28, re-verified unchanged
@@ -1651,7 +1662,10 @@ curl -s -X POST -H "Authorization: Bearer <token>" \
   (`kind:"subagent"`), background bash (`kind:"bash"`), question flows
   (`kind:"tool"`). Terminal tasks stay listed. Core→wire mappings: kind
   `agent`→`subagent`, `process`→`bash`, `question`→`tool`; status
-  `killed`→`cancelled`, `timed_out`/`lost`→`failed`.
+  `killed`→`cancelled`, `timed_out`/`lost`→`failed`. **Main-agent only** —
+  a sub-agent's own background tasks are never listed, fetched, or
+  cancellable here (their only channel is the live `task.*` frames, see the
+  owning-agent stamp above).
 - **Get** — `GET .../tasks/{task_id}`; `with_output=true` adds
   `output_preview` (tail of the stored result, default cap 32768 bytes —
   override with `output_bytes`) and `output_bytes` (byte length of the

@@ -339,10 +339,14 @@ data class TaskCancelData(
     val cancelled: Boolean = false,
 )
 
-/** Shared payload shape of `task.started`/`task.terminated` (docs/server-api.md). */
+/** Shared payload shape of `task.started`/`task.terminated` (docs/server-api.md).
+ * [agentId] is the envelope stamp naming the OWNING agent — the one whose task store
+ * holds the task ("main", or the sub-agent that spawned the task); it differs from
+ * `info.agentId`, which links a sub-agent-kind task to the spawned sub-agent's page. */
 @Serializable
 data class TaskEventPayload(
     val info: TaskInfoDto? = null,
+    val agentId: String = MAIN_AGENT_ID,
 )
 
 /** The WS task `info` object: [status] is the CORE vocabulary (running | completed |

@@ -1,15 +1,19 @@
 package fr.louissaglio.kimi.android.ui.chat
 
+import fr.louissaglio.kimi.android.data.chat.BackgroundTask
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.SubagentRosterEntry
 import fr.louissaglio.kimi.android.data.chat.SubagentRosterPhase
+import fr.louissaglio.kimi.android.data.chat.TaskInfo
+import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.TranscriptFrame
 import fr.louissaglio.kimi.android.data.chat.TranscriptPage
 import fr.louissaglio.kimi.android.data.chat.TranscriptState
 import fr.louissaglio.kimi.android.data.chat.TranscriptStep
 import fr.louissaglio.kimi.android.data.chat.TranscriptTurn
 import fr.louissaglio.kimi.android.testutil.testSubagentStreamStore
+import java.time.Instant
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -634,6 +638,114 @@ class SubagentStreamStoreTest {
         assertEquals(
             mapOf("tool_1" to "agent-12", "tool_2" to "agent-13", "tool_3" to "agent-14"),
             store.linksFor(SESSION_ID),
+        )
+    }
+
+    // --- Todos & jobs (the sub-agent page's dock) ---------------------------------------
+
+    private fun taskInfo(
+        taskId: String,
+        status: TaskInfo.Status,
+        kind: TaskInfo.Kind = TaskInfo.Kind.Process,
+        endedAt: Instant? = null,
+    ) = TaskInfo(taskId, "nested bg", status, Instant.ofEpochMilli(1785210101939), endedAt, kind = kind)
+
+    @Test
+    fun `task frames feed the owning sub-agent's jobs list`() = runBlocking {
+        store.apply(SESSION_ID, spawned("agent-12"))
+
+        store.apply(
+            SESSION_ID,
+            SessionEvent.TaskStarted(taskInfo("bash-1", TaskInfo.Status.Running), agentId = "agent-12"),
+        )
+
+        assertEquals(
+            listOf(
+                Job(
+                    "bash-1", BackgroundTask.Kind.Bash, "nested bg",
+                    BackgroundTask.Status.Running, Instant.ofEpochMilli(1785210101939),
+                ),
+            ),
+            entry("agent-12")!!.jobs,
+        )
+
+        // The terminal frame flips the same job — core timed_out maps to the wire
+        // Failed and retains the live-only timed-out flag (ticket 097).
+        store.apply(
+            SESSION_ID,
+            SessionEvent.TaskTerminated(
+                taskInfo("bash-1", TaskInfo.Status.TimedOut, endedAt = Instant.ofEpochMilli(1785210118804)),
+                agentId = "agent-12",
+            ),
+        )
+        val terminated = entry("agent-12")!!.jobs.single()
+        assertEquals(BackgroundTask.Status.Failed, terminated.status)
+        assertTrue(terminated.timedOut)
+        assertEquals(Instant.ofEpochMilli(1785210118804), terminated.endedAt)
+    }
+
+    @Test
+    fun `main-owned task frames never touch the records`() = runBlocking {
+        store.apply(SESSION_ID, spawned("agent-12"))
+
+        // The default agentId (main) — the chat's JobsStore owns those.
+        store.apply(SESSION_ID, SessionEvent.TaskStarted(taskInfo("bash-1", TaskInfo.Status.Running)))
+
+        assertTrue(entry("agent-12")!!.jobs.isEmpty())
+    }
+
+    @Test
+    fun `a task frame for an unknown sub-agent is dropped without creating a record`() = runBlocking {
+        store.apply(SESSION_ID, SessionEvent.TaskStarted(taskInfo("bash-1", TaskInfo.Status.Running), agentId = "agent-99"))
+
+        assertNull(store.entry(SESSION_ID, "agent-99").first())
+    }
+
+    @Test
+    fun `the todo list surfaces from the sub-agent's live TodoList call`() = runBlocking {
+        store.apply(SESSION_ID, spawned("agent-12"))
+
+        store.apply(
+            SESSION_ID,
+            SessionEvent.ToolCallStarted(
+                "tool_t", "TodoList",
+                input = """{"todos":[{"title":"write","status":"done"},{"title":"verify","status":"in_progress"}]}""",
+                agentId = "agent-12",
+            ),
+        )
+
+        assertEquals(
+            listOf(Todo("write", Todo.Status.Done), Todo("verify", Todo.Status.InProgress)),
+            entry("agent-12")!!.todos,
+        )
+    }
+
+    @Test
+    fun `the todo list surfaces from a cold-open transcript page`() = runBlocking {
+        // The committed path: a finished sub-agent's TodoList call reaches the record
+        // through the transcript fetch, exactly like the chat's history (ticket 042).
+        val turn = TranscriptTurn(
+            "t0", 0, TranscriptState.Completed, null,
+            listOf(
+                TranscriptStep(
+                    "t0.1", TranscriptState.Completed,
+                    listOf(
+                        TranscriptFrame.Tool(
+                            "t0.1.f1", "tool_t", "TodoList", running = false,
+                            preview = "2 todos",
+                            input = """{"todos":[{"title":"write","status":"done"},{"title":"verify","status":"pending"}]}""",
+                            output = "The todos have been updated.",
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        store.applyTranscriptPage(SESSION_ID, "agent-12", transcriptPage(listOf(turn)), keepLive = false)
+
+        assertEquals(
+            listOf(Todo("write", Todo.Status.Done), Todo("verify", Todo.Status.Pending)),
+            entry("agent-12")!!.todos,
         )
     }
 

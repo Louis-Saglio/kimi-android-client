@@ -7,15 +7,8 @@ import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -282,8 +275,6 @@ private fun ChatContent(
     onCancelJob: (String) -> Unit = {},
 ) {
     var showModelPicker by rememberSaveable { mutableStateOf(false) }
-    var showTodos by rememberSaveable { mutableStateOf(false) }
-    var showJobs by rememberSaveable { mutableStateOf(false) }
     // Ticket 089: system back closes the read-only resolved view before navigating.
     BackHandler(enabled = uiState.resolvedQuestionView != null) { onCloseResolvedQuestion() }
     // Explicit "go to the newest" intent (ticket 051): the send wrapper below
@@ -412,36 +403,16 @@ private fun ChatContent(
                     }
                 }
                 // The agent's todo list (ticket 042) and the background-jobs counter
-                // (ticket 092) sit directly above the composer, sharing the row —
-                // TodosSummaryRow was designed for this (TodosWidget.kt). The jobs
-                // pill is sticky (ticket 094): visible whenever the session has ANY
-                // background task, running or terminal — the sheet is the session's
-                // job history, and the pill is its only entry point.
-                val todosVisible = !uiState.todos.isNullOrEmpty()
-                val jobsVisible = uiState.jobs.isNotEmpty()
-                AnimatedVisibility(
-                    visible = todosVisible || jobsVisible,
-                    enter = expandVertically() + fadeIn(),
-                    exit = shrinkVertically() + fadeOut(),
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        if (todosVisible) {
-                            TodosSummaryRow(
-                                todos = uiState.todos.orEmpty(),
-                                onClick = { showTodos = true },
-                            )
-                        }
-                        if (jobsVisible) {
-                            JobsSummaryRow(
-                                jobs = uiState.jobs,
-                                onClick = { showJobs = true },
-                            )
-                        }
-                    }
-                }
+                // (ticket 092) sit directly above the composer — the shared dock owns
+                // the pills, the sheets and their open state (TodoJobsDock.kt).
+                TodoJobsDock(
+                    todos = uiState.todos,
+                    jobs = uiState.jobs,
+                    items = uiState.items,
+                    onOpenSubagent = onOpenSubagent,
+                    onOpenJob = onOpenJob,
+                    onCancelJob = onCancelJob,
+                )
                 ChatInputBar(
                     text = uiState.inputText,
                     isSending = uiState.isSending,
@@ -519,41 +490,6 @@ private fun ChatContent(
             onModelSelected = onModelSelected,
             onEffortSelected = onEffortSelected,
             onDismiss = { showModelPicker = false },
-        )
-    }
-    // Re-derived from the state at open time: a clearing TodoList call while the sheet
-    // is up simply closes it (there is nothing left to show). The open flag resets on
-    // that transition too — otherwise the next non-empty list would pop the sheet back
-    // with no tap.
-    val todos = uiState.todos
-    LaunchedEffect(todos.isNullOrEmpty()) {
-        if (todos.isNullOrEmpty()) showTodos = false
-    }
-    if (showTodos && !todos.isNullOrEmpty()) {
-        TodosSheet(todos = todos, onDismiss = { showTodos = false })
-    }
-    // The jobs sheet (ticket 092) stays open while jobs flip terminal — recently
-    // finished jobs linger in the list by design. Tapping a sub-agent row closes it
-    // and opens the sub-agent page; tapping a bash row (ticket 096) closes it and
-    // opens the job screen. A REST-seeded sub-agent job carries no agentId (REST
-    // /tasks omits it): the spawning `Agent` row's result stub links task id to
-    // sub-agent id, so the timeline fills the gap; an unresolvable tap is a no-op.
-    if (showJobs && uiState.jobs.isNotEmpty()) {
-        JobsSheet(
-            jobs = uiState.jobs,
-            onCancel = onCancelJob,
-            onOpenSubagent = { job ->
-                val agentId = job.agentId ?: subagentIdForTask(uiState.items, job.taskId)
-                if (agentId != null) {
-                    showJobs = false
-                    onOpenSubagent(agentId)
-                }
-            },
-            onOpenJob = { taskId ->
-                showJobs = false
-                onOpenJob(taskId)
-            },
-            onDismiss = { showJobs = false },
         )
     }
 }

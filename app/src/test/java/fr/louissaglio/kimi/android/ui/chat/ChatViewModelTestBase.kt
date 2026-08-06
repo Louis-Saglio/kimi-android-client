@@ -600,24 +600,28 @@ abstract class ChatViewModelTestBase {
 
     /** Verbatim-shaped 0.31.0 task.started (docs/server-api.md, Background lifecycle —
      * ticket 092): CORE status vocabulary, epoch-millis times, info.agentId linking a
-     * sub-agent task to its page id (null on bash). */
+     * sub-agent task to its page id (null on bash). [ownerAgentId] is the payload
+     * stamp naming the agent whose task store holds the task — "main" by default, a
+     * sub-agent id for a sub-agent-spawned task. */
     protected fun taskStartedFrame(
         taskId: String,
         description: String,
         kind: String = "agent",
         agentId: String? = "agent-13",
         seq: Int = 52,
+        ownerAgentId: String = "main",
     ): String =
         """{"type":"task.started","seq":$seq,"epoch":"ep_1","session_id":"session_1",""" +
             """"timestamp":"2026-08-03T00:00:00.000Z","payload":{"type":"task.started",""" +
             """"info":{"taskId":"$taskId","description":"$description","status":"running",""" +
             """"detached":true,"startedAt":1785210101939,"timeoutMs":7200000,""" +
             """"kind":"$kind","agentId":${agentId?.let { "\"$it\"" } ?: "null"},""" +
-            """"subagentType":"explore"},"agentId":"main","sessionId":"session_1"}}"""
+            """"subagentType":"explore"},"agentId":"$ownerAgentId","sessionId":"session_1"}}"""
 
     /** Verbatim-shaped 0.31.0 task.terminated (docs/server-api.md — the cancel run's
      * frame carries status "killed" + stopReason "Aborted by the user"). [status] is
-     * the CORE vocabulary. */
+     * the CORE vocabulary. [ownerAgentId] is the payload stamp, as on
+     * [taskStartedFrame]. */
     protected fun taskTerminatedFrame(
         taskId: String,
         status: String,
@@ -625,6 +629,7 @@ abstract class ChatViewModelTestBase {
         kind: String = "agent",
         agentId: String? = "agent-13",
         seq: Int = 109,
+        ownerAgentId: String = "main",
     ): String =
         """{"type":"task.terminated","seq":$seq,"epoch":"ep_1","session_id":"session_1",""" +
             """"timestamp":"2026-08-03T00:00:01.000Z","payload":{"type":"task.terminated",""" +
@@ -632,7 +637,7 @@ abstract class ChatViewModelTestBase {
             """"detached":true,"startedAt":1785210101939,"endedAt":1785210118804,""" +
             """"stopReason":"Aborted by the user","timeoutMs":7200000,""" +
             """"kind":"$kind","agentId":${agentId?.let { "\"$it\"" } ?: "null"},""" +
-            """"subagentType":"agent"},"agentId":"main","sessionId":"session_1"}}"""
+            """"subagentType":"agent"},"agentId":"$ownerAgentId","sessionId":"session_1"}}"""
 
     /** Verbatim 0.30.0 compaction.started (docs/server-api.md, Compact — ticket 056). */
     protected fun compactionStartedFrame(): String =
