@@ -65,6 +65,11 @@ import kotlinx.coroutines.delay
  * section render immediately from the route arguments (the tapped row's call
  * input); only the status line (it needs the fetch's started_at) and the output
  * wait for the entry fetch.
+ *
+ * Store-backed mode (ticket 098 — a sub-agent-owned task, opened from a sub-agent
+ * page): no poll, no output tail (an explicit placeholder instead), no Stop —
+ * REST `/tasks` serves only the main agent's task store; the status line follows
+ * the store's live `task.*` frames.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -98,7 +103,9 @@ fun JobDetailScreen(
                     }
                 },
                 actions = {
-                    if (uiState.status == BackgroundTask.Status.Running) {
+                    // No Stop in store-backed mode (ticket 098): REST :cancel is
+                    // main-agent-only — no cancel channel exists for these tasks.
+                    if (!uiState.storeBacked && uiState.status == BackgroundTask.Status.Running) {
                         TextButton(onClick = viewModel::onStop) {
                             Text("Stop", color = MaterialTheme.colorScheme.error)
                         }
@@ -259,10 +266,27 @@ private fun JobSection(title: String, modifier: Modifier = Modifier, content: @C
 /** The stored stdout/stderr tail (the ToolDetailBlock recipe): one monospace block
  * scrolling internally, re-pinned to the tail each time a poll grows it while the
  * job runs. Until the entry fetch answers, a small spinner stands in for the block —
- * the rest of the shell already renders from the route-seeded state. Internal for
- * the semantics tests. */
+ * the rest of the shell already renders from the route-seeded state. In store-backed
+ * mode (ticket 098) an explicit placeholder replaces the block: no output channel
+ * exists for a sub-agent-owned task (no `tool.progress`, REST `/tasks` 40406).
+ * Internal for the semantics tests. */
 @Composable
 internal fun JobOutputBlock(uiState: JobDetailViewModel.UiState, modifier: Modifier = Modifier) {
+    if (uiState.storeBacked) {
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            shape = MaterialTheme.shapes.small,
+            modifier = modifier.fillMaxWidth(),
+        ) {
+            Text(
+                text = "Output not available for sub-agent tasks",
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        return
+    }
     if (uiState.isLoading && uiState.outputPreview == null) {
         Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
             CircularProgressIndicator(

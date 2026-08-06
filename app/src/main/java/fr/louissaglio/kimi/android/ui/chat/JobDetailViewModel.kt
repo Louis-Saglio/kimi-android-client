@@ -8,6 +8,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.chat.BackgroundTask
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
+import fr.louissaglio.kimi.android.data.chat.MAIN_AGENT_ID
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.data.toUserMessage
 import fr.louissaglio.kimi.android.navigation.JobDetail
@@ -47,6 +48,18 @@ import kotlinx.coroutines.launch
  * session page count (the sub-agent page mechanism): the chat socket stays collected
  * while this screen is on top, so a live `task.terminated` still reaches the jobs
  * store — the sheet (and the next entry here) learn the timed-out truth.
+ *
+ * Ticket 098: TWO data modes, split on the route's `ownerAgentId`. null/"main" is
+ * the REST-backed mode above. Anything else is the store-backed mode: a
+ * sub-agent-owned task is live-only by protocol — REST `/tasks` resolves only the
+ * main agent's task service (get and `:cancel` alike answer 40406), and no output
+ * channel exists (docs/server-api.md, Background lifecycle) — so status/startedAt/
+ * completedAt/timedOut come from the owning record's live jobs in
+ * [SubagentStreamStore] (fed by `task.started`/`task.terminated`), collected while
+ * the screen lives; the screen NEVER calls getTask/cancelTask in this mode, the
+ * Output section shows an explicit unavailable placeholder, and Stop is hidden.
+ * The socket-gate registration stays: it is what keeps the live `task.terminated`
+ * frames reaching the store while the screen is on top.
  */
 @HiltViewModel
 class JobDetailViewModel internal constructor(
@@ -75,6 +88,12 @@ class JobDetailViewModel internal constructor(
     private val sessionId: String = routeArgs.sessionId
     private val taskId: String = routeArgs.taskId
 
+    /** The store-backed mode split (ticket 098): a sub-agent-owned task id — REST
+     * `/tasks` 40406s those (docs/server-api.md, Background lifecycle), so getTask/
+     * cancelTask must never run for them. */
+    private val ownerAgentId: String? = routeArgs.ownerAgentId
+    private val storeBacked = ownerAgentId != null && ownerAgentId != MAIN_AGENT_ID
+
     /** [status] null = nothing fetched yet (the entry fetch is running, or failed).
      * [budgetSeconds]/[budgetIsDefault]/[timedOut] are the ticket-097 route
      * arguments: the effective kill budget (null = no budget UI), whether it is the
@@ -94,6 +113,10 @@ class JobDetailViewModel internal constructor(
         val budgetSeconds: Int? = null,
         val budgetIsDefault: Boolean = false,
         val timedOut: Boolean = false,
+        /** Store-backed mode (ticket 098): the task is sub-agent-owned — status comes
+         * from the SubagentStreamStore's live frames; no output tail and no Stop
+         * exist for it (no wire channel does). */
+        val storeBacked: Boolean = false,
         /** True while the entry fetch runs — only the Output section waits on it
          * (a placeholder); the seeded title/command render already. */
         val isLoading: Boolean = true,
@@ -110,6 +133,9 @@ class JobDetailViewModel internal constructor(
                 timedOut = routeArgs.timedOut,
                 description = routeArgs.description,
                 command = routeArgs.command,
+                storeBacked = storeBacked,
+                // The store-backed mode has no entry fetch: nothing ever loads.
+                isLoading = !storeBacked,
             ),
         )
 
@@ -128,12 +154,37 @@ class JobDetailViewModel internal constructor(
     private var pollJob: Job? = null
 
     init {
-        fetch()
+        if (storeBacked) collectStoreJob() else fetch()
+    }
+
+    /** Store-backed mode (ticket 098): the owning record's live jobs are the ONLY
+     * status channel — fed by `task.started`/`task.terminated` while the screen's
+     * socket-gate registration keeps the session socket collected. The seeded
+     * title/command/budget stay the route's; a cold-opened screen whose task predates
+     * the subscription shows those seeds with an empty status line (cold-open healing
+     * is ticket 099's) — never a full-screen error. */
+    private fun collectStoreJob() {
+        val owner = ownerAgentId ?: return
+        viewModelScope.launch {
+            subagentStore.entry(sessionId, owner).collect { entry ->
+                val job = entry?.jobs?.firstOrNull { it.taskId == taskId } ?: return@collect
+                uiState.update {
+                    it.copy(
+                        status = job.status,
+                        startedAt = job.startedAt,
+                        completedAt = job.endedAt,
+                        timedOut = it.timedOut || job.timedOut,
+                    )
+                }
+            }
+        }
     }
 
     /** One task read. A failed poll keeps the last state (the next tick retries); the
      * entry fetch is the screen's only data source, so its failure goes full-screen. */
     private fun fetch() {
+        // A sub-agent-owned task is never fetched: REST /tasks 40406s it.
+        if (storeBacked) return
         viewModelScope.launch {
             chatRepository.getTask(settingsRepository.current(), sessionId, taskId)
                 .onSuccess { task ->
@@ -175,9 +226,10 @@ class JobDetailViewModel internal constructor(
         syncPolling()
     }
 
-    /** The output poll runs exactly while (job running AND screen visible). */
+    /** The output poll runs exactly while (job running AND screen visible); the
+     * store-backed mode never polls — it has no output endpoint. */
     private fun syncPolling() {
-        val shouldPoll = screenActive && uiState.value.status == BackgroundTask.Status.Running
+        val shouldPoll = !storeBacked && screenActive && uiState.value.status == BackgroundTask.Status.Running
         if (shouldPoll && pollJob?.isActive != true) {
             pollJob = viewModelScope.launch(pollDispatcher) {
                 while (isActive) {
@@ -191,17 +243,20 @@ class JobDetailViewModel internal constructor(
         }
     }
 
-    /** Retry of the failed entry fetch (the error state is the whole screen). */
+    /** Retry of the failed entry fetch (the error state is the whole screen). The
+     * store-backed mode has no fetch to retry — and never enters the error state. */
     fun onRetry() {
+        if (storeBacked) return
         uiState.update { it.copy(isLoading = true, error = null) }
         fetch()
     }
 
     /** Stops the running job (`POST .../tasks/{id}:cancel`, ticket 092's endpoint):
      * 40904 = already-terminal success; any other failure snackbars. No optimistic
-     * flip — the screen's own poll sees the terminal status. */
+     * flip — the screen's own poll sees the terminal status. Never in store-backed
+     * mode: REST `:cancel` 40406s a sub-agent-owned task (the UI hides Stop there). */
     fun onStop() {
-        if (uiState.value.status != BackgroundTask.Status.Running) return
+        if (storeBacked || uiState.value.status != BackgroundTask.Status.Running) return
         viewModelScope.launch {
             chatRepository.cancelTask(settingsRepository.current(), sessionId, taskId)
                 .onFailure { error ->

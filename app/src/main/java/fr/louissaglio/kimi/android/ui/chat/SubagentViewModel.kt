@@ -55,9 +55,11 @@ class SubagentViewModel internal constructor(
 
     /** [status] null = the store has no entry for [subagentId] yet (its spawn predates
      * the app's subscription and the transcript fetch has not landed): the screen
-     * shows its loading/empty state. */
+     * shows its loading/empty state. [sessionId] rides along so the screen's
+     * navigation callbacks (the job screen, ticket 098) can name it. */
     data class UiState(
         val subagentId: String,
+        val sessionId: String,
         /** The subagent type (e.g. "explore"). */
         val name: String? = null,
         val description: String? = null,
@@ -77,7 +79,7 @@ class SubagentViewModel internal constructor(
     )
 
     val uiState: StateFlow<UiState>
-        field = MutableStateFlow(UiState(subagentId = subagentId))
+        field = MutableStateFlow(UiState(subagentId = subagentId, sessionId = sessionId))
 
     /** Last status the entry collector observed — the reconcile trigger's edge detector. */
     private var lastSeenStatus: SubagentStatus? = null

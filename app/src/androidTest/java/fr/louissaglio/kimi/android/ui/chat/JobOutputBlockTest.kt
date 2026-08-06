@@ -60,4 +60,22 @@ class JobOutputBlockTest {
         composeTestRule.onNodeWithText("No output yet").assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription("Loading output").assertDoesNotExist()
     }
+
+    @Test
+    fun aSubAgentOwnedJobShowsTheOutputUnavailablePlaceholder() {
+        // Store-backed mode (ticket 098): no output channel exists for these tasks —
+        // an explicit placeholder, never the poll spinner or the "No output yet" copy.
+        outputBlock(
+            JobDetailViewModel.UiState(
+                taskId = "bash-1",
+                status = BackgroundTask.Status.Running,
+                storeBacked = true,
+                isLoading = false,
+            ),
+        )
+
+        composeTestRule.onNodeWithText("Output not available for sub-agent tasks").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Loading output").assertDoesNotExist()
+        composeTestRule.onNodeWithText("No output yet").assertDoesNotExist()
+    }
 }

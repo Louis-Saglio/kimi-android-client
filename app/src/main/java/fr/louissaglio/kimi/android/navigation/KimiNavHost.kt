@@ -40,7 +40,11 @@ data class Subagent(val sessionId: String, val subagentId: String)
  * row), the screen falls back to plain elapsed and "failed". The description and
  * command ride along the same way (the tapped row already carries the call input),
  * so the title and the Command section render before the entry fetch answers; the
- * fetch stays authoritative and overwrites both. */
+ * fetch stays authoritative and overwrites both. [ownerAgentId] (ticket 098) selects
+ * the data mode: null/"main" is the REST-backed mode; a sub-agent id is the
+ * store-backed mode — REST `/tasks` serves only the main agent's task store, so a
+ * sub-agent-owned task gets its status from the SubagentStreamStore's live frames
+ * (no output tail, no Stop). */
 @Serializable
 data class JobDetail(
     val sessionId: String,
@@ -50,6 +54,7 @@ data class JobDetail(
     val timedOut: Boolean = false,
     val description: String? = null,
     val command: String? = null,
+    val ownerAgentId: String? = null,
 )
 
 @Composable
@@ -92,11 +97,24 @@ fun KimiNavHost() {
         composable<Subagent> { entry ->
             // Nested sub-agents (ticket 071): the page can navigate one level deeper,
             // into another sub-agent of the SAME session (from this entry's route).
-            val sessionId = entry.toRoute<Subagent>().sessionId
+            val route = entry.toRoute<Subagent>()
             SubagentScreen(
                 onNavigateBack = { navController.popBackStack() },
                 onOpenSubagent = { subagentId ->
-                    navController.navigate(Subagent(sessionId, subagentId)) {
+                    navController.navigate(Subagent(route.sessionId, subagentId)) {
+                        launchSingleTop = true
+                    }
+                },
+                // The page's background bash jobs are owned by its sub-agent
+                // (ticket 098): the owner stamp puts the job screen in its
+                // store-backed mode.
+                onNavigateToJob = { sessionId, taskId, budgetSeconds, budgetIsDefault, timedOut, description, command ->
+                    navController.navigate(
+                        JobDetail(
+                            sessionId, taskId, budgetSeconds, budgetIsDefault, timedOut,
+                            description, command, ownerAgentId = route.subagentId,
+                        ),
+                    ) {
                         launchSingleTop = true
                     }
                 },

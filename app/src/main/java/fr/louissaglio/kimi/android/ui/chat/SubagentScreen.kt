@@ -16,6 +16,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -23,6 +24,9 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import fr.louissaglio.kimi.android.data.chat.BashTimeout
+import fr.louissaglio.kimi.android.data.chat.bashCommandOf
+import fr.louissaglio.kimi.android.data.chat.bashDescriptionOf
 import fr.louissaglio.kimi.android.ui.common.EmptyState
 import fr.louissaglio.kimi.android.ui.common.ErrorState
 import fr.louissaglio.kimi.android.ui.common.LoadingState
@@ -35,9 +39,10 @@ import fr.louissaglio.kimi.android.ui.common.LoadingState
  * cannot be talked to; its questions and approvals stay in the main chat). The list
  * reuses the chat's [MessageList], auto-scroll and history pagination included.
  * The bottom bar hosts the shared todos/jobs dock (the chat composer's widgets):
- * the sub-agent's own todo list and its own background tasks. The jobs sheet is
- * read-only here — no Stop, no bash-row job screen — because REST `/tasks` (cancel
- * and get alike) serves only the main agent's task store (docs/server-api.md).
+ * the sub-agent's own todo list and its own background tasks. Background `Bash` rows
+ * — timeline and jobs sheet alike — open the job screen (ticket 098), which runs
+ * store-backed for these sub-agent-owned tasks; the sheet stays without a Stop
+ * (REST `/tasks` serves only the main agent's task store — docs/server-api.md).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -46,6 +51,18 @@ fun SubagentScreen(
     /** Nested sub-agents (ticket 071): a linked `Agent` row inside this transcript
      * navigates one page deeper. Invoked with the nested subagentId. */
     onOpenSubagent: (String) -> Unit = {},
+    /** Background `Bash` rows (ticket 098) open their job screen. Same resolution as
+     * the chat's (ChatScreen): the budget/description/command resolve from the tapped
+     * row's call input, the timed-out flag from the jobs list. */
+    onNavigateToJob: (
+        sessionId: String,
+        taskId: String,
+        budgetSeconds: Int?,
+        budgetIsDefault: Boolean,
+        timedOut: Boolean,
+        description: String?,
+        command: String?,
+    ) -> Unit = { _, _, _, _, _, _, _ -> },
     viewModel: SubagentViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -54,6 +71,32 @@ fun SubagentScreen(
     // gate when it exists, by the store's own keep-alive collection otherwise (064).
     LifecycleEventEffect(Lifecycle.Event.ON_START) { viewModel.onScreenStarted() }
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) { viewModel.onScreenStopped() }
+    // Linked background `Bash` rows open their job screen (ticket 098) — the chat's
+    // ticket-096 resolution: the timeout budget comes from the matching timeline row
+    // (the call input is the only wire location of the timeout), the timed-out flag
+    // from the jobs list, and the call input's description/command seed the job
+    // screen's title and Command section; an unknown row navigates budget-less.
+    val sessionId = uiState.sessionId
+    val timelineItems = uiState.items
+    val jobs = uiState.jobs
+    val onOpenJob = remember(onNavigateToJob, sessionId, timelineItems, jobs) {
+        { taskId: String ->
+            val row = timelineItems.filterIsInstance<ChatItem.ToolGroup>()
+                .flatMap { it.tools }
+                .firstOrNull { it.bashTaskId == taskId }
+            val timeout = row?.let { BashTimeout(it.timeoutSeconds, it.timeoutDisabled) }
+            val job = jobs.firstOrNull { it.taskId == taskId }
+            onNavigateToJob(
+                sessionId,
+                taskId,
+                timeout?.effectiveSeconds,
+                timeout?.isDefault ?: false,
+                job?.timedOut == true,
+                row?.let { bashDescriptionOf(it.name, it.input) } ?: job?.description,
+                row?.let { bashCommandOf(it.name, it.input) },
+            )
+        }
+    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -88,13 +131,14 @@ fun SubagentScreen(
             )
         },
         bottomBar = {
-            // The sub-agent's own todos/jobs — the chat's dock, minus the affordances
-            // REST `/tasks` cannot back for a sub-agent (cancel, the job screen).
+            // The sub-agent's own todos/jobs — the chat's dock, minus the affordance
+            // REST `/tasks` cannot back for a sub-agent (cancel).
             TodoJobsDock(
                 todos = uiState.todos,
                 jobs = uiState.jobs,
                 items = uiState.items,
                 onOpenSubagent = onOpenSubagent,
+                onOpenJob = onOpenJob,
             )
         },
     ) { innerPadding ->
@@ -112,6 +156,7 @@ fun SubagentScreen(
                 else -> MessageList(
                     uiState.items,
                     onOpenSubagent = onOpenSubagent,
+                    onOpenJob = onOpenJob,
                     isLoadingMoreHistory = uiState.isLoadingMoreHistory,
                     onHistoryTopReached = viewModel::onHistoryTopReached,
                 )

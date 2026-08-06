@@ -476,6 +476,166 @@ class ChatTimelineTest {
     }
 
     @Test
+    fun `the enrichment derives every link and never overwrites set fields`() {
+        // Ticket 098's single choke point: bashTaskId from the result's first line,
+        // subagentId from the agent_id marker, the timeout knobs from the call input.
+        val bashOutput = "task_id: bash-2q5gu61e\npid: 502439\nstatus: running\n"
+        val agentOutput = "task_id: agent-7noib8bb\nstatus: running\nagent_id: agent-13\n"
+        val input = """{"command":"for i in …","timeout":30}"""
+
+        val derived = ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, input = input, output = bashOutput)
+            .enriched()
+        assertEquals("bash-2q5gu61e", derived.bashTaskId)
+        assertEquals(30, derived.timeoutSeconds)
+        assertEquals(false, derived.timeoutDisabled)
+
+        assertEquals(
+            "agent-13",
+            ChatItem.ToolActivity("tool_2", "Agent", ToolStatus.Done, output = agentOutput).enriched().subagentId,
+        )
+
+        // First writer wins: a live/registry-learned field survives any later pass.
+        val linked = ChatItem.ToolActivity(
+            "tool_3", "Bash", ToolStatus.Done,
+            input = """{"command":"for i in …","timeout":30}""",
+            output = bashOutput,
+            subagentId = "agent-99",
+            bashTaskId = "bash-livelearned",
+            timeoutSeconds = 120,
+            timeoutDisabled = true,
+        ).enriched(name = "Agent", output = agentOutput)
+        assertEquals("agent-99", linked.subagentId)
+        assertEquals("bash-livelearned", linked.bashTaskId)
+        assertEquals(120, linked.timeoutSeconds)
+        assertEquals(true, linked.timeoutDisabled)
+    }
+
+    @Test
+    fun `transcript rows carry the links and timeout of history-flattened rows`() {
+        // Ticket 098 regression: the transcript-turn flatten derived nothing, so every
+        // transcript-backed row (the sub-agent page's whole committed history) lost
+        // its job/sub-agent links and its timeout budget.
+        val bashOutput = "task_id: bash-2q5gu61e\npid: 502439\nstatus: running\n"
+        val agentOutput = "agent_id: agent-13\nstatus: completed\n"
+        val timeline = testChatTimeline(historyBacked = false)
+
+        timeline.replaceTranscript(
+            listOf(
+                transcriptTurn(
+                    "t0", 0,
+                    transcriptStep(
+                        "t0.1",
+                        TranscriptFrame.Tool(
+                            "t0.1.tool_1", "tool_1", "Bash", running = false,
+                            preview = "tick counter loop (120)",
+                            input = """{"command":"for i in …","timeout":30}""",
+                            output = bashOutput,
+                        ),
+                        TranscriptFrame.Tool(
+                            "t0.1.tool_2", "tool_2", "Agent", running = false,
+                            preview = "doc-verify",
+                            input = """{"prompt":"check the docs"}""",
+                            output = agentOutput,
+                        ),
+                    ),
+                ),
+            ),
+            keepLive = false,
+        )
+
+        assertEquals(
+            listOf(
+                ChatItem.ToolActivity(
+                    "tool_1", "Bash", ToolStatus.Done, "tick counter loop (120)",
+                    input = """{"command":"for i in …","timeout":30}""",
+                    output = bashOutput,
+                    bashTaskId = "bash-2q5gu61e",
+                    timeoutSeconds = 30,
+                ),
+                ChatItem.ToolActivity(
+                    "tool_2", "Agent", ToolStatus.Done, "doc-verify",
+                    input = """{"prompt":"check the docs"}""",
+                    output = agentOutput,
+                    subagentId = "agent-13",
+                ),
+            ),
+            timeline.items().filterIsInstance<ChatItem.ToolGroup>().flatMap { it.tools },
+        )
+    }
+
+    @Test
+    fun `a prepended transcript page carries the links too`() {
+        // Pagination (046) flattens through the same turn path — an older page's
+        // background bash rows stay linked as well.
+        val bashOutput = "task_id: bash-2q5gu61e\npid: 502439\nstatus: running\n"
+        val timeline = testChatTimeline(historyBacked = false)
+        timeline.replaceTranscript(
+            listOf(
+                transcriptTurn(
+                    "t1", 1,
+                    transcriptStep("t1.1", TranscriptFrame.Text("t1.1.f1", TranscriptFrame.Text.Role.Assistant, "newer")),
+                ),
+            ),
+            keepLive = false,
+        )
+
+        timeline.prependTranscript(
+            listOf(
+                transcriptTurn(
+                    "t0", 0,
+                    transcriptStep(
+                        "t0.1",
+                        TranscriptFrame.Tool(
+                            "t0.1.tool_1", "tool_1", "Bash", running = false,
+                            preview = "tick counter loop (120)", input = "", output = bashOutput,
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        val tool = timeline.items().filterIsInstance<ChatItem.ToolGroup>().flatMap { it.tools }.single()
+        assertEquals("bash-2q5gu61e", tool.bashTaskId)
+    }
+
+    @Test
+    fun `a live result-linked row keeps its bashTaskId across the terminal transcript reconcile`() {
+        // Ticket 098: the sub-agent page's terminal reconcile (SubagentViewModel's
+        // keepLive = false refetch) drops the live rows — the link survives only if
+        // the transcript flatten re-derives it from the committed stub output.
+        val output = "task_id: bash-2q5gu61e\npid: 502439\nstatus: running\n"
+        val timeline = testChatTimeline(historyBacked = false)
+        timeline.apply(SessionEvent.TurnStarted())
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "tick counter loop (120)"))
+        timeline.apply(SessionEvent.ToolCallResult("tool_1", false, output))
+        assertEquals(
+            "bash-2q5gu61e",
+            (timeline.items().single() as ChatItem.ToolGroup).tools.single().bashTaskId,
+        )
+
+        timeline.replaceTranscript(
+            listOf(
+                transcriptTurn(
+                    "t0", 0,
+                    transcriptStep(
+                        "t0.1",
+                        TranscriptFrame.Tool(
+                            "t0.1.tool_1", "tool_1", "Bash", running = false,
+                            preview = "tick counter loop (120)", input = "", output = output,
+                        ),
+                    ),
+                ),
+            ),
+            keepLive = false,
+        )
+
+        assertEquals(
+            "bash-2q5gu61e",
+            (timeline.items().single() as ChatItem.ToolGroup).tools.single().bashTaskId,
+        )
+    }
+
+    @Test
     fun `tool call started fills the running row preview live`() {
         val timeline = testChatTimeline()
         timeline.apply(SessionEvent.TurnStarted())

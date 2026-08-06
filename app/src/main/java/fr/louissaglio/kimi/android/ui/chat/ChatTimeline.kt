@@ -147,17 +147,12 @@ class ChatTimeline(
                 tools = group.tools.map { tool ->
                     val call = headCalls[tool.id] ?: return@map tool
                     adopted += tool.id
-                    val timeout = bashTimeoutOf(call.name, call.input)
                     tool.copy(
                         name = call.name,
                         preview = call.preview,
                         input = call.input,
                         output = tool.output.ifBlank { call.output },
-                        subagentId = tool.subagentId ?: agentResultSubagentId(call.name, tool.output),
-                        bashTaskId = tool.bashTaskId ?: bashTaskIdOf(call.name, tool.output),
-                        timeoutSeconds = tool.timeoutSeconds ?: timeout?.seconds,
-                        timeoutDisabled = tool.timeoutDisabled || (timeout?.disabled == true),
-                    )
+                    ).enriched(name = call.name, input = call.input, output = tool.output)
                 },
             )
         }
@@ -357,8 +352,7 @@ class ChatTimeline(
                         // The definitive result replaces any accumulated progress wholesale.
                         replaceOutput = true,
                     )
-                    linkSubagentFromResult(event.toolCallId, event.output)
-                    linkBashTaskFromResult(event.toolCallId, event.output)
+                    linkFromResult(event.toolCallId, event.output)
                 }
             is SessionEvent.ToolCallProgress ->
                 if (event.toolCallId !in todoCallIds) appendToolProgress(event.toolCallId, event.chunk)
@@ -510,33 +504,20 @@ class ChatTimeline(
         healTool(toolCallId) { row -> if (row.subagentId == null) row.copy(subagentId = subagentId) else row }
     }
 
-    /** Cold row→sub-agent linkage (ticket 045): an `Agent` call's result text carries
-     * `agent_id: <id>` on its own line (the version-pinned wire format — first line for
-     * foreground runs, after the task fields for background ones). This is the only
-     * linkage available when the spawn happened before the app subscribed; a result
-     * without the marker leaves the row unlinked, hence non-tappable. */
-    private fun linkSubagentFromResult(toolCallId: String, output: String) {
+    /** Live row linkage (tickets 045/096/097, unified in 098): one [enriched] pass over
+     * the row — the result's `agent_id:` marker and `task_id: bash-…` first line, plus
+     * the call input's timeout knobs (the row's `input` holds the args by result time).
+     * First writer wins, so a spawned/registry-learned sub-agent link survives. The
+     * derived sub-agent link also feeds the [subagentLinks] cache: a refetch rebuilds
+     * committed rows from history, where the `agent_id:` result marker only exists once
+     * the result is committed too. The bash-task link has no registry: the result text
+     * is the only carrier and history/transcript repeat it verbatim, so every rebuild
+     * re-derives it. */
+    private fun linkFromResult(toolCallId: String, output: String) {
         healTool(toolCallId) { row ->
-            val linked = row.subagentId ?: agentResultSubagentId(row.name, output)
-            if (linked != null) subagentLinks[toolCallId] = linked
-            row.copy(subagentId = linked)
-        }
-    }
-
-    /** Live row→job linkage (ticket 096): a background Bash result's first line
-     * carries `task_id: bash-…`, so the row gains its open affordance. Unlike the
-     * sub-agent links there is no registry: the result text is the only carrier and
-     * history repeats it verbatim, so every rebuild re-derives the link. The call
-     * input's timeout knobs (ticket 097) ride the same heal — the row's `input`
-     * holds the args by result time. */
-    private fun linkBashTaskFromResult(toolCallId: String, output: String) {
-        healTool(toolCallId) { row ->
-            val timeout = bashTimeoutOf(row.name, row.input)
-            row.copy(
-                bashTaskId = row.bashTaskId ?: bashTaskIdOf(row.name, output),
-                timeoutSeconds = row.timeoutSeconds ?: timeout?.seconds,
-                timeoutDisabled = row.timeoutDisabled || (timeout?.disabled == true),
-            )
+            val enriched = row.enriched(output = output)
+            enriched.subagentId?.let { subagentLinks[toolCallId] = it }
+            enriched
         }
     }
 
@@ -552,14 +533,6 @@ class ChatTimeline(
             )
         }
     }
-
-    private fun agentResultSubagentId(name: String, output: String): String? =
-        if (name != AGENT_TOOL_NAME) null
-        else output.lineSequence()
-            .firstOrNull { it.startsWith(AGENT_ID_PREFIX) }
-            ?.removePrefix(AGENT_ID_PREFIX)
-            ?.trim()
-            ?.takeIf { it.isNotBlank() }
 
     /** Records a call as the agent's todo tool (ticket 042): its row is suppressed and
      * later result/progress frames for the id are dropped too. */
@@ -615,15 +588,10 @@ class ChatTimeline(
                     var found = false
                     target.updateTool(result.toolCallId) { existing ->
                         found = true
-                        val timeout = bashTimeoutOf(existing.name, existing.input)
                         existing.copy(
                             status = status,
                             output = existing.output.ifBlank { result.output },
-                            subagentId = existing.subagentId ?: agentResultSubagentId(existing.name, result.output),
-                            bashTaskId = existing.bashTaskId ?: bashTaskIdOf(existing.name, result.output),
-                            timeoutSeconds = existing.timeoutSeconds ?: timeout?.seconds,
-                            timeoutDisabled = existing.timeoutDisabled || (timeout?.disabled == true),
-                        )
+                        ).enriched(output = result.output)
                     }
                     if (!found) {
                         // Result without a matching call (e.g. page boundary): show it anyway.
@@ -680,6 +648,8 @@ class ChatTimeline(
                         if (isTodoCall(frame.toolCallId, frame.name)) {
                             todoParser.of(frame.name, frame.input)?.let { parsed -> committedTodos = parsed }
                         } else {
+                            // The same enrichment as every other row path (ticket 098)
+                            // — transcript frames carry input and output in one frame.
                             target.appendTool(
                                 ChatItem.ToolActivity(
                                     frame.toolCallId,
@@ -688,7 +658,7 @@ class ChatTimeline(
                                     frame.preview,
                                     frame.input,
                                     frame.output,
-                                ),
+                                ).enriched(),
                             )
                         }
                     }
@@ -761,9 +731,47 @@ class ChatTimeline(
             return
         }
     }
-
-    private companion object {
-        /** Line prefix of the linkage marker in an `Agent` call's result text. */
-        const val AGENT_ID_PREFIX = "agent_id: "
-    }
 }
+
+/**
+ * The ONE tool-row enrichment (ticket 098 — the root fix for transcript-backed rows
+ * losing their links): every [ChatItem.ToolActivity] field computable from the call's
+ * name/input and a result text is derived HERE — [ChatItem.ToolActivity.bashTaskId]
+ * from the result's `task_id: bash-…` first line, [ChatItem.ToolActivity.subagentId]
+ * from the `agent_id:` result marker, [ChatItem.ToolActivity.timeoutSeconds]/
+ * [ChatItem.ToolActivity.timeoutDisabled] from the call input's timeout knobs. All
+ * four row construction/update sites in [ChatTimeline] route through it (the history
+ * flatten's result branch, the transcript-turn flatten, the live `ToolCallResult`
+ * handling, and [ChatTimeline]'s orphan completion), so no row path can forget a
+ * derivation. First writer wins — an already-set field is never overwritten, so a
+ * live/registry-learned link survives any later refetch-derived pass.
+ */
+internal fun ChatItem.ToolActivity.enriched(
+    name: String = this.name,
+    input: String = this.input,
+    output: String = this.output,
+): ChatItem.ToolActivity {
+    val timeout = bashTimeoutOf(name, input)
+    return copy(
+        subagentId = subagentId ?: agentResultSubagentId(name, output),
+        bashTaskId = bashTaskId ?: bashTaskIdOf(name, output),
+        timeoutSeconds = timeoutSeconds ?: timeout?.seconds,
+        timeoutDisabled = timeoutDisabled || (timeout?.disabled == true),
+    )
+}
+
+/** Line prefix of the linkage marker in an `Agent` call's result text. */
+private const val AGENT_ID_PREFIX = "agent_id: "
+
+/** The `agent_id:` linkage marker of an `Agent` call's result text (the version-pinned
+ * wire format — first line for foreground runs, after the task fields for background
+ * ones); null for non-`Agent` calls and unmarked results. This is the only sub-agent
+ * linkage available when the spawn happened before the app subscribed; a result
+ * without the marker leaves the row unlinked, hence non-tappable. */
+private fun agentResultSubagentId(name: String, output: String): String? =
+    if (name != AGENT_TOOL_NAME) null
+    else output.lineSequence()
+        .firstOrNull { it.startsWith(AGENT_ID_PREFIX) }
+        ?.removePrefix(AGENT_ID_PREFIX)
+        ?.trim()
+        ?.takeIf { it.isNotBlank() }

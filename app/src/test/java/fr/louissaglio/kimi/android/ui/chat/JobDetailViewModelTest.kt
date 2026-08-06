@@ -5,6 +5,8 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.chat.BackgroundTask
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
+import fr.louissaglio.kimi.android.data.chat.SessionEvent
+import fr.louissaglio.kimi.android.data.chat.TaskInfo
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.data.toUserMessage
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
@@ -268,6 +270,127 @@ class JobDetailViewModelTest {
         assertEquals(30, state.budgetSeconds)
         assertFalse(state.budgetIsDefault)
         assertTrue(state.timedOut)
+    }
+
+    // --- Store-backed mode (ticket 098) ------------------------------------------------
+
+    private fun seedStoreJob(status: TaskInfo.Status, endedAt: Instant? = null) = runBlocking {
+        subagentStore.apply(
+            "session_1",
+            SessionEvent.SubagentSpawned("agent-3", "explore", "tool_1", "doc-verify", runInBackground = false),
+        )
+        subagentStore.apply(
+            "session_1",
+            SessionEvent.TaskStarted(
+                TaskInfo(
+                    "bash-1", "nested bg", status,
+                    Instant.ofEpochMilli(1785210101939), endedAt, kind = TaskInfo.Kind.Process,
+                ),
+                agentId = "agent-3",
+            ),
+        )
+    }
+
+    @Test
+    fun `a sub-agent-owned task is store-backed and never calls REST`() = runBlocking {
+        seedStoreJob(TaskInfo.Status.Running)
+
+        val viewModel = newViewModel(
+            JobDetail(
+                "session_1", "bash-1",
+                budgetSeconds = 600, budgetIsDefault = true,
+                description = "count ticks", command = "for i in …",
+                ownerAgentId = "agent-3",
+            ),
+        )
+        awaitState(viewModel.uiState) { it.status == BackgroundTask.Status.Running }
+
+        val state = viewModel.uiState.value
+        assertTrue(state.storeBacked)
+        assertEquals(BackgroundTask.Status.Running, state.status)
+        assertEquals(Instant.ofEpochMilli(1785210101939), state.startedAt)
+        // Title/Command/budget stay the route seeds.
+        assertEquals("count ticks", state.description)
+        assertEquals("for i in …", state.command)
+        assertEquals(600, state.budgetSeconds)
+        assertTrue(state.budgetIsDefault)
+        assertFalse(state.isLoading)
+        assertNull(state.error)
+        // No entry fetch, and no poll even with the screen active on a running job.
+        viewModel.onScreenStarted()
+        delay(150)
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test
+    fun `the store-backed screen reflects a live task terminated`() = runBlocking {
+        seedStoreJob(TaskInfo.Status.Running)
+        val viewModel = newViewModel(JobDetail("session_1", "bash-1", ownerAgentId = "agent-3"))
+        awaitState(viewModel.uiState) { it.status == BackgroundTask.Status.Running }
+
+        subagentStore.apply(
+            "session_1",
+            SessionEvent.TaskTerminated(
+                TaskInfo(
+                    "bash-1", "nested bg", TaskInfo.Status.TimedOut,
+                    Instant.ofEpochMilli(1785210101939), Instant.ofEpochMilli(1785210118804),
+                    kind = TaskInfo.Kind.Process,
+                ),
+                agentId = "agent-3",
+            ),
+        )
+
+        awaitState(viewModel.uiState) { it.status == BackgroundTask.Status.Failed }
+        val state = viewModel.uiState.value
+        // The core timed_out reaches the timed-out label through the store's Job.
+        assertTrue(state.timedOut)
+        assertEquals(Instant.ofEpochMilli(1785210118804), state.completedAt)
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test
+    fun `the store-backed mode offers no stop`() = runBlocking {
+        seedStoreJob(TaskInfo.Status.Running)
+        val viewModel = newViewModel(JobDetail("session_1", "bash-1", ownerAgentId = "agent-3"))
+        val effects = collectEffects(viewModel)
+        awaitState(viewModel.uiState) { it.status == BackgroundTask.Status.Running }
+
+        viewModel.onStop()
+
+        delay(100)
+        assertEquals(0, server.requestCount)
+        assertTrue(effects.isEmpty())
+    }
+
+    @Test
+    fun `the store-backed mode shows the seeds without error when the store has no live frame`() = runBlocking {
+        // Cold open (ticket 099's healing is out of scope): nothing live observed —
+        // the route seeds render, the status line stays empty, no full-screen 40406.
+        val viewModel = newViewModel(
+            JobDetail("session_1", "bash-1", description = "count ticks", ownerAgentId = "agent-3"),
+        )
+        delay(100)
+
+        val state = viewModel.uiState.value
+        assertNull(state.status)
+        assertNull(state.error)
+        assertFalse(state.isLoading)
+        assertEquals("count ticks", state.description)
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test
+    fun `a main-owned task id stays REST-backed`() = runBlocking {
+        taskBody = COMPLETED_TASK_BODY
+
+        val viewModel = newViewModel(JobDetail("session_1", "bash-1", ownerAgentId = "main"))
+        awaitState(viewModel.uiState) { it.status != null }
+
+        assertFalse(viewModel.uiState.value.storeBacked)
+        assertEquals(
+            "/api/v1/sessions/session_1/tasks/bash-1?with_output=true",
+            server.takeRequest(2, TimeUnit.SECONDS)?.target,
+        )
     }
 
     private companion object {

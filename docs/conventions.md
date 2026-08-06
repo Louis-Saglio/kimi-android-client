@@ -59,9 +59,9 @@
   vanish at zero. The pills and their sheets are shared UI:
   `TodoJobsDock` (ui/chat) bundles the pill row, the sheet-open state, the
   sheets and the sub-agent tap's timeline resolution; the chat mounts it above
-  the composer, the sub-agent page as its bottom bar — there with null
-  cancel/job callbacks, since REST `/tasks` is main-agent-only (a sub-agent's
-  jobs sheet is read-only: no Stop, no bash-row job screen).
+  the composer, the sub-agent page as its bottom bar — there with a null cancel
+  callback only (REST `/tasks:cancel` is main-agent-only): bash rows open the
+  job screen's store-backed mode (ticket 098), wired exactly like the chat's.
 - Cold start / resync (085, freshness model 091): `GET .../snapshot` is the single
   entry point — `SnapshotSync` (ui/chat, session-scoped singleton like the store, so
   the page-on-top restore path with no ChatViewModel runs the same rebuild) owns the
@@ -123,8 +123,8 @@
   own background tasks (the live `task.*` frames stamped with its id, upserted
   into `SubagentRecord.jobs` via the shared `TaskInfo.toJob()` mapping — no
   REST seed exists, REST `/tasks` being main-agent-only); the page mounts the
-  shared `TodoJobsDock` as its bottom bar, read-only (no cancel, no job
-  screen — same REST limitation).
+  shared `TodoJobsDock` as its bottom bar, with the job screen wired
+  (store-backed mode, ticket 098) but no cancel (same REST limitation).
   Transcript backing (046): the page's history comes
   from `GET .../transcript?agent_id=…` (`ChatApi.transcript` →
   turn/step/frame domain model in `data/chat/Transcript.kt`, NOT

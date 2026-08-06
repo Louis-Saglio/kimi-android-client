@@ -28,9 +28,9 @@ import fr.louissaglio.kimi.android.data.chat.Todo
  * [items] (the caller's timeline rows) resolve a REST-seeded sub-agent job's missing
  * agentId when its sheet row is tapped (see [subagentIdForTask]); an unresolvable tap
  * is a no-op and keeps the sheet open. [onOpenJob] and [onCancelJob] are optional:
- * null hides the affordance — the sub-agent page passes null for both because REST
- * `/tasks` (the job screen's fetch, and the cancel endpoint) serves only the main
- * agent's task store, so a sub-agent's bash job has neither a job screen nor a Stop
+ * null hides the affordance. The sub-agent page wires [onOpenJob] too (ticket 098 —
+ * the job screen's store-backed mode covers sub-agent-owned tasks) but keeps
+ * [onCancelJob] null: REST `/tasks:cancel` serves only the main agent's task store
  * (docs/server-api.md, REST /tasks).
  */
 @Composable

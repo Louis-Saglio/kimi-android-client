@@ -39,8 +39,10 @@ sealed interface ChatItem {
      * [bashTaskId] links a background `Bash` row to its job screen (ticket 096) —
      * parsed from the result's `task_id: bash-…` first line; like the sub-agent link,
      * a linked row never expands. [timeoutSeconds]/[timeoutDisabled] are the call
-     * input's timeout knobs (ticket 097), parsed at the same link sites — the job
-     * screen's budget display derives from them (REST never exposes the timeout). */
+     * input's timeout knobs (ticket 097) — the job screen's budget display derives
+     * from them (REST never exposes the timeout). All three link/budget fields are
+     * derived by the ONE enrichment pass every row path routes through
+     * ([enriched], ticket 098). */
     data class ToolActivity(
         override val id: String,
         val name: String,
