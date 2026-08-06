@@ -10,20 +10,26 @@ import kotlinx.serialization.json.contentOrNull
  * identifying argument keys (Bash's `command`, the file tools' `path`), no per-tool
  * framework; anything else falls back to the compact input JSON.
  *
- * Bash rows are the one exception (ticket 095): the call's `description` argument —
+ * Bash rows are one exception (ticket 095): the call's `description` argument —
  * the human-written label of what the command does — leads the list, matching the
- * CLI and the jobs widget. Scoped to Bash only: adding `description` to the shared
- * list would silently relabel Agent/AgentSwarm rows, whose args carry it too.
+ * CLI and the jobs widget. Agent/AgentSwarm rows get the same treatment: their
+ * `description` is the sub-agent's short label, far more readable on the row than
+ * the compact JSON of the whole prompt payload.
  */
 object ToolPreview {
 
     private val IDENTIFYING_KEYS = listOf("command", "path")
     private val BASH_IDENTIFYING_KEYS = listOf("description", "command", "path")
+    private val AGENT_IDENTIFYING_KEYS = listOf("description")
     private val WHITESPACE = Regex("\\s+")
 
     fun of(toolName: String?, input: JsonObject?): String {
         if (input.isNullOrEmpty()) return ""
-        val keys = if (toolName == "Bash") BASH_IDENTIFYING_KEYS else IDENTIFYING_KEYS
+        val keys = when (toolName) {
+            "Bash" -> BASH_IDENTIFYING_KEYS
+            "Agent", "AgentSwarm" -> AGENT_IDENTIFYING_KEYS
+            else -> IDENTIFYING_KEYS
+        }
         for (key in keys) {
             val value = (input[key] as? JsonPrimitive)?.contentOrNull
             if (!value.isNullOrBlank()) return oneLine(value)

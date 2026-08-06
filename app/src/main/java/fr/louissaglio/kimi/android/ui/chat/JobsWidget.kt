@@ -84,15 +84,17 @@ internal fun JobsSummaryRow(
  * The jobs sheet (ticket 092): every background task of the session — running first
  * (oldest first), then terminal (newest first) — with its kind badge, plain-English
  * status, and ticking elapsed time (startedAt → endedAt ?: now). Running rows get a trailing
- * Stop button; tapping a sub-agent row with a known agentId opens its page, tapping a
- * bash row opens its job screen (ticket 096). Same transient-detail pattern as TodosSheet.
+ * Stop button; tapping a sub-agent row opens its page, tapping a bash row opens its job
+ * screen (ticket 096). The sub-agent tap reports the whole [Job]: REST seeds carry no
+ * agentId, so the caller resolves it from the timeline when the job itself doesn't.
+ * Same transient-detail pattern as TodosSheet.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun JobsSheet(
     jobs: List<Job>,
     onCancel: (String) -> Unit,
-    onOpenSubagent: (String) -> Unit,
+    onOpenSubagent: (Job) -> Unit,
     onOpenJob: (String) -> Unit = {},
     onDismiss: () -> Unit,
 ) {
@@ -129,17 +131,35 @@ internal fun JobsSheet(
     }
 }
 
+private val TASK_ID_PREFIX = "task_id:"
+
+/** Resolves a background sub-agent job's page id from the timeline (the jobs sheet's
+ * tap navigation): REST /tasks omits the agentId, but the spawning `Agent` row's
+ * result stub carries a `task_id: <taskId>` line and the row is linked to its
+ * sub-agent ([ChatItem.ToolActivity.subagentId]). Null when the row is not among the
+ * loaded history pages — the tap is then a no-op. */
+internal fun subagentIdForTask(items: List<ChatItem>?, taskId: String): String? =
+    items?.filterIsInstance<ChatItem.ToolGroup>()
+        ?.flatMap { it.tools }
+        ?.firstOrNull { row ->
+            row.subagentId != null && row.output.lineSequence().any { line ->
+                line.startsWith(TASK_ID_PREFIX) && line.removePrefix(TASK_ID_PREFIX).trim() == taskId
+            }
+        }
+        ?.subagentId
+
 /** One sheet row: description over a "badge · status · elapsed" secondary line,
  * and a trailing Stop for running rows. No status glyph — the plain-English status
- * on the secondary line carries it (Louis's call, ticket 094). Sub-agent rows with
- * a known [Job.agentId] are tappable (the page navigation); bash rows are tappable
- * too (ticket 096's job screen — [Job.taskId] is always known). */
+ * on the secondary line carries it (Louis's call, ticket 094). Sub-agent rows are
+ * tappable (the page navigation — the whole [Job] is reported so the caller can
+ * resolve a REST-seeded row's missing agentId); bash rows are tappable too
+ * (ticket 096's job screen — [Job.taskId] is always known). */
 @Composable
 private fun JobRow(
     job: Job,
     now: Instant,
     onCancel: (String) -> Unit,
-    onOpenSubagent: (String) -> Unit,
+    onOpenSubagent: (Job) -> Unit,
     onOpenJob: (String) -> Unit,
 ) {
     val kindLabel = when (job.kind) {
@@ -170,8 +190,8 @@ private fun JobRow(
             .heightIn(min = 48.dp)
             .let {
                 when {
-                    job.kind == BackgroundTask.Kind.Subagent && job.agentId != null ->
-                        it.clickable { onOpenSubagent(job.agentId) }
+                    job.kind == BackgroundTask.Kind.Subagent ->
+                        it.clickable { onOpenSubagent(job) }
                     job.kind == BackgroundTask.Kind.Bash ->
                         it.clickable { onOpenJob(job.taskId) }
                     else -> it

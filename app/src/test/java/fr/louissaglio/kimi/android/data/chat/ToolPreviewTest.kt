@@ -34,18 +34,22 @@ class ToolPreviewTest {
     }
 
     @Test
-    fun `a non-bash tool whose args carry a description keeps the compact-json fallback`() {
-        // Regression guard (ticket 095): Agent args carry a description too — only Bash
-        // rows change; adding the key to the shared list would silently relabel these.
+    fun `an agent call previews its description`() {
+        // Agent args carry a human-written `description` (the sub-agent's short label):
+        // it leads the row, not the compact JSON of the whole prompt payload.
         val input = buildJsonObject {
             put("description", "Find the leak")
             put("prompt", "Investigate the memory leak")
         }
 
-        assertEquals(
-            """{"description":"Find the leak","prompt":"Investigate the memory leak"}""",
-            ToolPreview.of("Agent", input),
-        )
+        assertEquals("Find the leak", ToolPreview.of("Agent", input))
+    }
+
+    @Test
+    fun `an agent call without a description falls back to the compact json`() {
+        val input = buildJsonObject { put("prompt", "Investigate the memory leak") }
+
+        assertEquals("""{"prompt":"Investigate the memory leak"}""", ToolPreview.of("Agent", input))
     }
 
     @Test

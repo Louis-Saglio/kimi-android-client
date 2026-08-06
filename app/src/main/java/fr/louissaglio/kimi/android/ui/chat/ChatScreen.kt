@@ -535,14 +535,19 @@ private fun ChatContent(
     // The jobs sheet (ticket 092) stays open while jobs flip terminal — recently
     // finished jobs linger in the list by design. Tapping a sub-agent row closes it
     // and opens the sub-agent page; tapping a bash row (ticket 096) closes it and
-    // opens the job screen.
+    // opens the job screen. A REST-seeded sub-agent job carries no agentId (REST
+    // /tasks omits it): the spawning `Agent` row's result stub links task id to
+    // sub-agent id, so the timeline fills the gap; an unresolvable tap is a no-op.
     if (showJobs && uiState.jobs.isNotEmpty()) {
         JobsSheet(
             jobs = uiState.jobs,
             onCancel = onCancelJob,
-            onOpenSubagent = { agentId ->
-                showJobs = false
-                onOpenSubagent(agentId)
+            onOpenSubagent = { job ->
+                val agentId = job.agentId ?: subagentIdForTask(uiState.items, job.taskId)
+                if (agentId != null) {
+                    showJobs = false
+                    onOpenSubagent(agentId)
+                }
             },
             onOpenJob = { taskId ->
                 showJobs = false
