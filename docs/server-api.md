@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-08-05
-(server version `0.33.0`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-08-06
+(server version `0.34.0`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
@@ -14,16 +14,78 @@ the workspace list used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `0.32.0`
-(verified 2026-08-05; see git history), `0.31.1`
+**Protocol history:** this document previously described server `0.33.0`
+(verified 2026-08-05; see git history), `0.32.0`
+(verified 2026-08-05), `0.31.1`
 (verified 2026-07-31), `0.31.0`
 (verified 2026-07-30), `0.29.2`
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
-that, `0.27.0` before that, and `0.23.3` before that. The drift from 0.32.0 to
-0.33.0 is again **minor** for the core loop: every shape the Android app
-parses still decodes. An upstream tree-diff of `packages/protocol` and
-`packages/kap-server` between the two tags shows only one protocol file
+that, `0.27.0` before that, and `0.23.3` before that. The drift from 0.33.0 to
+0.34.0 is again **minor** for the core loop: every shape the Android app
+parses still decodes. An upstream diff of `packages/protocol` and
+`packages/kap-server` between the two tags (24 commits) shows the
+protocol-relevant work: sub-agent model/effort surfacing
+(`events.ts`/`task.ts`), the `/status` `max_context_tokens` optionality, a
+persisted `last_turn_reason` fallback for cold sessions, a new `/api/v2/sessions`
+table endpoint, MCP-server tombstoning (one new enum value), and skill
+activation attachments (out of scope). The real changes:
+
+- **Sub-agent model/effort surfacing (the shaped drift):**
+  `subagent.spawned` gained optional **`model`** and **`thinkingEffort`**
+  (camelCase); agent-kind `task.*` `info` payloads gained the same pair;
+  REST `/tasks` subagent objects **and** the snapshot `subagents` roster
+  gained **`model`**/**`thinking_effort`** (snake_case). Observed
+  `"kimi-code/k3"`/`"high"` throughout — the spawned child inherits the
+  session's bound model. All additive; the app ignores them.
+- **Foreground sub-agents now register in the task store while running**
+  (unannounced): a `running` foreground sub-agent is listed by REST
+  `/tasks`, stays fetchable by id once terminal, and `:cancel` works on it
+  while running — still with **no `task.*` WS frames**, and the list drops
+  it again once terminal. Details in the Sub-agents section.
+- **Session status:** `max_context_tokens` is now **omittable** when the
+  context limit is unknown (upstream schema change — never observed omitted:
+  fresh sessions report the 262144 default, k3 sessions 1048576). Minor:
+  fresh sessions now report `thinking_level: ""` (was `"off"`).
+- **Session object:** `last_turn_reason` now falls back to a **persisted**
+  outcome for cold sessions (no live handle) — upstream only; not observable
+  here (pre-upgrade sessions have nothing persisted, so every pre-restart
+  session still omits it).
+- **Questions:** `multi_select` is now present on a question item **only
+  when true** (single-select items omit it) — the doc's long-standing
+  "treat absence as `false`" guidance covers it.
+- **Tools catalog:** `ReadMediaFile` is **back** — 27 builtin tools on
+  initialized agents (26 on fresh never-prompted sessions; the catalog is
+  resolved from the live agent's state).
+- **Sub-agent first message:** the `<git-context status="unavailable"
+  reason="not-a-repo"/>` prefix (added in 0.31.0) is **gone** — the first
+  spliced text is the raw prompt verbatim.
+- **New endpoint (out of the app's use):** `GET /api/v2/sessions` — a
+  v1-enveloped, keyset-paginated session table for the kimi-inspect tool,
+  with the new error code `40922` for bad page tokens. New section under
+  Sessions.
+- **Additive/minor:** a new `agent.status.updated` phase kind
+  **`interrupted`** fires during abort; a new user-message injection origin
+  variant **`permission_mode`** rides auto-mode turns; the MCP
+  `mcp.server.status` enum gained **`removed`** (source-derived; MCP events
+  are out of the core loop); image url-kind sources may carry a
+  provider-issued **`id`** (never observed in the upload→prompt flow); skill
+  `:activate` now accepts `attachments` (skills stay out of scope).
+- **Everything else byte-identical**, re-verified live: meta (incl.
+  `experimental_flags`), models, sessions list/create/get/status/snapshot
+  (multi-page pagination walks, unknown cursor), workspaces + trust,
+  messages, transcript, prompts/steer/abort (full WS sequences), compact
+  (both variants + both `40910`s), questions (surface/poll/answer/dismiss/
+  `40909`/`40902`), approvals (full manual round-trip, v2 + legacy frames),
+  TodoList write contract, files (upload/download/`Range` 206/delete + the
+  attachment rewrite, em dash intact), sub-agent lifecycles + legacy
+  `background.task.*` aliases + cancel/`40904`, WS hello/ack/cursor-resume/
+  resync, and one full prompt round-trip — every event payload's field set
+  matched.
+
+The drift from 0.32.0 to 0.33.0 was again **minor** for the core loop: every
+shape the Android app parses still decoded. An upstream tree-diff of
+`packages/protocol` and `packages/kap-server` between the two tags showed only one protocol file
 (`events.ts`, an optional field on an MCP tool update) and three kap-server
 areas touched (search, sessions-list pagination internals, skills listing).
 The real changes:
@@ -345,7 +407,11 @@ Session object shape (0.31.0, fields truncated for brevity):
   `pending_interaction` (`"none"` | `"approval"` | `"question"`),
   `last_turn_reason` (`"completed"` | `"cancelled"`). **`last_turn_reason` is
   absent entirely on sessions that have not run a turn yet** (re-verified
-  2026-07-23).
+  2026-07-23). **0.34.0 (upstream-only so far):** the field now falls back to
+  a **persisted** last-turn outcome for *cold* sessions (no live handle) —
+  previously only warm sessions reported it. Not observable right after the
+  upgrade: pre-0.34.0 sessions have nothing persisted, so they still omit it
+  (verified 2026-08-06 on 100 pre-restart sessions).
 - `message_count` and `last_seq` are still present but observed stuck at `0`
   (re-verified 2026-07-23 after several turns) — do not rely on them.
 - The list envelope carries `has_more` for pagination (verified with
@@ -415,7 +481,13 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/session
 
 `busy: true` ⇔ the session is mid-turn. `model` is omitted entirely when the
 session has no model configured. `thinking_level` and `permission` reflect the
-session's current config (`"off"`/`"yolo"` observed on a fresh session).
+session's current config (`"off"`/`"yolo"` observed on a fresh session;
+**0.34.0:** a fresh session now reports `thinking_level: ""`). **0.34.0:**
+`max_context_tokens` is now **omittable when the context limit is unknown**
+(upstream schema change — `0` is the engine's "unknown" marker, never a real
+limit); never observed omitted live — a fresh session reports the 262144
+default and a k3 session 1048576 (re-verified 2026-08-06). Clients should
+still treat an absent/zero limit as "unknown", never render a 0/0 ring.
 
 ### Session snapshot — `GET /api/v1/sessions/{id}/snapshot`
 
@@ -478,6 +550,48 @@ verified live on 0.31.1 (2026-08-01). Top-level keys of `data`:
   `tool_call_id`, `session_id`, `questions[]` with
   `id`/`question`/`options[{id,label}]`/`header`/`allow_other`/`multi_select`,
   `created_at`, `turn_id`.
+
+### Session table (v2) — `GET /api/v2/sessions`
+
+**New in 0.34.0** (upstream #2640/#2644, built for the kimi-inspect tool's
+spreadsheet-like session table). GET-only (`POST` → plain 404), wrapped in
+the **v1 response envelope**. A leaner, cold-storage-friendly session
+listing: epoch-**ms** timestamps, `null` (not absent) unset fields, no usage
+block. The Android app does not use it; documented for completeness
+(verified live 2026-08-06).
+
+```bash
+curl -s -H "Authorization: Bearer <token>" \
+  'http://127.0.0.1:58627/api/v2/sessions?page_size=1'
+```
+
+```json
+{"code":0,"msg":"success",
+ "data":{"items":[
+   {"id":"session_3cc24efe-f493-425f-8b27-ff571884a1ce",
+    "workspace":{"id":"wd_kimi-android-client_479bb0bcfde4","cwd":"/home/ubuntu/kimi-android-client"},
+    "meta":{"title":null,"last_prompt":null,"created_at":1786044249808,
+            "updated_at":1786044440384,"archived":false},
+    "activity":{"status":"idle"}}],
+  "has_more":true,
+  "next_page_token":"eyJ2IjoxLCJmIjoi…"},
+ "request_id":"01KZC8QQD9DPQWP6HGBWTHTMV3"}
+```
+
+- Query params: `page_size` (1–100, default 50; `0`/over-100 → `40001`),
+  `sort` (`meta.updated_at_desc` default | `meta.updated_at_asc` |
+  `meta.created_at_desc`; anything else → `40001` listing the options), and
+  `page_token` (opaque base64 **v1-fingerprint keyset cursor** — decodes to
+  `{"v":1,"f":"<fingerprint>","k":[<updated_at_ms>,"<session_id>"]}`;
+  multi-page continuation verified, no overlap). Items are ordered by
+  `meta.updated_at` desc by default. Unknown params (`limit`, `cursor`,
+  `workspace_id`, `archived`, `q`, …) are **silently ignored**.
+- Bad page tokens are a **new error code `40922`** (HTTP 200, envelope;
+  distinct from search's `40001`): undecodable → `"page_token is corrupted;
+  discard it and restart from the first page"`; valid-base64-but-foreign →
+  `"page_token does not match the query conditions; …"`.
+- `activity.status` observed only as `"idle"` on this server; `title` /
+  `last_prompt` are `null` when unset.
 
 ## Workspaces
 
@@ -611,7 +725,10 @@ incomplete. The user's next message continues the conversation." — carrying
 `metadata.origin: {"kind":"injection","variant":"interruption"}` (verified
 live 2026-07-31: present in `GET .../messages` after each abort, and pushed
 live as a `context.spliced` echo right after `turn.ended`). It repeats per
-cancelled turn and persists in history.
+cancelled turn and persists in history. Sibling variant observed on **0.34.0**
+(2026-08-06): `{"kind":"injection","variant":"permission_mode"}` — a
+`<system-reminder>` user message injected when a turn runs under auto
+permission mode (additive; the same envelope-stripping rule covers it).
 
 ## Transcript
 
@@ -1255,11 +1372,14 @@ question id == tool-call id); with this provider's ULID ids nothing changes.
 
 **Multi-select questions** (verified live 2026-08-02 on 0.31.1, against
 `packages/protocol/src/question.ts` in the upstream repo): every question item
-carries a **`multi_select` boolean** — present in both `true` and `false` form
-in the `event.question.requested` payload, the `/questions?status=pending`
-poll, and the session snapshot (treat absence as `false`; the protocol schema
-marks it optional). The history (`GET .../messages`) `tool_use` input for
-`AskUserQuestion` also carries `multi_select` per question, but its options
+carries a **`multi_select` boolean** — **0.34.0: present only when `true`**
+(single-select items omit the key entirely in the `event.question.requested`
+payload, the `/questions?status=pending` poll, and the history `tool_use`
+input; re-verified live 2026-08-06 — on 0.31.1 it appeared in both `true` and
+`false` form). Treat absence as `false`; the protocol schema marks it
+optional, and the session snapshot behaves the same. The history
+(`GET .../messages`) `tool_use` input for
+`AskUserQuestion` also carries `multi_select` per question (when true), but its options
 are **label-only** (no ids). The `skipped` answer kind and the optional
 `method`/`note` body fields exist in the protocol schema (`skipped` omits the
 item from the flattened `answers`; all-skipped degrades to the dismiss shape)
@@ -1378,18 +1498,20 @@ summary widget.
 ### Tool catalog — `GET /api/v1/tools`
 
 Lists the agent's builtin tools. Undocumented upstream until now; verified
-live on 0.31.0 (2026-07-30) and again on 0.31.1 (2026-07-31) and 0.33.0
-(2026-08-05). Response
+live on 0.31.0 (2026-07-30) and again on 0.31.1 (2026-07-31), 0.33.0
+(2026-08-05) and 0.34.0 (2026-08-06). Response
 `data.tools[]` entries carry only
 `{name, description, source: "builtin", active: true, input_schema: null}` —
 **input schemas are not exposed** (so tool-parameter drift, e.g. the
-`TaskOutput` `block`/`timeout` removal, is not observable here). 26 builtin
-tools observed on 0.33.0 (**`ReadMediaFile` was removed** since 0.32.0 —
-the only content change): Agent, AgentSwarm, AskUserQuestion, Bash,
+`TaskOutput` `block`/`timeout` removal, is not observable here). 27 builtin
+tools observed on 0.34.0 (**`ReadMediaFile` is back** — removed in 0.33.0,
+restored in 0.34.0): Agent, AgentSwarm, AskUserQuestion, Bash,
 CreateGoal,
 CronCreate/Delete/List, Edit, EnterPlanMode, ExitPlanMode, FetchURL, GetGoal,
-Glob, Grep, Read, select_tools, SetGoalBudget, Skill, TaskList,
-TaskOutput, TaskStop, TodoList, UpdateGoal, WebSearch, Write.
+Glob, Grep, Read, ReadMediaFile, select_tools, SetGoalBudget, Skill, TaskList,
+TaskOutput, TaskStop, TodoList, UpdateGoal, WebSearch, Write. **The count is
+session-state-dependent:** fresh never-prompted sessions report 26 (no
+`ReadMediaFile`) — the catalog is resolved from the live agent's state.
 
 **Liveness caveat (verified 2026-07-31):** the route resolves the catalog from
 a live session's agent (the `session_id` query param, else the most recent
@@ -1409,19 +1531,24 @@ How the server exposes the sub-agents the main agent spawns with its `Agent`
 (or `AgentSwarm`) tool. All shapes below verified live on `0.29.2`
 (2026-07-28, throwaway session — pre-PrivateTmp cwd — prompts with
 `permission_mode:"yolo"`) and re-verified on `0.31.0` (2026-07-30, throwaway
-session in `/home/ubuntu/spike`) — drift
+session in `/home/ubuntu/spike`) and on `0.34.0` (2026-08-06) — drift
 since 0.29.2 is called out inline (spawn-time status republication, the
 `agent_call` display, the git-context prefix, the background completion
-delivery, the Agent tool-result trailer); fields not captured live are marked
+delivery, the Agent tool-result trailer, the 0.34.0 model/effort fields and
+the foreground task-store registration); fields not captured live are marked
 as upstream-schema-only (`packages/kap-server/src/protocol/events-zod.ts`).
 
 There are **two exposure paths**, chosen by the `Agent` call's
 `run_in_background` argument:
 
-- **Foreground** (default): the sub-agent exists only on the WS event stream
-  and in the session-snapshot roster. It is **never** listed by REST `/tasks`
-  (verified: `{"items":[]}` right after a completed foreground run) and its
-  messages never enter history.
+- **Foreground** (default): the sub-agent exists on the WS event stream
+  and in the session-snapshot roster; its messages never enter history.
+  **0.34.0:** it also **registers in the task store while running** — listed
+  by REST `/tasks` (`status:"running"`), fetchable by id (even once
+  terminal), and cancellable via `:cancel` — but still with **no `task.*`
+  WS frames**, and the list drops it again once terminal
+  (`{"items":[]}` after a completed run still holds, even with
+  `?status=completed`). On 0.33.0 and earlier it was never listed at all.
 - **Background** (`run_in_background: true`): registered in the main agent's
   background-task store, so it gets the full REST `/tasks` lifecycle plus
   `task.*` WS events, and its completion is pushed back into the main agent
@@ -1515,10 +1642,13 @@ seq 34  tool.result         the Agent call's result; the main turn resumes
 `subagent.*` events carry only `subagentId`). **0.31.0:** immediately after
 `subagent.spawned` (same seq, volatile) the server **republishes the
 sub-agent's `agent.status.updated`** — a duplicate of the one that follows
-`agent.created`. The pair, verbatim:
+`agent.created`. **0.34.0 (additive):** the payload gained **`model`** and
+**`thinkingEffort`** (camelCase; the spawned child inherits the session's
+bound model — `"kimi-code/k3"`/`"high"` observed on both foreground and
+background spawns). The pair, verbatim (0.34.0):
 
 ```json
-{"type":"subagent.spawned","seq":27,"payload":{"type":"subagent.spawned","subagentId":"agent-0","subagentName":"explore","parentToolCallId":"tool_7Fs0y4Xb5bwD5DtU7PCq2PdM","parentAgentId":"main","callerAgentId":"main","description":"doc-verify-fg","runInBackground":false,"agentId":"main","sessionId":"session_7f33a76c-..."}}
+{"type":"subagent.spawned","seq":33,"payload":{"type":"subagent.spawned","subagentId":"agent-2","subagentName":"agent","parentToolCallId":"tool_jaW1ZPJgetZxZ4ZgLQmQM4wP","parentAgentId":"main","callerAgentId":"main","description":"Reply OK","runInBackground":false,"model":"kimi-code/k3","thinkingEffort":"high","agentId":"main","sessionId":"session_1143a947-..."}}
 {"type":"agent.status.updated","seq":27,"volatile":true,"payload":{"type":"agent.status.updated","model":"kimi-code/k3","thinkingEffort":"high","maxContextTokens":1048576,"usage":{},"contextTokens":0,"agentId":"agent-0","sessionId":"session_7f33a76c-..."}}
 ```
 
@@ -1535,7 +1665,9 @@ sub-agent's `agent.status.updated`** — a duplicate of the one that follows
 Also new in 0.31.0: the sub-agent's first internal user message (the
 `context.spliced` after its `turn.started`) embeds a
 **`<git-context status="unavailable" reason="not-a-repo"/>`** prefix when the
-session cwd is not a git repository.
+session cwd is not a git repository. **Gone again in 0.34.0** (verified
+2026-08-06 with a non-repo cwd: zero `git-context` occurrences in the full
+stream — the first spliced text is the raw prompt verbatim).
 
 `subagent.completed` (verbatim, `resultSummary` elided):
 
@@ -1624,6 +1756,22 @@ seq 90  context.spliced     a `<notification ...>` user message spliced into the
             "agentId":"main","sessionId":"session_..."}}
 ```
 
+**0.34.0 (additive):** agent-kind `info` gained **`model`** and
+**`thinkingEffort`** (camelCase) on `task.started`/`task.terminated` and
+their `background.task.*` legacy aliases alike (verbatim 0.34.0
+`task.started`):
+
+```json
+{"type":"task.started","seq":103,
+ "payload":{"type":"task.started",
+            "info":{"taskId":"agent-bpy0kylc","description":"Sleep 240 then reply OK",
+                    "status":"running","detached":true,"startedAt":1786044903637,
+                    "endedAt":null,"timeoutMs":7200000,
+                    "kind":"agent","agentId":"agent-4","subagentType":"agent",
+                    "model":"kimi-code/k3","thinkingEffort":"high"},
+            "agentId":"main","sessionId":"session_..."}}
+```
+
 `info.status` uses the **core** vocabulary (`running` | `completed` |
 `failed` | `timed_out` | `killed` | `lost`), not the REST wire one (mapping
 below); `kind:"agent"` marks a sub-agent (`process` = background bash).
@@ -1665,7 +1813,10 @@ curl -s -X POST -H "Authorization: Bearer <token>" \
   `killed`→`cancelled`, `timed_out`/`lost`→`failed`. **Main-agent only** —
   a sub-agent's own background tasks are never listed, fetched, or
   cancellable here (their only channel is the live `task.*` frames, see the
-  owning-agent stamp above).
+  owning-agent stamp above). **0.34.0:** a **running foreground sub-agent**
+  is listed too (`kind:"subagent"`, `status:"running"`, with
+  `model`/`thinking_effort`) and dropped from the list once terminal — see
+  the foreground bullet at the top of this section.
 - **Get** — `GET .../tasks/{task_id}`; `with_output=true` adds
   `output_preview` (tail of the stored result, default cap 32768 bytes —
   override with `output_bytes`) and `output_bytes` (byte length of the
@@ -1689,15 +1840,25 @@ curl -s -X POST -H "Authorization: Bearer <token>" \
   legacy alias, `task.notified`
   (`notificationType:"task.killed"`, severity warning) and the notification
   splice; REST reads
-  `"cancelled"` afterwards.
+  `"cancelled"` afterwards. **0.34.0:** `:cancel` also works on a **running
+  foreground** sub-agent (verified 2026-08-06): the Agent tool returns
+  `status: failed` ("subagent error: The subagent was stopped before it
+  finished"), the sub-agent's WS shows `tool.result` "Interrupted by user" →
+  `turn.step.interrupted` → `turn.ended` `reason:"cancelled"` →
+  `prompt.aborted` — still **no `task.*` frames** and no
+  `subagent.failed`/`subagent.completed` for it.
 
-Task object (verbatim):
+Task object (verbatim, 0.34.0 — **gained `model`/`thinking_effort`**
+(snake_case) on subagent-kind objects, in list and get, running and
+terminal):
 
 ```json
-{"id":"agent-7noib8bb","session_id":"session_...","kind":"subagent",
- "description":"doc-verify-bg","status":"completed",
- "created_at":"2026-07-28T03:40:08.039Z","started_at":"2026-07-28T03:40:08.039Z",
- "completed_at":"2026-07-28T03:40:22.372Z"}
+{"id":"agent-he52q7i9","session_id":"session_...","kind":"subagent",
+ "description":"Trivial OK reply task","status":"completed",
+ "created_at":"2026-08-06T19:29:46.209Z","started_at":"2026-08-06T19:29:46.209Z",
+ "completed_at":"2026-08-06T19:30:01.502Z",
+ "model":"kimi-code/k3","thinking_effort":"high",
+ "output_preview":"OK","output_bytes":2}
 ```
 
 The REST shape is thinner than the WS/snapshot one: no `subagent_type`, no
@@ -1766,17 +1927,22 @@ Verified 2026-07-28 right after the foreground run, re-verified 2026-07-30 on
 terminal entries captured on 0.31.1, 2026-08-01.
 
 While running — `status`/`subagent_phase` read `running`/`working`, and
-`completed_at`/`output_preview` are absent:
+`completed_at`/`output_preview` are absent (**0.34.0, additive:** entries
+gained **`model`**/**`thinking_effort`**, snake_case, running and terminal
+alike — verbatim 0.34.0 running entry):
 
 ```json
-{"id":"agent-3","session_id":"session_...","kind":"subagent",
- "description":"Sleep then answer ok","status":"running",
- "subagent_phase":"working","subagent_type":"explore",
- "parent_tool_call_id":"tool_GgLCPjSW9Vo2oN0x5SOrB0x9","run_in_background":false,
- "created_at":"2026-08-01T14:50:09.024Z","started_at":"2026-08-01T14:50:09.026Z"}
+{"id":"agent-5","session_id":"session_...","kind":"subagent",
+ "description":"Sleep 20 then reply OK","status":"running",
+ "subagent_phase":"working","subagent_type":"agent",
+ "parent_tool_call_id":"tool_zBY7RxT22gFKxyvchCt15jya","run_in_background":false,
+ "model":"kimi-code/k3","thinking_effort":"high",
+ "created_at":"2026-08-06T19:38:08.384Z","started_at":"2026-08-06T19:38:08.390Z"}
 ```
 
-Terminal — both state fields flip and the run's result-summary tail arrives:
+Terminal — both state fields flip and the run's result-summary tail arrives
+(0.31.1 capture; on 0.34.0 it additionally carries the same
+`model`/`thinking_effort` pair):
 
 ```json
 {"id":"agent-3","session_id":"session_...","kind":"subagent",
@@ -2135,7 +2301,10 @@ ms) on active phases; the `awaiting_approval` inline approval now carries both
 (with `"stream": "thinking" | "tool_call"` — **0.31.0 adds
 `"stream": "assistant"`** to the streaming-phase variant), `awaiting_approval`,
 `tool_call`,
-`ended` (with `at` instead of `since`). **0.31.0, additive:** the model/usage
+`ended` (with `at` instead of `since`), and — observed on **0.34.0**
+(2026-08-06, during a REST `:abort`; possibly older) — **`interrupted`**:
+`{"kind":"interrupted","turnId":2,"step":1,"reason":"aborted","at":...}` (with
+`at`, like `ended`). **0.31.0, additive:** the model/usage
 variant's `usage` can be a **nested** object — per-model buckets plus
 `total`/`currentTurn` aggregates:
 
@@ -2291,6 +2460,58 @@ selected option and free text both re-verified 2026-07-23:
 ```
 
 ## Verification log
+
+- 2026-08-06 re-verification on `0.34.0` (server 0.33.0 → 0.34.0; throwaway
+  sessions in `/home/ubuntu/spike`, guided by the upstream 0.33.0→0.34.0
+  diff — 24 commits; protocol-relevant: the sub-agent model/effort
+  surfacing, `/status` `max_context_tokens` optionality, persisted
+  `last_turn_reason` for cold listings, the new `/api/v2/sessions` table,
+  MCP-server tombstoning, skill-activation attachments). Re-verified
+  unchanged, most byte-for-byte: meta (incl. `experimental_flags`), models,
+  sessions create/get/list (multi-page `before_id`/`after_id` walks; unknown
+  cursor → `{"items":[],"has_more":false}`), status idle/busy, snapshot
+  (top-level keys, busy `in_flight_turn`, roster), workspaces + trust cycle,
+  messages (incl. the interruption injection), transcript, prompts
+  running/queued, steer (fresh-id splice, `40402`/`40001`), abort
+  (`interruptReason:"user_cancelled"` + reminder splice), a full
+  manual-approval round-trip (v2 + legacy frames, REST approve,
+  `expires_at` = +24 h), questions (surface, poll, single/multi answers,
+  dismiss, `40909`/`40902`, 404 on `/questions/{qid}`), TodoList write
+  contract verbatim, compact `{}` and with `instruction` (full WS sequence,
+  summary without `id`, `tokensAfter` == post-compaction `context_tokens`,
+  both `40910`s), files upload/download/`Range` 206/delete + the
+  `Attached file "…"` rewrite (em dash intact), search (v2 keyset tokens,
+  same-generation replay, both `40001` token errors with `stack`,
+  `index_state.stale:true` observed mid-rebuild), foreground + background
+  sub-agent lifecycles (`subagent.*`/`task.*` + legacy aliases, REST `/tasks`
+  list/get/cancel→killed/`40904`, snapshot roster), WS hello/subscribe/ack,
+  cursor-resume replay (seq 44 → 45–47 in order), refused cursor (standalone
+  `resync_required` + ack), zero heartbeat frames. Drift found (all detailed
+  inline): (a) `subagent.spawned` gained `model`/`thinkingEffort`
+  (camelCase); agent-kind `task.*` `info` gained the same pair; REST
+  `/tasks` subagent objects and the snapshot roster gained
+  `model`/`thinking_effort` (snake_case) — `"kimi-code/k3"`/`"high"`
+  observed throughout; (b) foreground sub-agents now register in the task
+  store while running — REST-listed, fetchable once terminal, `:cancel`-able
+  while running, still no `task.*` frames, dropped from the list when
+  terminal; (c) `/status` `max_context_tokens` is omittable per the upstream
+  schema (never observed omitted — fresh sessions report the 262144
+  default); fresh sessions now report `thinking_level: ""`; (d)
+  `last_turn_reason` has a persisted fallback for cold sessions (upstream
+  only — all 100 pre-restart sessions still omit it); (e) question items
+  carry `multi_select` only when true now; (f) `GET /api/v1/tools` lists 27
+  tools again — `ReadMediaFile` is back (26 on fresh never-prompted
+  sessions); (g) the sub-agent first-message `<git-context
+  status="unavailable"/>` prefix is gone; (h) new endpoint `GET
+  /api/v2/sessions` (v1 envelope, v1-fingerprint keyset `next_page_token`,
+  new error code `40922`, GET-only); (i) additive WS observations: new
+  `agent.status.updated` phase kind `interrupted` during abort, new
+  injection origin variant `permission_mode`. Not re-triggered this run:
+  TodoList read-query, `event.config.warning`, the image url-source `id`
+  field, MCP `removed` status. App impact: no breakage — every change is
+  additive or already tolerated (`ignoreUnknownKeys`, unknown-frame ignore);
+  the `/status` zero-limit handling and the foreground-subagent task-store
+  registration degrade existing behavior — tickets 100 and 101 filed.
 
 - 2026-08-05 re-verification on `0.33.0` (server 0.32.0 → 0.33.0; throwaway
   sessions `session_5921be1f-...` / `session_c9b9588a-...` in
