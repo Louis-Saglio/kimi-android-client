@@ -39,7 +39,11 @@ import kotlinx.coroutines.launch
  * Ticket 097: the timeout budget and the timed-out flag arrive as route arguments
  * (resolved from the chat's state at navigation time) — REST never exposes the
  * timeout and collapses `timed_out` to `failed`, so this screen's poll alone could
- * show neither. ON_START/ON_STOP also register the page with the socket gate's
+ * show neither. The description and command arrive the same way (the tapped row
+ * already carries the call input), seeding the title and the Command section before
+ * the entry fetch answers; the fetch stays authoritative — REST's description is
+ * the server's (`Bash: <command>…` invented when the agent set none) — and
+ * overwrites both. ON_START/ON_STOP also register the page with the socket gate's
  * session page count (the sub-agent page mechanism): the chat socket stays collected
  * while this screen is on top, so a live `task.terminated` still reaches the jobs
  * store — the sheet (and the next entry here) learn the timed-out truth.
@@ -75,7 +79,10 @@ class JobDetailViewModel internal constructor(
      * [budgetSeconds]/[budgetIsDefault]/[timedOut] are the ticket-097 route
      * arguments: the effective kill budget (null = no budget UI), whether it is the
      * harness's 600 s default (labeled), and whether a live `task.terminated`
-     * recorded the terminal cause as a timeout. */
+     * recorded the terminal cause as a timeout. [description]/[command] are seeded
+     * from the route arguments as well (the tapped row's call input) so the title
+     * and the Command section render before the entry fetch; the fetch overwrites
+     * both — REST is authoritative. */
     data class UiState(
         val taskId: String,
         val description: String? = null,
@@ -87,7 +94,8 @@ class JobDetailViewModel internal constructor(
         val budgetSeconds: Int? = null,
         val budgetIsDefault: Boolean = false,
         val timedOut: Boolean = false,
-        /** True while the entry fetch runs with nothing to show yet. */
+        /** True while the entry fetch runs — only the Output section waits on it
+         * (a placeholder); the seeded title/command render already. */
         val isLoading: Boolean = true,
         /** The entry fetch failed (unknown task / fetch failure) — full-screen error. */
         val error: String? = null,
@@ -100,6 +108,8 @@ class JobDetailViewModel internal constructor(
                 budgetSeconds = routeArgs.budgetSeconds,
                 budgetIsDefault = routeArgs.budgetIsDefault,
                 timedOut = routeArgs.timedOut,
+                description = routeArgs.description,
+                command = routeArgs.command,
             ),
         )
 

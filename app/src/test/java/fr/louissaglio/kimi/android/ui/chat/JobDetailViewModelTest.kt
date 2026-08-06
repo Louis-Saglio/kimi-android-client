@@ -216,6 +216,36 @@ class JobDetailViewModelTest {
         assertEquals(DataError.Api(40406, "task not found").toUserMessage(), state.error)
         assertFalse(state.isLoading)
         assertNull(state.status)
+        // Nothing was seeded on this route, so nothing masks the error.
+        assertNull(state.description)
+        assertNull(state.command)
+    }
+
+    @Test
+    fun `the route's description and command seed the state before the fetch answers`() = runBlocking {
+        val viewModel = newViewModel(
+            JobDetail("session_1", "bash-1", description = "count ticks", command = "for i in …"),
+        )
+
+        // Seeded synchronously — the first composition already shows them.
+        assertEquals("count ticks", viewModel.uiState.value.description)
+        assertEquals("for i in …", viewModel.uiState.value.command)
+    }
+
+    @Test
+    fun `the fetch overwrites the seeded description and command with the API values`() = runBlocking {
+        // The server is authoritative: it invents `Bash: <command>…` when the agent
+        // set no description, so the route seed must never stick.
+        taskBody = COMPLETED_TASK_BODY
+
+        val viewModel = newViewModel(
+            JobDetail("session_1", "bash-1", description = "row description", command = "row command"),
+        )
+        awaitState(viewModel.uiState) { it.status != null }
+
+        val state = viewModel.uiState.value
+        assertEquals("tick counter loop", state.description)
+        assertEquals("for i in …", state.command)
     }
 
     @Test

@@ -59,6 +59,8 @@ import fr.louissaglio.kimi.android.data.chat.ContextUsage
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.data.chat.ServerModel
 import fr.louissaglio.kimi.android.data.chat.asCardModel
+import fr.louissaglio.kimi.android.data.chat.bashCommandOf
+import fr.louissaglio.kimi.android.data.chat.bashDescriptionOf
 import fr.louissaglio.kimi.android.ui.common.EmptyState
 import fr.louissaglio.kimi.android.ui.common.ErrorState
 import fr.louissaglio.kimi.android.ui.common.LoadingState
@@ -69,8 +71,15 @@ import java.time.Instant
 fun ChatScreen(
     onNavigateBack: () -> Unit,
     onNavigateToSubagent: (sessionId: String, subagentId: String) -> Unit = { _, _ -> },
-    onNavigateToJob: (sessionId: String, taskId: String, budgetSeconds: Int?, budgetIsDefault: Boolean, timedOut: Boolean) -> Unit =
-        { _, _, _, _, _ -> },
+    onNavigateToJob: (
+        sessionId: String,
+        taskId: String,
+        budgetSeconds: Int?,
+        budgetIsDefault: Boolean,
+        timedOut: Boolean,
+        description: String?,
+        command: String?,
+    ) -> Unit = { _, _, _, _, _, _, _ -> },
     viewModel: ChatViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -134,6 +143,9 @@ fun ChatScreen(
     // budget (ticket 097) resolves from the matching timeline row — the call input is
     // the only wire location of the timeout — and the timed-out flag from the jobs
     // list; an unknown row navigates budget-less (plain elapsed, the 096 behavior).
+    // The call input's description/command seed the job screen's title and Command
+    // section; a jobs-sheet entry can outlive its timeline row, so the description
+    // falls back to the jobs-store Job's — null leaves either to the entry fetch.
     val timelineItems = uiState.items
     val jobs = uiState.jobs
     val onOpenJob = remember(onNavigateToJob, sessionId, timelineItems, jobs) {
@@ -142,12 +154,15 @@ fun ChatScreen(
                 ?.flatMap { it.tools }
                 ?.firstOrNull { it.bashTaskId == taskId }
             val timeout = row?.let { BashTimeout(it.timeoutSeconds, it.timeoutDisabled) }
+            val job = jobs.firstOrNull { it.taskId == taskId }
             onNavigateToJob(
                 sessionId,
                 taskId,
                 timeout?.effectiveSeconds,
                 timeout?.isDefault ?: false,
-                jobs.firstOrNull { it.taskId == taskId }?.timedOut == true,
+                job?.timedOut == true,
+                row?.let { bashDescriptionOf(it.name, it.input) } ?: job?.description,
+                row?.let { bashCommandOf(it.name, it.input) },
             )
         }
     }

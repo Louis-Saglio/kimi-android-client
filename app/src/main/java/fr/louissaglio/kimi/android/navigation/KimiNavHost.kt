@@ -37,7 +37,10 @@ data class Subagent(val sessionId: String, val subagentId: String)
  * timeout budget and the timed-out flag (ticket 097) ride as optional arguments —
  * REST never exposes the timeout and collapses `timed_out` to `failed`, so the chat
  * resolves them from its own state at navigation time; absent (deep link, unknown
- * row), the screen falls back to plain elapsed and "failed". */
+ * row), the screen falls back to plain elapsed and "failed". The description and
+ * command ride along the same way (the tapped row already carries the call input),
+ * so the title and the Command section render before the entry fetch answers; the
+ * fetch stays authoritative and overwrites both. */
 @Serializable
 data class JobDetail(
     val sessionId: String,
@@ -45,6 +48,8 @@ data class JobDetail(
     val budgetSeconds: Int? = null,
     val budgetIsDefault: Boolean = false,
     val timedOut: Boolean = false,
+    val description: String? = null,
+    val command: String? = null,
 )
 
 @Composable
@@ -75,8 +80,10 @@ fun KimiNavHost() {
                         launchSingleTop = true
                     }
                 },
-                onNavigateToJob = { sessionId, taskId, budgetSeconds, budgetIsDefault, timedOut ->
-                    navController.navigate(JobDetail(sessionId, taskId, budgetSeconds, budgetIsDefault, timedOut)) {
+                onNavigateToJob = { sessionId, taskId, budgetSeconds, budgetIsDefault, timedOut, description, command ->
+                    navController.navigate(
+                        JobDetail(sessionId, taskId, budgetSeconds, budgetIsDefault, timedOut, description, command),
+                    ) {
                         launchSingleTop = true
                     }
                 },

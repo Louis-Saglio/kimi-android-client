@@ -48,7 +48,6 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import fr.louissaglio.kimi.android.data.chat.BackgroundTask
 import fr.louissaglio.kimi.android.ui.common.ErrorState
-import fr.louissaglio.kimi.android.ui.common.LoadingState
 import fr.louissaglio.kimi.android.ui.common.formatElapsed
 import fr.louissaglio.kimi.android.ui.theme.successColor
 import java.time.Duration
@@ -62,7 +61,10 @@ import kotlinx.coroutines.delay
  * runs and pinned to the newest output. Stop lives in the app bar while running:
  * killing a runaway job is the natural reaction while watching its output. Entry
  * points: a linked chat row or the jobs sheet's bash rows — the chat row itself
- * stays free of the log.
+ * stays free of the log. No full-screen loading gate: the title and the Command
+ * section render immediately from the route arguments (the tapped row's call
+ * input); only the status line (it needs the fetch's started_at) and the output
+ * wait for the entry fetch.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -110,7 +112,8 @@ fun JobDetailScreen(
                 // Unknown task / fetch failure: the StateViews pattern, retry re-runs
                 // the entry fetch; the app bar's Back is the way out.
                 uiState.error != null -> ErrorState(uiState.error.orEmpty(), onRetry = viewModel::onRetry)
-                uiState.isLoading -> LoadingState()
+                // No loading gate: the shell renders from the route-seeded state
+                // while the entry fetch runs.
                 else -> JobDetailContent(uiState)
             }
         }
@@ -255,9 +258,19 @@ private fun JobSection(title: String, modifier: Modifier = Modifier, content: @C
 
 /** The stored stdout/stderr tail (the ToolDetailBlock recipe): one monospace block
  * scrolling internally, re-pinned to the tail each time a poll grows it while the
- * job runs. */
+ * job runs. Until the entry fetch answers, a small spinner stands in for the block —
+ * the rest of the shell already renders from the route-seeded state. Internal for
+ * the semantics tests. */
 @Composable
-private fun JobOutputBlock(uiState: JobDetailViewModel.UiState, modifier: Modifier = Modifier) {
+internal fun JobOutputBlock(uiState: JobDetailViewModel.UiState, modifier: Modifier = Modifier) {
+    if (uiState.isLoading && uiState.outputPreview == null) {
+        Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator(
+                modifier = Modifier.padding(24.dp).semantics { contentDescription = "Loading output" },
+            )
+        }
+        return
+    }
     val output = uiState.outputPreview.orEmpty()
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,

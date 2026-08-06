@@ -2,7 +2,9 @@ package fr.louissaglio.kimi.android.data.chat
 
 import java.time.Instant
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -112,13 +114,29 @@ data class BashTimeout(
 
 private val bashArgsJson = Json { ignoreUnknownKeys = true }
 
+/** The input object of a Bash tool call; null for non-Bash calls and
+ * blank/unparseable input (the row then carries no input-derived information). */
+private fun bashArgsOf(toolName: String, argsJson: String): JsonObject? {
+    if (toolName != "Bash" || argsJson.isBlank()) return null
+    return runCatching { bashArgsJson.parseToJsonElement(argsJson).jsonObject }.getOrNull()
+}
+
 /** Parses [argsJson] (a Bash call's input) into its [BashTimeout]; null for non-Bash
  * calls and blank/unparseable input (the row then carries no budget information). */
 fun bashTimeoutOf(toolName: String, argsJson: String): BashTimeout? {
-    if (toolName != "Bash" || argsJson.isBlank()) return null
-    val args = runCatching { bashArgsJson.parseToJsonElement(argsJson).jsonObject }.getOrNull() ?: return null
+    val args = bashArgsOf(toolName, argsJson) ?: return null
     return BashTimeout(
         seconds = args["timeout"]?.jsonPrimitive?.intOrNull,
         disabled = args["disable_timeout"]?.jsonPrimitive?.booleanOrNull == true,
     )
 }
+
+/** The agent-set `description` of a Bash call's input; null when absent or blank —
+ * the job screen's title then falls back to the task-store description. */
+fun bashDescriptionOf(toolName: String, argsJson: String): String? =
+    bashArgsOf(toolName, argsJson)?.get("description")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+
+/** The `command` of a Bash call's input; null when absent — the job screen's Command
+ * section then waits for the entry fetch (REST carries it). */
+fun bashCommandOf(toolName: String, argsJson: String): String? =
+    bashArgsOf(toolName, argsJson)?.get("command")?.jsonPrimitive?.contentOrNull
