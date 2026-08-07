@@ -11,6 +11,7 @@ import fr.louissaglio.kimi.android.data.chat.TranscriptFrame
 import fr.louissaglio.kimi.android.data.chat.TranscriptPage
 import fr.louissaglio.kimi.android.data.chat.TranscriptState
 import fr.louissaglio.kimi.android.data.chat.TranscriptStep
+import fr.louissaglio.kimi.android.data.chat.TranscriptTaskOrigin
 import fr.louissaglio.kimi.android.data.chat.TranscriptTurn
 import fr.louissaglio.kimi.android.testutil.testSubagentStreamStore
 import java.time.Instant
@@ -699,6 +700,183 @@ class SubagentStreamStoreTest {
         store.apply(SESSION_ID, SessionEvent.TaskStarted(taskInfo("bash-1", TaskInfo.Status.Running), agentId = "agent-99"))
 
         assertNull(store.entry(SESSION_ID, "agent-99").first())
+    }
+
+    // --- Transcript task-origin healing (ticket 099) ------------------------------------
+
+    /** A task-completion notification turn (origin kind `task`, verified on 0.34.0):
+     * no steps needed for the jobs heal — the origin is read off the turn. */
+    private fun taskOriginTurn(id: String, ordinal: Int, taskId: String, status: TaskInfo.Status?) = TranscriptTurn(
+        id, ordinal, TranscriptState.Completed, null, emptyList(),
+        taskOrigin = TranscriptTaskOrigin(taskId, status),
+    )
+
+    @Test
+    fun `a transcript page's task origin heals the named job's terminal status`() = runBlocking {
+        // The cold open (ticket 099): no live frame ever observed — the transcript's
+        // notification turn is the only terminal evidence.
+        store.apply(SESSION_ID, spawned("agent-12"))
+
+        store.applyTranscriptPage(
+            SESSION_ID, "agent-12",
+            transcriptPage(listOf(taskOriginTurn("t1", 1, "bash-1", TaskInfo.Status.Completed))),
+            keepLive = false,
+        )
+
+        val job = entry("agent-12")!!.jobs.single()
+        assertEquals("bash-1", job.taskId)
+        assertEquals(BackgroundTask.Kind.Bash, job.kind)
+        assertEquals(BackgroundTask.Status.Completed, job.status)
+        // The origin carries no timestamps or description: unknown stays unknown.
+        assertNull(job.startedAt)
+        assertNull(job.endedAt)
+        assertEquals("", job.description)
+    }
+
+    @Test
+    fun `an older transcript page mines task origins too`() = runBlocking {
+        store.apply(SESSION_ID, spawned("agent-12"))
+        store.applyTranscriptPage(
+            SESSION_ID, "agent-12",
+            transcriptPage(listOf(finishedTurn("t1", 1, "newer")), hasMore = true),
+            keepLive = false,
+        )
+        assertTrue(entry("agent-12")!!.jobs.isEmpty())
+
+        // The notification turn sits beyond the newest page; core killed → cancelled.
+        store.prependTranscriptPage(
+            SESSION_ID, "agent-12",
+            transcriptPage(listOf(taskOriginTurn("t0", 0, "bash-1", TaskInfo.Status.Killed))),
+        )
+
+        val job = entry("agent-12")!!.jobs.single()
+        assertEquals(BackgroundTask.Status.Cancelled, job.status)
+    }
+
+    @Test
+    fun `a live task terminated is never regressed by a later transcript task origin`() = runBlocking {
+        // First-writer-wins against live frames (ticket 099): the live terminated
+        // carries endedAt/timedOut the origin lacks — the heal must not touch it.
+        store.apply(SESSION_ID, spawned("agent-12"))
+        store.apply(SESSION_ID, SessionEvent.TaskStarted(taskInfo("bash-1", TaskInfo.Status.Running), agentId = "agent-12"))
+        store.apply(
+            SESSION_ID,
+            SessionEvent.TaskTerminated(
+                taskInfo("bash-1", TaskInfo.Status.TimedOut, endedAt = Instant.ofEpochMilli(1785210118804)),
+                agentId = "agent-12",
+            ),
+        )
+
+        store.applyTranscriptPage(
+            SESSION_ID, "agent-12",
+            transcriptPage(listOf(taskOriginTurn("t1", 1, "bash-1", TaskInfo.Status.Completed))),
+            keepLive = false,
+        )
+
+        val job = entry("agent-12")!!.jobs.single()
+        assertEquals(BackgroundTask.Status.Failed, job.status)
+        assertTrue(job.timedOut)
+        assertEquals(Instant.ofEpochMilli(1785210118804), job.endedAt)
+    }
+
+    @Test
+    fun `a transcript task origin flips a live-started running job but keeps its fields`() = runBlocking {
+        // The app saw the start but missed the termination (socket gap): the heal
+        // flips the status while keeping the live frame's startedAt/description.
+        store.apply(SESSION_ID, spawned("agent-12"))
+        store.apply(SESSION_ID, SessionEvent.TaskStarted(taskInfo("bash-1", TaskInfo.Status.Running), agentId = "agent-12"))
+
+        store.applyTranscriptPage(
+            SESSION_ID, "agent-12",
+            transcriptPage(listOf(taskOriginTurn("t1", 1, "bash-1", TaskInfo.Status.Completed))),
+            keepLive = false,
+        )
+
+        val job = entry("agent-12")!!.jobs.single()
+        assertEquals(BackgroundTask.Status.Completed, job.status)
+        assertEquals(Instant.ofEpochMilli(1785210101939), job.startedAt)
+        assertEquals("nested bg", job.description)
+    }
+
+    @Test
+    fun `a task origin with a running or unknown status heals nothing`() = runBlocking {
+        store.apply(SESSION_ID, spawned("agent-12"))
+
+        store.applyTranscriptPage(
+            SESSION_ID, "agent-12",
+            transcriptPage(
+                listOf(
+                    taskOriginTurn("t1", 1, "bash-1", TaskInfo.Status.Running),
+                    taskOriginTurn("t2", 2, "bash-2", null),
+                    // An id with no known prefix: no kind to render, skipped.
+                    taskOriginTurn("t3", 3, "tool-3", TaskInfo.Status.Completed),
+                ),
+            ),
+            keepLive = false,
+        )
+
+        assertTrue(entry("agent-12")!!.jobs.isEmpty())
+    }
+
+    /** A turn holding the background Bash call itself: the result stub's first line
+     * links the row to its task (the 098 enrichment), the input carries the
+     * agent-set `description` the sheet shows. */
+    private fun bashCallTurn(id: String, ordinal: Int, taskId: String, description: String) = TranscriptTurn(
+        id, ordinal, TranscriptState.Completed, null,
+        listOf(
+            TranscriptStep(
+                "$id.1", TranscriptState.Completed,
+                listOf(
+                    TranscriptFrame.Tool(
+                        id = "$id.1.tool_1",
+                        toolCallId = "tool_1",
+                        name = "Bash",
+                        running = false,
+                        preview = description,
+                        input = """{"command":"for i in …","description":"$description"}""",
+                        output = "task_id: $taskId\nBackground task started.",
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    @Test
+    fun `a healed job takes its description from the bash call's row`() = runBlocking {
+        store.apply(SESSION_ID, spawned("agent-12"))
+
+        store.applyTranscriptPage(
+            SESSION_ID, "agent-12",
+            transcriptPage(
+                listOf(
+                    bashCallTurn("t0", 0, "bash-1", "count ticks"),
+                    taskOriginTurn("t1", 1, "bash-1", TaskInfo.Status.Completed),
+                ),
+            ),
+            keepLive = false,
+        )
+
+        assertEquals("count ticks", entry("agent-12")!!.jobs.single().description)
+    }
+
+    @Test
+    fun `a healed job's blank description backfills when the call's older page lands`() = runBlocking {
+        // The notification turn sits on the newest page, the call on an older one:
+        // the heal lands first (blank description), the prepend fills it.
+        store.apply(SESSION_ID, spawned("agent-12"))
+        store.applyTranscriptPage(
+            SESSION_ID, "agent-12",
+            transcriptPage(listOf(taskOriginTurn("t1", 1, "bash-1", TaskInfo.Status.Completed)), hasMore = true),
+            keepLive = false,
+        )
+        assertEquals("", entry("agent-12")!!.jobs.single().description)
+
+        store.prependTranscriptPage(
+            SESSION_ID, "agent-12",
+            transcriptPage(listOf(bashCallTurn("t0", 0, "bash-1", "count ticks"))),
+        )
+
+        assertEquals("count ticks", entry("agent-12")!!.jobs.single().description)
     }
 
     @Test

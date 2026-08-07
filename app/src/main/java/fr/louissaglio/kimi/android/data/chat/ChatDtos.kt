@@ -490,6 +490,9 @@ data class TranscriptItemDto(
 @Serializable
 data class TranscriptOriginDto(
     val kind: String = "",
+    // Only on kind "task" (verified on 0.34.0 — docs/server-api.md, Transcript):
+    // the flattened task id; `status`/`notificationId` live inside [payload].
+    val taskId: String? = null,
     val payload: JsonObject? = null,
 )
 

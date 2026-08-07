@@ -26,9 +26,24 @@ data class TranscriptTurn(
     val state: TranscriptState,
     /** The prompting user text. Only user-origin turns carry one: a sub-agent's
      * internal turns (system_trigger/subagent) never do — the task text is not in the
-     * transcript, the page's seeded prompt bubble covers it. */
+     * transcript, the page's seeded prompt bubble covers it. (Task-origin turns also
+     * ship a prompt — the notification XML — which the mapper deliberately drops.) */
     val prompt: String?,
     val steps: List<TranscriptStep>,
+    /** Non-null only on a background-task completion-notification turn (origin kind
+     * `task` — see [TranscriptTaskOrigin]). */
+    val taskOrigin: TranscriptTaskOrigin? = null,
+)
+
+/** The origin of a background-task completion-notification turn (origin kind `task`,
+ * verified on 0.34.0 — docs/server-api.md, Transcript): the finished task's id and
+ * terminal status. This is the cold-open healing channel for sub-agent-owned jobs
+ * (ticket 099) — the record's jobs are otherwise live-only (REST `/tasks` never
+ * serves them). [status] keeps the core vocabulary; null when the wire value is not
+ * a known one (the heal then skips the turn rather than guess). */
+data class TranscriptTaskOrigin(
+    val taskId: String,
+    val status: TaskInfo.Status?,
 )
 
 data class TranscriptStep(

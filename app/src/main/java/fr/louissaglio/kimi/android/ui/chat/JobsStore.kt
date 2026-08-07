@@ -18,13 +18,16 @@ import kotlinx.coroutines.launch
  * subscription. [timedOut] retains that the terminal cause was the kill budget
  * (ticket 097): REST collapses `timed_out` to `failed`, so only a live
  * `task.terminated` sets it — REST-seeded jobs stay plain Failed (documented
- * limitation). Terminal jobs linger until the session is left — no eviction. */
+ * limitation). Terminal jobs linger until the session is left — no eviction.
+ * [startedAt] is null on a job healed from a transcript `task` origin (ticket
+ * 099): the origin carries no timestamps, so unknown stays unknown instead of a
+ * sentinel. */
 data class Job(
     val taskId: String,
     val kind: BackgroundTask.Kind,
     val description: String,
     val status: BackgroundTask.Status,
-    val startedAt: Instant,
+    val startedAt: Instant?,
     val endedAt: Instant? = null,
     val agentId: String? = null,
     val timedOut: Boolean = false,
@@ -192,8 +195,9 @@ private fun TaskInfo.Kind.toWireKind(): BackgroundTask.Kind = when (this) {
 }
 
 /** Core→wire status mapping (docs/server-api.md): `killed`→cancelled,
- * `timed_out`/`lost`→failed. */
-private fun TaskInfo.Status.toWireStatus(): BackgroundTask.Status = when (this) {
+ * `timed_out`/`lost`→failed. Shared with SubagentStreamStore, whose transcript
+ * task-origin healing (ticket 099) maps the origin's core status through it. */
+internal fun TaskInfo.Status.toWireStatus(): BackgroundTask.Status = when (this) {
     TaskInfo.Status.Running -> BackgroundTask.Status.Running
     TaskInfo.Status.Completed -> BackgroundTask.Status.Completed
     TaskInfo.Status.Failed -> BackgroundTask.Status.Failed

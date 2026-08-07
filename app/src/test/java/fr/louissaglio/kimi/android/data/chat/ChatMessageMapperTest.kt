@@ -4,6 +4,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
@@ -117,6 +118,92 @@ class ChatMessageMapperTest {
         assertEquals(TranscriptState.Failed, stateOf("failed"))
         assertEquals(TranscriptState.Failed, stateOf("cancelled"))
         assertEquals(TranscriptState.Other, stateOf("something-new"))
+    }
+
+    // --- Transcript task origins (ticket 099 — verified on 0.34.0, docs/server-api.md) ---
+
+    private fun taskOriginTurnDto(
+        origin: TranscriptOriginDto?,
+    ): TranscriptData = TranscriptData(
+        agentId = "agent-1",
+        items = listOf(TranscriptItemDto(kind = "turn", turnId = "t1", state = "completed", origin = origin)),
+    )
+
+    @Test
+    fun `a task-origin turn parses the task id and terminal status`() {
+        // The verbatim 0.34.0 shape: taskId flattened AND inside payload, status
+        // only inside payload.
+        val page = mapper.toDomain(
+            taskOriginTurnDto(
+                TranscriptOriginDto(
+                    kind = "task",
+                    taskId = "bash-xhlawxzk",
+                    payload = buildJsonObject {
+                        put("kind", "task")
+                        put("taskId", "bash-xhlawxzk")
+                        put("status", "completed")
+                        put("notificationId", "task:bash-xhlawxzk:completed")
+                    },
+                ),
+            ),
+        )
+
+        assertEquals(
+            TranscriptTaskOrigin("bash-xhlawxzk", TaskInfo.Status.Completed),
+            page.turns.single().taskOrigin,
+        )
+    }
+
+    @Test
+    fun `the task origin falls back to the flattened task id and maps the core vocabulary`() {
+        val page = mapper.toDomain(
+            taskOriginTurnDto(
+                TranscriptOriginDto(
+                    kind = "task",
+                    taskId = "agent-a7fxomh0",
+                    payload = buildJsonObject { put("status", "killed") },
+                ),
+            ),
+        )
+
+        assertEquals(
+            TranscriptTaskOrigin("agent-a7fxomh0", TaskInfo.Status.Killed),
+            page.turns.single().taskOrigin,
+        )
+    }
+
+    @Test
+    fun `an unknown origin status maps to null rather than a guess`() {
+        val page = mapper.toDomain(
+            taskOriginTurnDto(
+                TranscriptOriginDto(
+                    kind = "task",
+                    payload = buildJsonObject {
+                        put("taskId", "bash-1")
+                        put("status", "something-new")
+                    },
+                ),
+            ),
+        )
+
+        assertEquals(TranscriptTaskOrigin("bash-1", null), page.turns.single().taskOrigin)
+    }
+
+    @Test
+    fun `non-task origins carry no task origin`() {
+        val page = mapper.toDomain(
+            taskOriginTurnDto(
+                TranscriptOriginDto(
+                    kind = "other",
+                    payload = buildJsonObject {
+                        put("kind", "system_trigger")
+                        put("name", "subagent")
+                    },
+                ),
+            ),
+        )
+
+        assertNull(page.turns.single().taskOrigin)
     }
 
     private fun transcript(vararg frames: TranscriptFrameDto): TranscriptData = TranscriptData(

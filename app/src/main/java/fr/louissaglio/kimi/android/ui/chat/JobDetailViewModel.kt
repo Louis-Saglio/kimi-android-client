@@ -159,10 +159,12 @@ class JobDetailViewModel internal constructor(
 
     /** Store-backed mode (ticket 098): the owning record's live jobs are the ONLY
      * status channel — fed by `task.started`/`task.terminated` while the screen's
-     * socket-gate registration keeps the session socket collected. The seeded
-     * title/command/budget stay the route's; a cold-opened screen whose task predates
-     * the subscription shows those seeds with an empty status line (cold-open healing
-     * is ticket 099's) — never a full-screen error. */
+     * socket-gate registration keeps the session socket collected, and healed on a
+     * cold open by the transcript's `task` turn origins (ticket 099 — the sub-agent
+     * page's transcript fetch rides the same store). The seeded title/command/budget
+     * stay the route's; a screen whose task has neither a live frame nor a fetched
+     * transcript page yet shows those seeds with an empty status line — never a
+     * full-screen error. */
     private fun collectStoreJob() {
         val owner = ownerAgentId ?: return
         viewModelScope.launch {

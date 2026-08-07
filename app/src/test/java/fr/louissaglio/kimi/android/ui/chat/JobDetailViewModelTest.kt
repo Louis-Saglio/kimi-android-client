@@ -7,6 +7,10 @@ import fr.louissaglio.kimi.android.data.chat.BackgroundTask
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.TaskInfo
+import fr.louissaglio.kimi.android.data.chat.TranscriptPage
+import fr.louissaglio.kimi.android.data.chat.TranscriptState
+import fr.louissaglio.kimi.android.data.chat.TranscriptTaskOrigin
+import fr.louissaglio.kimi.android.data.chat.TranscriptTurn
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.data.toUserMessage
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
@@ -364,8 +368,9 @@ class JobDetailViewModelTest {
 
     @Test
     fun `the store-backed mode shows the seeds without error when the store has no live frame`() = runBlocking {
-        // Cold open (ticket 099's healing is out of scope): nothing live observed —
-        // the route seeds render, the status line stays empty, no full-screen 40406.
+        // Nothing live observed and no transcript landed (ticket 099's heal needs a
+        // fetched page): the route seeds render, the status line stays empty, no
+        // full-screen 40406.
         val viewModel = newViewModel(
             JobDetail("session_1", "bash-1", description = "count ticks", ownerAgentId = "agent-3"),
         )
@@ -376,6 +381,44 @@ class JobDetailViewModelTest {
         assertNull(state.error)
         assertFalse(state.isLoading)
         assertEquals("count ticks", state.description)
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test
+    fun `a cold-opened store-backed screen shows the transcript-healed terminal status`() = runBlocking {
+        // Ticket 099: the app never observed a live task.* frame (process death) —
+        // the sub-agent page's transcript fetch mines the completion-notification
+        // turn's task origin into the record's jobs, and this screen collects the
+        // result: the true terminal status instead of an empty status line.
+        subagentStore.apply(
+            "session_1",
+            SessionEvent.SubagentSpawned("agent-3", "explore", "tool_1", "doc-verify", runInBackground = false),
+        )
+        subagentStore.applyTranscriptPage(
+            "session_1", "agent-3",
+            TranscriptPage(
+                "agent-3",
+                listOf(
+                    TranscriptTurn(
+                        "t0", 0, TranscriptState.Completed, null, emptyList(),
+                        taskOrigin = TranscriptTaskOrigin("bash-1", TaskInfo.Status.Completed),
+                    ),
+                ),
+                hasMore = false,
+            ),
+            keepLive = false,
+        )
+
+        val viewModel = newViewModel(
+            JobDetail("session_1", "bash-1", description = "count ticks", ownerAgentId = "agent-3"),
+        )
+        awaitState(viewModel.uiState) { it.status == BackgroundTask.Status.Completed }
+
+        val state = viewModel.uiState.value
+        assertEquals(BackgroundTask.Status.Completed, state.status)
+        // The origin carries no timestamps — unknown stays unknown.
+        assertNull(state.startedAt)
+        assertNull(state.completedAt)
         assertEquals(0, server.requestCount)
     }
 

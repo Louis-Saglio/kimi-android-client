@@ -179,14 +179,21 @@ private fun JobRow(
             BackgroundTask.Status.Cancelled -> "cancelled"
         }
     }
-    val elapsed = formatElapsed(Duration.between(job.startedAt, job.endedAt ?: now))
+    // Null on a transcript-healed job (ticket 099): the task origin carries no
+    // timestamps — the row then shows the bare status, never a fake elapsed.
+    val elapsed = job.startedAt?.let { formatElapsed(Duration.between(it, job.endedAt ?: now)) }
     // A live-recorded timeout (ticket 097) reads "timed out after <elapsed>" in error
     // color; a REST-seeded job can't tell timeout from crash and stays plain "failed".
-    val statusText = if (job.timedOut) "timed out after $elapsed" else "$statusLabel · $elapsed"
-    val rowDescription = if (job.timedOut) {
-        "${job.description}, $kindLabel, $statusText"
-    } else {
-        "${job.description}, $kindLabel, $statusLabel, elapsed $elapsed"
+    val statusText = when {
+        job.timedOut && elapsed != null -> "timed out after $elapsed"
+        job.timedOut -> "timed out"
+        elapsed != null -> "$statusLabel · $elapsed"
+        else -> statusLabel
+    }
+    val rowDescription = when {
+        job.timedOut -> "${job.description}, $kindLabel, $statusText"
+        elapsed != null -> "${job.description}, $kindLabel, $statusLabel, elapsed $elapsed"
+        else -> "${job.description}, $kindLabel, $statusLabel"
     }
     Row(
         modifier = Modifier

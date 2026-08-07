@@ -122,7 +122,10 @@
   (the record timeline's `todos()` — the chat's ticket-042 mechanism) and its
   own background tasks (the live `task.*` frames stamped with its id, upserted
   into `SubagentRecord.jobs` via the shared `TaskInfo.toJob()` mapping — no
-  REST seed exists, REST `/tasks` being main-agent-only); the page mounts the
+  REST seed exists, REST `/tasks` being main-agent-only; on a cold open the
+  transcript pages' `task` turn origins heal the terminal status into the
+  record's jobs — ticket 099, a live `task.terminated` stays authoritative
+  over the origin); the page mounts the
   shared `TodoJobsDock` as its bottom bar, with the job screen wired
   (store-backed mode, ticket 098) but no cancel (same REST limitation).
   Transcript backing (046): the page's history comes

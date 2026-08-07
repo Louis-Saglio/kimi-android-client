@@ -3,6 +3,7 @@ package fr.louissaglio.kimi.android.ui.chat
 import android.util.Log
 import fr.louissaglio.kimi.android.data.chat.AGENT_TOOL_NAME
 import fr.louissaglio.kimi.android.data.chat.AgentScopedEvent
+import fr.louissaglio.kimi.android.data.chat.BackgroundTask
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.MAIN_AGENT_ID
@@ -16,6 +17,8 @@ import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.TodoParser
 import fr.louissaglio.kimi.android.data.chat.TranscriptPage
 import fr.louissaglio.kimi.android.data.chat.TranscriptState
+import fr.louissaglio.kimi.android.data.chat.TranscriptTurn
+import fr.louissaglio.kimi.android.data.chat.bashDescriptionOf
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.di.StreamCoalesceWindowMillis
 import javax.inject.Inject
@@ -117,7 +120,8 @@ class SubagentStreamStore @Inject constructor(
          * (the same timeline mechanism as the chat's, ticket 042). */
         val todos: List<Todo>? = null,
         /** The sub-agent's own background tasks (nested background bash/sub-agents),
-         * fed live by its agent-tagged task.* frames — no REST seed exists: REST
+         * fed live by its agent-tagged task.* frames and healed on a cold open by the
+         * transcript's `task` turn origins (ticket 099) — no REST seed exists: REST
          * `/tasks` serves only the main agent's task store (docs/server-api.md). */
         val jobs: List<Job> = emptyList(),
     )
@@ -165,13 +169,24 @@ class SubagentStreamStore @Inject constructor(
         var error: String? = null
 
         /** The sub-agent's own background tasks, keyed by task id (live-only — REST
-         * `/tasks` never serves them). Insertion-ordered; the jobs sheet owns the
-         * running-first/terminal-newest display sort. */
+         * `/tasks` never serves them; a transcript `task` origin heals the terminal
+         * status on a cold open, ticket 099). Insertion-ordered; the jobs sheet owns
+         * the running-first/terminal-newest display sort. */
         private val jobs = LinkedHashMap<String, Job>()
 
+        /** Task ids whose live `task.terminated` was observed (ticket 099): the live
+         * frame is the terminal truth — it carries `endedAt`/`timedOut`/`stopReason`
+         * the transcript origin lacks — so the transcript heal never regresses one
+         * (first-writer-wins against live frames). Process-lifetime by construction:
+         * after process death the set is empty and the transcript heals, which is
+         * exactly the cold-open case. */
+        private val liveTerminatedJobIds = mutableSetOf<String>()
+
         /** One task.* frame's upsert; the page link and the timed-out flag survive a
-         * later upsert that doesn't carry them (the JobsStore merge rule). */
-        fun upsertJob(job: Job) {
+         * later upsert that doesn't carry them (the JobsStore merge rule). A terminal
+         * frame additionally pins the task against the transcript heal. */
+        fun upsertJob(job: Job, terminal: Boolean) {
+            if (terminal) liveTerminatedJobIds += job.taskId
             val existing = jobs[job.taskId]
             jobs[job.taskId] = if (existing == null) {
                 job
@@ -180,6 +195,45 @@ class SubagentStreamStore @Inject constructor(
                     agentId = job.agentId ?: existing.agentId,
                     timedOut = job.timedOut || existing.timedOut,
                 )
+            }
+        }
+
+        /** The transcript `task`-origin upsert (ticket 099): heals a job's terminal
+         * status from canonical history. Everything the origin lacks (timestamps,
+         * description, page link, timed-out flag) keeps the existing entry's values —
+         * a live-observed `task.started` (still Running) gets its status flipped but
+         * keeps its real `startedAt`. A live-terminated task is skipped: the live
+         * frame stays authoritative. */
+        fun upsertJobFromTranscript(job: Job) {
+            if (job.taskId in liveTerminatedJobIds) return
+            val existing = jobs[job.taskId]
+            jobs[job.taskId] = if (existing == null) {
+                job
+            } else {
+                job.copy(
+                    description = job.description.ifBlank { existing.description },
+                    startedAt = job.startedAt ?: existing.startedAt,
+                    endedAt = job.endedAt ?: existing.endedAt,
+                    agentId = job.agentId ?: existing.agentId,
+                    timedOut = job.timedOut || existing.timedOut,
+                )
+            }
+        }
+
+        /** Fills blank job descriptions from the timeline's Bash call rows (the 098
+         * enrichment already linked each row to its task id; the call input's
+         * `description` argument is what the row and the job screen show). A
+         * transcript-healed job (ticket 099) starts blank — its call's turn can sit
+         * on a page landing after the notification turn's. A live-fed job already
+         * carries the frame's description and is untouched. */
+        fun backfillJobDescriptions() {
+            val rows = timeline.items().filterIsInstance<ChatItem.ToolGroup>().flatMap { it.tools }
+            for (taskId in jobs.keys) {
+                val job = jobs[taskId] ?: continue
+                if (job.description.isNotBlank()) continue
+                val description = rows.firstOrNull { it.bashTaskId == taskId }
+                    ?.let { bashDescriptionOf(it.name, it.input) }
+                if (!description.isNullOrBlank()) jobs[taskId] = job.copy(description = description)
             }
         }
 
@@ -364,8 +418,8 @@ class SubagentStreamStore @Inject constructor(
             // task events are agent-scoped since the sub-agent page's jobs widget):
             // they feed only the owning record's jobs list. Main-owned ones are the
             // chat's JobsStore business and drop here.
-            is SessionEvent.TaskStarted -> onTaskEvent(sessionId, event.agentId, event.info)
-            is SessionEvent.TaskTerminated -> onTaskEvent(sessionId, event.agentId, event.info)
+            is SessionEvent.TaskStarted -> onTaskEvent(sessionId, event.agentId, event.info, terminal = false)
+            is SessionEvent.TaskTerminated -> onTaskEvent(sessionId, event.agentId, event.info, terminal = true)
             is AgentScopedEvent -> if (event.agentId != MAIN_AGENT_ID) onTranscript(sessionId, event.agentId, event)
             else -> Unit
         }
@@ -557,11 +611,16 @@ class SubagentStreamStore @Inject constructor(
                 StatusSource.Transcript,
             )
         }
+        // Cold-open job heal (ticket 099): the page's task-completion notification
+        // turns upsert the record's jobs — live-only otherwise.
+        mineTaskOrigins(record, page.turns)
         publish(sessionId)
     }
 
     /** Prepends an older transcript page (ticket 046 pagination); the turn-id dedup in
-     * the timeline makes a racing [applyTranscriptPage] harmless. */
+     * the timeline makes a racing [applyTranscriptPage] harmless. An older page mines
+     * task origins too (ticket 099) — the notification turn can sit beyond the newest
+     * page. */
     fun prependTranscriptPage(sessionId: String, subagentId: String, page: TranscriptPage) {
         val record = record(sessionId, subagentId) ?: return
         if (page.turns.isNotEmpty()) {
@@ -569,21 +628,47 @@ class SubagentStreamStore @Inject constructor(
             record.oldestTurnId = page.turns.first().id
         }
         record.hasMoreTurns = page.hasMore
+        mineTaskOrigins(record, page.turns)
         publish(sessionId)
     }
 
     /** One sub-agent-owned task.* frame (started/terminated share the upsert): the
      * record's jobs list is the sub-agent page's jobs widget. Unknown sub-agent (its
      * spawn predates the subscription): dropped exactly like its transcript frames. */
-    private fun onTaskEvent(sessionId: String, agentId: String, info: TaskInfo) {
+    private fun onTaskEvent(sessionId: String, agentId: String, info: TaskInfo, terminal: Boolean) {
         if (agentId == MAIN_AGENT_ID) return
         val record = record(sessionId, agentId)
         if (record == null) {
             Log.d(TAG, "Dropping task frame for unknown sub-agent '$agentId' (spawn missed)")
             return
         }
-        record.upsertJob(info.toJob())
+        record.upsertJob(info.toJob(), terminal)
         publish(sessionId)
+    }
+
+    /** The ticket-099 cold-open heal: a transcript page's task-completion notification
+     * turns upsert the named jobs' terminal status into the record's jobs — the same
+     * "canonical history heals live-only state" pattern the snapshot roster and the
+     * turn states already follow. The origin carries no kind/timestamps/description:
+     * the kind derives from the task-id prefix (`bash-`/`agent-` — the only two on
+     * the wire), timestamps stay unknown (null) on a newly created entry, and the
+     * description backfills from the Bash call's timeline row (blank until the page
+     * holding the call lands). */
+    private fun mineTaskOrigins(record: SubagentRecord, turns: List<TranscriptTurn>) {
+        for (turn in turns) {
+            val origin = turn.taskOrigin ?: continue
+            val status = origin.status?.toWireStatus() ?: continue
+            // A notification turn only exists once the task is terminal; a "running"
+            // origin would say nothing the live stream doesn't know better.
+            if (status == BackgroundTask.Status.Running) continue
+            val kind = when {
+                origin.taskId.startsWith("bash-") -> BackgroundTask.Kind.Bash
+                origin.taskId.startsWith("agent-") -> BackgroundTask.Kind.Subagent
+                else -> continue
+            }
+            record.upsertJobFromTranscript(Job(origin.taskId, kind, description = "", status, startedAt = null))
+        }
+        record.backfillJobDescriptions()
     }
 
     private fun onLifecycle(sessionId: String, event: SubagentLifecycleEvent) {

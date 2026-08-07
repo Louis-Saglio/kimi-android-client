@@ -188,7 +188,34 @@ class ChatMessageMapper @Inject constructor(json: Json) {
                 frames = step.frames.mapNotNull(::toDomain),
             )
         },
+        taskOrigin = dto.origin?.takeIf { it.kind == "task" }?.let(::toTaskOrigin),
     )
+
+    /** The `task` origin of a completion-notification turn (verified on 0.34.0 —
+     * docs/server-api.md, Transcript): `taskId` ships both flattened and inside
+     * `payload`, `status` only inside `payload`. Null when the task id is absent. */
+    private fun toTaskOrigin(dto: TranscriptOriginDto): TranscriptTaskOrigin? {
+        val taskId = (dto.payload?.get("taskId") as? JsonPrimitive)?.contentOrNull ?: dto.taskId
+        return taskId?.takeIf { it.isNotBlank() }?.let {
+            TranscriptTaskOrigin(
+                taskId = it,
+                status = taskOriginStatus((dto.payload?.get("status") as? JsonPrimitive)?.contentOrNull),
+            )
+        }
+    }
+
+    /** The origin's status — only "completed" is verified on the wire (0.34.0); the
+     * rest of the core vocabulary is assumed, an unknown value maps to null and the
+     * store's heal skips the turn instead of guessing. */
+    private fun taskOriginStatus(status: String?): TaskInfo.Status? = when (status) {
+        "running" -> TaskInfo.Status.Running
+        "completed" -> TaskInfo.Status.Completed
+        "failed" -> TaskInfo.Status.Failed
+        "timed_out" -> TaskInfo.Status.TimedOut
+        "killed" -> TaskInfo.Status.Killed
+        "lost" -> TaskInfo.Status.Lost
+        else -> null
+    }
 
     private fun toDomain(dto: TranscriptFrameDto): TranscriptFrame? = when (dto.kind) {
         "thinking" -> dto.text?.let { TranscriptFrame.Thinking(dto.frameId, it) }

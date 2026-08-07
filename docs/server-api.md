@@ -794,7 +794,9 @@ Turn → step → frame structure (verbatim keys, running sub-agent capture):
   field with the prompt text (seen on main-agent turns) — or
   `{"kind":"other","payload":{"kind":"system_trigger","name":"subagent"}}` for
   a sub-agent's internal turns (the task turn and the forced result-summary
-  turn; **no** `prompt` field — the task text is not in the transcript turns).
+  turn; **no** `prompt` field — the task text is not in the transcript turns)
+  — or a **`task` origin** on a background-task completion-notification turn
+  (see the verification below).
 - Step: `stepId` (`"t0.1"`), `turnId`, `ordinal`, `state`, `frames`.
 - Frames: `thinking` (`frameId`, `text`), `text` (`frameId`, `role` —
   `"assistant"` observed — `text`), and `tool` (`frameId`, `toolCallId`,
@@ -811,6 +813,30 @@ Turn → step → frame structure (verbatim keys, running sub-agent capture):
   `"failed"`; `"blocked"` folds into `"failed"`) plus `endedAt` / `durationMs`
   / `error` (message only) — previously every cold turn read `"completed"`.
   Journals written before 0.31.1 lack the records and keep the old default.
+
+**`task` turn origin — verified live on 0.34.0 (2026-08-07, ticket 099):**
+the background-task completion-notification turn ships its origin on the REST
+transcript too (owning agent's transcript — here a sub-agent's,
+`GET .../transcript?agent_id=agent-0`, session with two completed
+sub-agent-owned background bash tasks; verbatim turn, steps trimmed):
+
+```json
+{"kind":"turn","turnId":"t1","ordinal":1,"state":"completed",
+ "origin":{"kind":"task","taskId":"bash-xhlawxzk",
+           "payload":{"kind":"task","taskId":"bash-xhlawxzk","status":"completed",
+                      "notificationId":"task:bash-xhlawxzk:completed"}},
+ "prompt":"<notification id=\"task:bash-xhlawxzk:completed\" category=\"task\" type=\"task.completed\" source_kind=\"background_task\" source_id=\"bash-xhlawxzk\">\nTitle: Background process completed\n…\n</notification>"}
+```
+
+Two differences from the WS `turn.started` origin (Background lifecycle): the
+transcript shape wraps the origin in a **`payload`** object (the WS one is
+flat) and additionally flattens `taskId` at the origin's top level; `status`
+and `notificationId` live only inside `payload`. Only `"completed"` is
+verified for `status` (the `notificationId` embeds it:
+`task:<taskId>:<status>`) — a killed task whose notification turn never
+landed ships no such turn at all. Note the turn carries a top-level `prompt`
+(the `<notification …>` XML body) even though its origin is not `user` —
+`prompt` is not user-origin-only.
 
 Markers are interleaved between turns and must be tolerated, not rendered:
 
