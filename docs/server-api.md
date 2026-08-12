@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-08-06
-(server version `0.34.0`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-08-12
+(server version `0.35.0`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
@@ -14,22 +14,44 @@ the workspace list used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `0.33.0`
-(verified 2026-08-05; see git history), `0.32.0`
+**Protocol history:** this document previously described server `0.34.0`
+(verified 2026-08-06; see git history), `0.33.0`
+(verified 2026-08-05), `0.32.0`
 (verified 2026-08-05), `0.31.1`
 (verified 2026-07-31), `0.31.0`
 (verified 2026-07-30), `0.29.2`
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
-that, `0.27.0` before that, and `0.23.3` before that. The drift from 0.33.0 to
-0.34.0 is again **minor** for the core loop: every shape the Android app
-parses still decodes. An upstream diff of `packages/protocol` and
-`packages/kap-server` between the two tags (24 commits) shows the
-protocol-relevant work: sub-agent model/effort surfacing
+that, `0.27.0` before that, and `0.23.3` before that. The drift from 0.34.0 to
+0.35.0 is a **single wire change** for the core loop: the upstream diff of
+`packages/protocol` and `packages/kap-server` between the two tags (24
+commits) shows `packages/protocol` untouched and exactly three kap-server
+commits, of which only one touches the client-facing wire:
+
+- **WebSocket heartbeat is back** (commit `619564dc`, "survive proxy idle
+  timeouts"): `server_hello` now always carries `heartbeat_ms: 10000`, the
+  server sends app-level `ping` frames every 10 s, and closes the socket
+  (code `1001`, reason `"heartbeat timeout"`) after ~2 cycles (~20 s) of
+  total client silence. Clients should answer `ping` with
+  `{"type":"pong","payload":{"nonce":<echo>}}` — any inbound frame resets
+  the server's liveness timer, so ordinary control traffic also counts.
+  Details in the WebSocket → Heartbeat section. The other two kap-server
+  commits are internal: the debug-RPC dispatcher now also resolves services
+  from the global decorator registry (`86035497`), and the full-text search
+  index moved into a worker thread (`7cd64766`) — the search REST
+  request/response shapes and error codes are unchanged.
+- **`last_turn_reason` persisted fallback is now observable:** sessions that
+  ran turns under 0.34.0 report their persisted outcome after the restart
+  (verified on the pre-upgrade sessions — see the session-object section).
+
+The drift from 0.33.0 to 0.34.0 was again **minor** for the core loop: every
+shape the Android app parses still decoded. An upstream diff of
+`packages/protocol` and `packages/kap-server` between the two tags (24
+commits) showed the protocol-relevant work: sub-agent model/effort surfacing
 (`events.ts`/`task.ts`), the `/status` `max_context_tokens` optionality, a
-persisted `last_turn_reason` fallback for cold sessions, a new `/api/v2/sessions`
-table endpoint, MCP-server tombstoning (one new enum value), and skill
-activation attachments (out of scope). The real changes:
+persisted `last_turn_reason` fallback for cold sessions, a new
+`/api/v2/sessions` table endpoint, MCP-server tombstoning (one new enum
+value), and skill activation attachments (out of scope). The real changes:
 
 - **Sub-agent model/effort surfacing (the shaped drift):**
   `subagent.spawned` gained optional **`model`** and **`thinkingEffort`**
@@ -38,23 +60,20 @@ activation attachments (out of scope). The real changes:
   gained **`model`**/**`thinking_effort`** (snake_case). Observed
   `"kimi-code/k3"`/`"high"` throughout — the spawned child inherits the
   session's bound model. All additive; the app ignores them.
-- **Foreground sub-agents now register in the task store while running**
+- **Foreground sub-agents register in the task store while running**
   (unannounced): a `running` foreground sub-agent is listed by REST
   `/tasks`, stays fetchable by id once terminal, and `:cancel` works on it
   while running — still with **no `task.*` WS frames**, and the list drops
   it again once terminal. Details in the Sub-agents section.
-- **Session status:** `max_context_tokens` is now **omittable** when the
+- **Session status:** `max_context_tokens` became **omittable** when the
   context limit is unknown (upstream schema change — never observed omitted:
   fresh sessions report the 262144 default, k3 sessions 1048576). Minor:
   fresh sessions now report `thinking_level: ""` (was `"off"`).
-- **Session object:** `last_turn_reason` now falls back to a **persisted**
-  outcome for cold sessions (no live handle) — upstream only; not observable
-  here (pre-upgrade sessions have nothing persisted, so every pre-restart
-  session still omits it).
-- **Questions:** `multi_select` is now present on a question item **only
-  when true** (single-select items omit it) — the doc's long-standing
-  "treat absence as `false`" guidance covers it.
-- **Tools catalog:** `ReadMediaFile` is **back** — 27 builtin tools on
+- **Session object:** `last_turn_reason` gained the **persisted** fallback
+  for cold sessions (see the session-object section).
+- **Questions:** `multi_select` is present on a question item **only when
+  true** (single-select items omit it).
+- **Tools catalog:** `ReadMediaFile` came **back** — 27 builtin tools on
   initialized agents (26 on fresh never-prompted sessions; the catalog is
   resolved from the live agent's state).
 - **Sub-agent first message:** the `<git-context status="unavailable"
@@ -407,11 +426,12 @@ Session object shape (0.31.0, fields truncated for brevity):
   `pending_interaction` (`"none"` | `"approval"` | `"question"`),
   `last_turn_reason` (`"completed"` | `"cancelled"`). **`last_turn_reason` is
   absent entirely on sessions that have not run a turn yet** (re-verified
-  2026-07-23). **0.34.0 (upstream-only so far):** the field now falls back to
-  a **persisted** last-turn outcome for *cold* sessions (no live handle) —
-  previously only warm sessions reported it. Not observable right after the
-  upgrade: pre-0.34.0 sessions have nothing persisted, so they still omit it
-  (verified 2026-08-06 on 100 pre-restart sessions).
+  2026-07-23). **0.34.0:** the field gained a **persisted** last-turn
+  outcome fallback for *cold* sessions (no live handle) — previously only
+  warm sessions reported it. Not observable right after the 0.34.0 upgrade
+  (pre-0.34.0 sessions had nothing persisted); **observable since 0.35.0**
+  on the sessions that ran turns under 0.34.0 — e.g. a pre-restart session
+  now lists `"last_turn_reason": "completed"` cold (verified 2026-08-12).
 - `message_count` and `last_seq` are still present but observed stuck at `0`
   (re-verified 2026-07-23 after several turns) — do not rely on them.
 - The list envelope carries `has_more` for pagination (verified with
@@ -2007,21 +2027,44 @@ or put it last):
   'ws://127.0.0.1:58627/api/v1/ws?client_id=doc_verify_0290'
 ```
 
-First server frame is `server_hello` (unchanged):
+First server frame is `server_hello`; since 0.35.0 it always carries
+`heartbeat_ms` (captured 2026-08-12 on 0.35.0):
 
 ```json
-{"type":"server_hello","timestamp":"2026-07-23T03:26:48.774Z",
- "payload":{"ws_connection_id":"conn_01KY6G5WY5EKAC0EQGZRN8XKD9","protocol_version":2,
+{"type":"server_hello","timestamp":"2026-08-12T19:27:55.907Z",
+ "payload":{"ws_connection_id":"conn_01KZVQ44G3D5YNXTB65V0TRNZK","protocol_version":2,
+            "heartbeat_ms":10000,
             "max_event_buffer_size":1000,
             "capabilities":{"event_batching":false,"compression":false}}}
 ```
 
-### Heartbeat — gone in v2
+### Heartbeat — back in 0.35.0
 
-0.23.3 sent app-level `ping` frames every ~30 s and closed connections that did
-not answer with a matching `pong`. **v2 sends no pings** (zero observed across
-all 2026-07-22 and 2026-07-23 captures; the connections stayed open).
-Answering pings remains harmless if an older server sends them.
+History: 0.23.3 sent app-level `ping` frames every ~30 s; the v2 protocol
+(0.29.0 through 0.34.0) sent none. **0.35.0 reintroduces the heartbeat**
+(upstream commit `619564dc`, "add WebSocket heartbeat to survive proxy idle
+timeouts"; verified live 2026-08-12):
+
+- The server sends a `ping` frame every `heartbeat_ms` (default **10000**),
+  each with a fresh ULID `nonce`:
+
+  ```json
+  {"type":"ping","timestamp":"2026-08-12T19:28:05.908Z",
+   "payload":{"nonce":"01KZVQ4E8M7Y73ME5EZQMFQ971"}}
+  ```
+
+- The client should answer with `{"type":"pong","payload":{"nonce":<echo>}}`.
+  **Any inbound frame resets the server's liveness timer** — an unanswered
+  `ping` is harmless as long as the client sends ordinary control traffic
+  (subscribe, unsubscribe, …). The upstream docs keep `heartbeat_ms`
+  "advisory, not required".
+- After ~2 cycles of total client silence (~20 s at the default) the server
+  closes the socket with code **`1001`**, reason **`"heartbeat timeout"`**.
+  Observed live: a connection that subscribed once and then went silent got
+  `ping`s at +10 s and +20 s, then the connection closed before the +30 s
+  ping. Previously (0.29.0–0.34.0) the server never initiated a disconnect,
+  so idle app sockets stayed open indefinitely — clients that only listen
+  now reconnect every ~20 s unless they answer the pings.
 
 ### Subscribe to a session
 
@@ -2486,6 +2529,29 @@ selected option and free text both re-verified 2026-07-23:
 ```
 
 ## Verification log
+
+- 2026-08-12 re-verification on `0.35.0` (server 0.34.0 → 0.35.0; throwaway
+  session `session_4b7556dd-...` in `/home/ubuntu/spike`, guided by the
+  upstream 0.34.0→0.35.0 diff — 24 commits; `packages/protocol` untouched;
+  three kap-server commits, one wire-relevant: the WS heartbeat). Re-checked
+  unchanged: meta (capabilities + `experimental_flags`; `backend:"v2"`),
+  sessions list/create (`{"metadata":{"cwd":...}}`), session status (idle,
+  `max_context_tokens:262144`, `thinking_level:""`), messages (empty
+  `{"items":[],"has_more":false}`), WS handshake/subscribe/ack (cursor
+  `{seq,epoch}` unchanged). Drift found (detailed inline): (a) `server_hello`
+  gained `heartbeat_ms:10000` (always present); (b) new server→client `ping`
+  frames every 10 s with a ULID `nonce`, and a server-initiated close
+  (code `1001`, reason `"heartbeat timeout"`) after ~2 cycles (~20 s) of
+  total client silence — observed live on a silent subscribed connection
+  (pings at +10 s/+20 s, closed before +30 s); (c) the `last_turn_reason`
+  persisted fallback (schema new in 0.34.0) is now observable on cold
+  pre-restart sessions. Not re-triggered this run: prompts/steer/abort,
+  compact, questions, approvals, sub-agents, TodoList, files, search — no
+  upstream commits touched their shapes. App impact: the app parses none of
+  the new frames (`ping` falls into the unknown-type ignore — harmless), but
+  it never sends WS traffic while idle, so the heartbeat timeout now
+  force-closes its sockets every ~20 s of silence — reconnect churn on both
+  the chat and session-list sockets. Ticket 103 filed.
 
 - 2026-08-06 re-verification on `0.34.0` (server 0.33.0 → 0.34.0; throwaway
   sessions in `/home/ubuntu/spike`, guided by the upstream 0.33.0→0.34.0
