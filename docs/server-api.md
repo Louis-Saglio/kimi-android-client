@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-08-12
-(server version `0.35.0`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-08-13
+(server version `0.36.0`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
@@ -14,15 +14,75 @@ the workspace list used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `0.34.0`
-(verified 2026-08-06; see git history), `0.33.0`
+**Protocol history:** this document previously described server `0.35.0`
+(verified 2026-08-12; see git history), `0.34.0`
+(verified 2026-08-06), `0.33.0`
 (verified 2026-08-05), `0.32.0`
 (verified 2026-08-05), `0.31.1`
 (verified 2026-07-31), `0.31.0`
 (verified 2026-07-30), `0.29.2`
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
-that, `0.27.0` before that, and `0.23.3` before that. The drift from 0.34.0 to
+that, `0.27.0` before that, and `0.23.3` before that. The drift from 0.35.0 to
+0.36.0 is **minor** for the core loop — every shape the Android app parses
+still decoded. The upstream diff of `packages/protocol` and
+`packages/kap-server` between the two tags (19 commits) shows exactly five
+kap-server commits, of which only two touch the client-facing wire:
+
+- **Session object gained optional `archived_at`** (commit `43c68f58`, "keep
+  session updatedAt stable across meta management writes"): an ISO timestamp
+  set when the session is archived, cleared on restore; **absent for
+  never-archived sessions** (verified live — the fresh throwaway session
+  carries no `archived_at` key in create/list/get). The same commit makes
+  rename/archive non-bumping for `updated_at` (behavioral, not shape).
+  Source-derived; archiving is not exercised by the app.
+- **`GET /api/v1/config` shape** (commit `c9bfe8b2`, "replace the
+  secondary-model experiment with a declarative subagent model pool"): the
+  `secondary_model` key is **gone** from this server's response (was `{}` —
+  the experiment stays off, `experimental_flags["secondary-model"]: false`),
+  and a new **`subagent`** object appears (`{"timeoutMs": 7200000}` here —
+  the subagent idle-timeout config section, camelCase like the rest of the
+  response). The app consumes neither.
+- **Invisible here:** the other three kap-server commits are internal —
+  the debug-RPC dispatcher restriction (`26a37f30`), the agent-RPC
+  aggregation-layer removal (`23e68eee`; the `:abort` route now calls
+  `IAgentLoopService.cancelFromUser` — the REST ACK and the WS abort
+  sequence re-verified byte-identical), and the swarm scope reorganization
+  (`314b3948`; `events-zod.ts`/`coreEventMap.ts` diffs are import moves
+  only). The `c9bfe8b2` secondary-model work also touched
+  `legacyStatus.ts`/`modelCatalog.ts`/`errors.ts`, but every change is
+  gated on the experiment or the derived model entry: `/status` and
+  `/models` re-verified byte-identical with the experiment off, and the
+  only error-side change is `Error2(config.invalid)` now mapping to
+  envelope code `40001` instead of `50001` (a broken user config on session
+  resume — not triggered live, no config here produces it).
+- **Config-derived values observed this run** (not shape drift): the
+  session's thinking effort is `low` on this server now
+  (`GET /api/v1/config` `thinking.effort: "low"`), so `thinking_level`,
+  `thinkingEffort`, and the `thinking_effort` fields on
+  `subagent.spawned`/`task.*` info/REST `/tasks`/the snapshot roster all
+  read `"low"` where the 0.34.0 captures read `"high"` — the spawned
+  sub-agent inherits the session's effort along with its model.
+- **Everything else byte-identical**, re-verified live: meta
+  (`experimental_flags` gained `search_worker: true` and
+  `persistence_minidb_readmodel` flipped to `true` — flag values are
+  config, not protocol), models catalog, sessions list/create/get/status
+  (fresh `thinking_level: ""`, `max_context_tokens: 262144` present),
+  snapshot (top-level keys, roster `model`/`thinking_effort`, all-zero
+  `session.usage` placeholder), error envelopes (`40401` + `stack`, unknown
+  list cursor → `{"items":[],"has_more":false}`, `40922` bad v2 page token,
+  empty-session compact `40910`, terminal-task cancel `40904` with
+  `details.current_status`), WS hello (`heartbeat_ms: 10000`) / ack /
+  server pings, one full prompt round-trip with a foreground AND a
+  background sub-agent spawn (`agent.created`, `subagent.spawned` with
+  `model`/`thinkingEffort`, `task.started`/`task.terminated` + the
+  `background.task.*` aliases, `task.notified`, the `task`-origin
+  completion turn, REST `/tasks` list/get/cancel), a mid-turn `:abort`
+  (`interruptReason: "user_cancelled"` + the reminder splice), and a
+  compact with `instruction` (`compaction.started` echo +
+  `compaction.completed` + the history `compaction_summary` message).
+
+The drift from 0.34.0 to
 0.35.0 is a **single wire change** for the core loop: the upstream diff of
 `packages/protocol` and `packages/kap-server` between the two tags (24
 commits) shows `packages/protocol` untouched and exactly three kap-server
@@ -311,22 +371,24 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
 {
   "code": 0, "msg": "success",
   "data": {
-    "server_version": "0.33.0",
+    "server_version": "0.36.0",
     "capabilities": {"websocket": true, "file_upload": true, "fs_query": true, "mcp": true, "tasks": true, "terminal": true},
-    "server_id": "01KZ9P3ESZ9RDMQVWSD940VH8P",
-    "started_at": "2026-08-05T19:23:45.343Z",
+    "server_id": "01KZY99XDH0AQ49RVQ4M1TKZAC",
+    "started_at": "2026-08-13T19:24:08.497Z",
     "open_in_apps": [],
     "dangerous_bypass_auth": false,
     "backend": "v2",
-    "experimental_flags": {"secondary-model": false, "tool-select": false, "persistence_minidb_readmodel": false}
+    "experimental_flags": {"secondary-model": false, "tool-select": false, "persistence_minidb_readmodel": true, "search_worker": true}
   },
-  "request_id": "01KZ9P45K79DRWGD2PR8J9ZEVA"
+  "request_id": "01KZY9JH4YR0TYF0MHKSYHTX6M"
 }
 ```
 
 - **`experimental_flags` is new in 0.32.0** (additive): the effective
-  server-side experiment switches. All `false` on this server; treat every
-  flag as optional.
+  server-side experiment switches. Flag *values* are config, not protocol —
+  on 0.36.0 (2026-08-13) `persistence_minidb_readmodel` and `search_worker`
+  read `true`, and `search_worker` is a new flag key. Treat every flag as
+  optional.
 
 ## Models
 
@@ -382,6 +444,10 @@ unchanged from 0.29.2):
   in 0.31.0, additive): `{}` on this server (2026-07-30). It is writable via
   `POST /api/v1/config`; per upstream, the POST body is snake_case while the
   GET echoes camelCase for some fields. The Android app consumes neither.
+  **0.36.0:** the key is **absent** from this server's GET response (the
+  experiment is off and nothing is configured), and the response gained a
+  **`subagent`** object (`{"timeoutMs": 7200000}` here — the subagent
+  idle-timeout section, camelCase; upstream commit `c9bfe8b2`).
 
 ## Sessions
 
@@ -432,6 +498,11 @@ Session object shape (0.31.0, fields truncated for brevity):
   (pre-0.34.0 sessions had nothing persisted); **observable since 0.35.0**
   on the sessions that ran turns under 0.34.0 — e.g. a pre-restart session
   now lists `"last_turn_reason": "completed"` cold (verified 2026-08-12).
+- **0.36.0 (additive, source-derived):** optional **`archived_at`** (ISO
+  timestamp) — set when the session is archived, cleared on restore;
+  **absent for never-archived sessions** (verified live 2026-08-13: the
+  fresh throwaway session carries no `archived_at` key in create/list/get).
+  Upstream commit `43c68f58`; clients fall back to `updated_at` for display.
 - `message_count` and `last_seq` are still present but observed stuck at `0`
   (re-verified 2026-07-23 after several turns) — do not rely on them.
 - The list envelope carries `has_more` for pagination (verified with
@@ -1691,7 +1762,8 @@ sub-agent's `agent.status.updated`** — a duplicate of the one that follows
 `agent.created`. **0.34.0 (additive):** the payload gained **`model`** and
 **`thinkingEffort`** (camelCase; the spawned child inherits the session's
 bound model — `"kimi-code/k3"`/`"high"` observed on both foreground and
-background spawns). The pair, verbatim (0.34.0):
+background spawns; **0.36.0:** `"low"` observed — the effort follows the
+session's thinking config, re-verified 2026-08-13). The pair, verbatim (0.34.0):
 
 ```json
 {"type":"subagent.spawned","seq":33,"payload":{"type":"subagent.spawned","subagentId":"agent-2","subagentName":"agent","parentToolCallId":"tool_jaW1ZPJgetZxZ4ZgLQmQM4wP","parentAgentId":"main","callerAgentId":"main","description":"Reply OK","runInBackground":false,"model":"kimi-code/k3","thinkingEffort":"high","agentId":"main","sessionId":"session_1143a947-..."}}
@@ -2529,6 +2601,47 @@ selected option and free text both re-verified 2026-07-23:
 ```
 
 ## Verification log
+
+- 2026-08-13 re-verification on `0.36.0` (server 0.35.0 → 0.36.0; throwaway
+  session `session_3d09cba8-...` in `/home/ubuntu/spike`, guided by the
+  upstream 0.35.0→0.36.0 diff — 19 commits; five kap-server commits, two
+  wire-relevant: `43c68f58` (session `archived_at`) and `c9bfe8b2` (config
+  shape / error mapping); the debug-RPC restriction, the agent-RPC
+  aggregation removal and the swarm scope reorganization are import-move or
+  internal diffs). Re-verified unchanged, most byte-for-byte: meta
+  (`backend:"v2"`; `experimental_flags` values drifted —
+  `persistence_minidb_readmodel:true`, new `search_worker:true` flag),
+  models catalog, sessions create/get/list/status (fresh
+  `thinking_level:""`, `max_context_tokens:262144` present, no
+  `archived_at` key on a never-archived session), snapshot (top-level keys,
+  roster `model`/`thinking_effort`, all-zero `session.usage` placeholder),
+  error envelopes (`40401` + `stack`, unknown list cursor →
+  `{"items":[],"has_more":false}`, `40922` bad v2 page token, empty-session
+  compact `40910` + `stack`, terminal-task `:cancel` `40904` with
+  `details.current_status`), WS hello (`heartbeat_ms:10000`) / ack /
+  server `ping` frames, one full prompt round-trip with a foreground AND a
+  background sub-agent spawn (`agent.created` ×2, `subagent.spawned` with
+  `model`/`thinkingEffort`, `subagent.started`/`completed`, sub-agent-tagged
+  turn frames, `task.started`/`task.terminated` + the `background.task.*`
+  legacy aliases, `task.notified`, the `{"kind":"task"}` completion-turn
+  origin, REST `/tasks` list/get `with_output`), a mid-turn `:abort`
+  (`turn.step.interrupted` → `turn.ended` `interruptReason:"user_cancelled"`
+  → reminder splice → idle `work_changed` → `prompt.aborted`), and a
+  compact with `instruction` (`compaction.started` echo,
+  `compaction.completed` result keys, the `compaction_summary` history
+  message, `tokensAfter` semantics). Drift found (all detailed inline):
+  (a) session object gained optional `archived_at` (source-derived; absent
+  on never-archived sessions — verified live); (b) `GET /api/v1/config`
+  dropped the `secondary_model` key and gained `subagent`
+  (`{"timeoutMs":7200000}` here); (c) `Error2(config.invalid)` now maps to
+  envelope `40001` instead of `50001` (not triggered live). Config-derived
+  values this run: session thinking effort is `low`, so every
+  `thinkingEffort`/`thinking_effort` capture reads `"low"` (was `"high"` on
+  0.34.0). Not re-triggered this run: questions, approvals, steer, files,
+  search, workspaces/trust, transcript paging — no upstream commit touched
+  their shapes. App impact: no breakage — `archived_at` is additive,
+  `subagent` is additive, and the app consumes neither `secondary_model`
+  nor the config route's new field. No `todo/` tickets filed.
 
 - 2026-08-12 re-verification on `0.35.0` (server 0.34.0 → 0.35.0; throwaway
   session `session_4b7556dd-...` in `/home/ubuntu/spike`, guided by the
