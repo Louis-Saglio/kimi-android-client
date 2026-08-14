@@ -21,6 +21,7 @@ import fr.louissaglio.kimi.android.data.chat.SessionSnapshot
 import fr.louissaglio.kimi.android.data.chat.SocketEvent
 import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.TodoParser
+import fr.louissaglio.kimi.android.data.chat.agentTaskIdOf
 import fr.louissaglio.kimi.android.data.chat.isSubagentScoped
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
 import fr.louissaglio.kimi.android.data.sessions.displayName
@@ -866,6 +867,9 @@ class ChatViewModel internal constructor(
                     resultText = row.output.ifBlank { null },
                     rowStatus = row.status,
                 )
+                // A background Agent result's `task_id: agent-…` marker is background
+                // proof for the jobs seed's foreground filter (ticket 101).
+                agentTaskIdOf(row.name, row.output)?.let(jobsStore::onBackgroundTaskId)
             }
         applySubagentLinks()
     }

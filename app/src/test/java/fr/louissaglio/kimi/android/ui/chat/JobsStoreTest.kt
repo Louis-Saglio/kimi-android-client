@@ -207,13 +207,17 @@ class JobsStoreTest {
     }
 
     @Test
-    fun `a live started heals the sub-agent link a REST-seeded job lacks`() = runBlocking {
+    fun `a live event heals the sub-agent link a REST-seeded job lacks`() = runBlocking {
+        // A terminal REST entry (a background sub-agent that finished while the
+        // session was away — a RUNNING unknown one would now be filtered as a
+        // foreground ghost, ticket 101): REST carries no agentId.
         server.enqueue(
             MockResponse(body =
                 """{"code":0,"msg":"success","data":{"items":[""" +
                     """{"id":"agent-7noib8bb","session_id":"session_1","kind":"subagent",""" +
-                    """"description":"doc-verify-bg","status":"running",""" +
-                    """"created_at":"2026-07-28T03:40:08.039Z","started_at":"2026-07-28T03:40:08.039Z"}""" +
+                    """"description":"doc-verify-bg","status":"completed",""" +
+                    """"created_at":"2026-07-28T03:40:08.039Z","started_at":"2026-07-28T03:40:08.039Z",""" +
+                    """"completed_at":"2026-07-28T03:40:22.372Z"}""" +
                     """]},"request_id":"r"}""",
             ),
         )
@@ -221,10 +225,87 @@ class JobsStoreTest {
         awaitCondition { uiState.jobs.isNotEmpty() }
         assertEquals(null, uiState.jobs.single().agentId)
 
-        // The live task.started carries info.agentId — the page link (ticket 092).
-        store.onStarted(taskInfo(taskId = "agent-7noib8bb", status = TaskInfo.Status.Running, agentId = "agent-13"))
+        // The replayed task.terminated carries info.agentId — the page link
+        // (ticket 092).
+        store.onTerminated(
+            taskInfo(
+                taskId = "agent-7noib8bb",
+                status = TaskInfo.Status.Completed,
+                agentId = "agent-13",
+                endedAt = Instant.ofEpochMilli(1785210101939),
+            ),
+        )
 
         assertEquals("agent-13", uiState.jobs.single().agentId)
+    }
+
+    @Test
+    fun `a REST-seeded running subagent unknown to the background set is filtered as foreground`() = runBlocking {
+        // Ticket 101: since server 0.34.0 a RUNNING foreground sub-agent is listed
+        // by REST /tasks; unknown to the WS/marker background set, it is a ghost —
+        // no job row. The bash entry is unaffected.
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"items":[""" +
+                    """{"id":"agent-fg1","session_id":"session_1","kind":"subagent",""" +
+                    """"description":"explore the repo","status":"running",""" +
+                    """"created_at":"2026-08-06T10:00:00.000Z","started_at":"2026-08-06T10:00:00.000Z"},""" +
+                    """{"id":"bash-1","session_id":"session_1","kind":"bash",""" +
+                    """"description":"sleep 1000","status":"running",""" +
+                    """"created_at":"2026-08-06T10:01:00.000Z","started_at":"2026-08-06T10:01:00.000Z"}""" +
+                    """]},"request_id":"r"}""",
+            ),
+        )
+
+        store.seed()
+        awaitCondition { uiState.jobs.isNotEmpty() }
+
+        assertEquals(listOf("bash-1"), uiState.jobs.map { it.taskId })
+
+        // The same id once learned via a task.started frame (background
+        // classification) survives the next seed.
+        store.onStarted(taskInfo(taskId = "agent-bg1", status = TaskInfo.Status.Running, agentId = "agent-13"))
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"items":[""" +
+                    """{"id":"agent-fg1","session_id":"session_1","kind":"subagent",""" +
+                    """"description":"explore the repo","status":"running",""" +
+                    """"created_at":"2026-08-06T10:00:00.000Z","started_at":"2026-08-06T10:00:00.000Z"},""" +
+                    """{"id":"agent-bg1","session_id":"session_1","kind":"subagent",""" +
+                    """"description":"doc-verify-bg","status":"running",""" +
+                    """"created_at":"2026-08-06T10:02:00.000Z","started_at":"2026-08-06T10:02:00.000Z"},""" +
+                    """{"id":"bash-1","session_id":"session_1","kind":"bash",""" +
+                    """"description":"sleep 1000","status":"running",""" +
+                    """"created_at":"2026-08-06T10:01:00.000Z","started_at":"2026-08-06T10:01:00.000Z"}""" +
+                    """]},"request_id":"r"}""",
+            ),
+        )
+        store.seed()
+        awaitCondition { uiState.jobs.any { it.taskId == "agent-bg1" && it.description == "doc-verify-bg" } }
+
+        assertEquals(setOf("bash-1", "agent-bg1"), uiState.jobs.map { it.taskId }.toSet())
+    }
+
+    @Test
+    fun `an Agent result task_id marker marks the id as background for the seed`() = runBlocking {
+        // Ticket 101: on a re-entered session the task.started predates the
+        // subscription — the history row's `task_id: agent-…` stub is the background
+        // proof that keeps the still-running sub-agent's job row.
+        store.onBackgroundTaskId("agent-bg1")
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"items":[""" +
+                    """{"id":"agent-bg1","session_id":"session_1","kind":"subagent",""" +
+                    """"description":"doc-verify-bg","status":"running",""" +
+                    """"created_at":"2026-08-06T10:02:00.000Z","started_at":"2026-08-06T10:02:00.000Z"}""" +
+                    """]},"request_id":"r"}""",
+            ),
+        )
+
+        store.seed()
+        awaitCondition { uiState.jobs.isNotEmpty() }
+
+        assertEquals(listOf("agent-bg1"), uiState.jobs.map { it.taskId })
     }
 
     @Test

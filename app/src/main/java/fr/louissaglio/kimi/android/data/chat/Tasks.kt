@@ -70,7 +70,7 @@ data class TaskInfo(
     enum class Status { Running, Completed, Failed, TimedOut, Killed, Lost }
 }
 
-private val BASH_TASK_ID = Regex("""task_id:\s*(\S+)""")
+private val TASK_ID = Regex("""task_id:\s*(\S+)""")
 
 /**
  * The row→job link of a background Bash call (ticket 096): the call's tool result is
@@ -83,9 +83,24 @@ private val BASH_TASK_ID = Regex("""task_id:\s*(\S+)""")
  */
 fun bashTaskIdOf(toolName: String, output: String): String? {
     if (toolName != "Bash") return null
-    val id = BASH_TASK_ID.find(output.lineSequence().firstOrNull().orEmpty())
+    val id = TASK_ID.find(output.lineSequence().firstOrNull().orEmpty())
         ?.groupValues?.get(1)
     return id?.takeIf { it.startsWith("bash-") }
+}
+
+/**
+ * The task id of a background `Agent` call (ticket 101): its result stub's FIRST
+ * line is `task_id: agent-…` (docs/server-api.md — same wire format as the bash
+ * stub, the `agent-` prefix distinguishing the two). JobsStore learns the id into
+ * its known-background set, so the REST `/tasks` seed keeps the still-running
+ * background sub-agent whose `task.started` predates the subscription instead of
+ * filtering it as a foreground ghost.
+ */
+fun agentTaskIdOf(toolName: String, output: String): String? {
+    if (toolName != AGENT_TOOL_NAME) return null
+    val id = TASK_ID.find(output.lineSequence().firstOrNull().orEmpty())
+        ?.groupValues?.get(1)
+    return id?.takeIf { it.startsWith("agent-") }
 }
 
 /** The harness's kill budget for a background Bash call whose input sets no explicit

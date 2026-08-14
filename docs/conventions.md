@@ -51,7 +51,12 @@
   the shared `ChatViewModelTestBase` harness. `JobsStore` (ticket 092) backs the
   composer jobs pill/sheet (`UiState.jobs`, event-driven — REST `/tasks` is only
   the cold-start/`resync_required` seed, never polled; cancel is optimistic,
-  40904 = already-terminal success). The pill is sticky (ticket 094): visible
+  40904 = already-terminal success). The seed drops a RUNNING subagent-kind entry
+  unknown to the store's known-background set (ids learned from live `task.*`
+  frames and `Agent` result `task_id:` markers — ticket 101): since server
+  0.34.0 that's a foreground sub-agent, whose UI home is the sub-agent
+  roster/page; terminal subagent entries stay listed (REST drops foreground
+  tasks once terminal, so a terminal listing is always a background job). The pill is sticky (ticket 094): visible
   whenever the session has ANY background task (running or terminal — the
   unfiltered REST seed resurrects it across re-entries), labeled
   `Jobs · finished/total` (finished = completed/cancelled/failed — the Todos
