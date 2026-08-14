@@ -21,7 +21,9 @@ import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
@@ -44,9 +46,10 @@ class SessionSocket @Inject constructor(
     private val json: Json,
     private val mapper: ChatMessageMapper,
 ) {
-    // Protocol-level WS pings keep the socket alive through dead NAT routes: the v2
-    // server sends no app-level pings (docs/server-api.md, Heartbeat). The read timeout
-    // stays disabled so an idle stream is not cut (the shared client sets 30 s for REST).
+    // Protocol-level WS pings keep the socket alive through dead NAT routes; the
+    // 0.35.0 app-level heartbeat (docs/server-api.md, Heartbeat) is answered in
+    // handleFrame. The read timeout stays disabled so an idle stream is not cut
+    // (the shared client sets 30 s for REST).
     private val socketClient = client.newBuilder()
         .readTimeout(0, TimeUnit.SECONDS)
         .pingInterval(20, TimeUnit.SECONDS)
@@ -192,7 +195,7 @@ class SessionSocket @Inject constructor(
                         webSocket.send(subscribeFrame(sessionId, cursor))
                     }
                     is Signal.Text ->
-                        handleFrame(signal.text, sessionId, onCursor, onResyncRequired, onEvent)
+                        handleFrame(webSocket, signal.text, sessionId, onCursor, onResyncRequired, onEvent)
                     Signal.Closed -> return
                     is Signal.Failed -> throw IOException("WebSocket failed", signal.cause)
                 }
@@ -205,6 +208,7 @@ class SessionSocket @Inject constructor(
 
     /** One bad frame must not kill the connection: parse failures are dropped. */
     private suspend fun handleFrame(
+        webSocket: WebSocket,
         text: String,
         sessionId: String,
         onCursor: (Cursor) -> Unit,
@@ -357,6 +361,13 @@ class SessionSocket @Inject constructor(
             "ack" -> frame.decodePayload<AckPayload>()
                 ?.takeIf { sessionId in it.resyncRequired }
                 ?.let { onResyncRequired() }
+            // App-level heartbeat (0.35.0 — docs/server-api.md, Heartbeat): the server
+            // pings every 10 s and closes the socket after ~20 s of client silence, so
+            // the nonce is echoed back in a pong. A ping without a decodable nonce is
+            // ignored like any other undecodable payload.
+            "ping" -> frame.payload?.get("nonce")?.jsonPrimitive?.contentOrNull
+                ?.let { webSocket.send(pongFrame(it)) }
+                ?: Log.w(TAG, "Dropping 'ping' frame without a nonce")
             // server_hello and events we don't render yet: ignored, but logged so a
             // server rename shows up during development.
             else -> Log.d(TAG, "Ignoring '${frame.type}' frame")
@@ -399,6 +410,11 @@ class SessionSocket @Inject constructor(
                 }
             }
         }
+    }.toString()
+
+    private fun pongFrame(nonce: String): String = buildJsonObject {
+        put("type", "pong")
+        putJsonObject("payload") { put("nonce", nonce) }
     }.toString()
 
     private companion object {

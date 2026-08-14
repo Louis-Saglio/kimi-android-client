@@ -74,6 +74,79 @@ class OkHttpSessionListSocketTest {
             .containsKey("cursors")
 
     @Test
+    fun `a server ping is answered with a pong echoing the nonce`() = runBlocking {
+        // 0.35.0 heartbeat (docs/server-api.md, Heartbeat): the answer must go over the
+        // wire as exactly one pong with the echoed nonce.
+        sessionIds.value = linkedSetOf("session_1")
+        val clientFrames = CopyOnWriteArrayList<String>()
+        server.enqueue(
+            webSocketUpgradeResponse(
+                recordingListener(
+                    clientFrames,
+                    // Ping once, right after the subscribe lands (answering the ping
+                    // would re-trigger this hook otherwise).
+                    onClientFrame = { webSocket ->
+                        if (clientFrames.size == 1) {
+                            webSocket.send("""{"type":"ping","payload":{"nonce":"abc"}}""")
+                        }
+                    },
+                ),
+            ),
+        )
+        coroutineScope {
+            val job = launch { socket.observe(settings(), sessionIds).collect {} }
+            try {
+                awaitCondition { clientFrames.size >= 2 }
+                // Settle: no second pong, no other frame.
+                delay(200)
+            } finally {
+                job.cancel()
+            }
+        }
+
+        assertEquals(2, clientFrames.size)
+        assertEquals("""{"type":"pong","payload":{"nonce":"abc"}}""", clientFrames[1])
+    }
+
+    @Test
+    fun `a ping without a nonce is ignored`() = runBlocking {
+        sessionIds.value = linkedSetOf("session_1")
+        val clientFrames = CopyOnWriteArrayList<String>()
+        val events = CopyOnWriteArrayList<SessionListEvent>()
+        server.enqueue(
+            webSocketUpgradeResponse(
+                recordingListener(
+                    clientFrames,
+                    onClientFrame = { webSocket ->
+                        if (clientFrames.size == 1) {
+                            webSocket.send("""{"type":"ping","payload":{}}""")
+                            // One deliverable frame after the ping proves the socket survived.
+                            webSocket.send(workChangedFrame("session_1", busy = true, pendingInteraction = "none"))
+                        }
+                    },
+                ),
+            ),
+        )
+        coroutineScope {
+            val job = launch { socket.observe(settings(), sessionIds).collect { events += it } }
+            try {
+                awaitCondition { events.isNotEmpty() }
+                // Settle: the malformed ping must have arrived and produced no frame.
+                delay(200)
+            } finally {
+                job.cancel()
+            }
+        }
+
+        assertEquals(
+            listOf(SessionListEvent.WorkChanged("session_1", busy = true, pendingInteraction = "none")),
+            events,
+        )
+        // Only the subscribe ever went out.
+        assertEquals(1, clientFrames.size)
+    }
+
+    @Test
     fun `the first subscribe carries exactly the loaded ids in one frame, without cursors`() = runBlocking {
         sessionIds.value = linkedSetOf("session_1", "session_2")
         val clientFrames = CopyOnWriteArrayList<String>()
