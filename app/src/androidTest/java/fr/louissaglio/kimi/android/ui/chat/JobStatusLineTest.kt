@@ -2,6 +2,7 @@ package fr.louissaglio.kimi.android.ui.chat
 
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
@@ -52,7 +53,7 @@ class JobStatusLineTest {
             .onNode(
                 SemanticsMatcher.expectValue(
                     SemanticsProperties.ProgressBarRangeInfo,
-                    ProgressBarRangeInfo(0.25f, 0f..1f),
+                    ProgressBarRangeInfo(0.5f, 0f..1f),
                 ),
             )
             .assertIsDisplayed()
@@ -71,8 +72,16 @@ class JobStatusLineTest {
         statusLine(runningState(elapsedSeconds = 15, budgetSeconds = null))
 
         composeTestRule.onNodeWithText("running · 00:15").assertIsDisplayed()
+        // Newer M3 reports an indeterminate ProgressBarRangeInfo (0.0..0.0) on the
+        // running glyph's CircularProgressIndicator — only the determinate budget bar
+        // (0.0..1.0) is forbidden here.
         composeTestRule
-            .onAllNodes(SemanticsMatcher.keyIsDefined(SemanticsProperties.ProgressBarRangeInfo))
+            .onAllNodes(
+                SemanticsMatcher("has a determinate ProgressBarRangeInfo") {
+                    val info = it.config.getOrNull(SemanticsProperties.ProgressBarRangeInfo)
+                    info != null && info.range.endInclusive > info.range.start
+                },
+            )
             .assertCountEquals(0)
     }
 

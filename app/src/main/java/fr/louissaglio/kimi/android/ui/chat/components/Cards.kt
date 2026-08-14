@@ -182,7 +182,10 @@ internal fun QuestionCard(
                         if (item.multiSelect) {
                             Checkbox(
                                 checked = option.id in selections[item.id].orEmpty(),
-                                onCheckedChange = if (readOnly) null else ({ toggle() }),
+                                onCheckedChange = { toggle() },
+                                // Keep the handler (null drops the toggleable semantics in
+                                // current M3); read-only means disabled, still announced.
+                                enabled = !readOnly,
                             )
                         } else {
                             RadioButton(
