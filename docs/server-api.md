@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-08-13
-(server version `0.36.0`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-08-14
+(server version `0.36.1`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
@@ -14,8 +14,9 @@ the workspace list used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `0.35.0`
-(verified 2026-08-12; see git history), `0.34.0`
+**Protocol history:** this document previously described server `0.36.0`
+(verified 2026-08-13; see git history), `0.35.0`
+(verified 2026-08-12), `0.34.0`
 (verified 2026-08-06), `0.33.0`
 (verified 2026-08-05), `0.32.0`
 (verified 2026-08-05), `0.31.1`
@@ -23,7 +24,34 @@ used are shown with each section. Secrets are redacted (`<token>`).
 (verified 2026-07-30), `0.29.2`
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
-that, `0.27.0` before that, and `0.23.3` before that. The drift from 0.35.0 to
+that, `0.27.0` before that, and `0.23.3` before that. The drift from 0.36.0 to
+0.36.1 is again **minor** for the core loop — additive fields only. The
+upstream diff between the two tags (25 commits) shows four kap-server commits,
+of which two touch the client-facing wire, both on the **REST `/tasks`
+responses** (list, get, `with_output`):
+
+- **Subagent-kind task objects gained three optional fields** (commits
+  `325913a5` and `cb30a779`): `agent_id` (the sub-agent registry id,
+  `"agent-0"`-style — the same id the WS `subagent.*`/snapshot roster uses),
+  `subagent_type` (`"explore"`, …), and `parent_tool_call_id` (the main
+  agent's `Agent` tool-call id). All three are emitted only for
+  `kind:"subagent"` tasks; bash/tool tasks omit them. Verified live —
+  see the Tasks section. The doc's earlier note that the REST shape has "no
+  `subagent_type`, no `parent_tool_call_id`" no longer holds.
+- **Invisible here:** the other two kap-server commits are additive route
+  additions outside the core loop — the plugin marketplace / capability REST
+  routes (`741708f9`) and the 64 MiB web session-export limit removal
+  (`eb72aebe`). The remaining commits are web-bundle, TUI, vscode, oauth,
+  minidb and test-only changes; `packages/protocol` is otherwise untouched.
+- **Meta flag drift** (config, not protocol): `experimental_flags` gained
+  `auto_session_title: false` (upstream `6be26978`, titles via a managed
+  `chat_title` tool — off here).
+- **Everything else byte-identical**, spot-verified live: meta, session
+  create/get, `/status` (k3 session → `max_context_tokens:1048576`,
+  `thinking_level:"low"`), WS `server_hello` (`protocol_version:2`,
+  `heartbeat_ms:10000`), prompts POST, `:abort` ACK.
+
+The drift from 0.35.0 to
 0.36.0 is **minor** for the core loop — every shape the Android app parses
 still decoded. The upstream diff of `packages/protocol` and
 `packages/kap-server` between the two tags (19 commits) shows exactly five
@@ -371,23 +399,24 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
 {
   "code": 0, "msg": "success",
   "data": {
-    "server_version": "0.36.0",
+    "server_version": "0.36.1",
     "capabilities": {"websocket": true, "file_upload": true, "fs_query": true, "mcp": true, "tasks": true, "terminal": true},
-    "server_id": "01KZY99XDH0AQ49RVQ4M1TKZAC",
-    "started_at": "2026-08-13T19:24:08.497Z",
+    "server_id": "01M00VNYAPE809G5H3DH71H2T1",
+    "started_at": "2026-08-14T19:23:45.878Z",
     "open_in_apps": [],
     "dangerous_bypass_auth": false,
     "backend": "v2",
-    "experimental_flags": {"secondary-model": false, "tool-select": false, "persistence_minidb_readmodel": true, "search_worker": true}
+    "experimental_flags": {"auto_session_title": false, "secondary-model": false, "tool-select": false, "persistence_minidb_readmodel": true, "search_worker": true}
   },
-  "request_id": "01KZY9JH4YR0TYF0MHKSYHTX6M"
+  "request_id": "01M00VQCQDH7QTWWBC9CYP77MJ"
 }
 ```
 
 - **`experimental_flags` is new in 0.32.0** (additive): the effective
   server-side experiment switches. Flag *values* are config, not protocol —
-  on 0.36.0 (2026-08-13) `persistence_minidb_readmodel` and `search_worker`
-  read `true`, and `search_worker` is a new flag key. Treat every flag as
+  on 0.36.1 (2026-08-14) `persistence_minidb_readmodel` and `search_worker`
+  read `true`, and `auto_session_title` (new key in 0.36.1, `false` here)
+  gates server-side session-title generation. Treat every flag as
   optional.
 
 ## Models
@@ -1966,21 +1995,28 @@ curl -s -X POST -H "Authorization: Bearer <token>" \
   `prompt.aborted` — still **no `task.*` frames** and no
   `subagent.failed`/`subagent.completed` for it.
 
-Task object (verbatim, 0.34.0 — **gained `model`/`thinking_effort`**
-(snake_case) on subagent-kind objects, in list and get, running and
-terminal):
+Task object (verbatim, 0.36.1 — subagent-kind objects carry `model`/
+`thinking_effort` (snake_case, since 0.34.0) and, **new in 0.36.1**,
+`agent_id`, `subagent_type` and `parent_tool_call_id`, in list and get,
+running and terminal):
 
 ```json
-{"id":"agent-he52q7i9","session_id":"session_...","kind":"subagent",
- "description":"Trivial OK reply task","status":"completed",
- "created_at":"2026-08-06T19:29:46.209Z","started_at":"2026-08-06T19:29:46.209Z",
- "completed_at":"2026-08-06T19:30:01.502Z",
- "model":"kimi-code/k3","thinking_effort":"high",
- "output_preview":"OK","output_bytes":2}
+{"id":"agent-l38j2zce","session_id":"session_...","kind":"subagent",
+ "description":"doc-verify","status":"completed",
+ "created_at":"2026-08-14T19:25:58.172Z","started_at":"2026-08-14T19:25:58.172Z",
+ "completed_at":"2026-08-14T19:26:07.709Z",
+ "model":"kimi-code/k3","thinking_effort":"low",
+ "agent_id":"agent-0","subagent_type":"explore",
+ "parent_tool_call_id":"tool_FXrHPtQ0ieUGu1EpztqzhreZ",
+ "output_preview":"OK — but to be candid: …","output_bytes":1513}
 ```
 
-The REST shape is thinner than the WS/snapshot one: no `subagent_type`, no
-`parent_tool_call_id`, and `created_at` == `started_at`.
+(`output_preview`/`output_bytes` only with `with_output=true`.) The three new
+fields are emitted only on `kind:"subagent"` tasks — bash/tool tasks omit
+them. `agent_id` is the sub-agent registry id the WS `subagent.*` events and
+the snapshot roster already use, so REST tasks can now be joined to the
+roster without matching on `description`. `created_at` == `started_at` still
+holds.
 
 Background **bash** tasks live in their own id namespace (`bash-…`, vs
 `agent-…` for sub-agents) and carry the shell **`command`** on the wire
@@ -2601,6 +2637,28 @@ selected option and free text both re-verified 2026-07-23:
 ```
 
 ## Verification log
+
+- 2026-08-14 re-verification on `0.36.1` (server 0.36.0 → 0.36.1; throwaway
+  session `session_e03e5ddc-...` in `/home/ubuntu/spike`, guided by the
+  upstream 0.36.0→0.36.1 diff — 25 commits; four kap-server commits, two
+  wire-relevant and both on REST `/tasks`: `325913a5` (`agent_id`) and
+  `cb30a779` (`subagent_type`/`parent_tool_call_id`); the plugin-marketplace
+  routes (`741708f9`) and the session-export limit removal (`eb72aebe`) are
+  additive routes outside the core loop). Spot-verified unchanged, most
+  byte-for-byte: meta (`backend:"v2"`; `experimental_flags` gained
+  `auto_session_title:false`), session create/get (no `archived_at` on a
+  never-archived session), `/status` on a k3 session
+  (`max_context_tokens:1048576`, `thinking_level:"low"`), prompts POST,
+  `:abort` ACK, WS `server_hello` (`protocol_version:2`,
+  `heartbeat_ms:10000`). Drift found (detailed inline): subagent-kind
+  `/tasks` objects (list, get, `with_output`) gained optional `agent_id`,
+  `subagent_type` and `parent_tool_call_id` — verified live on a background
+  `explore` sub-agent (`agent_id:"agent-0"` joins to the WS/snapshot roster
+  id). Not re-triggered this run: questions, approvals, steer, compact,
+  files, snapshot, foreground sub-agents — no upstream commit touched their
+  shapes. App impact: no breakage — all three fields are additive optional
+  and every app parser runs `ignoreUnknownKeys = true`; the app simply does
+  not consume them yet. No `todo/` tickets filed.
 
 - 2026-08-13 re-verification on `0.36.0` (server 0.35.0 → 0.36.0; throwaway
   session `session_3d09cba8-...` in `/home/ubuntu/spike`, guided by the
