@@ -979,6 +979,38 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun `getSessionStatus drops the context usage when max_context_tokens is omitted`() = runBlocking {
+        // 0.34.0 (ticket 100): max_context_tokens is omittable; 0 is the engine's
+        // unknown marker, never a real limit — no ContextUsage must reach the UI.
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"busy":true,"context_tokens":25050,""" +
+                    """"context_usage":0.0239},"request_id":"01KX"}""",
+            ),
+        )
+
+        assertEquals(
+            SessionStatus(busy = true, contextUsage = null),
+            repository.getSessionStatus(settings(), "session_1").getOrThrow(),
+        )
+    }
+
+    @Test
+    fun `getSessionStatus drops the context usage when max_context_tokens is zero`() = runBlocking {
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"busy":false,"context_tokens":25050,""" +
+                    """"max_context_tokens":0,"context_usage":0.0},"request_id":"01KX"}""",
+            ),
+        )
+
+        assertEquals(
+            SessionStatus(busy = false, contextUsage = null),
+            repository.getSessionStatus(settings(), "session_1").getOrThrow(),
+        )
+    }
+
+    @Test
     fun `agent status usage frame emits the context usage, phase frame emits nothing`() = runBlocking {
         // Verbatim 0.29.0 shapes (docs/server-api.md, Agent status). The settle wait
         // covers the phase frame: it must arrive and still produce no event.

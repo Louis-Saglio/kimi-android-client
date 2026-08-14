@@ -319,7 +319,11 @@ class ChatApi @Inject constructor(
             api.json.decodeFromString<Envelope<SessionStatusData>>(body).toNullableResult().map { data ->
                 SessionStatus(
                     busy = data?.busy == true,
-                    contextUsage = data?.let { ContextUsage(it.contextTokens, it.maxContextTokens) },
+                    // 0.34.0: max_context_tokens is omittable, 0 decodes as the unknown
+                    // marker — drop the usage instead of leaking a phantom 0/0 fill
+                    // (same rule as the snapshot guard, ChatMessageMapper).
+                    contextUsage = data?.takeIf { it.maxContextTokens > 0 }
+                        ?.let { ContextUsage(it.contextTokens, it.maxContextTokens) },
                 )
             }
         }
