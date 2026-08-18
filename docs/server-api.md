@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-08-14
-(server version `0.36.1`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-08-18
+(server version `0.37.2`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
@@ -14,7 +14,8 @@ the workspace list used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `0.36.0`
+**Protocol history:** this document previously described server `0.36.1`
+(verified 2026-08-14; see git history), `0.36.0`
 (verified 2026-08-13; see git history), `0.35.0`
 (verified 2026-08-12), `0.34.0`
 (verified 2026-08-06), `0.33.0`
@@ -24,7 +25,63 @@ used are shown with each section. Secrets are redacted (`<token>`).
 (verified 2026-07-30), `0.29.2`
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
-that, `0.27.0` before that, and `0.23.3` before that. The drift from 0.36.0 to
+that, `0.27.0` before that, and `0.23.3` before that.
+
+The drift from 0.36.1 to 0.37.2 is **minor for the core loop, with one real
+break**: the image/video source projection changed. The upstream diff between
+the two tags (43 commits) touched the client-facing wire in exactly these
+places:
+
+- **Image/video `source` gained a 4th kind `session_media`** (commit
+  `d833a1a8`, "engine-native image references via kimi-file:// media
+  resolver"): history (`GET .../messages`) and the prompt ACK echo now project
+  uploaded images and videos as
+  `{"type":"image","source":{"kind":"session_media","file_id":"f_…"}}` instead
+  of the 0.36.1 shapes (ACK base64 / history `url:data:…`). The `file` kind
+  stays as the transient upload form accepted on submission. A new endpoint
+  `GET /api/v1/sessions/{id}/media/{file_id}` serves the canonical
+  Session-owned copy. **The Android app's image mapper only knows
+  `base64`/`url`/`file`, so history/splice image parts are dropped** — ticket
+  104. Verified live: a 1×1 png uploaded then prompted produced
+  `kind:"session_media"` in both the ACK and history, and both
+  `/api/v1/files/{f_…}` and `/api/v1/sessions/{id}/media/{f_…}` returned the
+  70 bytes (the upload id is reused as the session-media id for uploaded
+  files).
+- **`turn.ended` gained optional `time`** (commit `3ded0808`, "expose turn
+  ended event time") — an epoch-ms number in the payload, declared in the
+  protocol schema. Live, `turn.started` and `prompt.completed` also emit a
+  top-level `time` (epoch ms) without a matching schema field. All additive;
+  the app ignores them.
+- **`turn.started` gained optional `promptId`** (commit `d833a1a8`): the prompt
+  record id echoed when the submitter sent `prompt_id`.
+- **Prompt POST gained `skills` and `prompt_id`** (commits `d6021fa0`/
+  `61591bce` and `d833a1a8`): `skills` is `[{name, args?}]` (bundled skill
+  activations), `prompt_id` a client-chosen record id echoed on the ACK
+  `prompt_id` / `user_message_id`, the history message id, and
+  `turn.started.promptId`. Both optional; the app sends neither.
+- **`/meta` gained optional `web_title`** (commit `09976b09`): present only
+  when the server was started with `--web-title`; absent here (verified live).
+- **New error code `40927`** (`PROMPT_ID_CONFLICT`, reason
+  `prompt.id_conflict`) when a client-chosen `prompt_id` is already used in the
+  agent's history.
+- **`/api/v2/sessions` grew** (commit `eaa3969d`): a stateless 1-based `page`
+  param, a `fields=id,archived` item projection (`page_size` ceiling relaxed to
+  10000), `meta.updated_before`, a `total` count on every page, and new
+  `POST /api/v2/sessions:archive` / `:restore` batch endpoints. The Android app
+  does not use v2 (doc-only).
+- **Config drift (not shape):** `GET /api/v1/config` now reports
+  `default_model: "deepseek/deepseek-v4-pro"` and `thinking.effort: "high"`;
+  the models catalog gained four `deepseek/*` entries
+  (`max_context_size: 1000000`); a fresh model-less session's `/status` now
+  reports `max_context_tokens: 1000000` (the default model's context, was
+  262144). All values, not protocol.
+
+Everything else spot-verified unchanged live: v1 session object/list/create/
+get/status, WS `server_hello`/heartbeat/`subscribe`/`ack`, and one full prompt
+round-trip emitting the complete event stream for two turns
+(`turn.started`/`context.spliced`/deltas/`turn.ended`/`prompt.completed`).
+
+The drift from 0.36.0 to
 0.36.1 is again **minor** for the core loop — additive fields only. The
 upstream diff between the two tags (25 commits) shows four kap-server commits,
 of which two touch the client-facing wire, both on the **REST `/tasks`
@@ -399,25 +456,28 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
 {
   "code": 0, "msg": "success",
   "data": {
-    "server_version": "0.36.1",
+    "server_version": "0.37.2",
     "capabilities": {"websocket": true, "file_upload": true, "fs_query": true, "mcp": true, "tasks": true, "terminal": true},
-    "server_id": "01M00VNYAPE809G5H3DH71H2T1",
-    "started_at": "2026-08-14T19:23:45.878Z",
+    "server_id": "01M0B58VCJKD97XHSQN45VWE90",
+    "started_at": "2026-08-18T19:23:46.962Z",
     "open_in_apps": [],
     "dangerous_bypass_auth": false,
     "backend": "v2",
-    "experimental_flags": {"auto_session_title": false, "secondary-model": false, "tool-select": false, "persistence_minidb_readmodel": true, "search_worker": true}
+    "experimental_flags": {"secondary-model": false, "auto_session_title": false, "tool-select": false, "persistence_minidb_readmodel": true, "search_worker": true}
   },
-  "request_id": "01M00VQCQDH7QTWWBC9CYP77MJ"
+  "request_id": "01M0B59KZ0TMNAB51M7CJT62PC"
 }
 ```
 
 - **`experimental_flags` is new in 0.32.0** (additive): the effective
   server-side experiment switches. Flag *values* are config, not protocol —
-  on 0.36.1 (2026-08-14) `persistence_minidb_readmodel` and `search_worker`
-  read `true`, and `auto_session_title` (new key in 0.36.1, `false` here)
-  gates server-side session-title generation. Treat every flag as
-  optional.
+  on 0.37.2 (2026-08-18) `persistence_minidb_readmodel` and `search_worker`
+  read `true`, and `auto_session_title` (`false` here) gates server-side
+  session-title generation. Treat every flag as optional.
+- **`web_title` is new in 0.37.2** (additive): the instance's `--web-title`
+  browser-tab label, present only when the server was started with that flag;
+  omitted here (verified live 2026-08-18). Treat it as an optional instance
+  label.
 
 ## Models
 
@@ -467,8 +527,12 @@ unchanged from 0.29.2):
 - The server-wide default model is *not* in this response — it comes from
   `GET /api/v1/config` (`data.default_model`). This is a config value, not
   protocol: it read `kimi-code/kimi-for-coding` on 0.29.1 (2026-07-25),
-  `kimi-code/k3` on 0.29.2 (2026-07-27) and `kimi-code/k3-256k` on 0.31.0
-  (2026-07-30) — the server may change it independently of protocol drift.
+  `kimi-code/k3` on 0.29.2 (2026-07-27), `kimi-code/k3-256k` on 0.31.0
+  (2026-07-30), and **`deepseek/deepseek-v4-pro` on 0.37.2** (2026-08-18) —
+  the server may change it independently of protocol drift. The catalog above
+  is the 0.31.0 capture; **0.37.2 adds four `deepseek/*` entries**
+  (`deepseek/deepseek-v4-flash`, `-pro`, `-chat`, `-reasoner`; all
+  `max_context_size: 1000000`, no `support_efforts`) — additive.
 - `GET`/`POST /api/v1/config` also carries a **`secondary_model`** field (new
   in 0.31.0, additive): `{}` on this server (2026-07-30). It is writable via
   `POST /api/v1/config`; per upstream, the POST body is snake_case while the
@@ -605,8 +669,10 @@ session's current config (`"off"`/`"yolo"` observed on a fresh session;
 **0.34.0:** a fresh session now reports `thinking_level: ""`). **0.34.0:**
 `max_context_tokens` is now **omittable when the context limit is unknown**
 (upstream schema change — `0` is the engine's "unknown" marker, never a real
-limit); never observed omitted live — a fresh session reports the 262144
-default and a k3 session 1048576 (re-verified 2026-08-06). Clients should
+limit); never observed omitted live — a fresh model-less session reports the
+default model's context (262144 on 0.34.0–0.36.1; **1000000 since 0.37.2**,
+the `deepseek/deepseek-v4-pro` default) and a k3 session 1048576 (re-verified
+2026-08-18). Clients should
 still treat an absent/zero limit as "unknown", never render a 0/0 ring.
 
 ### Session snapshot — `GET /api/v1/sessions/{id}/snapshot`
@@ -698,12 +764,19 @@ curl -s -H "Authorization: Bearer <token>" \
  "request_id":"01KZC8QQD9DPQWP6HGBWTHTMV3"}
 ```
 
-- Query params: `page_size` (1–100, default 50; `0`/over-100 → `40001`),
-  `sort` (`meta.updated_at_desc` default | `meta.updated_at_asc` |
-  `meta.created_at_desc`; anything else → `40001` listing the options), and
+- Query params (0.37.2 additions marked): `page_size` (1–100, default 50;
+  `0`/over-100 → `40001`; **with `fields=id,archived` the ceiling relaxes to
+  10000**), `sort` (`meta.updated_at_desc` default | `meta.updated_at_asc` |
+  `meta.created_at_desc`; anything else → `40001` listing the options),
   `page_token` (opaque base64 **v1-fingerprint keyset cursor** — decodes to
   `{"v":1,"f":"<fingerprint>","k":[<updated_at_ms>,"<session_id>"]}`;
-  multi-page continuation verified, no overlap). Items are ordered by
+  multi-page continuation verified, no overlap), **`page` (0.37.2: stateless
+  1-based page number; mutually exclusive with `page_token` — combining them →
+  `40001`; `next_page_token` is always `null` in this mode)**,
+  **`meta.updated_before` (0.37.2: epoch ms upper bound on `meta.updated_at`)**,
+  and **`fields` (0.37.2: only `id,archived`, trimming each item to
+  `{id, archived}`; any other field/combination → `40001`; not combinable with
+  `include=git`)**. Items are ordered by
   `meta.updated_at` desc by default. Unknown params (`limit`, `cursor`,
   `workspace_id`, `archived`, `q`, …) are **silently ignored**.
 - Bad page tokens are a **new error code `40922`** (HTTP 200, envelope;
@@ -712,6 +785,23 @@ curl -s -H "Authorization: Bearer <token>" \
   `"page_token does not match the query conditions; …"`.
 - `activity.status` observed only as `"idle"` on this server; `title` /
   `last_prompt` are `null` when unset.
+- **0.37.2:** every page carries **`total`** (the size of the filtered set);
+  with `fields=id,archived` each item is just `{id, archived}` (verified live).
+
+### Batch archive/restore — `POST /api/v2/sessions:archive` / `:restore`
+
+**New in 0.37.2** (commit `eaa3969d`; verified live). Body
+`{"ids":["session_…"]}` — non-empty, ≤5000 unique ids (duplicates collapse).
+Only a body-validation failure fails the whole request (`40001`); otherwise the
+response is per-item: `data.results` keeps input order with `{id, ok}` or
+`{id, ok:false, error}` (an unknown id reports `40401` in its own item), plus
+`succeeded`/`failed` counts:
+
+```json
+{"code":0,"msg":"success",
+ "data":{"results":[{"id":"session_…","ok":true}],"succeeded":1,"failed":0},
+ "request_id":"…"}
+```
 
 ## Workspaces
 
@@ -1116,6 +1206,20 @@ Binary stream; supports `Range` (`accept-ranges: bytes` verified).
 
 Response: `{"code":0,"msg":"success","data":{"deleted":true},…}` (verified).
 
+### Session media — `GET /api/v1/sessions/{id}/media/{file_id}`
+
+**New in 0.37.2** (commit `d833a1a8`; verified live 2026-08-18). Serves the
+Session-owned canonical copy of prompt media (images/videos) referenced by a
+`session_media` content source. Same binary semantics as the file download:
+`Range` supported (`206`, `accept-ranges: bytes`), `content-disposition` inline
+for image/video/audio. Errors return **HTTP 404** (not the usual HTTP-200
+envelope): unknown session → `40401` "session not found", unknown file →
+`40406` "file not found". For media uploaded through `POST /api/v1/files` the
+`file_id` is the same `f_…` id, so the legacy `GET /api/v1/files/{id}` still
+serves it (verified live: both returned the same 70 bytes for a 1×1 png); the
+session-media route is the canonical path and the only one that works for media
+that never passed through the daemon upload store.
+
 ## Prompts
 
 ### Send — `POST /api/v1/sessions/{id}/prompts`
@@ -1172,12 +1276,14 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../promp
     `~/.kimi-code/sessions/<workspace_id>/<session_id>`) — the agent reads them
     from disk; the web client parses this notice back into a chip with a regex,
     so its wording is a client contract.
-  - Uploaded images are inlined as base64, but the shape **differs between the
-    prompt ACK and history**: the `POST .../prompts` response echoes
-    `{"type":"image","source":{"kind":"base64","media_type":"…","data":"…"}}`,
-    while `GET .../messages` returns
-    `{"type":"image","source":{"kind":"url","url":"data:<mime>;base64,…"}}`.
-    Clients must accept both.
+  - **0.37.2 change (verified live):** uploaded images now project to
+    `{"type":"image","source":{"kind":"session_media","file_id":"f_…"}}` in
+    BOTH the prompt ACK echo and `GET .../messages` — the transient `file`
+    upload is promoted to a Session-owned canonical copy at intake, and the
+    ACK/history no longer carry base64 or `url:data:…`. Fetch the bytes via
+    `GET /api/v1/sessions/{id}/media/{file_id}` (see Files). The pre-0.37.2
+    shapes — ACK `{"kind":"base64","media_type","data"}`, history
+    `{"kind":"url","url":"data:<mime>;base64,…"}` — no longer occur.
   - Large images are compressed before enqueueing (verified: a 14.1 MB
     2600×1900 png was downscaled to 1000×731; a 3.2 MB one passed through
     untouched). A compression then prepends a separate **text part** wrapped in
@@ -1187,13 +1293,21 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../promp
     "<sessionDir>/media-originals/<hash>.<ext>"; if you need fine detail (e.g.
     small text), call ReadMediaFile on that path …`. Formats the model rejects
     degrade to the "Attached file" notice above (source-derived, not verified).
-  - Videos appear as `{type:"video", source:{kind:"file", file_id}}` over REST
-    (source-derived; unreachable live on 0.29.0, see validation note above).
+  - Videos project the same `session_media` source kind as images since 0.37.2
+    (`{type:"video", source:{kind:"session_media", file_id}}`); the earlier
+    `file`-kind video shape was source-derived and unreachable live (the 0.29.0
+    upload sniffer never returned `video/*`).
 - Optional body fields (per-prompt overrides): `permission_mode`
   (`manual`/`auto`/`yolo` — `manual` verified live), `model` (verified: a
   session with empty `agent_config.model` runs when the prompt carries one),
   `thinking`, `plan_mode`, `swarm_mode`, `agent_id`, `metadata`,
-  `goal_objective`, `goal_control`.
+  `goal_objective`, `goal_control`, `disabled_tools`, `prompt_id` (**0.37.2**:
+  a client-chosen prompt record id echoed on the ACK `prompt_id`/
+  `user_message_id`, the history message id, and `turn.started.promptId`;
+  reusing one already in the agent's history answers `40927`
+  `prompt.id_conflict`), and `skills` (**0.37.2**:
+  `[{"name":"…","args":"…"}]` bundled skill activations — the app sends none;
+  skills stay out of scope).
 - `thinking` (verified live 2026-07-24, ticket 032) is a **plain effort
   string**, not an object: `"thinking": "low"`. Values come from the model's
   `support_efforts` (`GET /api/v1/models`; K3 on 0.29.0: `low`/`high`/`max`,
@@ -2455,15 +2569,25 @@ Verbatim:
 the prompt text. **0.31.1, additive:** `turn.ended` gained an optional
 `interruptReason` (`"user_cancelled"` / `"aborted"` / `"max_steps"` /
 `"error"` / `"filtered"` / `"blocked"`), present when a turn stops early —
-a REST `:abort` reports `"user_cancelled"` (verbatim capture in Abort):
+a REST `:abort` reports `"user_cancelled"` (verbatim capture in Abort).
+**0.37.2, additive:** `turn.ended` gained optional **`time`** (epoch ms,
+schema-declared — commit `3ded0808`); live, `turn.started` and
+`prompt.completed` also emit a top-level `time` (epoch ms) without a matching
+schema field. `turn.started` also gained optional **`promptId`** (the
+submitter's `prompt_id`). The app ignores all of them. Verbatim 0.37.2 frames
+(one turn, seqs trimmed):
 
 ```json
-{"type":"turn.started","seq":5,
- "payload":{"type":"turn.started","turnId":0,"origin":{"kind":"user"},
-            "prompt":"Run exactly this one command, then reply done: echo doc-verify-0290",
+{"type":"turn.started","seq":4,
+ "payload":{"type":"turn.started","time":1787081841775,"turnId":0,"origin":{"kind":"user"},
+            "prompt":"Reply with exactly: one-ok-0372",
             "agentId":"main","sessionId":"session_..."}}
-{"type":"turn.ended","seq":19,
- "payload":{"type":"turn.ended","turnId":0,"reason":"completed","durationMs":91351,
+{"type":"turn.ended","seq":9,
+ "payload":{"type":"turn.ended","time":1787081845958,"turnId":0,"reason":"completed","durationMs":4182,
+            "agentId":"main","sessionId":"session_..."}}
+{"type":"prompt.completed","seq":11,
+ "payload":{"type":"prompt.completed","time":1787081845959,"promptId":"msg_01M0B61Q2PTMSXVXRX0DSHJ2C1",
+            "finishedAt":"2026-08-18T19:37:25.959Z","reason":"completed",
             "agentId":"main","sessionId":"session_..."}}
 ```
 
@@ -2572,7 +2696,8 @@ Both are followed (after the REST decision) by `event.approval.resolved` →
 `permission.approval.resolved` v2 duplicate (adds `"decision"` to the request
 payload).
 
-**Prompt finished:** unchanged:
+**Prompt finished** (0.37.2: the payload also carries `time`, epoch ms — see the
+`turn.started`/`turn.ended` note above; otherwise unchanged):
 
 ```json
 {"type":"prompt.completed","seq":21,
@@ -2637,6 +2762,41 @@ selected option and free text both re-verified 2026-07-23:
 ```
 
 ## Verification log
+
+- 2026-08-18 re-verification on `0.37.2` (server 0.36.1 → 0.37.2; throwaway
+  sessions `session_956685b4-...` / `session_378ba373-...` in
+  `/home/ubuntu/spike`, guided by the upstream 0.36.1→0.37.2 diff — 43
+  commits; the wire-relevant ones are the media resolver (`d833a1a8`),
+  `turn.ended` time (`3ded0808`), `/meta` `web_title` (`09976b09`), the prompt
+  `skills`/`prompt_id` fields (`d6021fa0`/`d833a1a8`), and the v2-sessions
+  page/projection/batch-archive work (`eaa3969d`)). Re-verified unchanged, most
+  byte-for-byte: meta (capabilities + `experimental_flags` + `backend:"v2"`;
+  `web_title` absent), v1 session object/list/create/get/status (fresh
+  `thinking_level:""`, `pending_interaction:"none"`, no `archived_at`/no
+  `last_turn_reason` on fresh never-archived sessions), WS
+  `server_hello`/`ack`/`ping` (heartbeat 10 s), and one full prompt round-trip
+  on a fresh session emitting the complete event stream for two turns
+  (`agent.created`, `turn.started`, `context.spliced`, deltas,
+  `turn.step.*`, `turn.ended`, `prompt.completed`). Drift found (all detailed
+  inline): (a) image/video `source` gained `session_media` — history AND the
+  prompt ACK now project uploaded images as
+  `{kind:"session_media",file_id}` instead of base64/`url:data:…` (live-
+  verified with a 1×1 png; new `GET /api/v1/sessions/{id}/media/{file_id}`
+  endpoint serves the copy) — **this breaks the app's image rendering**, ticket
+  104; (b) `turn.ended` gained `time` (epoch ms; `turn.started`/
+  `prompt.completed` emit it live too, schema-undocumented); (c) `turn.started`
+  gained `promptId`; (d) prompt POST gained `skills`/`prompt_id` (the latter
+  echoed on ACK/history/`turn.started.promptId`); (e) `/meta` gained
+  `web_title` (absent here); (f) error code `40927` `prompt.id_conflict`;
+  (g) `/api/v2/sessions` gained `page`, `fields=id,archived`,
+  `meta.updated_before`, `total`, and `POST :archive`/`:restore` batch
+  endpoints (app doesn't use v2). Config drift this run: default model is now
+  `deepseek/deepseek-v4-pro`, `thinking.effort` `"high"`, four `deepseek/*`
+  models added, and a fresh session's `/status` `max_context_tokens` reads
+  1000000. Not re-triggered this run: questions, approvals, steer, compact,
+  files upload/delete, sub-agents, TodoList, search, workspaces — no upstream
+  commit touched their shapes. App impact: one breakage (image
+  `session_media`); ticket 104 filed.
 
 - 2026-08-14 re-verification on `0.36.1` (server 0.36.0 → 0.36.1; throwaway
   session `session_e03e5ddc-...` in `/home/ubuntu/spike`, guided by the
