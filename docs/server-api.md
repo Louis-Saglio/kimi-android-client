@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-08-18
-(server version `0.37.2`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-08-20
+(server version `0.38.0`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
@@ -14,7 +14,8 @@ the workspace list used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `0.36.1`
+**Protocol history:** this document previously described server `0.37.2`
+(verified 2026-08-18; see git history), `0.36.1`
 (verified 2026-08-14; see git history), `0.36.0`
 (verified 2026-08-13; see git history), `0.35.0`
 (verified 2026-08-12), `0.34.0`
@@ -26,6 +27,88 @@ used are shown with each section. Secrets are redacted (`<token>`).
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
 that, `0.27.0` before that, and `0.23.3` before that.
+
+The drift from 0.37.2 to 0.38.0 is **small, mostly additive — with one
+behavioral break for the app** (the question-id split below). The upstream
+diff between the two tags (38 commits) touched the
+client-facing wire in exactly these places:
+
+- **`/meta` gained `features`** (commit `cb8a7e5f`, "expose engine feature
+  list on /api/v1/meta"): a `[{name, state, meta}]` list of the engine's
+  feature units (all `"Active"` here — `btw`, `plan`, `externalHooks`,
+  `goal`, `todo`, …). Additive; the app ignores it. `experimental_flags`
+  also gained **`wait_for: true`** (the new `WaitFor` tool's switch).
+- **`GET /api/v2/sessions` gained a workspace-grouped view** (commit
+  `15da8460`): new params `meta.has_prompt` (`true` = the v1
+  `exclude_empty` equivalent), `view=flat|by_workspace`, and
+  `group.page_size` (1–100, default 5; only valid with the grouped view).
+  Under `view=by_workspace` the page becomes `{groups:[{workspace,
+  sessions[], total}], total, has_more, next_page_token}` — see the v2
+  section. The Android app does not use v2 (doc-only).
+- **New global WS event `event.session.archived`** (commit `15da8460`):
+  fires on both the live and the cold archive path, no subscription needed;
+  the envelope `session_id` is the global watermark `__global__` and the real
+  session id rides in the payload as camelCase `sessionId`:
+  `{"type":"event.session.archived","session_id":"__global__",...,"payload":{"type":"event.session.archived","workspace_id":"wd_…","agentId":"main","sessionId":"session_…"}}`
+  (verified live 2026-08-20 via `POST /api/v2/sessions:archive`). There is no
+  session-deleted event. **The Android app does not listen for it — sessions
+  archived from another client stay in the app's list until a manual
+  refresh** — ticket 105.
+- **Snapshot `session.usage` is real now** (commit `4ff06f17`, "serve real
+  session usage in snapshot"): the all-zero placeholder served since 0.32.0
+  is gone — after a turn the snapshot reports the actual
+  `input_tokens`/`context_tokens`/…. In the same commit the usage schema made
+  **`total_cost_usd`, `context_limit`, and `turn_count` optional**: the
+  snapshot's usage omits `total_cost_usd` and `turn_count` (the list/create/get
+  session object still emits all eight fields). The snapshot `session` also
+  gained **`agent_config: {model}`** (`""` when unset). See the Snapshot
+  section. The app defaults every usage field, so omission decodes fine; it
+  still takes the live context fill from `/status` + `agent.status.updated`.
+- **`/status` `context_usage` is now optional** (same commit): omitted when
+  the context limit is unknown, like `max_context_tokens` since 0.34.0. The
+  app doesn't decode `context_usage` at all.
+- **`turn.started` gained optional `promptAttachments`** (commit `38a5a934`):
+  `[{kind:"image"|"video"|"audio", fileId}]` — the session-media references
+  carried by the prompt, for transcript attachment projection. Schema-derived;
+  **not observed live on 0.38.0** — a prompt whose image resolved to
+  `session_media` still emitted `turn.started` without the field (and without
+  `promptId`). Additive either way; the app ignores it.
+- **`question_id` split from `tool_call_id`** (one of the 0.38.0
+  interaction/agent-domain refactors — the route/service files are unchanged;
+  verified live 2026-08-20): pending questions and `event.question.requested`
+  now carry a dedicated `question_<uuid>` `question_id` plus a **distinct**
+  `tool_call_id` (they were equal before). The answer/dismiss routes keyed on
+  `question_id` work unchanged — **but the app's question wizard correlated a
+  pending question with its transcript tool row via the old equality, so the
+  row tap no longer reopens the card** — ticket 106.
+- **`subagent.spawned` gained optional `taskId`** (commits `be8e0175` /
+  `3b69765c`): the background-task id the run registered under, and the event
+  now fires **after** task registration (so cancel/status actions can bind
+  immediately); the duplicate launch-time `subagent.spawned` emission was
+  removed. Verified live on foreground and background spawns. Additive; the
+  app binds background tasks via `task.*` frames.
+- **Every event payload now emits a top-level epoch-ms `time`** (observed on
+  `assistant.delta`/`thinking.delta`, `subagent.*`, `task.*`, `tool.call.*`,
+  `compaction.*` — extending the 0.37.2 `turn.*`/`prompt.completed` fields).
+  All additive; the app ignores them.
+- **Tool catalog:** the new **`WaitFor`** tool (commits `8440801d`/`01eeacb5`,
+  flag `wait_for: true`) brings the catalog back to 27 entries, and
+  **`ReadMediaFile` is no longer advertised** to non-multimodal models
+  (commit `f13f3790`) — it is absent from this server's catalog.
+- **Invisible here:** cron tasks are now persisted as durable wire records
+  (`eac9ea88` — cron is out of scope), the multi-action routes were
+  re-dispatched table-driven (`c843d3a7` — no wire change), and the rest is
+  web-bundle/TUI/vscode/oauth/datasource work.
+
+Everything else re-verified unchanged live on 0.38.0 (see the verification
+log): auth 401s, sessions list/create/get/status, v2 flat table + batch
+archive/restore, messages history, prompts POST + steer + `:abort`, the
+questions flow mechanics (surface/answer/dismiss; the id drift is called out
+above), compact (both bodies, the WS sequence, both
+`40910`s), files upload/download/delete + session media, WS
+hello/heartbeat/subscribe/ack/cursor-resume, one full prompt round-trip with
+image attachments, foreground + background sub-agents, REST `/tasks`, the
+TodoList contract, and the full snapshot.
 
 The drift from 0.36.1 to 0.37.2 is **minor for the core loop, with one real
 break**: the image/video source projection changed. The upstream diff between
@@ -456,18 +539,29 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
 {
   "code": 0, "msg": "success",
   "data": {
-    "server_version": "0.37.2",
+    "server_version": "0.38.0",
     "capabilities": {"websocket": true, "file_upload": true, "fs_query": true, "mcp": true, "tasks": true, "terminal": true},
-    "server_id": "01M0B58VCJKD97XHSQN45VWE90",
-    "started_at": "2026-08-18T19:23:46.962Z",
+    "server_id": "01M0GA2B0T9DCCX6R71FER69QR",
+    "started_at": "2026-08-20T19:23:48.634Z",
     "open_in_apps": [],
     "dangerous_bypass_auth": false,
     "backend": "v2",
-    "experimental_flags": {"secondary-model": false, "auto_session_title": false, "tool-select": false, "persistence_minidb_readmodel": true, "search_worker": true}
+    "experimental_flags": {"secondary-model": false, "auto_session_title": false, "wait_for": true, "tool-select": false, "persistence_minidb_readmodel": true, "search_worker": true},
+    "features": [
+      {"name": "btw", "state": "Active", "meta": {}},
+      {"name": "plan", "state": "Active", "meta": {}},
+      {"name": "goal", "state": "Active", "meta": {}},
+      {"name": "todo", "state": "Active", "meta": {}}
+    ]
   },
-  "request_id": "01M0B59KZ0TMNAB51M7CJT62PC"
+  "request_id": "01M0GA352XAX1W241G81810N19"
 }
 ```
+
+(`features` trimmed to 4 of 13 entries; the full 0.38.0 list here is `btw`,
+`plan`, `externalHooks`, `debugEvents`, `swarm`, `goal`, `staleGuard`,
+`tower`, `usage`, `dateChange`, `tokenCounting`, `sessionInit`, `todo` — all
+`"Active"` with empty `meta`.)
 
 - **`experimental_flags` is new in 0.32.0** (additive): the effective
   server-side experiment switches. Flag *values* are config, not protocol —
@@ -478,6 +572,11 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
   browser-tab label, present only when the server was started with that flag;
   omitted here (verified live 2026-08-18). Treat it as an optional instance
   label.
+- **`features` is new in 0.38.0** (additive; upstream commit `cb8a7e5f"): the
+  engine's feature-unit list, `[{name, state, meta}]`. Diagnostic metadata —
+  treat every entry as optional. `experimental_flags` gained `wait_for: true`
+  in the same release (the `WaitFor` tool's switch; flag values are config,
+  not protocol).
 
 ## Models
 
@@ -672,7 +771,10 @@ session's current config (`"off"`/`"yolo"` observed on a fresh session;
 limit); never observed omitted live — a fresh model-less session reports the
 default model's context (262144 on 0.34.0–0.36.1; **1000000 since 0.37.2**,
 the `deepseek/deepseek-v4-pro` default) and a k3 session 1048576 (re-verified
-2026-08-18). Clients should
+2026-08-18). **0.38.0:** **`context_usage` is now omittable too** (same
+commit `4ff06f17`, same "unknown" rule — upstream schema made it optional;
+still present on this server, `0` on a fresh session, re-verified 2026-08-20).
+Clients should
 still treat an absent/zero limit as "unknown", never render a 0/0 ring.
 
 ### Session snapshot — `GET /api/v1/sessions/{id}/snapshot`
@@ -691,16 +793,36 @@ verified live on 0.31.1 (2026-08-01). Top-level keys of `data`:
   `main_turn_active`, `pending_interaction`, `last_turn_reason`, `usage`, …).
   When it carries a real fill, the context numbers live at
   `session.usage.context_tokens` / `session.usage.context_limit` — NOT the
-  `/status` naming (`context_tokens`/`max_context_tokens`). **0.32.0 drift:**
-  `session.usage` is the server's all-zero placeholder on every read path
-  (every field zeroed — verified live 2026-08-05 on busy AND idle sessions
-  with 48k–121k real context tokens per `/status`; on 0.31.1 only idle
-  sessions zeroed both). kimi-web documents the same
-  (`isPlaceholderSessionUsage`: "both engines return placeholders for the
-  heavy session fields on the list/snapshot read paths"). The context fill's
-  only live sources are `GET .../status` and the WS `agent.status.updated`
-  stream — clients must treat the placeholder as "unknown" (never render a
-  0/0 ring) and re-read `/status` to converge, like both official clients.
+  `/status` naming (`context_tokens`/`max_context_tokens`). **0.38.0 drift
+  (commit `4ff06f17`): the all-zero placeholder is gone — the snapshot now
+  serves REAL usage** (verified live 2026-08-20: after a turn
+  `input_tokens`/`context_tokens` report actuals and `context_limit` the real
+  window, e.g. 262144; on a fresh session `context_tokens: 0` with
+  `context_limit` already set). In the same commit the usage schema made
+  **`total_cost_usd`, `context_limit`, and `turn_count` optional** — the
+  snapshot's usage omits `total_cost_usd` and `turn_count` entirely (the
+  list/create/get session object still emits all eight fields, zeroed).
+  The snapshot `session` also gained **`agent_config: {model}`** (`""` when
+  unset). Verbatim 0.38.0 snapshot `session` after two completed turns
+  (2026-08-20, k3 session; `title`/`last_prompt` trimmed):
+
+  ```json
+  {"id":"session_59e4fb8e-…","workspace_id":"wd_spike_6baf4c130e63",
+   "busy":false,"main_turn_active":false,"pending_interaction":"none",
+   "last_turn_reason":"completed","archived":false,
+   "metadata":{"cwd":"/home/ubuntu/spike"},
+   "agent_config":{"model":"kimi-code/k3"},
+   "usage":{"input_tokens":6646,"output_tokens":286,"cache_read_tokens":95232,
+            "cache_creation_tokens":0,"context_tokens":25843,"context_limit":1048576},
+   "permission_rules":[],"message_count":0,"last_seq":0}
+  ```
+
+  History: **0.32.0** introduced the all-zero placeholder on every
+  read path (verified live 2026-08-05 on busy AND idle sessions
+  with 48k–121k real context tokens per `/status`); the 0.38.0 real-usage
+  change reverses that. The Android app still takes the live context fill
+  from `/status` and the WS `agent.status.updated` stream and defaults every
+  usage field, so the optional-field omission decodes cleanly.
 - `messages`: the newest history page (~100 items per page) with `has_more` —
   same item shape as `/messages` but **opposite order: `items` are OLDEST-first**
   (ascending ids/`created_at`; live-verified on 0.31.1, 2026-08-02 — `/messages`
@@ -732,10 +854,12 @@ verified live on 0.31.1 (2026-08-01). Top-level keys of `data`:
 
 - `pending_questions`: the pending `AskUserQuestion` requests; each item is
   byte-identical to the `/questions?status=pending` poll's `items[]` entries
-  (verified live with a live question, 2026-08-01): `question_id` ==
-  `tool_call_id`, `session_id`, `questions[]` with
+  (verified live with a live question, 2026-08-01): `question_id`,
+  `session_id`, `questions[]` with
   `id`/`question`/`options[{id,label}]`/`header`/`allow_other`/`multi_select`,
-  `created_at`, `turn_id`.
+  `created_at`, `turn_id`. **0.38.0:** `question_id` is a dedicated
+  `question_<uuid>` interaction id and the item also carries a distinct
+  `tool_call_id` (was: `question_id` == `tool_call_id` — see Questions).
 
 ### Session table (v2) — `GET /api/v2/sessions`
 
@@ -764,9 +888,10 @@ curl -s -H "Authorization: Bearer <token>" \
  "request_id":"01KZC8QQD9DPQWP6HGBWTHTMV3"}
 ```
 
-- Query params (0.37.2 additions marked): `page_size` (1–100, default 50;
+- Query params (0.38.0 additions marked): `page_size` (1–100, default 50;
   `0`/over-100 → `40001`; **with `fields=id,archived` the ceiling relaxes to
-  10000**), `sort` (`meta.updated_at_desc` default | `meta.updated_at_asc` |
+  10000**; **0.38.0: under `view=by_workspace` it counts groups per page**),
+  `sort` (`meta.updated_at_desc` default | `meta.updated_at_asc` |
   `meta.created_at_desc`; anything else → `40001` listing the options),
   `page_token` (opaque base64 **v1-fingerprint keyset cursor** — decodes to
   `{"v":1,"f":"<fingerprint>","k":[<updated_at_ms>,"<session_id>"]}`;
@@ -774,9 +899,14 @@ curl -s -H "Authorization: Bearer <token>" \
   1-based page number; mutually exclusive with `page_token` — combining them →
   `40001`; `next_page_token` is always `null` in this mode)**,
   **`meta.updated_before` (0.37.2: epoch ms upper bound on `meta.updated_at`)**,
-  and **`fields` (0.37.2: only `id,archived`, trimming each item to
+  **`fields` (0.37.2: only `id,archived`, trimming each item to
   `{id, archived}`; any other field/combination → `40001`; not combinable with
-  `include=git`)**. Items are ordered by
+  `include=git`)**, **`meta.has_prompt` (0.38.0: `true` keeps only sessions
+  that carry a user prompt — the v1 `exclude_empty` equivalent; `false` keeps
+  only empty ones)**, **`view` (0.38.0: `flat` default | `by_workspace`, see
+  below)**, and **`group.page_size` (0.38.0: sessions per workspace under the
+  grouped view, 1–100, default 5, up to 10000 with the `id,archived`
+  projection; rejected without the grouped view → `40001`)**. Items are ordered by
   `meta.updated_at` desc by default. Unknown params (`limit`, `cursor`,
   `workspace_id`, `archived`, `q`, …) are **silently ignored**.
 - Bad page tokens are a **new error code `40922`** (HTTP 200, envelope;
@@ -787,6 +917,35 @@ curl -s -H "Authorization: Bearer <token>" \
   `last_prompt` are `null` when unset.
 - **0.37.2:** every page carries **`total`** (the size of the filtered set);
   with `fields=id,archived` each item is just `{id, archived}` (verified live).
+- **0.38.0: `view=by_workspace`** (commit `15da8460`; verified live
+  2026-08-20): the same filtered, sorted set re-projected into per-workspace
+  groups. `data` becomes `groups[]` + `total` (the group count) + `has_more` +
+  `next_page_token`; each group is `{workspace:{id,cwd}, sessions[],
+  total}` with the workspace's first `group.page_size` sessions under the
+  requested `sort` and the workspace's full matching-session count. Only
+  workspaces with at least one matching session appear; groups order by their
+  first session's sort key. `page`/`page_token` paginate over groups with the
+  same fingerprint binding (the token also covers `view` and the grouping
+  parameters — flipping them mid-pagination → `40922`). Verbatim (trimmed):
+
+  ```json
+  {"code":0,"msg":"success",
+   "data":{"groups":[
+     {"workspace":{"id":"wd_spike_6baf4c130e63","cwd":"/home/ubuntu/spike"},
+      "sessions":[
+        {"id":"session_a42f8560-…",
+         "workspace":{"id":"wd_spike_6baf4c130e63","cwd":"/home/ubuntu/spike"},
+         "meta":{"title":null,"last_prompt":null,"created_at":1787253993333,
+                 "updated_at":1787253993333,"archived":false,"archived_at":null},
+         "activity":{"status":"idle"}}],
+      "total":42}],
+    "total":7,"has_more":true,"next_page_token":"eyJ2IjoxLCJmIjoi…"},
+   "request_id":"…"}
+  ```
+
+  (Note: the 0.38.0 v2 item `meta` now carries **`archived_at: null`** when
+  never archived — present-but-null, unlike the v1 session object where the
+  key is absent for never-archived sessions.)
 
 ### Batch archive/restore — `POST /api/v2/sessions:archive` / `:restore`
 
@@ -1607,15 +1766,22 @@ same session flow as 2026-07-23 on 0.29.0) by prompting a session to call the
 tool — the question surfaced directly, with no approval gate, under the
 session's default permission mode. Flow re-verified end-to-end on 0.32.0
 (2026-08-05: surface + selected-option answer + dismiss + re-dismiss `40902` +
-pending polling, all byte-identical). Since 0.32.0 the resolve routes also
+pending polling, all byte-identical), and the answer/dismiss routes plus the
+new id convention on 0.38.0 (2026-08-20). Since 0.32.0 the resolve routes also
 accept question ids containing **colons** (upstream #2585 — some
-OpenAI-compatible providers emit tool-call ids like `AskUserQuestion:0`, and
-question id == tool-call id); with this provider's ULID ids nothing changes.
+OpenAI-compatible providers emit tool-call ids like `AskUserQuestion:0`).
+On 0.38.0 question ids are server-minted `question_<uuid>` strings (see step
+1), so provider tool-call id shapes no longer reach the route at all.
 
 1. Surface sequence: `tool.call.started` (`"name": "AskUserQuestion"`) →
    `event.session.work_changed` with `pending_interaction: "question"` →
-   `event.question.requested` (verbatim payload in the WS section). **The
-   question id is the `toolCallId`** (same convention as approvals). Unlike
+   `event.question.requested` (verbatim payload in the WS section). **0.38.0
+   drift: the question id is no longer the `toolCallId`** — `question_id` is
+   now a dedicated interaction id (`question_<uuid>`), and the payload carries
+   BOTH `question_id` and a distinct `tool_call_id` (verified live 2026-08-20:
+   `question_a38aaf28-…` vs `tool_EwFXscDF0HraGfTelCTRdRe9`). Key
+   resolve/dismiss routes and resolution bookkeeping off `question_id`; the
+   `tool_call_id` is only the transcript row's id. Unlike
    approvals there is **no v2 camelCase duplicate** — only the
    `event.question.*` family exists.
 2. While a question is pending, the session object shows
@@ -1759,19 +1925,24 @@ summary widget.
 
 Lists the agent's builtin tools. Undocumented upstream until now; verified
 live on 0.31.0 (2026-07-30) and again on 0.31.1 (2026-07-31), 0.33.0
-(2026-08-05) and 0.34.0 (2026-08-06). Response
+(2026-08-05), 0.34.0 (2026-08-06) and 0.38.0 (2026-08-20). Response
 `data.tools[]` entries carry only
-`{name, description, source: "builtin", active: true, input_schema: null}` —
+`{name, description, source: "builtin", active: <bool>, input_schema: null}` —
 **input schemas are not exposed** (so tool-parameter drift, e.g. the
-`TaskOutput` `block`/`timeout` removal, is not observable here). 27 builtin
-tools observed on 0.34.0 (**`ReadMediaFile` is back** — removed in 0.33.0,
-restored in 0.34.0): Agent, AgentSwarm, AskUserQuestion, Bash,
+`TaskOutput` `block`/`timeout` removal, is not observable here). `active`
+reflects the resolving session's live tool state (both values observed on
+0.38.0). 27 builtin
+tools observed on 0.38.0 (**`WaitFor` is new** — the background-task wait
+tool, commits `8440801d`/`01eeacb5`, flag `wait_for: true`;
+**`ReadMediaFile` is gone again** — commit `f13f3790` stops advertising it to
+non-multimodal models): Agent, AgentSwarm, AskUserQuestion, Bash,
 CreateGoal,
 CronCreate/Delete/List, Edit, EnterPlanMode, ExitPlanMode, FetchURL, GetGoal,
-Glob, Grep, Read, ReadMediaFile, select_tools, SetGoalBudget, Skill, TaskList,
-TaskOutput, TaskStop, TodoList, UpdateGoal, WebSearch, Write. **The count is
-session-state-dependent:** fresh never-prompted sessions report 26 (no
-`ReadMediaFile`) — the catalog is resolved from the live agent's state.
+Glob, Grep, Read, select_tools, SetGoalBudget, Skill, TaskList,
+TaskOutput, TaskStop, TodoList, UpdateGoal, WaitFor, WebSearch, Write.
+**The count is
+session-state-dependent:** on 0.34.0 fresh never-prompted sessions reported 26
+(no `ReadMediaFile`) — the catalog is resolved from the live agent's state.
 
 **Liveness caveat (verified 2026-07-31):** the route resolves the catalog from
 a live session's agent (the `session_id` query param, else the most recent
@@ -1899,14 +2070,31 @@ seq 34  tool.result         the Agent call's result; the main turn resumes
 ```
 
 `subagent.spawned` (verbatim; carries all the identity metadata — later
-`subagent.*` events carry only `subagentId`). **0.31.0:** immediately after
+`subagent.*` events carry only `subagentId`). A 0.38.0 frame (2026-08-20,
+foreground spawn — note `taskId` and `time`):
+
+```json
+{"type":"subagent.spawned","seq":41,"payload":{"type":"subagent.spawned","time":1787254524517,"subagentId":"agent-1","subagentName":"explore","parentToolCallId":"tool_ArVyKiUhCDxXT341BmjTba8L","parentAgentId":"main","callerAgentId":"main","description":"Ask what is 2+2","runInBackground":false,"model":"kimi-code/k3","thinkingEffort":"high","taskId":"agent-rhh36xem","agentId":"main","sessionId":"session_59e4fb8e-..."}}
+```
+
+**0.31.0:** immediately after
 `subagent.spawned` (same seq, volatile) the server **republishes the
 sub-agent's `agent.status.updated`** — a duplicate of the one that follows
 `agent.created`. **0.34.0 (additive):** the payload gained **`model`** and
 **`thinkingEffort`** (camelCase; the spawned child inherits the session's
 bound model — `"kimi-code/k3"`/`"high"` observed on both foreground and
 background spawns; **0.36.0:** `"low"` observed — the effort follows the
-session's thinking config, re-verified 2026-08-13). The pair, verbatim (0.34.0):
+session's thinking config, re-verified 2026-08-13). **0.38.0 (additive,
+verified live 2026-08-20 on both foreground and background spawns):**
+the payload carries **`taskId`** — the background-task id the run registered
+under in the caller's task store (e.g. `"agent-rhh36xem"`, present even for
+foreground runs, though foreground runs still emit no `task.*` frames) — and
+the event now fires **after** task registration (commit `be8e0175`: clients
+can bind cancel/status actions without waiting for `task.started`); the
+duplicate launch-time `subagent.spawned` emission was removed (commit
+`3b69765c`). Also observed on 0.38.0: `subagent.*` / `task.*` / `tool.call.*`
+payloads all carry the top-level **`time`** (epoch ms) field, like
+`turn.started` since 0.37.2. The pair, verbatim (0.34.0):
 
 ```json
 {"type":"subagent.spawned","seq":33,"payload":{"type":"subagent.spawned","subagentId":"agent-2","subagentName":"agent","parentToolCallId":"tool_jaW1ZPJgetZxZ4ZgLQmQM4wP","parentAgentId":"main","callerAgentId":"main","description":"Reply OK","runInBackground":false,"model":"kimi-code/k3","thinkingEffort":"high","agentId":"main","sessionId":"session_1143a947-..."}}
@@ -2383,6 +2571,33 @@ Each item is `{domain?: string, message: string}`. Clients that ignore unknown
 frame types (the Android app does) need no change; note the frame would also
 fail any per-session `session_id` filter, which is the correct outcome.
 
+### Global events — `event.session.archived` (new in 0.38.0)
+
+Fires when a session is archived — on both the live and the cold archive path
+(`POST /api/v2/sessions:archive` with either a loaded or a never-loaded
+session). Global like `event.config.warning`: pushed to every established
+connection with no subscribe needed, `session_id: "__global__"`, and the real
+session id rides in the payload as **camelCase `sessionId`** (alongside
+snake_case `workspace_id`). Delivery is live-only; there is no
+session-deleted event. Verbatim capture (2026-08-20 on 0.38.0):
+
+```json
+{"type":"event.session.archived","seq":28,"session_id":"__global__","timestamp":"2026-08-20T19:31:40.052Z",
+ "payload":{"type":"event.session.archived","workspace_id":"wd_spike_6baf4c130e63",
+  "agentId":"main","sessionId":"session_a57d4784-4fe8-4268-bbe1-b5f3e23b37ba"},
+ "epoch":"ep_01KX01QDWWRZFHBCEEQ8A5SZ8T"}
+```
+
+(Verification nit: on this server the frame arrived on every connection that
+had sent at least one inbound frame (`client_hello` or a `subscribe`), while a
+fully silent socket received nothing in three attempts. The Android app's
+sockets always subscribe, so they qualify; a listen-only client should send a
+`client_hello` after connect to be safe.)
+
+The sibling workspace lifecycle events `event.workspace.created` / `updated`
+(full wire workspace object) and `event.workspace.deleted`
+(`{workspace_id, root}`) are global too — all out of the app's scope.
+
 ### Captured round-trips
 
 Full prompt with a manual-permission tool call, recorded 2026-07-23 on 0.29.0
@@ -2454,7 +2669,7 @@ Question round-trip (2026-07-23; the prompt asked the agent to use its
 ```
 seq 50  tool.call.started          name "AskUserQuestion"
 seq 51  event.session.work_changed pending_interaction "question"
-seq 52  event.question.requested   question_id = toolCallId, questions inline
+seq 52  event.question.requested   question_id (== toolCallId before 0.38.0), questions inline
 -- answer posted via REST --
 seq 53  event.session.work_changed pending_interaction "none"
 seq 54  event.question.answered    answers {"<question text>": "<label or free text>"}
@@ -2574,7 +2789,17 @@ a REST `:abort` reports `"user_cancelled"` (verbatim capture in Abort).
 schema-declared — commit `3ded0808`); live, `turn.started` and
 `prompt.completed` also emit a top-level `time` (epoch ms) without a matching
 schema field. `turn.started` also gained optional **`promptId`** (the
-submitter's `prompt_id`). The app ignores all of them. Verbatim 0.37.2 frames
+submitter's `prompt_id`). **0.38.0, additive (schema-only):** `turn.started`
+gained optional **`promptAttachments`** — `[{kind:"image"|"video"|"audio",
+fileId}]`, the session-media references carried by the prompt (commit
+`38a5a934`, transcript attachment projection). **Not observed live on
+0.38.0** (verified 2026-08-20: a prompt whose image part resolved to a
+`session_media` upload emitted `turn.started` with neither `promptAttachments`
+nor `promptId`) — treat it as a server-side projection detail the wire
+withholds for now. Also observed live on 0.38.0: `assistant.delta` /
+`thinking.delta` payloads now carry a top-level **`time`** (epoch ms), like
+`turn.started`/`turn.ended`/`prompt.completed` since 0.37.2. The app ignores
+all of them. Verbatim 0.37.2 frames
 (one turn, seqs trimmed):
 
 ```json
@@ -2718,11 +2943,29 @@ payload).
 ```
 
 **Question requested** (`event.question.requested`; snake_case;
-**`question_id` == `tool_call_id`** — no v2 duplicate). `options[].description`
+no v2 duplicate). **0.38.0 drift (verified live 2026-08-20): `question_id` is
+now a dedicated `question_<uuid>` interaction id, distinct from
+`tool_call_id`** — both fields are present (before 0.38.0 they were equal).
+`options[].description`
 is omitted when the option has none; `header` is optional and was absent
 entirely from the 2026-07-23 captures (key order is not stable either — never
 rely on it). `multi_select` is present per item in both `true` and `false`
-form (verified live 2026-08-02 on 0.31.1):
+form (verified live 2026-08-02 on 0.31.1; **0.34.0: present only when
+`true`**). Fresh 0.38.0 capture (2026-08-20):
+
+```json
+{"type":"event.question.requested","seq":10,
+ "payload":{"type":"event.question.requested","question_id":"question_a38aaf28-7dfe-489d-bca3-ea43c93b86fa",
+            "session_id":"session_...","turn_id":0,
+            "tool_call_id":"tool_EwFXscDF0HraGfTelCTRdRe9",
+            "questions":[{"id":"q_0","question":"Pick a color?",
+                          "options":[{"id":"opt_0_0","label":"Red"},
+                                     {"id":"opt_0_1","label":"Blue"}],
+                          "allow_other":true}],
+            "created_at":"2026-08-20T19:33:45.150Z","agentId":"main","sessionId":"session_..."}}
+```
+
+0.29.0 capture for comparison:
 
 ```json
 {"type":"event.question.requested","seq":52,
@@ -2763,6 +3006,56 @@ selected option and free text both re-verified 2026-07-23:
 
 ## Verification log
 
+- 2026-08-20 re-verification on `0.38.0` (server 0.37.2 → 0.38.0; throwaway
+  sessions in `/home/ubuntu/spike`, guided by the upstream 0.37.2→0.38.0 diff
+  — 38 commits; the wire-relevant ones are `cb8a7e5f` (/meta `features`),
+  `15da8460` (v2 grouped view + lifecycle events), `4ff06f17` (real snapshot
+  usage + optional usage fields + `/status` `context_usage` optional),
+  `38a5a934` (`turn.started.promptAttachments`, schema-only live), and
+  `be8e0175`/`3b69765c` (`subagent.spawned` `taskId` + ordering)). Drift found
+  and documented inline:
+  (a) `/meta` gained `features` and the `wait_for` flag;
+  (b) `/api/v2/sessions` gained `meta.has_prompt` / `view=by_workspace` /
+      `group.page_size` (grouped page verified live; the v2 item `meta` now
+      carries `archived_at:null` when never archived);
+  (c) new global `event.session.archived` (verified live — envelope
+      `session_id:"__global__"`, payload `workspace_id` + camelCase
+      `sessionId`; observed only on connections that had sent at least one
+      inbound frame);
+  (d) snapshot `session.usage` is REAL now and omits `total_cost_usd` /
+      `turn_count`; `session.agent_config` added (verified live);
+  (e) **`question_id` split from `tool_call_id`** — pending poll and
+      `event.question.requested` now carry a dedicated `question_<uuid>` id
+      plus a distinct `tool_call_id` (verified live end-to-end: surface,
+      record-body answer, dismiss `40909`, both events); answer/dismiss routes
+      keyed on `question_id` work unchanged — ticket 106 covers the app's
+      row-correlation reliance on the old equality, ticket 105 covers the
+      unhandled `event.session.archived`;
+  (f) `subagent.spawned` carries `taskId` on foreground AND background spawns
+      and fires after task registration (verified live); every event payload
+      family now emits a top-level epoch-ms `time`.
+  Re-verified unchanged, most byte-for-byte: auth 401s, v1 sessions
+  list/create/get (`usage` still the all-zero eight-field placeholder on the
+  list path), `/status` (k3 session: `context_usage` present,
+  `max_context_tokens:1048576`), snapshot top-level keys + roster shape,
+  messages history (envelope, newest-first, `session_media` image projection),
+  prompts POST ACK, prompt round-trip event order, image upload → ACK/history
+  `session_media` projection → both byte routes → DELETE (and the
+  session-media copy surviving the upload's delete), steer (`prompt_ids`
+  array body, fresh-ULID splice), `:abort` (`interruptReason:"user_cancelled"`),
+  compact `{}` / `{"instruction":…}` / both `40910`s (empty + busy) /
+  post-compaction history + status, questions flow (above), TodoList
+  `tool.call.started` contract, REST `/tasks` list/get + terminal `:cancel`
+  `40904` with `details.current_status`, tools catalog (27 entries — `WaitFor`
+  in, `ReadMediaFile` out), WS hello/heartbeat/subscribe/ack/cursor-resume,
+  and the `40401` error envelope with `stack`.
+  **Anomaly (unresolved, likely server-side):** in 3/3 background-subagent
+  runs the subscribed WS connection silently stalled right after the Agent
+  call's `tool.result` — no close frame, no further events (not even pings),
+  while foreground runs and plain turns streamed fully; `task.terminated` /
+  `task.notified` could not be captured this run. REST `/tasks` showed the
+  runs completing normally. The Android app should treat a stalled socket as
+  a drop and resync via REST; no app ticket filed (no client-side fix).
 - 2026-08-18 re-verification on `0.37.2` (server 0.36.1 → 0.37.2; throwaway
   sessions `session_956685b4-...` / `session_378ba373-...` in
   `/home/ubuntu/spike`, guided by the upstream 0.36.1→0.37.2 diff — 43
