@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-08-20
-(server version `0.38.0`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-08-27
+(server version `0.39.0`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
@@ -14,7 +14,8 @@ the workspace list used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `0.37.2`
+**Protocol history:** this document previously described server `0.38.0`
+(verified 2026-08-20; see git history), `0.37.2`
 (verified 2026-08-18; see git history), `0.36.1`
 (verified 2026-08-14; see git history), `0.36.0`
 (verified 2026-08-13; see git history), `0.35.0`
@@ -27,6 +28,104 @@ used are shown with each section. Secrets are redacted (`<token>`).
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
 that, `0.27.0` before that, and `0.23.3` before that.
+
+The drift from 0.38.0 to 0.39.0 is **additive everywhere — no break for the
+app**. The upstream diff between the two tags (66 commits, much of it the
+agent-runtime refactor and web-bundle churn) touched the client-facing wire
+in exactly these places:
+
+- **Approval ids split from tool-call ids** (the interaction/agent-runtime
+  refactors — `9a715820`/`4e16f2a8`; the route/service files are unchanged —
+  verified live 2026-08-27): `permission.approval.requested` now carries a
+  dedicated **`id: "approval_<uuid>"`**, the legacy
+  `event.approval.requested` carries it as `approval_id`, and the
+  `awaiting_approval` phase's `approval.approvalId` — all **distinct from the
+  `tool_call_id`/`toolCallId`** (they were equal up to 0.38.0, same split as
+  questions in 0.38.0). `POST .../approvals/{id}` now accepts **only** the
+  `approval_<uuid>` id — posting the `tool_call_id` answers
+  `{"code":40404,"msg":"approval tool_… not found"}` (verified live).
+  **The Android app keys everything off the legacy `approval_id` field, so
+  the split is transparent to it** — no ticket.
+- **REST `/tasks` objects gained `run_in_background`** (commit `6595955b`):
+  a boolean on every task, list and get, running and terminal
+  (`false` on a running foreground sub-agent, `true` on background ones).
+  `parent_tool_call_id` is now also emitted on `kind:"bash"` (process) tasks
+  when set (commit `692bb0a4`), not only on subagent ones.
+- **New task action `:detach`** (commit `692bb0a4`):
+  `POST /api/v1/sessions/{id}/tasks/{task_id}:detach` converts a running
+  **foreground** task into a background one →
+  `{"detached":true,"status":"running"}`; already-background or terminal
+  tasks answer `{"detached":false,"status":<current>}` (both verified live).
+  The detach resolves the foreground `Agent` tool call immediately
+  (`tool.result` stub: "note: The user moved this subagent to the
+  background."), emits `task.started` + `background.task.started` for the
+  task (foreground tasks have no `task.*` frames until detached), and the run
+  then lives the full background lifecycle (`task.terminated`, notification
+  turn). See the Tasks section. The app has no detach UI; no ticket.
+- **`/status` gained `tower_mode`** (boolean; the new tower mode, commits
+  `0f44537c`/`d3b27cc7`, flag `tower: false` here) next to
+  `plan_mode`/`swarm_mode`. Additive; the app decodes none of the mode flags.
+- **New WS event `prompt.started`** (the prompt-entities work, commit
+  `2f124693`): fires when a submitted prompt actually starts executing —
+  `{"type":"prompt.started","promptId":"msg_…","agentId":"main",…}`. Also
+  correction: **`prompt.submitted` and `prompt.queued` exist since at least
+  0.38.0** (present in the 0.38.0 broadcaster source; this document wrongly
+  claimed `prompt.submitted` did not exist — the round-trip skeleton was last
+  byte-verified on 0.31.0). `prompt.submitted` echoes the submission
+  (`promptId`/`userMessageId`/`status`/`content`); `prompt.queued` carries
+  `queueLength`. All additive; the app ignores them.
+- **Transcript gained a top-level `prompts` array** (commit `2f124693`):
+  prompt entities `{promptId, status, userMessageId, content, createdAt,
+  finishedAt}` for the session's turn-opening inputs. Prompts compacted out
+  of history vanish from it. Additive; the app doesn't decode it.
+- **Steered messages now project as live user frames in the transcript**
+  (commit `5634cb55`): the steered text appears as a
+  `{"kind":"text","role":"user","text":…,"promptIds":["msg_…"]}` frame inside
+  the running turn's next step (`promptIds` is new on text frames). Only the
+  **main** agent's transcript is affected (steer targets the active main
+  turn), and the app only renders sub-agent transcripts — no visible change.
+- **Pending-question transcript entities carry the wire question shape**
+  (commit `b3f08b68`): `interactions[]` question entries' `request` is now
+  the full `event.question.requested` payload (stable `q_N`/`opt_N_M` ids,
+  `question_id`, `tool_call_id`, `created_at`) instead of the raw
+  `AskUserQuestion` tool input. Transcript `tasks[]` entities gained optional
+  `model`/`thinkingEffort` (commit `2f124693`). The app decodes neither.
+- **Sub-agent transcript turns now carry the orchestrator's `prompt`**
+  (commit `f143130c`; verified live: `git-context` prefix + task text on
+  `origin.system_trigger/subagent` turns) — previously the task text was not
+  in the transcript turns at all. Additive.
+- **The tools catalog now lists MCP tools** (the unified MCP management
+  plane, commit `d723cc47`): entries with `source:"mcp"` and a new
+  `mcp_server_id` field ride alongside the 27 builtins (36 here — count is
+  server-config-dependent). New routes `GET /api/v1/mcp/servers` and
+  `POST /api/v1/mcp/servers/{id}:restart` (see the Tools section). The app
+  never calls the catalog.
+- **`/meta` `experimental_flags` gained `subagent_fork: false`,
+  `remote-control: false`, `tower: false`**; `features` gained `skill`,
+  `cron`, `interaction`, `reminder` (17 entries). All additive.
+- **Invisible here:** the `Agent` tool gained a `fork` parameter
+  (`f6736d7c`, flag-gated) and `AgentSwarm` a `timeout_ms` (`496bb6ce`) —
+  input schemas are not on this wire; oversized tool outputs now spill to
+  files engine-internally (`4b044926` — no transcript/history shape change);
+  prompt attachments fall back to a `kimi-file://` URL when the session-media
+  projection is unavailable (`75c94c4a` — the verified upload round-trip
+  still projects `session_media`); undone turns are dropped from the live
+  transcript projection (`c4885860` — the app has no undo); the WS fs-watch
+  moved to the engine service (`09858919` — `fs:*` is out of scope).
+
+Everything else re-verified unchanged live on 0.39.0 (see the verification
+log): auth 401s, v1 sessions list/create/get, `/status`, the full snapshot,
+messages history, prompts POST + ACK, one full prompt round-trip, prompt
+queueing + steer (WS sequence byte-similar, transcript projection called out
+above), `:abort`, compact (both bodies, the WS sequence, both `40910`s), the
+questions flow end-to-end (surface/poll/answer/dismiss + all three events;
+the answer body's `kind`-tagged union predates 0.39.0 — the legacy
+`{"selected":[…]}` shape is rejected with `40001`), the approvals round-trip
+(the id split above), files upload/download/session-media/delete + the
+`session_media` attachment projection, foreground + background sub-agents,
+REST `/tasks` list/get/`:cancel`/`:detach`, the TodoList contract, WS
+hello/heartbeat/subscribe/ack/cursor-resume, the tools catalog, and
+`event.session.archived`.
 
 The drift from 0.37.2 to 0.38.0 is **small, mostly additive — with one
 behavioral break for the app** (the question-id split below). The upstream
@@ -539,14 +638,14 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
 {
   "code": 0, "msg": "success",
   "data": {
-    "server_version": "0.38.0",
+    "server_version": "0.39.0",
     "capabilities": {"websocket": true, "file_upload": true, "fs_query": true, "mcp": true, "tasks": true, "terminal": true},
-    "server_id": "01M0GA2B0T9DCCX6R71FER69QR",
-    "started_at": "2026-08-20T19:23:48.634Z",
+    "server_id": "01M12AVKJ8Y95TN3M69GXV07PY",
+    "started_at": "2026-08-27T19:23:56.360Z",
     "open_in_apps": [],
     "dangerous_bypass_auth": false,
     "backend": "v2",
-    "experimental_flags": {"secondary-model": false, "auto_session_title": false, "wait_for": true, "tool-select": false, "persistence_minidb_readmodel": true, "search_worker": true},
+    "experimental_flags": {"secondary-model": false, "subagent_fork": false, "auto_session_title": false, "remote-control": false, "wait_for": true, "tower": false, "tool-select": false, "persistence_minidb_readmodel": true, "search_worker": true},
     "features": [
       {"name": "btw", "state": "Active", "meta": {}},
       {"name": "plan", "state": "Active", "meta": {}},
@@ -554,14 +653,16 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
       {"name": "todo", "state": "Active", "meta": {}}
     ]
   },
-  "request_id": "01M0GA352XAX1W241G81810N19"
+  "request_id": "01M12AWBHEPTJCEB03YQ7NRN5B"
 }
 ```
 
-(`features` trimmed to 4 of 13 entries; the full 0.38.0 list here is `btw`,
-`plan`, `externalHooks`, `debugEvents`, `swarm`, `goal`, `staleGuard`,
-`tower`, `usage`, `dateChange`, `tokenCounting`, `sessionInit`, `todo` — all
-`"Active"` with empty `meta`.)
+(`features` trimmed to 4 of 17 entries; the full 0.39.0 list here is `skill`,
+`btw`, `dateChange`, `plan`, `externalHooks`, `debugEvents`, `swarm`, `goal`,
+`staleGuard`, `tower`, `usage`, `cron`, `interaction`, `reminder`,
+`tokenCounting`, `sessionInit`, `todo` — all
+`"Active"` with empty `meta`. **0.39.0:** `skill`, `cron`, `interaction` and
+`reminder` are new — the agent-runtime featurization, commit `9a715820`.)
 
 - **`experimental_flags` is new in 0.32.0** (additive): the effective
   server-side experiment switches. Flag *values* are config, not protocol —
@@ -576,7 +677,9 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
   engine's feature-unit list, `[{name, state, meta}]`. Diagnostic metadata —
   treat every entry as optional. `experimental_flags` gained `wait_for: true`
   in the same release (the `WaitFor` tool's switch; flag values are config,
-  not protocol).
+  not protocol). **0.39.0:** the flags gained `subagent_fork` (the `Agent`
+  tool's fork parameter), `remote-control` (the web remote-control tunnel)
+  and `tower` (tower mode) — all `false` here.
 
 ## Models
 
@@ -754,6 +857,7 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/session
     "permission": "manual",
     "plan_mode": false,
     "swarm_mode": false,
+    "tower_mode": false,
     "context_tokens": 25050,
     "max_context_tokens": 1048576,
     "context_usage": 0.023889541625976562
@@ -776,6 +880,10 @@ commit `4ff06f17`, same "unknown" rule — upstream schema made it optional;
 still present on this server, `0` on a fresh session, re-verified 2026-08-20).
 Clients should
 still treat an absent/zero limit as "unknown", never render a 0/0 ring.
+**0.39.0:** `tower_mode` (boolean) rides next to `plan_mode`/`swarm_mode` —
+the new tower mode (commits `0f44537c`/`d3b27cc7`, flag `tower`; `false`
+here, verified live 2026-08-27). Additive; the Android app decodes none of
+the mode flags.
 
 ### Session snapshot — `GET /api/v1/sessions/{id}/snapshot`
 
@@ -842,8 +950,10 @@ verified live on 0.31.1 (2026-08-01). Top-level keys of `data`:
   [Session snapshot roster](#session-snapshot-roster) under Sub-agents.
 - `pending_approvals`: the pending permission requests — the ONLY REST read
   that exists for approvals. Each item is the legacy
-  `event.approval.requested` payload verbatim (`approval_id` ==
-  `tool_call_id`; 2026-08-01 capture):
+  `event.approval.requested` payload verbatim (up to 0.38.0 `approval_id` ==
+  `tool_call_id`; **0.39.0:** `approval_id` is a dedicated `approval_<uuid>`
+  id distinct from `tool_call_id` — see Permissions; 2026-08-01 capture,
+  id fields from the pre-split era):
 
   ```json
   {"approval_id":"tool_EYGD…","session_id":"session_…","turn_id":0,
@@ -1131,9 +1241,20 @@ opposite of `/messages` intra-page order. `after_turn=t0&page_size=2` pages
 forward (ascending, `has_more` true while newer turns remain).
 
 `data` fields beyond `agent_id`/`items`/`has_more` — `tasks`, `interactions`,
-`attachments`, `todos`, `meta`, `agents`, `pending_interactions`, `seq` — are
+`attachments`, `todos`, `prompts`, `meta`, `agents`, `pending_interactions`,
+`seq` — are
 the session's **unpaginated global state**, shipped with every page (the
-`agents` roster: `{agentId, type: "main"|"sub", parentAgentId?, label?}`). The
+`agents` roster: `{agentId, type: "main"|"sub", parentAgentId?, label?}`).
+**0.39.0 (commit `2f124693`): `prompts` is new** — prompt entities
+`{promptId, status, userMessageId, content, createdAt, finishedAt}` for the
+session's turn-opening inputs, including steered-in prompts (status
+`"completed"` once their host turn ends); prompts whose messages were
+compacted away vanish from the list. Also **0.39.0:** `interactions[]`
+question entries now carry `request` as the full wire question payload
+(stable `q_N`/`opt_N_M` ids, `question_id`, `tool_call_id`, `created_at` —
+commit `b3f08b68`; verified live on a pending question 2026-08-27) instead of
+the raw `AskUserQuestion` tool input, and `tasks[]` entries gained optional
+`model`/`thinkingEffort` (camelCase). The
 Android app consumes none of them.
 
 `items` has two entry kinds: `turn` and `marker`.
@@ -1163,7 +1284,9 @@ Turn → step → frame structure (verbatim keys, running sub-agent capture):
   field with the prompt text (seen on main-agent turns) — or
   `{"kind":"other","payload":{"kind":"system_trigger","name":"subagent"}}` for
   a sub-agent's internal turns (the task turn and the forced result-summary
-  turn; **no** `prompt` field — the task text is not in the transcript turns)
+  turn; **0.39.0:** these now carry the orchestrator's **`prompt`** too —
+  the `git-context` prefix + the task text, commit `f143130c`, verified live
+  2026-08-27; up to 0.38.0 the task text was not in the transcript turns)
   — or a **`task` origin** on a background-task completion-notification turn
   (see the verification below).
 - Step: `stepId` (`"t0.1"`), `turnId`, `ordinal`, `state`, `frames`.
@@ -1171,6 +1294,13 @@ Turn → step → frame structure (verbatim keys, running sub-agent capture):
   `"assistant"` observed — `text`), and `tool` (`frameId`, `toolCallId`,
   `name`, `state` `"running"`/`"done"`, `input` (args object), `output`).
   A step can hold several frames of the same kind (two `text` frames seen).
+  **0.39.0 (commit `5634cb55`): steered-in prompts project as mid-turn
+  `{"kind":"text","role":"user","text":…}` frames** in the running turn's
+  next step, carrying the new optional **`promptIds`** array (verified live
+  2026-08-27:
+  `{"kind":"text","frameId":"t7.2.f1","role":"user","text":"Also reply with exactly: steered-ok","promptIds":["msg_01M12C2W0M9YBYF3QQHPYWRK6P"]}`);
+  up to 0.38.0 the steered text never appeared in the transcript. Only the
+  main agent's transcript is affected — steer targets the active main turn.
 - **Warm vs cold rebuild:** answers computed from the live session add
   `startedAt`/`endedAt` on turns and steps, `finishReason`/`usage`/`timing` on
   steps, and `inputText`/`display`/`progress` on tool frames; the cold-session
@@ -1220,6 +1350,9 @@ Markers are interleaved between turns and must be tolerated, not rendered:
 `undo` markers carry context splices (the sub-agent's task prompt message —
 git-context envelope included — shows up here, full `MessageDto` shape) and
 persist after completion on the warm path. They vanish on the cold rebuild.
+**0.39.0 (commit `c4885860`):** the live projection also drops the **undone
+turns themselves** after an `undo` — previously they stayed visible until the
+cold rebuild (schema-level; undo is TUI-only, not triggered live this run).
 **0.31.1 adds `interruption` markers** — one per user-cancelled turn, on both
 the warm and the cold path (verified live 2026-07-31 after two `:abort`s; the
 `turnId` in the payload is the engine turn id, the cold path maps it to the
@@ -1737,18 +1870,28 @@ endpoint. The decision is posted back via REST.
 
 1. A prompt sent with `permission_mode: "manual"` that needs a tool emits two
    WS events (see the WS section for exact payloads):
-   `permission.approval.requested` (new v2 shape, camelCase; **the approval id
-   is the `toolCallId`**) followed by the legacy `event.approval.requested`
-   (snake_case, with `approval_id` and `expires_at` — 24 h validity observed).
+   `permission.approval.requested` (new v2 shape, camelCase) followed by the
+   legacy `event.approval.requested` (snake_case, with `approval_id` and
+   `expires_at` — 24 h validity observed).
    Both carry the human-readable action and a command preview.
-2. Post the decision (either id form works — they are the same id):
+   **0.39.0: the approval id split from the tool-call id** (verified live
+   2026-08-27): the v2 frame's `id` and the legacy frame's `approval_id` are
+   now a dedicated `approval_<uuid>` interaction id, **distinct** from the
+   `toolCallId`/`tool_call_id` (`tool_…`) both frames also carry (they were
+   equal up to 0.38.0 — the same split questions got in 0.38.0). The
+   `awaiting_approval` phase of `agent.status.updated` carries both ids too.
+2. Post the decision. **Only the `approval_<uuid>` id is accepted** —
+   posting the `tool_call_id` answers
+   `{"code":40404,"msg":"approval tool_… not found","data":null,...}`
+   (verified live 2026-08-27; up to 0.38.0 either spelling worked because
+   they were the same string):
 
 ```bash
-curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../approvals/tool_RMgBIy1asIorg1eV8P3ZhHiL \
+curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../approvals/approval_92bb2ce7-0956-4791-ba68-ac8f8762093f \
   -H "Authorization: Bearer <token>" \
   -H 'Content-Type: application/json; charset=utf-8' \
   -d '{"decision":"approved"}'
-# {"code":0,"msg":"success","data":{"resolved":true,"resolved_at":"2026-07-23T03:28:28.438Z"},"request_id":"01KY6G8Y8F6EJC7XH8KYZ4F2E5"}
+# {"code":0,"msg":"success","data":{"resolved":true,"resolved_at":"2026-08-27T19:54:53.787Z"},"request_id":"01M12CM9EJDYPKP9BT211FGFDP"}
 ```
 
 Body fields: `decision` (`"approved"` | `"rejected"`), optional `scope`,
@@ -1923,20 +2066,18 @@ summary widget.
 
 ### Tool catalog — `GET /api/v1/tools`
 
-Lists the agent's builtin tools. Undocumented upstream until now; verified
+Lists the agent's tools. Undocumented upstream until now; verified
 live on 0.31.0 (2026-07-30) and again on 0.31.1 (2026-07-31), 0.33.0
-(2026-08-05), 0.34.0 (2026-08-06) and 0.38.0 (2026-08-20). Response
-`data.tools[]` entries carry only
+(2026-08-05), 0.34.0 (2026-08-06), 0.38.0 (2026-08-20) and 0.39.0
+(2026-08-27). Response
+`data.tools[]` builtin entries carry only
 `{name, description, source: "builtin", active: <bool>, input_schema: null}` —
 **input schemas are not exposed** (so tool-parameter drift, e.g. the
 `TaskOutput` `block`/`timeout` removal, is not observable here). `active`
 reflects the resolving session's live tool state (both values observed on
 0.38.0). 27 builtin
-tools observed on 0.38.0 (**`WaitFor` is new** — the background-task wait
-tool, commits `8440801d`/`01eeacb5`, flag `wait_for: true`;
-**`ReadMediaFile` is gone again** — commit `f13f3790` stops advertising it to
-non-multimodal models): Agent, AgentSwarm, AskUserQuestion, Bash,
-CreateGoal,
+tools observed on 0.38.0 and again on 0.39.0: Agent, AgentSwarm,
+AskUserQuestion, Bash, CreateGoal,
 CronCreate/Delete/List, Edit, EnterPlanMode, ExitPlanMode, FetchURL, GetGoal,
 Glob, Grep, Read, select_tools, SetGoalBudget, Skill, TaskList,
 TaskOutput, TaskStop, TodoList, UpdateGoal, WaitFor, WebSearch, Write.
@@ -1944,7 +2085,22 @@ TaskOutput, TaskStop, TodoList, UpdateGoal, WaitFor, WebSearch, Write.
 session-state-dependent:** on 0.34.0 fresh never-prompted sessions reported 26
 (no `ReadMediaFile`) — the catalog is resolved from the live agent's state.
 
-**Liveness caveat (verified 2026-07-31):** the route resolves the catalog from
+**0.39.0: the catalog also lists MCP tools** (the unified MCP management
+plane, commit `d723cc47`; verified live 2026-08-27): this server reports 36
+entries — the 27 builtins plus 9 MCP tools from its two configured servers.
+MCP entries carry `source: "mcp"` and an extra **`mcp_server_id`** field
+(`{"name":"mcp__kiln__get_batch_status","description":"…","input_schema":null,"source":"mcp","active":true,"mcp_server_id":"kiln"}`).
+The total count is now server-config-dependent on top of
+session-state-dependent. Two MCP routes ride along (both verified live
+2026-08-27):
+
+- `GET /api/v1/mcp/servers` →
+  `{"servers":[{"id":"tavily","name":"tavily","transport":"http","status":"connected","tool_count":5},…]}`.
+- `POST /api/v1/mcp/servers/{id}:restart` → `{"restarting":true}`;
+  unknown id → `404` family (`mcp_server_not_found`).
+
+**Liveness caveat (verified 2026-07-31, again 2026-08-27 on 0.39.0):** the
+route resolves the catalog from
 a live session's agent (the `session_id` query param, else the most recent
 session). When NO session is live — e.g. right after a server restart, before
 any session is opened — it answers `{"code":0,"data":{"tools":[]}}`, not an
@@ -1975,11 +2131,15 @@ There are **two exposure paths**, chosen by the `Agent` call's
 - **Foreground** (default): the sub-agent exists on the WS event stream
   and in the session-snapshot roster; its messages never enter history.
   **0.34.0:** it also **registers in the task store while running** — listed
-  by REST `/tasks` (`status:"running"`), fetchable by id (even once
+  by REST `/tasks` (`status:"running"`, `run_in_background:false` since
+  0.39.0), fetchable by id (even once
   terminal), and cancellable via `:cancel` — but still with **no `task.*`
   WS frames**, and the list drops it again once terminal
   (`{"items":[]}` after a completed run still holds, even with
   `?status=completed`). On 0.33.0 and earlier it was never listed at all.
+  **0.39.0:** a running foreground task can be converted to background with
+  the new `:detach` action — from then on it gets `task.*` frames and stays
+  listed (see REST `/tasks`).
 - **Background** (`run_in_background: true`): registered in the main agent's
   background-task store, so it gets the full REST `/tasks` lifecycle plus
   `task.*` WS events, and its completion is pushed back into the main agent
@@ -2251,6 +2411,8 @@ curl -s -H "Authorization: Bearer <token>" \
   'http://127.0.0.1:58627/api/v1/sessions/<sid>/tasks/<task_id>?with_output=true&output_bytes=4096'
 curl -s -X POST -H "Authorization: Bearer <token>" \
   'http://127.0.0.1:58627/api/v1/sessions/<sid>/tasks/<task_id>:cancel'
+curl -s -X POST -H "Authorization: Bearer <token>" \
+  'http://127.0.0.1:58627/api/v1/sessions/<sid>/tasks/<task_id>:detach'
 ```
 
 - **List** — `GET .../tasks` → `{"items":[...]}`; optional
@@ -2297,28 +2459,46 @@ curl -s -X POST -H "Authorization: Bearer <token>" \
   `prompt.aborted` — still **no `task.*` frames** and no
   `subagent.failed`/`subagent.completed` for it.
 
-Task object (verbatim, 0.36.1 — subagent-kind objects carry `model`/
-`thinking_effort` (snake_case, since 0.34.0) and, **new in 0.36.1**,
-`agent_id`, `subagent_type` and `parent_tool_call_id`, in list and get,
-running and terminal):
+Task object (verbatim, 0.39.0 — subagent-kind objects carry `model`/
+`thinking_effort` (snake_case, since 0.34.0), `agent_id`, `subagent_type` and
+`parent_tool_call_id` (since 0.36.1), and, **new in 0.39.0** (commit
+`6595955b`), **`run_in_background`** on every task, list and get, running and
+terminal; 2026-08-27 capture of a completed background sub-agent):
 
 ```json
-{"id":"agent-l38j2zce","session_id":"session_...","kind":"subagent",
- "description":"doc-verify","status":"completed",
- "created_at":"2026-08-14T19:25:58.172Z","started_at":"2026-08-14T19:25:58.172Z",
- "completed_at":"2026-08-14T19:26:07.709Z",
- "model":"kimi-code/k3","thinking_effort":"low",
- "agent_id":"agent-0","subagent_type":"explore",
- "parent_tool_call_id":"tool_FXrHPtQ0ieUGu1EpztqzhreZ",
- "output_preview":"OK — but to be candid: …","output_bytes":1513}
+{"id":"agent-ptkje5ey","session_id":"session_...","kind":"subagent",
+ "description":"Compute 2+2","status":"completed",
+ "created_at":"2026-08-27T19:39:16.435Z","started_at":"2026-08-27T19:39:16.435Z",
+ "run_in_background":true,
+ "completed_at":"2026-08-27T19:39:35.940Z",
+ "model":"kimi-code/k3","thinking_effort":"high",
+ "agent_id":"agent-1","subagent_type":"coder",
+ "parent_tool_call_id":"tool_JBuc3yrESF5aEiDPXUy025NK"}
 ```
 
-(`output_preview`/`output_bytes` only with `with_output=true`.) The three new
-fields are emitted only on `kind:"subagent"` tasks — bash/tool tasks omit
-them. `agent_id` is the sub-agent registry id the WS `subagent.*` events and
-the snapshot roster already use, so REST tasks can now be joined to the
-roster without matching on `description`. `created_at` == `started_at` still
+A **running foreground** sub-agent lists with `"run_in_background":false`
+(verified live 2026-08-27). Since 0.39.0 (commit `692bb0a4`)
+`parent_tool_call_id` is also emitted on `kind:"bash"` (process) tasks when
+set — it was subagent-only before. `agent_id` is the sub-agent registry id
+the WS `subagent.*` events and the snapshot roster already use, so REST tasks
+can be joined to the roster without matching on `description`. With
+`with_output=true` the object additionally carries `output_preview` (tail of
+the stored result) + `output_bytes`. `created_at` == `started_at` still
 holds.
+
+- **Detach** — **new in 0.39.0** (commit `692bb0a4`; verified live
+  2026-08-27): `POST .../tasks/{task_id}:detach` (empty body) moves a running
+  **foreground** task to the background →
+  `{"code":0,...,"data":{"detached":true,"status":"running"}}`. An
+  already-background or terminal task answers
+  `{"detached":false,"status":<current>}`; unknown task → `40406`. Effects:
+  the foreground `Agent` tool call resolves immediately with a stub result
+  ("note: The user moved this subagent to the background. …"), the task
+  flips to `run_in_background: true` on REST, the WS emits `task.started` +
+  `background.task.started` for it (a foreground task has no `task.*` frames
+  until detached), and completion then follows the background lifecycle
+  (`subagent.completed` + `task.terminated` + the task-origin notification
+  turn). The Android app has no detach UI.
 
 Background **bash** tasks live in their own id namespace (`bash-…`, vs
 `agent-…` for sub-agents) and carry the shell **`command`** on the wire
@@ -2618,7 +2798,8 @@ seq 4   event.session.work_changed busy=true, main_turn_active=true
 seq 5   turn.started               {"turnId": 0, "origin": {"kind": "user"}, "prompt": "<text>"}
 seq 6   context.spliced            the new user message, inline
 seq 7   turn.step.started          step 1; thinking.delta, tool.call.delta xN
-seq 8   permission.approval.requested  v2 shape (approval id = toolCallId)
+seq 8   permission.approval.requested  v2 shape (approval id = toolCallId up to 0.38.0;
+                                        a dedicated approval_<uuid> id since 0.39.0)
 seq 9   event.session.work_changed pending_interaction "approval"
 seq 10  event.approval.requested   legacy shape (approval_id, expires_at +24 h)
 seq 11  event.session.work_changed pending_interaction back to "none" (decision posted)
@@ -2635,7 +2816,14 @@ seq 21  prompt.completed           {"promptId": "msg_...", "reason": "completed"
 ```
 
 Plain text prompt: same skeleton without the approval/tool events.
-**`prompt.submitted` does not exist** — the user message arrives inline in
+**`prompt.submitted` DOES exist** (this section's older claim was stale — it
+is in the 0.38.0 broadcaster source and fires live on 0.39.0, verified
+2026-08-27): right after `session.meta.updated`, echoing the submission
+(`promptId`, `userMessageId`, `status:"running"`, `content`, `createdAt`).
+A busy-session POST additionally fires **`prompt.queued`** (with
+`queueLength`) and **0.39.0 adds `prompt.started`** when the prompt actually
+begins executing (`{"promptId","agentId","sessionId"}`). The user message
+itself still arrives inline in
 `context.spliced`. `agent.status.updated` (volatile; model, context, usage —
 plus a `phase` object, see payloads) and `session.meta.updated`
 (title/lastPrompt patch) fire interleaved throughout, sharing the same `seq`
@@ -2822,7 +3010,9 @@ all of them. Verbatim 0.37.2 frames
 both still present. **0.29.0 changes, all additive:** the model/usage variant
 can now carry `thinkingEffort`; the `phase` objects now carry `since` (epoch
 ms) on active phases; the `awaiting_approval` inline approval now carries both
-`approvalId` and `toolCallId`; and there is a **new phase kind `tool_call`**
+`approvalId` and `toolCallId` (**0.39.0:** `approvalId` is the dedicated
+`approval_<uuid>`, no longer equal to `toolCallId` — the capture below is
+from the pre-split era); and there is a **new phase kind `tool_call`**
 (emitted while a tool executes). Observed kinds: `running`, `streaming`
 (with `"stream": "thinking" | "tool_call"` — **0.31.0 adds
 `"stream": "assistant"`** to the streaming-phase variant), `awaiting_approval`,
@@ -2889,31 +3079,37 @@ Otherwise unchanged:
 ```
 
 **Permission requested — v2 shape** (`permission.approval.requested`,
-camelCase; **no `approval_id`, no `expires_at` — use `toolCallId` as the
-approval id**). Unchanged:
+camelCase; **no `expires_at`**). **0.39.0:** gained a dedicated
+**`id: "approval_<uuid>"`** — up to 0.38.0 there was no id field and
+`toolCallId` doubled as the approval id (fresh 0.39.0 capture, verified
+2026-08-27):
 
 ```json
-{"type":"permission.approval.requested","seq":8,
- "payload":{"type":"permission.approval.requested","sessionId":"session_...","agentId":"main",
-            "turnId":0,"toolCallId":"tool_RMgBIy1asIorg1eV8P3ZhHiL",
-            "toolName":"Bash","action":"Running: echo doc-verify-0290",
-            "display":{"kind":"command","command":"echo doc-verify-0290","cwd":"/home/ubuntu/spike","language":"bash"},
-            "toolInput":{"command":"echo doc-verify-0290"}}}
+{"type":"permission.approval.requested","seq":276,
+ "payload":{"type":"permission.approval.requested","time":1787860456869,
+            "id":"approval_92bb2ce7-0956-4791-ba68-ac8f8762093f",
+            "sessionId":"session_...","agentId":"main",
+            "turnId":11,"toolCallId":"tool_m7jk00BDj5fLljgs8LRp9YCP",
+            "toolName":"Bash","action":"Running: echo approval-probe",
+            "display":{"kind":"command","command":"echo approval-probe","cwd":"/home/ubuntu/spike","language":"bash"},
+            "toolInput":{"command":"echo approval-probe"}}}
 ```
 
 **Permission requested — legacy shape** (`event.approval.requested`, still
 emitted right after the v2 one; `expires_at` is `created_at` + 24 h).
-Unchanged:
+**0.39.0:** `approval_id` is the same dedicated `approval_<uuid>` as the v2
+frame's `id`, no longer equal to `tool_call_id` (fresh 0.39.0 capture,
+verified 2026-08-27):
 
 ```json
-{"type":"event.approval.requested","seq":10,
+{"type":"event.approval.requested","seq":278,
  "payload":{"type":"event.approval.requested","sessionId":"session_...","agentId":"main",
-            "approval_id":"tool_RMgBIy1asIorg1eV8P3ZhHiL","session_id":"session_...",
-            "turn_id":0,"tool_call_id":"tool_RMgBIy1asIorg1eV8P3ZhHiL",
-            "tool_name":"Bash","action":"Running: echo doc-verify-0290",
-            "tool_input_display":{"kind":"command","command":"echo doc-verify-0290",
+            "approval_id":"approval_92bb2ce7-0956-4791-ba68-ac8f8762093f","session_id":"session_...",
+            "turn_id":11,"tool_call_id":"tool_m7jk00BDj5fLljgs8LRp9YCP",
+            "tool_name":"Bash","action":"Running: echo approval-probe",
+            "tool_input_display":{"kind":"command","command":"echo approval-probe",
                                   "cwd":"/home/ubuntu/spike","language":"bash"},
-            "created_at":"2026-07-23T03:27:38.761Z","expires_at":"2026-07-24T03:27:38.761Z"}}
+            "created_at":"2026-08-27T19:54:16.870Z","expires_at":"2026-08-28T19:54:16.870Z"}}
 ```
 
 Both are followed (after the REST decision) by `event.approval.resolved` →
@@ -3006,6 +3202,83 @@ selected option and free text both re-verified 2026-07-23:
 
 ## Verification log
 
+- 2026-08-27 re-verification on `0.39.0` (server 0.38.0 → 0.39.0; throwaway
+  session `session_36cdf3cf-…` in `/home/ubuntu/spike`, guided by the upstream
+  0.38.0→0.39.0 diff — 66 commits; the wire-relevant ones are `6595955b`
+  (`run_in_background` on the task wire), `692bb0a4` (task `:detach` +
+  `parent_tool_call_id` on process tasks), `b3f08b68` (wire question shape in
+  transcript interaction entities), `5634cb55` (steered messages as live user
+  frames + `promptIds`), `2f124693` (transcript `prompts` entities + task
+  `model`/`thinkingEffort`), `f143130c` (orchestrator `prompt` on sub-agent
+  turns), `c4885860` (undone turns dropped from the live projection),
+  `d723cc47` (MCP tools in the catalog + `/mcp/servers` routes),
+  `0f44537c`/`d3b27cc7` (`tower_mode` + flag), `f6736d7c` (`Agent` `fork`,
+  schema-only here) and `f0a60948` (`remote-control` flag)). Drift found and
+  documented inline — all additive:
+  (a) **approval-id split** — `approval_<uuid>` everywhere (v2 `id`, legacy
+      `approval_id`, `awaiting_approval` phase), distinct from
+      `tool_call_id`; the decision POST accepts only the `approval_<uuid>`
+      form (`tool_call_id` → `40404`, verified live). The app keys off
+      `approval_id` throughout — transparent, no ticket;
+  (b) `/status` gained `tower_mode: false`;
+  (c) REST `/tasks` gained `run_in_background` on every object (verified on a
+      running foreground and a completed background sub-agent) and the
+      `:detach` action (verified: `{"detached":true,"status":"running"}` on a
+      running foreground task, `{"detached":false,…}` on the repeat; detach
+      resolves the Agent tool call with a stub, emits
+      `task.started`/`background.task.started`, then the full background
+      lifecycle including the notification turn);
+  (d) transcript: top-level `prompts` entities, steered mid-turn user frames
+      with `promptIds`, wire-shaped pending-question `interactions[].request`
+      (verified while pending), task `model`/`thinkingEffort`, sub-agent
+      turns carrying the orchestrator prompt;
+  (e) new WS `prompt.started`; `prompt.submitted`/`prompt.queued` confirmed
+      live (they exist since at least 0.38.0 — this document's "does not
+      exist" claim was stale);
+  (f) tools catalog lists 9 MCP tools (`source:"mcp"`, `mcp_server_id`) next
+      to the 27 builtins; `GET /api/v1/mcp/servers` verified
+      (`tavily`+`kiln`, both `connected`);
+  (g) `/meta` flags +`subagent_fork`/`remote-control`/`tower`, features
+      +`skill`/`cron`/`interaction`/`reminder` (17).
+  Re-verified unchanged, most byte-for-byte: v1 sessions list/create/get
+  (list/get `usage` still the all-zero placeholder even after turns), the
+  session object, `/status` otherwise, the full snapshot (top-level keys,
+  `session.usage` real fill omitting `total_cost_usd`/`turn_count`,
+  `agent_config`, `in_flight_turn`, roster), messages history (envelope,
+  `metadata.origin`, newest-first), prompts POST ACK (`prompt_id` ==
+  `user_message_id`), one full prompt round-trip (`agent.status.updated` →
+  `session.meta.updated` → `prompt.submitted` → `turn.started` →
+  `context.spliced` → deltas → `turn.step.*` → `turn.ended` →
+  `prompt.completed`; `turn.started` still emits NO `promptAttachments`
+  live), prompt queueing + steer (`prompt.queued` with `queueLength`,
+  `prompt.steered`, same-turn continuation, `prompt.completed` with the
+  original id), `:abort` (`turn.step.interrupted` → `turn.ended`
+  `interruptReason:"user_cancelled"` → interruption-reminder splice → idle
+  `work_changed` → `prompt.aborted`), compact `{}` and
+  `{"instruction":…}` (ACK, `compaction.started` `trigger:"manual"` →
+  `context.spliced` → `compaction.completed` with `result.summary`; both
+  `40910`s — empty session "No messages to compact…", busy session "Cannot
+  compact while a turn is active…"), the questions flow end-to-end
+  (surface + `pending_interaction:"question"` + pending poll + `single`
+  answer + dismiss `40909` + all three `event.question.*` — the answer
+  `kind`-union predates 0.39.0; the legacy `{"selected":[…]}` body is
+  rejected `40001`), the manual-approval round-trip (id split above),
+  files upload/download/session-media/delete (69-byte png byte-identical on
+  all routes; ACK + history project `session_media`), foreground +
+  background sub-agents (`subagent.spawned` with `taskId`,
+  `runInBackground`, `model`/`thinkingEffort`), REST `/tasks`
+  list/get/`:cancel` shapes, the TodoList `tool.call.started` contract,
+  WS hello/heartbeat/subscribe/ack/cursor-resume (replay from seq 14
+  re-delivered `event.question.requested`), and `event.session.archived`
+  (`__global__` envelope, camelCase `sessionId`).
+  **App impact: no breakage, no new tickets** — every change is additive and
+  the app decodes leniently (`ignoreUnknownKeys`); the approval split is
+  transparent (the app keys off `approval_id`), the transcript additions land
+  in payloads the app does not decode, and the steered-user frames only
+  appear in the main agent's transcript, which no app screen renders.
+  Tooling note: verification used a stdlib-python WS client answering the
+  app-level heartbeat pings — websocat's static stdin gets the connection
+  killed after ~2 ping cycles, which silently truncated earlier captures.
 - 2026-08-20 re-verification on `0.38.0` (server 0.37.2 → 0.38.0; throwaway
   sessions in `/home/ubuntu/spike`, guided by the upstream 0.37.2→0.38.0 diff
   — 38 commits; the wire-relevant ones are `cb8a7e5f` (/meta `features`),
