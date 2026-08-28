@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-08-27
-(server version `0.39.0`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-08-28
+(server version `0.39.1`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
@@ -14,7 +14,8 @@ the workspace list used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `0.38.0`
+**Protocol history:** this document previously described server `0.39.0`
+(verified 2026-08-27; see git history), `0.38.0`
 (verified 2026-08-20; see git history), `0.37.2`
 (verified 2026-08-18; see git history), `0.36.1`
 (verified 2026-08-14; see git history), `0.36.0`
@@ -28,6 +29,86 @@ used are shown with each section. Secrets are redacted (`<token>`).
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
 that, `0.27.0` before that, and `0.23.3` before that.
+
+The drift from 0.39.0 to 0.39.1 is **additive for the core loop — the one
+breaking change is on a route the app does not call** (`/api/v1/auth`). The
+upstream diff between the two tags (11 commits, mostly web-bundle and CLI
+churn) touched the client-facing wire in exactly these places:
+
+- **`GET /api/v1/auth` broke its shape** (commit `2bf7ed22`; verified live
+  2026-08-28): the summary now reads
+  `{"models_ready":true,"providers_count":2,"managed_provider":{"name":"managed:kimi-code","status":"authenticated"}}`
+  — the `ready` and `default_model` fields are **gone** (config values come
+  from `/config` alone; upstream flags it BREAKING). **The Android app never
+  calls `/api/v1/auth`** (its credential check is `/meta`) — no ticket.
+- **Server-local path attachments** (commit `4e7738b7`; every behavior below
+  verified live 2026-08-28 — see Prompts and Files):
+  - The image/video `source` union gained a 5th kind
+    `{"kind":"path","path":"<server-local absolute path>"}`, and the `file`
+    content part now takes **either** `file_id` (with `name`/`media_type`/
+    `size` as before) **or** `path` (all three metadata fields optional —
+    the daemon fills `name` from the basename, `media_type` defaults to
+    `application/octet-stream`, `size` from stat). Both or neither → `40001`
+    "exactly one of file_id or path is required".
+  - Validation: a relative path → `40001` "attachment path must be absolute:
+    …" (an Error2 envelope — it **carries `stack`**, unlike Zod `40001`s); a
+    missing path → **`40407`** "file not found: …" (a new code on this
+    route, distinct from the file store's `40406`). The sensitive-file check
+    did NOT reject `/home/ubuntu/.kimi-code/server.token` (attached without
+    complaint — do not rely on it).
+  - A `path` **file** part rewrites to the same `Attached file "…"` notice
+    text as uploads, but referencing the **original path in place** (no copy
+    under `<sessionDir>/attachments/`); a `path` **image** is read,
+    compressed if needed, and saved into the session-media store — the ACK
+    echo and history project it as `session_media` exactly like an upload.
+  - **Every** prompt file attachment (path or uploaded `file_id`) is now
+    recorded on the prompt origin: the ACK echo and the history user message
+    carry `metadata.origin: {"kind":"user","attachments":[{"name",
+    "mediaType","size","path"}]}` (camelCase; `path` is the original path
+    for `path` parts, the materialized `<sessionDir>/attachments/…` copy for
+    uploads), and the WS `turn.started` origin carries the same
+    `attachments` array. `turn.started.promptAttachments` is still NOT
+    emitted live (the schema gained a `kind:"file"` variant, but the field
+    never fired on any capture).
+  - The transcript's global `attachments[]` now includes typed **file**
+    entries — `{attachmentId, mediaType, name, size}` with **no `source`**
+    (media entries keep `source:{kind:"session_media",fileId}`); attachment
+    ids are inconsistent (`att_1` on the turn-0 entry, `t2.att1` later) —
+    treat them as opaque.
+- **Session list/get `agent_config.model` is real now** (commit `2bf7ed22`;
+  verified live): a live session's v1 object serves its bound model
+  (`"kimi-code/k3"`) instead of the hardcoded `""`; cold sessions keep `""`.
+  The v2 table's `activity` gained a `model` field (`""` when unset). The
+  app reads `agent_config.model` (ModelsRepository falls back to
+  `default_model` when empty) — an improvement, no ticket.
+- **`event.config.changed` and `event.model_catalog.changed` are actually
+  delivered now** (commit `2bf7ed22`; `event.config.changed` verified live):
+  both were published internally but never forwarded to WS clients before.
+  Every config write pushes a global `event.config.changed` frame
+  (`session_id:"__global__"`) with camelCase `changedFields` (e.g.
+  `["thinking"]` — was the raw snake_case request keys, a breaking change
+  for that event) and a **full config projection** with credentials redacted
+  to `has_api_key` (providers/models/services). `event.config.warning`
+  (delivered since 0.32.0) is now registered in the schema unions. All
+  global/unknown-frame territory — the app ignores them.
+- **Invisible/behavioral:** the cold transcript now folds only user-origin
+  steers by content (`dc6028dc` — the live projection is unchanged; not
+  observed); a resumed session reminds the model once about background tasks
+  killed by the previous app exit (`23921e9f` — engine-internal); the config
+  response schema is now passthrough (no client-visible change).
+- **Config drift (not shape):** `default_model` reads `kimi-code/k3` again
+  (it was `deepseek/deepseek-v4-pro` since 0.37.2), so a fresh model-less
+  session's `/status` `max_context_tokens` is back to **1048576**.
+
+Everything else re-verified unchanged live on 0.39.1 (see the verification
+log): auth 401s, v1 sessions list/create/get, `/status`, the full snapshot,
+messages history, prompts POST + ACK, one full prompt round-trip, prompt
+queueing + steer, `:abort`, compact (both bodies, the WS sequence, both
+`40910`s), the questions flow end-to-end, the manual-approval round-trip
+(the 0.39.0 id split intact; `tool_call_id` POST still `40404`), files
+upload/download/`Range`/delete, foreground + background sub-agents, REST
+`/tasks`, the TodoList contract, and WS
+hello/heartbeat/subscribe/ack/cursor-resume.
 
 The drift from 0.38.0 to 0.39.0 is **additive everywhere — no break for the
 app**. The upstream diff between the two tags (66 commits, much of it the
@@ -638,10 +719,10 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
 {
   "code": 0, "msg": "success",
   "data": {
-    "server_version": "0.39.0",
+    "server_version": "0.39.1",
     "capabilities": {"websocket": true, "file_upload": true, "fs_query": true, "mcp": true, "tasks": true, "terminal": true},
-    "server_id": "01M12AVKJ8Y95TN3M69GXV07PY",
-    "started_at": "2026-08-27T19:23:56.360Z",
+    "server_id": "01M14XB21A3KHXMKPFMJ298EEP",
+    "started_at": "2026-08-28T19:25:25.930Z",
     "open_in_apps": [],
     "dangerous_bypass_auth": false,
     "backend": "v2",
@@ -653,15 +734,15 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
       {"name": "todo", "state": "Active", "meta": {}}
     ]
   },
-  "request_id": "01M12AWBHEPTJCEB03YQ7NRN5B"
+  "request_id": "01M14XBTRNYKBCPA06WKV05THZ"
 }
 ```
 
-(`features` trimmed to 4 of 17 entries; the full 0.39.0 list here is `skill`,
+(`features` trimmed to 4 of 17 entries; the full list here is `skill`,
 `btw`, `dateChange`, `plan`, `externalHooks`, `debugEvents`, `swarm`, `goal`,
 `staleGuard`, `tower`, `usage`, `cron`, `interaction`, `reminder`,
 `tokenCounting`, `sessionInit`, `todo` — all
-`"Active"` with empty `meta`. **0.39.0:** `skill`, `cron`, `interaction` and
+`"Active"` with empty `meta`, unchanged from 0.39.0. **0.39.0:** `skill`, `cron`, `interaction` and
 `reminder` are new — the agent-runtime featurization, commit `9a715820`.)
 
 - **`experimental_flags` is new in 0.32.0** (additive): the effective
@@ -798,6 +879,11 @@ Session object shape (0.31.0, fields truncated for brevity):
   **absent for never-archived sessions** (verified live 2026-08-13: the
   fresh throwaway session carries no `archived_at` key in create/list/get).
   Upstream commit `43c68f58`; clients fall back to `updated_at` for display.
+- **0.39.1 (verified live 2026-08-28):** `agent_config.model` is **real** on
+  live sessions — the bound model (`"kimi-code/k3"`) instead of the
+  hardcoded `""` served up to 0.39.0 (upstream commit `2bf7ed22`). Cold
+  sessions still report `""`. The app reads this field (ModelsRepository
+  falls back to `default_model` when empty) — strictly an improvement.
 - `message_count` and `last_seq` are still present but observed stuck at `0`
   (re-verified 2026-07-23 after several turns) — do not rely on them.
 - The list envelope carries `has_more` for pagination (verified with
@@ -873,8 +959,9 @@ session's current config (`"off"`/`"yolo"` observed on a fresh session;
 `max_context_tokens` is now **omittable when the context limit is unknown**
 (upstream schema change — `0` is the engine's "unknown" marker, never a real
 limit); never observed omitted live — a fresh model-less session reports the
-default model's context (262144 on 0.34.0–0.36.1; **1000000 since 0.37.2**,
-the `deepseek/deepseek-v4-pro` default) and a k3 session 1048576 (re-verified
+default model's context (262144 on 0.34.0–0.36.1; 1000000 on 0.37.2–0.39.0,
+the `deepseek/deepseek-v4-pro` default; **1048576 since 0.39.1** — the
+default model is `kimi-code/k3` again; config drift, not protocol) and a k3 session 1048576 (re-verified
 2026-08-18). **0.38.0:** **`context_usage` is now omittable too** (same
 commit `4ff06f17`, same "unknown" rule — upstream schema made it optional;
 still present on this server, `0` on a fresh session, re-verified 2026-08-20).
@@ -1024,7 +1111,9 @@ curl -s -H "Authorization: Bearer <token>" \
   discard it and restart from the first page"`; valid-base64-but-foreign →
   `"page_token does not match the query conditions; …"`.
 - `activity.status` observed only as `"idle"` on this server; `title` /
-  `last_prompt` are `null` when unset.
+  `last_prompt` are `null` when unset. **0.39.1 (additive, verified live):**
+  `activity` gained a **`model`** field — the session's bound model, `""`
+  when unset (commit `2bf7ed22`).
 - **0.37.2:** every page carries **`total`** (the size of the filtered set);
   with `fields=id,archived` each item is just `{id, archived}` (verified live).
 - **0.38.0: `view=by_workspace`** (commit `15da8460`; verified live
@@ -1254,7 +1343,12 @@ question entries now carry `request` as the full wire question payload
 (stable `q_N`/`opt_N_M` ids, `question_id`, `tool_call_id`, `created_at` —
 commit `b3f08b68`; verified live on a pending question 2026-08-27) instead of
 the raw `AskUserQuestion` tool input, and `tasks[]` entries gained optional
-`model`/`thinkingEffort` (camelCase). The
+`model`/`thinkingEffort` (camelCase). **0.39.1 (commit `4e7738b7`; verified
+live):** `attachments[]` entries for prompt **file** attachments are typed
+file records — `{attachmentId, mediaType, name, size}` with **no `source`**
+(media attachments keep `source:{kind:"session_media",fileId}`), so web
+clients render chips without parsing the notice text; attachment ids are
+inconsistent (`att_1` on the turn-0 entry, `t2.att1` later) — opaque. The
 Android app consumes none of them.
 
 `items` has two entry kinds: `turn` and `marker`.
@@ -1439,7 +1533,9 @@ Validation: an empty query answers HTTP 200 with
 ## Files (attachments)
 
 File upload backs message attachments: upload the bytes first, then reference
-the returned `file_id` in a prompt's `content` items (see Prompts below). The
+the returned `file_id` in a prompt's `content` items (see Prompts below).
+**0.39.1:** prompts may alternatively attach **server-local absolute paths**
+directly (no upload) — see Prompts; the upload flow below is unchanged. The
 endpoints and the prompt-side rewriting were verified live on 0.29.0
 (2026-07-24, session `attach-spike`) and re-verified on 0.31.0 (2026-07-30:
 upload/download/`Range` 206/delete of a text file, plus a `file` attachment
@@ -1552,6 +1648,19 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../promp
   - `{"type":"file","file_id":"f_…","name":"…","media_type":"…","size":123}` —
     any other uploaded file. The web client picks the kind purely by MIME
     prefix (`image/*` → image, `video/*` → video, else file).
+  - **0.39.1 — server-local path attachments** (commit `4e7738b7`; verified
+    live 2026-08-28): image/video sources accept a 5th kind
+    `{"kind":"path","path":"<absolute server-local path>"}`, and a `file`
+    part may replace `file_id`+metadata with just `"path"` (`name`/
+    `media_type`/`size` then optional — basename, `application/octet-stream`
+    and stat fill the gaps). Exactly one of `file_id`/`path` must be present
+    (`40001` otherwise). Paths must be absolute (`40001` "attachment path
+    must be absolute: …", an Error2 envelope **with `stack`**), must exist
+    (**`40407`** "file not found: …" — a new code on this route, distinct
+    from the file store's `40406`), and are realpath-resolved; a
+    sensitive-file filter exists but did NOT reject
+    `/home/ubuntu/.kimi-code/server.token` live — do not rely on it. Local
+    runtime only (the daemon rejects path refs on non-local runtimes).
   - The server **validates the referenced file's sniffed `media_type`** against
     the part type (verified live): a `video` part whose file was uploaded as
     `application/octet-stream` is rejected up front with envelope code `40001`
@@ -1589,6 +1698,20 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../promp
     (`{type:"video", source:{kind:"session_media", file_id}}`); the earlier
     `file`-kind video shape was source-derived and unreachable live (the 0.29.0
     upload sniffer never returned `video/*`).
+  - **0.39.1 — attachments recorded on the prompt origin** (verified live):
+    every file attachment (uploaded `file_id` or server-local `path`) adds an
+    `attachments` array to the user-message origin — history carries it at
+    `metadata.origin.attachments`, the `context.spliced` echo at the
+    message's `origin.attachments`, and `turn.started` at
+    `origin.attachments` — `[{"name","mediaType","size","path"}]`,
+    camelCase; `path` is the original path for `path` parts and the
+    materialized `<sessionDir>/attachments/…` copy for uploads. A `path`
+    image projects as `session_media` (the file is saved into the
+    session-media store at intake), a `path` file as the usual
+    `Attached file "…"` notice naming the original path in place.
+    `turn.started.promptAttachments` is still never emitted live (the schema
+    gained a `kind:"file"` variant in 0.39.1; unobserved). The app decodes
+    only `origin.kind` — additive, ignored.
 - Optional body fields (per-prompt overrides): `permission_mode`
   (`manual`/`auto`/`yolo` — `manual` verified live), `model` (verified: a
   session with empty `agent_config.model` runs when the prompt carries one),
@@ -2751,6 +2874,33 @@ Each item is `{domain?: string, message: string}`. Clients that ignore unknown
 frame types (the Android app does) need no change; note the frame would also
 fail any per-session `session_id` filter, which is the correct outcome.
 
+### Global events — `event.config.changed` / `event.model_catalog.changed` (delivered since 0.39.1)
+
+Both event types existed in the schema earlier but were **never forwarded to
+WS clients**; 0.39.1 (commit `2bf7ed22`) wires the broadcaster up. Every
+config write (any path — REST `POST /api/v1/config`, OAuth refresh, …)
+pushes a global `event.config.changed` frame to every established
+connection, debounced with a trailing edge. `changedFields` is **camelCase
+domain names** (e.g. `["thinking"]` — up to 0.39.0 the never-delivered event
+carried the raw snake_case request keys; upstream flags the rename as
+breaking), and `config` is the full config projection with credentials
+redacted to `has_api_key` (providers/models/services). Verified live
+2026-08-28 (`POST /api/v1/config {"thinking":{"effort":"low"}}` → frame,
+restored afterwards):
+
+```json
+{"type":"event.config.changed","seq":181,"session_id":"__global__","timestamp":"2026-08-28T19:46:13.649Z",
+ "payload":{"type":"event.config.changed","changedFields":["thinking"],
+  "config":{"providers":{"managed:kimi-code":{"type":"kimi","base_url":"https://api.kimi.com/coding/v1","has_api_key":true},…},
+   "default_model":"kimi-code/k3","models":{…},…}},
+ "epoch":"ep_01M14XPS0FE7GX6J2H5NA8MP52"}
+```
+
+`event.model_catalog.changed` rides the same forwarding path (provider model
+refreshes; not triggered live). The app ignores both — unknown frame types
+fall into the ignore rule, and the `__global__` envelope fails per-session
+filters by design.
+
 ### Global events — `event.session.archived` (new in 0.38.0)
 
 Fires when a session is archived — on both the live and the cold archive path
@@ -3201,6 +3351,73 @@ selected option and free text both re-verified 2026-07-23:
 ```
 
 ## Verification log
+
+- 2026-08-28 re-verification on `0.39.1` (server 0.39.0 → 0.39.1; throwaway
+  sessions `session_62714470-…` / `session_9565d62c-…` in
+  `/home/ubuntu/spike`, guided by the upstream 0.39.0→0.39.1 diff — 11
+  commits; the wire-relevant ones are `4e7738b7` (server-local path
+  attachments + prompt-origin attachment records) and `2bf7ed22` (`/auth`
+  `models_ready`, session-list `model`, config-event delivery);
+  `dc6028dc` (cold-transcript steer folding) and `23921e9f` (resumed-task
+  reminder) are behavioral/engine-internal). Drift found and documented
+  inline:
+  (a) **`GET /api/v1/auth` dropped `ready`/`default_model` for
+      `models_ready`** (verified live) — breaking upstream, but the app
+      never calls `/auth`;
+  (b) server-local path attachments: `path` source kind for image/video,
+      `file` part `path` variant (metadata optional), absolute-path `40001`
+      (Error2, with `stack`), missing-path `40407`, both-keys `40001`;
+      path files rewrite to the usual `Attached file "…"` notice naming the
+      original path; path images project as `session_media`; the sensitive-
+      file filter did NOT reject `server.token`;
+  (c) prompt attachments recorded on the origin — `metadata.origin
+      .attachments` (history), `origin.attachments` (splice echo and
+      `turn.started`), typed file entries (no `source`) in transcript
+      `attachments[]`; `turn.started.promptAttachments` still never emitted;
+  (d) v1 session list/get `agent_config.model` serves the live bound model
+      (was hardcoded `""`); v2 `activity.model` added (`""` when unset);
+  (e) `event.config.changed` now delivered on config writes (global frame,
+      camelCase `changedFields`, full redacted config projection — verified
+      live, config restored byte-identical); `event.model_catalog.changed`
+      forwarded too (not triggered); `event.config.warning` schema-
+      registered (delivered since 0.32.0).
+  Config drift (not shape): `default_model` is `kimi-code/k3` again (was
+  `deepseek/deepseek-v4-pro` since 0.37.2) — fresh-session `/status`
+  `max_context_tokens` reads 1048576.
+  Re-verified unchanged, most byte-for-byte: meta (flags + 17 features
+  unchanged), auth 401s, v1 sessions list/create/get, `/status` (fresh
+  `thinking_level:""`, `max_context_tokens` present, `tower_mode:false`),
+  the full snapshot (top-level keys, real `session.usage` omitting
+  `total_cost_usd`/`turn_count`, oldest-first message page), messages
+  history, one full prompt round-trip with a manual-permission tool call
+  (`prompt.submitted` → `turn.started` → `context.spliced` →
+  `permission.approval.requested`/`event.approval.requested` — the 0.39.0
+  `approval_<uuid>` split intact, REST `approved` decision, posting the
+  `tool_call_id` still `40404` — → `tool.result` → `turn.ended` →
+  `prompt.completed`), prompt queueing + steer (`prompt.queued`
+  `queueLength`, `{"steered":true}` ACK), `:abort` (`turn.ended`
+  `reason:"cancelled"` + `interruptReason:"user_cancelled"` → interruption-
+  reminder splice → `prompt.aborted`), compact `{}` and
+  `{"instruction":…}` (`compaction.started` instruction echo →
+  `context.spliced` → `compaction.completed` with `result.summary`; both
+  `40910`s with `stack`), the questions flow end-to-end (pending poll with
+  `question_<uuid>` + distinct `tool_call_id` + stable `q_0`/`opt_0_N` ids,
+  `{"answers":{"q_0":{"kind":"single","option_id":…}}}` answer, dismiss
+  `40909`, re-dismiss `40902`, all three `event.question.*`), files
+  upload/download/`Range` 206/delete, foreground + background sub-agents
+  (`subagent.spawned` with `taskId`/`model`/`thinkingEffort`,
+  `task.started`/`background.task.started`/`…terminated`, `task.notified`,
+  REST `/tasks` list/get with `run_in_background`/`agent_id`/
+  `subagent_type`/`parent_tool_call_id`), the TodoList `tool.call.started`
+  contract, and WS hello/heartbeat/subscribe/ack/cursor-resume (replay from
+  seq 190 re-delivered 191+ in order). The 0.39.0 background-subagent WS
+  stall did NOT recur (frames kept flowing through the background
+  lifecycle). **App impact: no breakage, no new tickets** — `/auth` is
+  unused, `origin.attachments`/transcript attachments/config events are
+  additive and ignored (`ignoreUnknownKeys` + unknown-frame ignore), and
+  real `agent_config.model` values only improve the app's model fallback.
+  Tooling note: websocat kept alive by a 5 s `pong` feeder (any inbound
+  frame resets the heartbeat timer).
 
 - 2026-08-27 re-verification on `0.39.0` (server 0.38.0 → 0.39.0; throwaway
   session `session_36cdf3cf-…` in `/home/ubuntu/spike`, guided by the upstream
