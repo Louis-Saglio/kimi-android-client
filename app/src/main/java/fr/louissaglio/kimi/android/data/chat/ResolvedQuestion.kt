@@ -62,6 +62,7 @@ data class ResolvedQuestionCardModel(
 fun ResolvedQuestion.asCardModel(): ResolvedQuestionCardModel {
     val question = PendingQuestion(
         questionId = toolCallId,
+        toolCallId = toolCallId,
         items = items.mapIndexed { i, item ->
             PendingQuestion.Item(
                 id = "q_$i",

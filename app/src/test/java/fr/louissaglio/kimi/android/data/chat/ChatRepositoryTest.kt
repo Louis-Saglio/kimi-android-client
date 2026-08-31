@@ -1477,6 +1477,7 @@ class ChatRepositoryTest {
             SessionEvent.QuestionRequested(
                 PendingQuestion(
                     questionId = "tool_mU6ITagcpKjwSyiUKLHPZYWw",
+                    toolCallId = "tool_mU6ITagcpKjwSyiUKLHPZYWw",
                     items = listOf(
                         PendingQuestion.Item(
                             id = "q_0",
@@ -1498,12 +1499,55 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun `question requested decodes the 0_38_0 split question and tool call ids`() = runBlocking {
+        // Verbatim 0.38.0 capture (docs/server-api.md, "Core event payloads" →
+        // Question requested): question_id is a dedicated question_<uuid> id,
+        // distinct from the tool row's tool_call_id (ticket 106).
+        val emitted = runSocketEvents(
+            """{"type":"event.question.requested","seq":10,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-08-20T19:33:45.150Z","payload":{"type":"event.question.requested",""" +
+                """"question_id":"question_a38aaf28-7dfe-489d-bca3-ea43c93b86fa",""" +
+                """"session_id":"session_1","turn_id":0,""" +
+                """"tool_call_id":"tool_EwFXscDF0HraGfTelCTRdRe9",""" +
+                """"questions":[{"id":"q_0","question":"Pick a color?",""" +
+                """"options":[{"id":"opt_0_0","label":"Red"},{"id":"opt_0_1","label":"Blue"}],""" +
+                """"allow_other":true}],""" +
+                """"created_at":"2026-08-20T19:33:45.150Z","agentId":"main","sessionId":"session_1"}}""",
+        )
+
+        val events = emitted.filterIsInstance<SocketEvent.Event>().map { it.event }
+        assertEquals(
+            SessionEvent.QuestionRequested(
+                PendingQuestion(
+                    questionId = "question_a38aaf28-7dfe-489d-bca3-ea43c93b86fa",
+                    toolCallId = "tool_EwFXscDF0HraGfTelCTRdRe9",
+                    items = listOf(
+                        PendingQuestion.Item(
+                            id = "q_0",
+                            header = "",
+                            text = "Pick a color?",
+                            options = listOf(
+                                PendingQuestion.Option("opt_0_0", "Red", null),
+                                PendingQuestion.Option("opt_0_1", "Blue", null),
+                            ),
+                            allowOther = true,
+                        ),
+                    ),
+                ),
+            ),
+            events.single(),
+        )
+    }
+
+    @Test
     fun `getPendingQuestions parses the poll list`() = runBlocking {
+        // The poll items carry the 0.38.0 dual-id shape (docs/server-api.md,
+        // Questions — ticket 106).
         server.enqueue(
             MockResponse(body = 
                 """
                 {"code":0,"msg":"success","data":{"items":[
-                  {"type":"event.question.requested","question_id":"tool_q1","session_id":"session_1",
+                  {"type":"event.question.requested","question_id":"question_q1","session_id":"session_1",
                    "turn_id":0,"tool_call_id":"tool_q1",
                    "questions":[{"id":"q_0","question":"Red or blue?","header":"Color",
                                  "options":[{"id":"opt_0_0","label":"red"},
@@ -1521,7 +1565,8 @@ class ChatRepositoryTest {
         assertEquals(
             listOf(
                 PendingQuestion(
-                    questionId = "tool_q1",
+                    questionId = "question_q1",
+                    toolCallId = "tool_q1",
                     items = listOf(
                         PendingQuestion.Item(
                             id = "q_0",
@@ -1935,6 +1980,7 @@ class ChatRepositoryTest {
             SessionEvent.QuestionRequested(
                 PendingQuestion(
                     questionId = "tool_sub_q",
+                    toolCallId = "tool_sub_q",
                     items = listOf(
                         PendingQuestion.Item(id = "q_0", header = "", text = "Red or blue?", options = emptyList(), allowOther = true),
                     ),

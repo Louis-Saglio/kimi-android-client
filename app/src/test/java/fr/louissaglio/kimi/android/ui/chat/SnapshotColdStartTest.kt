@@ -100,9 +100,10 @@ class SnapshotColdStartTest : ChatViewModelTestBase() {
     @Test
     fun `cold open renders the snapshot's pending question card`() = runBlocking {
         // Same shape as the /questions poll's items (verified live, ticket 085) — the
-        // same card the live event.question.requested shows.
+        // same card the live event.question.requested shows. 0.38.0 dual ids (106):
+        // a dedicated question_<uuid> id plus the distinct tool_call_id.
         snapshotBody = snapshotBundle(
-            pendingQuestions = """[{"question_id":"tool_q1","session_id":"session_1","turn_id":0,""" +
+            pendingQuestions = """[{"question_id":"question_q1","session_id":"session_1","turn_id":0,""" +
                 """"tool_call_id":"tool_q1",""" +
                 """"questions":[{"id":"q_0","question":"Red or blue?","header":"Color",""" +
                 """"options":[{"id":"opt_0_0","label":"red"},{"id":"opt_0_1","label":"blue"}],""" +
@@ -113,7 +114,8 @@ class SnapshotColdStartTest : ChatViewModelTestBase() {
 
         awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
         val question = viewModel.uiState.value.pendingQuestions.single()
-        assertEquals("tool_q1", question.questionId)
+        assertEquals("question_q1", question.questionId)
+        assertEquals("tool_q1", question.toolCallId)
         assertEquals("Red or blue?", question.items.single().text)
     }
 

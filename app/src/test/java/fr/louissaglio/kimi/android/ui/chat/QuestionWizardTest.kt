@@ -34,6 +34,7 @@ class QuestionWizardTest : ChatViewModelTestBase() {
             listOf(
                 PendingQuestion(
                     questionId = "tool_q1",
+                    toolCallId = "tool_q1",
                     items = listOf(
                         PendingQuestion.Item(
                             id = "q_0",
@@ -83,9 +84,11 @@ class QuestionWizardTest : ChatViewModelTestBase() {
 
     @Test
     fun `submit posts the picked option and the card clears on answered`() = runBlocking {
+        // 0.38.0 split ids (ticket 106): the answer routes by question_id, not the
+        // tool call's.
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
-        socket.send(questionRequestedFrame(id = "tool_q1"))
+        socket.send(questionRequestedFrame(id = "question_q1", toolCallId = "tool_q1"))
         awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
 
         viewModel.onQuestionOptionPicked("q_0", "opt_0_1")
@@ -93,13 +96,13 @@ class QuestionWizardTest : ChatViewModelTestBase() {
 
         val request = awaitRequest("/questions/")
         assertEquals("POST", request.method)
-        assertEquals("/api/v1/sessions/session_1/questions/tool_q1", request.target)
+        assertEquals("/api/v1/sessions/session_1/questions/question_q1", request.target)
         assertEquals("""{"answers":{"q_0":{"kind":"single","option_id":"opt_0_1"}}}""", request.body!!.utf8())
 
         // The ack alone must not clear the card — only the answered event does.
         delay(300)
         assertEquals(1, viewModel.uiState.value.pendingQuestions.size)
-        socket.send(questionAnsweredFrame("tool_q1"))
+        socket.send(questionAnsweredFrame("question_q1"))
         awaitState(viewModel.uiState) { it.pendingQuestions.isEmpty() }
     }
 
@@ -392,19 +395,20 @@ class QuestionWizardTest : ChatViewModelTestBase() {
 
     @Test
     fun `dismiss posts to the dismiss endpoint and the card clears on dismissed`() = runBlocking {
+        // 0.38.0 split ids (ticket 106): dismiss routes by question_id.
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
-        socket.send(questionRequestedFrame(id = "tool_q1"))
+        socket.send(questionRequestedFrame(id = "question_q1", toolCallId = "tool_q1"))
         awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
 
         viewModel.onDismissQuestion()
 
         val request = awaitRequest(":dismiss")
         assertEquals("POST", request.method)
-        assertEquals("/api/v1/sessions/session_1/questions/tool_q1:dismiss", request.target)
+        assertEquals("/api/v1/sessions/session_1/questions/question_q1:dismiss", request.target)
         assertEquals("{}", request.body!!.utf8())
 
-        socket.send(questionDismissedFrame("tool_q1"))
+        socket.send(questionDismissedFrame("question_q1"))
         awaitState(viewModel.uiState) { it.pendingQuestions.isEmpty() }
     }
 
@@ -512,18 +516,19 @@ class QuestionWizardTest : ChatViewModelTestBase() {
     fun `resolved view hides the live card which returns on close`() = runBlocking {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
-        socket.send(questionRequestedFrame(id = "tool_q1"))
+        socket.send(questionRequestedFrame(id = "question_q1", toolCallId = "tool_q1"))
         awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
 
         viewModel.onQuestionRowTapped("tool_old", resolvedInput, resolvedOutput)
         assertTrue(viewModel.uiState.value.resolvedQuestionView != null)
         // The live question is untouched behind the view.
-        assertEquals(listOf("tool_q1"), viewModel.uiState.value.pendingQuestions.map { it.questionId })
+        assertEquals(listOf("question_q1"), viewModel.uiState.value.pendingQuestions.map { it.questionId })
 
-        // Tapping the pending row while the view is open surfaces the live card.
+        // Tapping the pending row (its tool_call_id, ticket 106) while the view is
+        // open surfaces the live card.
         viewModel.onQuestionRowTapped("tool_q1", "ignored", "ignored")
         assertNull(viewModel.uiState.value.resolvedQuestionView)
-        assertEquals(listOf("tool_q1"), viewModel.uiState.value.pendingQuestions.map { it.questionId })
+        assertEquals(listOf("question_q1"), viewModel.uiState.value.pendingQuestions.map { it.questionId })
         assertFalse(viewModel.uiState.value.questionCardMinimized)
     }
 
@@ -542,15 +547,23 @@ class QuestionWizardTest : ChatViewModelTestBase() {
 
     @Test
     fun `pending row tap still toggles the live card`() = runBlocking {
+        // Ticket 106: since 0.38.0 the pending question's question_id differs from
+        // its tool row's tool_call_id — the row tap correlates via the latter.
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
-        socket.send(questionRequestedFrame(id = "tool_q1"))
+        socket.send(questionRequestedFrame(id = "question_q1", toolCallId = "tool_q1"))
         awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
 
         viewModel.onQuestionRowTapped("tool_q1", "ignored", "ignored")
         assertTrue(viewModel.uiState.value.questionCardMinimized)
         viewModel.onQuestionRowTapped("tool_q1", "ignored", "ignored")
         assertFalse(viewModel.uiState.value.questionCardMinimized)
+
+        // The question_id is not a row id: a tap on it no-ops (the resolved-row
+        // parser rejects the unparseable strings).
+        viewModel.onQuestionRowTapped("question_q1", "ignored", "ignored")
+        assertFalse(viewModel.uiState.value.questionCardMinimized)
+        assertNull(viewModel.uiState.value.resolvedQuestionView)
     }
 
     private val resolvedInput = """{"questions":[{"question":"Red or blue?","header":"Color",""" +
@@ -561,11 +574,13 @@ class QuestionWizardTest : ChatViewModelTestBase() {
         """{"question":"Fast or safe?","header":"Mode","options":[{"label":"fast"},{"label":"safe"}],"multi_select":false}]}"""
     private val multiItemResolvedOutput = """{"answers":{"Red or blue?":"red","Fast or safe?":"fast"}}"""
 
-    /** Verbatim 0.27.0 shape (docs/server-api.md, "Core event payloads"). */
-    private fun questionRequestedFrame(id: String): String =
+    /** Verbatim shape (docs/server-api.md, "Core event payloads"). Since 0.38.0
+     * `question_id` is a dedicated `question_<uuid>` id distinct from `tool_call_id`
+     * (ticket 106) — [toolCallId] defaults to the pre-0.38.0 equality. */
+    private fun questionRequestedFrame(id: String, toolCallId: String = id): String =
         """{"type":"event.question.requested","seq":9,"epoch":"ep_1","session_id":"session_1",""" +
             """"timestamp":"2026-07-20T06:06:49.808Z","payload":{"type":"event.question.requested",""" +
-            """"question_id":"$id","session_id":"session_1","turn_id":0,"tool_call_id":"$id",""" +
+            """"question_id":"$id","session_id":"session_1","turn_id":0,"tool_call_id":"$toolCallId",""" +
             """"questions":[{"id":"q_0","question":"Red or blue?","header":"Color",""" +
             """"options":[{"id":"opt_0_0","label":"red","description":"warm color"},""" +
             """{"id":"opt_0_1","label":"blue","description":"cool color"}],"allow_other":true}],""" +

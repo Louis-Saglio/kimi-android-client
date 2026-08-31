@@ -34,6 +34,7 @@ class QuestionCardTest {
 
     private val question = PendingQuestion(
         questionId = "tool_q1",
+        toolCallId = "tool_q1",
         items = listOf(
             PendingQuestion.Item(
                 id = "q_0",
@@ -50,6 +51,7 @@ class QuestionCardTest {
 
     private val multiQuestion = PendingQuestion(
         questionId = "tool_q1",
+        toolCallId = "tool_q1",
         items = listOf(
             PendingQuestion.Item(
                 id = "q_0",

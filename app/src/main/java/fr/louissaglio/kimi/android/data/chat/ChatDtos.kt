@@ -262,12 +262,16 @@ data class ApprovalResolvedPayload(
 
 /**
  * `event.question.requested` payload (docs/server-api.md, Questions); the same
- * shape comes back as items of `GET .../questions?status=pending`. `question_id`
- * == `tool_call_id`; there is no v2 camelCase duplicate of this event family.
+ * shape comes back as items of `GET .../questions?status=pending` and of the
+ * snapshot's `pending_questions`. Since 0.38.0 `question_id` is a dedicated
+ * `question_<uuid>` interaction id and [toolCallId] is distinct (they were equal
+ * before): answer/dismiss route by `question_id`, the transcript row carries
+ * `tool_call_id`. There is no v2 camelCase duplicate of this event family.
  */
 @Serializable
 data class QuestionRequestedPayload(
     @SerialName("question_id") val questionId: String = "",
+    @SerialName("tool_call_id") val toolCallId: String = "",
     val questions: List<QuestionItemDto> = emptyList(),
 )
 

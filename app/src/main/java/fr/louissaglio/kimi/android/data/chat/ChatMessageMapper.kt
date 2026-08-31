@@ -49,6 +49,7 @@ class ChatMessageMapper @Inject constructor(json: Json) {
 
     fun toDomain(payload: QuestionRequestedPayload): PendingQuestion = PendingQuestion(
         questionId = payload.questionId,
+        toolCallId = payload.toolCallId,
         items = payload.questions.map { item ->
             PendingQuestion.Item(
                 id = item.id,

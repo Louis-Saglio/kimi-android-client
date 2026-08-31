@@ -63,9 +63,11 @@ internal fun MessageList(
     /** Invoked with the taskId when a linked background `Bash` tool row is tapped
      * (ticket 096) — the row's `task_id: bash-…` stub navigates to the job screen. */
     onOpenJob: (String) -> Unit = {},
-    /** Tickets 088/089: any `AskUserQuestion` row tap (row id == tool call id ==
-     * question id). The pending row toggles the live card; a resolved row opens or
-     * closes its read-only view. Question rows never expand — the card is the details. */
+    /** Tickets 088/089: any `AskUserQuestion` row tap (the row id is the tool call id;
+     * since 0.38.0 the pending question carries it as a distinct field next to its
+     * question id — ticket 106). The pending row toggles the live card; a resolved
+     * row opens or closes its read-only view. Question rows never expand — the card
+     * is the details. */
     onQuestionRowTapped: (toolCallId: String, input: String, output: String) -> Unit = { _, _, _ -> },
     /** Top-anchored history pagination (ticket 046 on the sub-agent page; the 043
      * mechanics): a small overlay spinner shows while an older page loads and

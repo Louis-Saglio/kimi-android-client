@@ -2,11 +2,15 @@ package fr.louissaglio.kimi.android.data.chat
 
 /**
  * Domain model of a pending agent question (the `AskUserQuestion` tool,
- * docs/server-api.md, Questions). The question id is the tool call id; one
- * request carries one or more structured items to answer.
+ * docs/server-api.md, Questions). Since server 0.38.0 [questionId] is a dedicated
+ * `question_<uuid>` interaction id distinct from [toolCallId] (they were equal
+ * before): answer/dismiss route by [questionId], while [toolCallId] links the
+ * request to its transcript tool row. One request carries one or more structured
+ * items to answer.
  */
 data class PendingQuestion(
     val questionId: String,
+    val toolCallId: String,
     val items: List<Item>,
 ) {
     data class Item(

@@ -113,12 +113,14 @@ internal class QuestionWizard(
     }
 
     /** Ticket 089: any AskUserQuestion tool-row tap. The pending head's row toggles
-     * the live card (088); a resolved row opens its read-only view — or closes it
-     * when it is the view's own row. Rows whose input/output don't parse (e.g.
-     * background-question plain-text results) no-op. */
+     * the live card (088) — matched on the row's `toolCallId`, which since server
+     * 0.38.0 is distinct from the pending question's id (ticket 106); a resolved
+     * row opens its read-only view — or closes it when it is the view's own row.
+     * Rows whose input/output don't parse (e.g. background-question plain-text
+     * results) no-op. */
     fun onRowTapped(toolCallId: String, input: String, output: String) {
         val current = state()
-        if (toolCallId == current.pendingQuestions.firstOrNull()?.questionId) {
+        if (toolCallId == current.pendingQuestions.firstOrNull()?.toolCallId) {
             // The pending row always surfaces the live card: with the read-only view
             // open (which hides the dock's live card), close the view and unminimize;
             // otherwise toggle (088).
