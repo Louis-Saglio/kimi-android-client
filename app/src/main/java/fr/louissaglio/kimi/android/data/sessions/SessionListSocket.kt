@@ -29,7 +29,7 @@ interface SessionListSocket {
     fun observe(settings: ServerSettings, sessionIds: Flow<Set<String>>): Flow<SessionListEvent>
 }
 
-/** One list-screen event: a live patch for one row, or the reconnect-heal signal. */
+/** One list-screen event: a live patch for one row, a row removal, or the reconnect-heal signal. */
 sealed interface SessionListEvent {
 
     /**
@@ -52,4 +52,12 @@ sealed interface SessionListEvent {
 
     /** `session.meta.updated` (docs/server-api.md): [title] is the patched title. */
     data class MetaUpdated(val sessionId: String, val title: String?) : SessionListEvent
+
+    /**
+     * `event.session.archived` (0.38.0, docs/server-api.md): the session was archived
+     * — from any client — and its row must leave the list; archives are the only
+     * removal signal (there is no session-deleted event). A global frame: the envelope
+     * `session_id` is `__global__`, so [sessionId] comes from the payload.
+     */
+    data class SessionArchived(val sessionId: String) : SessionListEvent
 }

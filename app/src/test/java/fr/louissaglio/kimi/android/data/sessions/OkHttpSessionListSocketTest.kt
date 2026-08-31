@@ -227,6 +227,37 @@ class OkHttpSessionListSocketTest {
     }
 
     @Test
+    fun `the global session archived event is delivered with the payload session id`() = runBlocking {
+        // 0.38.0 (docs/server-api.md, Global events — ticket 105): the frame below is
+        // the verbatim capture. Its envelope session_id is the __global__ watermark —
+        // never in the subscribed set — so it must survive the foreign-frame filter,
+        // and the real id comes from the payload's camelCase sessionId.
+        sessionIds.value = linkedSetOf("session_1")
+        val events = CopyOnWriteArrayList<SessionListEvent>()
+        server.enqueue(
+            webSocketUpgradeResponse(
+                recordingListener(
+                    CopyOnWriteArrayList(),
+                    onClientFrame = { webSocket -> webSocket.send(sessionArchivedFrame) },
+                ),
+            ),
+        )
+        coroutineScope {
+            val job = launch { socket.observe(settings(), sessionIds).collect { events += it } }
+            try {
+                awaitCondition { events.isNotEmpty() }
+            } finally {
+                job.cancel()
+            }
+        }
+
+        assertEquals(
+            listOf(SessionListEvent.SessionArchived("session_a57d4784-4fe8-4268-bbe1-b5f3e23b37ba")),
+            events,
+        )
+    }
+
+    @Test
     fun `a malformed frame is dropped without killing the connection`() = runBlocking {
         sessionIds.value = linkedSetOf("session_1")
         val events = CopyOnWriteArrayList<SessionListEvent>()
@@ -298,4 +329,11 @@ class OkHttpSessionListSocketTest {
             """"timestamp":"2026-08-02T00:00:00.000Z","payload":{"type":"session.meta.updated",""" +
             """"title":"$title","patch":{"title":"$title","isCustomTitle":false,"lastPrompt":"$title"},""" +
             """"agentId":"main","sessionId":"$sessionId"}}"""
+
+    // Verbatim 0.38.0 capture (docs/server-api.md, "Global events — event.session.archived").
+    private val sessionArchivedFrame =
+        """{"type":"event.session.archived","seq":28,"session_id":"__global__",""" +
+            """"timestamp":"2026-08-20T19:31:40.052Z","payload":{"type":"event.session.archived",""" +
+            """"workspace_id":"wd_spike_6baf4c130e63","agentId":"main",""" +
+            """"sessionId":"session_a57d4784-4fe8-4268-bbe1-b5f3e23b37ba"},"epoch":"ep_01KX01QDWWRZFHBCEEQ8A5SZ8T"}"""
 }

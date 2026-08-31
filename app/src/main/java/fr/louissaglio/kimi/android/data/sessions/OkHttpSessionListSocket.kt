@@ -40,9 +40,10 @@ import okhttp3.WebSocketListener
  * OkHttp [SessionListSocket] (ticket 087). The connection machinery (listener →
  * channel, reconnect loop with 1 s → 30 s exponential backoff) copies
  * [fr.louissaglio.kimi.android.data.chat.SessionSocket]'s shape; the frame parsing is
- * the list's own: exactly `event.session.work_changed`, `session.meta.updated`, and
- * the subscribe ack. SessionSocket stays single-session/chat-specific — patching it
- * for multi-session use was rejected in the ticket.
+ * the list's own: exactly `event.session.work_changed`, `session.meta.updated`, the
+ * global `event.session.archived` (0.38.0 — ticket 105), and the subscribe ack.
+ * SessionSocket stays single-session/chat-specific — patching it for multi-session
+ * use was rejected in the ticket.
  */
 @Singleton
 class OkHttpSessionListSocket @Inject constructor(
@@ -194,6 +195,16 @@ class OkHttpSessionListSocket @Inject constructor(
             json.decodeFromString<SessionListWsFrame>(text)
         } catch (e: SerializationException) {
             Log.w(TAG, "Dropping malformed frame", e)
+            return
+        }
+        // 0.38.0 global event (docs/server-api.md — ticket 105): parsed ahead of the
+        // unsubscribed filter below because the envelope session_id is the __global__
+        // watermark, never a subscribed id; the archived id rides in the payload as
+        // camelCase sessionId.
+        if (frame.type == "event.session.archived") {
+            frame.decodePayload<SessionArchivedPayload>()?.let { payload ->
+                onEvent(SessionListEvent.SessionArchived(payload.sessionId))
+            }
             return
         }
         // 0.31.0 caveat (docs/server-api.md): the server also sends events for sessions

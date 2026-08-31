@@ -231,9 +231,9 @@ client-facing wire in exactly these places:
   session id rides in the payload as camelCase `sessionId`:
   `{"type":"event.session.archived","session_id":"__global__",...,"payload":{"type":"event.session.archived","workspace_id":"wd_…","agentId":"main","sessionId":"session_…"}}`
   (verified live 2026-08-20 via `POST /api/v2/sessions:archive`). There is no
-  session-deleted event. **The Android app does not listen for it — sessions
-  archived from another client stay in the app's list until a manual
-  refresh** — ticket 105.
+  session-deleted event. The Android app handles it since ticket 105: the list
+  socket reads the payload `sessionId` (the `__global__` envelope would fail the
+  unsubscribed-session filter) and the session list drops the row live.
 - **Snapshot `session.usage` is real now** (commit `4ff06f17`, "serve real
   session usage in snapshot"): the all-zero placeholder served since 0.32.0
   is gone — after a turn the snapshot reports the actual

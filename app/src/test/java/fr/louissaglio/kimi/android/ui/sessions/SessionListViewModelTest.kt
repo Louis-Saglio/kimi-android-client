@@ -639,6 +639,20 @@ class SessionListViewModelTest {
     }
 
     @Test
+    fun `a session archived event drops the row without any refresh`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1", "session_2")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+
+        fakeSocket.events.tryEmit(SessionListEvent.SessionArchived("session_1"))
+
+        awaitState(viewModel.uiState) { it.sessions?.map { s -> s.id } == listOf("session_2") }
+        // Pure WebSocket removal: no REST call beyond the initial load.
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
     fun `events for sessions not in the list are ignored`() = runBlocking {
         server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1", "session_2")))
         viewModel.onScreenStarted()

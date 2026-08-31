@@ -44,7 +44,7 @@ data class WorkspaceDto(
     @SerialName("last_opened_at") val lastOpenedAt: String = "",
 )
 
-// DTOs for the sessions-list WebSocket (docs/server-api.md — ticket 087). Only the two
+// DTOs for the sessions-list WebSocket (docs/server-api.md — ticket 087). Only the
 // consumed event types plus the foreign-session filter key are declared; everything
 // else on the envelope is ignored.
 
@@ -70,4 +70,12 @@ data class WorkChangedPayload(
 @Serializable
 data class SessionMetaUpdatedPayload(
     val title: String? = null,
+)
+
+/** `event.session.archived` (0.38.0): a global frame — the envelope `session_id` is
+ * the `__global__` watermark, so the archived id is read from the payload's camelCase
+ * `sessionId`. No default: a payload without it fails to decode and is dropped. */
+@Serializable
+data class SessionArchivedPayload(
+    val sessionId: String,
 )

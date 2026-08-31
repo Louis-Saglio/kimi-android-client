@@ -83,8 +83,9 @@ class SessionListViewModel @Inject constructor(
 
     /**
      * Collects the sessions-list socket for the life of the screen (ticket 087): rows
-     * patch in place on work_changed / meta.updated, a reconnect heals via one silent
-     * refresh. The loaded ids ride a derived flow, so page loads while connected
+     * patch in place on work_changed / meta.updated, the archived row drops out on the
+     * global event.session.archived (0.38.0 — ticket 105), a reconnect heals via one
+     * silent refresh. The loaded ids ride a derived flow, so page loads while connected
      * re-subscribe on their own. Restart-safe: ON_START/ON_STOP pair up, but a repeat
      * start never opens a second collection.
      */
@@ -112,6 +113,13 @@ class SessionListViewModel @Inject constructor(
             is SessionListEvent.MetaUpdated -> patchRow(event.sessionId) {
                 // Same blank-title rule as the REST mapping: fall back to the cwd.
                 it.copy(title = event.title?.takeIf(String::isNotBlank))
+            }
+            // Archived from any client (0.38.0): the row leaves the list. An unknown
+            // id is ignored, like in patchRow; the next refresh reconciles.
+            is SessionListEvent.SessionArchived -> uiState.update { state ->
+                val sessions = state.sessions ?: return@update state
+                if (sessions.none { it.id == event.sessionId }) return@update state
+                state.copy(sessions = sessions.filterNot { it.id == event.sessionId })
             }
         }
     }
