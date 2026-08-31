@@ -59,8 +59,10 @@ data class ContentPartDto(
     // tools like AskUserQuestion); rendered by the expanded tool row (ticket 023).
     val output: JsonElement? = null,
     @SerialName("is_error") val isError: Boolean? = null,
-    // image parts (ticket 034): the inline source. History carries a data-url,
-    // the prompt ACK echo raw base64, a file reference a file_id (docs/server-api.md).
+    // image parts (ticket 034): the inline source. Since 0.37.2 both history and the
+    // prompt ACK echo carry a session_media file_id (ticket 104); the pre-0.37.2 shapes
+    // were a history data-url, ACK raw base64, a file reference a file_id
+    // (docs/server-api.md).
     val source: MediaSourceDto? = null,
 )
 

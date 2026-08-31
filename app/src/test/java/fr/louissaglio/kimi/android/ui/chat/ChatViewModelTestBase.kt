@@ -353,6 +353,8 @@ abstract class ChatViewModelTestBase {
                         } else {
                             MockResponse(body = tasksBody)
                         }
+                    path.startsWith("/api/v1/sessions/session_1/media/") ->
+                        MockResponse(body = "session-media-bytes")
                     path == "/api/v1/files" -> {
                         filesResponseGate?.await(5, TimeUnit.SECONDS)
                         if (uploadsSucceed) {

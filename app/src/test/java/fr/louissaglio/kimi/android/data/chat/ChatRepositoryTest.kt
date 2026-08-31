@@ -346,6 +346,42 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun `history maps a session media image source to a fetchable image part`() = runBlocking {
+        // 0.37.2 (ticket 104, docs/server-api.md): history and the prompt ACK echo
+        // project an uploaded image as a session_media source; its id is session-scoped
+        // and fetches through the session-media route, not /api/v1/files.
+        server.enqueue(
+            MockResponse(body =
+                """
+                {"code":0,"msg":"success","data":{"items":[
+                  {"id":"msg_1","session_id":"session_1","role":"user",
+                   "content":[
+                     {"type":"text","text":"what is in this?"},
+                     {"type":"image","source":{"kind":"session_media","file_id":"f_img"}}
+                   ],
+                   "created_at":"2026-08-18T10:00:00.000Z"}
+                ],"has_more":false},"request_id":"01KX"}
+                """.trimIndent(),
+            ),
+        )
+
+        val messages = repository.getMessages(settings(), "session_1").getOrThrow().items
+
+        assertEquals(
+            ChatMessage(
+                "msg_1",
+                ChatMessage.Role.User,
+                listOf(
+                    ChatMessage.Part.Text("what is in this?"),
+                    ChatMessage.Part.Image(base64Data = null, fileId = "f_img", isSessionMedia = true),
+                ),
+                createdAt = Instant.parse("2026-08-18T10:00:00.000Z"),
+            ),
+            messages.single(),
+        )
+    }
+
+    @Test
     fun `downloadFile streams the bytes and the content type`() = runBlocking {
         server.enqueue(
             MockResponse.Builder()
@@ -359,6 +395,24 @@ class ChatRepositoryTest {
         assertEquals("/api/v1/files/f_1", server.takeRequest().target)
         assertEquals("text/plain; charset=utf-8", download.mediaType)
         assertEquals("hello file", String(download.bytes))
+    }
+
+    @Test
+    fun `downloadSessionMedia streams the bytes through the session media route`() = runBlocking {
+        // Ticket 104 (docs/server-api.md, Files → Session media): the canonical route
+        // for a session_media image source.
+        server.enqueue(
+            MockResponse.Builder()
+                .body("hello media")
+                .setHeader("Content-Type", "image/png")
+                .build(),
+        )
+
+        val download = repository.downloadSessionMedia(settings(), "session_1", "f_1").getOrThrow()
+
+        assertEquals("/api/v1/sessions/session_1/media/f_1", server.takeRequest().target)
+        assertEquals("image/png", download.mediaType)
+        assertEquals("hello media", String(download.bytes))
     }
 
     @Test

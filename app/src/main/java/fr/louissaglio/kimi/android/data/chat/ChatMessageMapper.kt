@@ -104,6 +104,12 @@ class ChatMessageMapper @Inject constructor(json: Json) {
         "base64" -> dto.data?.let { ChatMessage.Part.Image(base64Data = it, fileId = null) }
         "url" -> dto.url?.let { parseDataUrl(it) }
         "file" -> dto.fileId?.let { ChatMessage.Part.Image(base64Data = null, fileId = it) }
+        // 0.37.2 (ticket 104): history and the prompt ACK echo project uploaded images
+        // as session-owned media; the id is session-scoped, hence the explicit marker
+        // (docs/server-api.md, Files → Session media).
+        "session_media" -> dto.fileId?.let {
+            ChatMessage.Part.Image(base64Data = null, fileId = it, isSessionMedia = true)
+        }
         else -> null
     }
 

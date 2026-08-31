@@ -48,11 +48,15 @@ data class ChatMessage(
 
         /** An uploaded image inlined into the message (ticket 034). [base64Data] is set
          * for base64 and data-url sources (ACK echo and history shapes,
-         * docs/server-api.md), [fileId] for a file-referenced source. The wire
-         * media_type is dropped: nothing reads it — bytes are decoded as-is. */
+         * docs/server-api.md), [fileId] for a file-referenced source. [isSessionMedia]
+         * marks a 0.37.2 `session_media` source (ticket 104): its [fileId] is
+         * session-scoped media, fetched via `GET /api/v1/sessions/{id}/media/{file_id}`
+         * rather than `/api/v1/files/{id}`. The wire media_type is dropped: nothing
+         * reads it, bytes are decoded as-is. */
         data class Image(
             val base64Data: String?,
             val fileId: String?,
+            val isSessionMedia: Boolean = false,
         ) : Part
     }
 }

@@ -1,6 +1,7 @@
 package fr.louissaglio.kimi.android.ui.chat
 
 import fr.louissaglio.kimi.android.data.attachments.AttachmentStore
+import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.awaitState
 import java.util.concurrent.CopyOnWriteArrayList
@@ -152,6 +153,20 @@ class ChatAttachmentsTest : ChatViewModelTestBase() {
         } finally {
             effectJob.cancel()
         }
+    }
+
+    @Test
+    fun `imageBytes of a session media source fetches through the session media endpoint`() = runBlocking {
+        // Ticket 104: a session_media image id is session-scoped; the fetch must hit
+        // GET /api/v1/sessions/{id}/media/{file_id}, not /api/v1/files/{id}.
+        val bytes = viewModel.imageBytes(
+            ChatMessage.Part.Image(base64Data = null, fileId = "f_img", isSessionMedia = true),
+        )
+
+        val request = awaitRequest("/media/")
+        assertEquals("GET", request.method)
+        assertEquals("/api/v1/sessions/session_1/media/f_img", request.target)
+        assertEquals("session-media-bytes", bytes?.let(::String))
     }
 
     /** Stages a composer chip the way the pick flow does, without an android.net.Uri

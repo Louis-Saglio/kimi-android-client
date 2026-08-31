@@ -86,6 +86,23 @@ class ChatApi @Inject constructor(
         }
 
     /**
+     * Downloads one session-owned media (`GET /api/v1/sessions/{id}/media/{file_id}`,
+     * docs/server-api.md, Files → Session media — ticket 104): the canonical route for
+     * a `session_media` image source. Same binary semantics as [downloadFile]; errors
+     * come back as plain HTTP 404, handled by the [ApiClient] scaffold like any status.
+     */
+    suspend fun downloadSessionMedia(settings: ServerSettings, sessionId: String, fileId: String): Result<FileDownload> =
+        api.getResponse(settings, "/api/v1/sessions/$sessionId/media/$fileId") { response ->
+            Result.success(
+                FileDownload(
+                    bytes = response.body?.bytes() ?: ByteArray(0),
+                    mediaType = response.body?.contentType()?.toString()
+                        ?: "application/octet-stream",
+                ),
+            )
+        }
+
+    /**
      * Uploads one file (`POST /api/v1/files`, multipart, docs/server-api.md, Files) and
      * returns its server metadata. The returned [FileMeta.mediaType] is sniffed from the
      * bytes server-side, so it — not the declared [mediaType] — decides the prompt part

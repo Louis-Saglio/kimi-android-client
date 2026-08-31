@@ -61,6 +61,7 @@ internal class ChatAttachments(
     private val attachmentStore: AttachmentStore,
     private val chatRepository: ChatRepository,
     private val settingsRepository: SettingsRepository,
+    private val sessionId: String,
     private val updateState: ((ChatViewModel.UiState) -> ChatViewModel.UiState) -> Unit,
     private val sendEffect: suspend (ChatViewModel.Effect) -> Unit,
 ) {
@@ -113,12 +114,19 @@ internal class ChatAttachments(
     }
 
     /** Bytes of a history image (ticket 034): decoded from the inline base64, or fetched
-     * via `GET /api/v1/files/{id}` for a file-referenced source. Pull-based display data
-     * for the thumbnail/full-screen viewer, hence a call rather than state or an effect. */
+     * for a file-referenced source — a `session_media` source (ticket 104) goes through
+     * `GET /api/v1/sessions/{id}/media/{file_id}`, a legacy file reference through
+     * `GET /api/v1/files/{id}`. Pull-based display data for the thumbnail/full-screen
+     * viewer, hence a call rather than state or an effect. */
     suspend fun imageBytes(image: ChatMessage.Part.Image): ByteArray? =
         image.base64Data?.let { runCatching { Base64.decode(it, Base64.DEFAULT) }.getOrNull() }
             ?: image.fileId?.let { fileId ->
-                chatRepository.downloadFile(settingsRepository.current(), fileId).getOrNull()?.bytes
+                val settings = settingsRepository.current()
+                if (image.isSessionMedia) {
+                    chatRepository.downloadSessionMedia(settings, sessionId, fileId).getOrNull()?.bytes
+                } else {
+                    chatRepository.downloadFile(settings, fileId).getOrNull()?.bytes
+                }
             }
 
     /** Downloads a history attachment's bytes, persists them via the store, and emits

@@ -40,8 +40,8 @@ import kotlinx.coroutines.withContext
 
 /** An image of a history user message (ticket 034): a bounded-decode thumbnail —
  * the bytes come from the inline base64 or, for file-referenced sources, from a
- * /files fetch. A failed resolve falls back to the generic sheet glyph; a tap opens
- * the full-screen viewer. */
+ * /files or session-media fetch (ticket 104). A failed resolve falls back to the
+ * generic sheet glyph; a tap opens the full-screen viewer. */
 @Composable
 internal fun HistoryImageThumbnail(
     image: ChatMessage.Part.Image,

@@ -48,6 +48,11 @@ class ChatRepository @Inject constructor(
     suspend fun downloadFile(settings: ServerSettings, fileId: String): Result<FileDownload> =
         chatApi.downloadFile(settings, fileId)
 
+    /** Downloads one session-owned media (`GET /api/v1/sessions/{id}/media/{file_id}`)
+     * — the canonical route for a `session_media` image source (ticket 104). */
+    suspend fun downloadSessionMedia(settings: ServerSettings, sessionId: String, fileId: String): Result<FileDownload> =
+        chatApi.downloadSessionMedia(settings, sessionId, fileId)
+
     /** Uploads one file (`POST /api/v1/files`, multipart) and returns its server
      * metadata (ticket 033). One file per request; the caller uploads sequentially. */
     suspend fun uploadFile(

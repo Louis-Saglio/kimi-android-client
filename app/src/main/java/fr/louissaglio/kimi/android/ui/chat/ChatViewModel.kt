@@ -290,6 +290,7 @@ class ChatViewModel internal constructor(
         attachmentStore = attachmentStore,
         chatRepository = chatRepository,
         settingsRepository = settingsRepository,
+        sessionId = sessionId,
         updateState = { transform -> uiState.update(transform) },
         sendEffect = { effect -> _effects.send(effect) },
     )
