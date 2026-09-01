@@ -6,6 +6,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import fr.louissaglio.kimi.android.data.toUserMessage
 import fr.louissaglio.kimi.android.data.sessions.Session
 import fr.louissaglio.kimi.android.data.sessions.SessionActivityStore
+import fr.louissaglio.kimi.android.data.sessions.SessionListCache
 import fr.louissaglio.kimi.android.data.sessions.SessionListEvent
 import fr.louissaglio.kimi.android.data.sessions.SessionListSocket
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
@@ -13,10 +14,12 @@ import fr.louissaglio.kimi.android.data.sessions.Workspace
 import fr.louissaglio.kimi.android.data.sessions.isAwaitingInteraction
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import javax.inject.Inject
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.receiveAsFlow
@@ -29,9 +32,10 @@ class SessionListViewModel @Inject constructor(
     private val settingsRepository: SettingsRepository,
     private val activityStore: SessionActivityStore,
     private val sessionListSocket: SessionListSocket,
+    private val sessionListCache: SessionListCache,
 ) : ViewModel() {
 
-    /** [sessions] is null until the first successful load; [error] is shown only when there is no list to display. */
+    /** [sessions] is null until the disk cache or the first successful load populates it; [error] is shown only when there is no list to display. */
     data class UiState(
         val isLoading: Boolean = false,
         val isRefreshing: Boolean = false,
@@ -65,6 +69,33 @@ class SessionListViewModel @Inject constructor(
     private var loadJob: Job? = null
     private var loadMoreJob: Job? = null
     private var socketJob: Job? = null
+
+    init {
+        // Cold start renders the last-known list from disk before any network traffic
+        // (ticket 111): a warm cache never shows the sessions == null spinner. The ON_START
+        // refresh still runs on top and reconciles (removing it is ticket 112).
+        viewModelScope.launch {
+            val cached = sessionListCache.load(settingsRepository.current().serverUrl) ?: return@launch
+            uiState.update { state ->
+                // A network page that somehow landed first always wins over the disk.
+                if (state.sessions == null) state.copy(sessions = cached.sessions, hasMore = cached.hasMore) else state
+            }
+        }
+        // The one writer covering every mutation path (initial load, refresh, paging,
+        // socket patches, archive drops, activity bumps, create-insert): debounced so
+        // bursts collapse into a single write, collected on IO so disk writes never
+        // touch the main thread.
+        viewModelScope.launch(Dispatchers.IO) {
+            uiState
+                .map { it.sessions to it.hasMore }
+                .distinctUntilChanged()
+                .debounce(CACHE_WRITE_DEBOUNCE_MS)
+                .collect { (sessions, hasMore) ->
+                    if (sessions == null) return@collect
+                    sessionListCache.save(settingsRepository.current().serverUrl, sessions, hasMore)
+                }
+        }
+    }
 
     fun onScreenStarted() {
         bumpPendingActivity()
@@ -346,5 +377,6 @@ class SessionListViewModel @Inject constructor(
 
     private companion object {
         const val DEFAULT_NEW_SESSION_CWD = "/home/ubuntu"
+        const val CACHE_WRITE_DEBOUNCE_MS = 500L
     }
 }

@@ -46,18 +46,19 @@ sessions.
 
 ## Acceptance criteria
 
-- [ ] `SessionListCache` round-trip unit test: save → load returns the same
+- [x] `SessionListCache` round-trip unit test: save → load returns the same
   sessions and `hasMore`; a corrupted file decodes as absent and is deleted.
-- [ ] ViewModel test (MockWebServer with a delayed response): with a cache
+  (`SessionListCacheTest`)
+- [x] ViewModel test (MockWebServer with a delayed response): with a cache
   present, `uiState.sessions` is populated from the cache before the network
-  answers — no loading state in between.
-- [ ] ViewModel test: with no cache for the current server, behavior is
-  unchanged (spinner → visible initial load).
-- [ ] Cache is keyed per server: two different base URLs keep independent
-  caches (unit test on the keying).
+  answers — no loading state in between. (`SessionListViewModelTest`)
+- [x] ViewModel test: with no cache for the current server, behavior is
+  unchanged (spinner → visible initial load). (`SessionListViewModelTest`)
+- [x] Cache is keyed per server: two different base URLs keep independent
+  caches (unit test on the keying). (`SessionListCacheTest`)
 - [ ] On-device: kill the app, enable airplane mode, relaunch → the cached
   list renders instead of the error state.
-- [ ] `./gradlew :app:assembleDebug` succeeds with all unit tests green (VPS
+- [x] `./gradlew :app:assembleDebug` succeeds with all unit tests green (VPS
   rules: `flock /tmp/kimi-android-gradle.lock`, `--max-workers=1`,
   `--no-daemon` when parallel).
 

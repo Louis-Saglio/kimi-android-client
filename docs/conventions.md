@@ -31,6 +31,14 @@
   REST-cancellable — docs/server-api.md, Background lifecycle). Domain:
   `BackgroundTask`/`TaskInfo` in `data/chat/Tasks.kt` — kind `tool` (question
   flows) is filtered out at the mapping boundary.
+- `data/sessions/` — `SessionsRepository` (list/get/create REST facade), the 087
+  `SessionListSocket`, the 086 `SessionActivityStore`, and `SessionListCache`
+  (ticket 111): the last-known list as one JSON file per server under
+  `filesDir/session-list-cache/` (file name = SHA-256 hex of the base URL), so a
+  cold start renders before any network traffic. The session-list ViewModel owns
+  both sides — init load, plus one debounced (~500 ms, IO) write-through
+  collection covering every mutation path. A corrupt file is deleted and treated
+  as absent.
 - `data/attachments/` — `AttachmentStore` owns all platform file I/O (content
   resolver reads capped at 256 MiB — a client-side guard; the server removed
   its own upload cap in 0.31.0, see ticket 059; cache writes;

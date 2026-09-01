@@ -2,7 +2,9 @@ package fr.louissaglio.kimi.android.ui.sessions
 
 import androidx.datastore.preferences.core.preferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
+import fr.louissaglio.kimi.android.data.sessions.Session
 import fr.louissaglio.kimi.android.data.sessions.SessionActivityStore
+import fr.louissaglio.kimi.android.data.sessions.SessionListCache
 import fr.louissaglio.kimi.android.data.sessions.SessionListEvent
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
@@ -11,9 +13,11 @@ import fr.louissaglio.kimi.android.fakes.FakeSessionListSocket
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.awaitState
 import fr.louissaglio.kimi.android.testutil.testSessionsRepository
+import java.io.File
 import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
+import kotlin.io.path.createTempDirectory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -25,6 +29,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
+import kotlinx.serialization.json.Json
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
 import org.junit.After
@@ -46,15 +51,18 @@ class SessionListViewModelTest {
 
     private val server = MockWebServer()
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+    private lateinit var settingsRepository: SettingsRepository
     private lateinit var viewModel: SessionListViewModel
     private lateinit var activityStore: SessionActivityStore
     private lateinit var fakeSocket: FakeSessionListSocket
+    private lateinit var cacheDir: File
+    private lateinit var sessionListCache: SessionListCache
 
     @Before
     fun setUp() {
         server.start()
         Dispatchers.setMain(UnconfinedTestDispatcher())
-        val settingsRepository = SettingsRepository(
+        settingsRepository = SettingsRepository(
             FakePreferencesDataStore(
                 preferencesOf(stringPreferencesKey("server_url") to server.url("/").toString()),
             ),
@@ -62,12 +70,9 @@ class SessionListViewModelTest {
         )
         activityStore = SessionActivityStore()
         fakeSocket = FakeSessionListSocket()
-        viewModel = SessionListViewModel(
-            testSessionsRepository(),
-            settingsRepository,
-            activityStore,
-            fakeSocket,
-        )
+        cacheDir = createTempDirectory("session-list-view-model-test").toFile()
+        sessionListCache = SessionListCache(cacheDir, Json { ignoreUnknownKeys = true })
+        viewModel = createViewModel()
     }
 
     @After
@@ -78,7 +83,16 @@ class SessionListViewModelTest {
         Dispatchers.resetMain()
         appScope.cancel()
         server.close()
+        cacheDir.deleteRecursively()
     }
+
+    private fun createViewModel(): SessionListViewModel = SessionListViewModel(
+        testSessionsRepository(),
+        settingsRepository,
+        activityStore,
+        fakeSocket,
+        sessionListCache,
+    )
 
     @Test
     fun `opening the dialog prefills the default working directory`() {
@@ -586,6 +600,95 @@ class SessionListViewModelTest {
 
         server.enqueue(MockResponse(body = pageBody(hasMore = true, "session_1")))
         awaitState(viewModel.uiState) { it.hasMore }
+    }
+
+    // --- Disk cache (ticket 111) ---
+
+    @Test
+    fun `a warm cache renders instantly and the delayed initial load reconciles on top`() = runBlocking {
+        sessionListCache.save(
+            server.url("/").toString(),
+            listOf(
+                Session(
+                    id = "session_cached",
+                    title = "Cached",
+                    cwd = "/tmp/cached",
+                    updatedAt = Instant.parse("2026-08-30T10:00:00.000Z"),
+                    isRunning = true,
+                    isAwaitingInteraction = true,
+                ),
+            ),
+            hasMore = true,
+        )
+        // Rebuilt with the cache already on disk, like a cold process start.
+        viewModel = createViewModel()
+
+        // Populated from disk during init, before any request was even made.
+        val warm = viewModel.uiState.value
+        val cached = warm.sessions!!
+        assertEquals(listOf("session_cached"), cached.map { it.id })
+        assertTrue(warm.hasMore)
+        assertTrue(cached.single().isRunning)
+        assertTrue(cached.single().isAwaitingInteraction)
+        assertEquals(0, server.requestCount)
+
+        server.enqueue(
+            MockResponse(body = pageBody(hasMore = false, "session_1"))
+                .newBuilder()
+                .bodyDelay(300, TimeUnit.MILLISECONDS)
+                .build(),
+        )
+        val states = CopyOnWriteArrayList<SessionListViewModel.UiState>()
+        val stateJob = launch { viewModel.uiState.collect { states += it } }
+        try {
+            viewModel.onScreenStarted()
+
+            // The network has not answered yet: the cached list is on screen, and
+            // nothing in between was a loading state.
+            assertEquals(listOf("session_cached"), viewModel.uiState.value.sessions!!.map { it.id })
+            assertTrue(states.none { it.sessions == null || it.isLoading })
+
+            // The ON_START refresh reconciles on top: server list and its hasMore.
+            awaitState(viewModel.uiState) { it.sessions?.map { s -> s.id } == listOf("session_1") }
+            assertFalse(viewModel.uiState.value.hasMore)
+            assertTrue(states.none { it.sessions == null || it.isLoading })
+        } finally {
+            stateJob.cancel()
+        }
+    }
+
+    @Test
+    fun `without a cache the cold start spins until the first page lands`() = runBlocking {
+        server.enqueue(
+            MockResponse(body = pageBody(hasMore = false, "session_1"))
+                .newBuilder()
+                .bodyDelay(300, TimeUnit.MILLISECONDS)
+                .build(),
+        )
+
+        viewModel.onScreenStarted()
+
+        // Nothing on disk: sessions == null → LoadingState, the visible initial load
+        // (the flag is set synchronously by the eager launch).
+        assertNull(viewModel.uiState.value.sessions)
+        assertTrue(viewModel.uiState.value.isLoading)
+
+        awaitState(viewModel.uiState) { it.sessions != null }
+        assertEquals(listOf("session_1"), viewModel.uiState.value.sessions!!.map { it.id })
+        assertFalse(viewModel.uiState.value.isLoading)
+    }
+
+    @Test
+    fun `the loaded list is written through to the disk cache`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = true, "session_1", "session_2")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+
+        // The write is debounced: the file holds the list (and hasMore) shortly after.
+        awaitCondition {
+            sessionListCache.load(server.url("/").toString())
+                ?.let { it.sessions.map { s -> s.id } == listOf("session_1", "session_2") && it.hasMore } == true
+        }
     }
 
     // --- Live socket patches (ticket 087, FakeSessionListSocket) ---

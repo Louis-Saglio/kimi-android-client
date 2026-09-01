@@ -15,8 +15,10 @@ import fr.louissaglio.kimi.android.data.attachments.AttachmentStore
 import fr.louissaglio.kimi.android.data.network.ApiClient
 import fr.louissaglio.kimi.android.data.network.BearerTokenInterceptor
 import fr.louissaglio.kimi.android.data.sessions.OkHttpSessionListSocket
+import fr.louissaglio.kimi.android.data.sessions.SessionListCache
 import fr.louissaglio.kimi.android.data.sessions.SessionListSocket
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
+import java.io.File
 import java.util.concurrent.TimeUnit
 import javax.inject.Qualifier
 import javax.inject.Singleton
@@ -72,6 +74,13 @@ object AppModule {
     @Provides
     @Singleton
     fun provideSessionListSocket(impl: OkHttpSessionListSocket): SessionListSocket = impl
+
+    /** The cache dir is handed over ready-made so the cache stays plain-JVM testable;
+     * filesDir, not cacheDir — the cached list is user-visible state (ticket 111). */
+    @Provides
+    @Singleton
+    fun provideSessionListCache(@ApplicationContext context: Context, json: Json): SessionListCache =
+        SessionListCache(File(context.filesDir, "session-list-cache"), json)
 
     @Provides
     @Singleton
