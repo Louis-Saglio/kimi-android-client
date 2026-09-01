@@ -59,6 +59,8 @@ internal fun ChatInputBar(
     isWorking: Boolean,
     attachments: List<PendingAttachment>,
     modelLabel: String?,
+    /** The chip's effective effort (ticket 108); null on effort-less models. */
+    modelEffort: String?,
     contextUsage: ContextUsage?,
     compactEnabled: Boolean,
     onCompact: () -> Unit,
@@ -131,7 +133,7 @@ internal fun ChatInputBar(
                         ) {
                             Icon(Icons.Filled.Add, contentDescription = null)
                         }
-                        modelLabel?.let { label -> ModelChip(label = label, onClick = onModelClick) }
+                        modelLabel?.let { label -> ModelChip(model = label, effort = modelEffort, onClick = onModelClick) }
                         // Context usage right of the model chip (ticket 053): model-scoped
                         // info next to the model it belongs to; hidden until known. The
                         // ring's dialog carries the compact affordance at ≥80% (057).
@@ -187,23 +189,26 @@ internal fun ChatInputBar(
 }
 
 /** Model/effort selector inside the composer (ticket 038): a low-key row with a
- * chevron, opening the same ModelPickerSheet the top-bar chip used to. The whole
- * row keeps the ≥ 48dp M3 touch target the web's compact hit area lacks. */
+ * chevron, opening the ModelPickerSheet. The label carries the effective effort next
+ * to the model name (ticket 108 — revisiting 032's sheet-only call), so a glance tells
+ * both. The whole row keeps the ≥ 48dp M3 touch target the web's compact hit area lacks. */
 @Composable
-private fun ModelChip(label: String, onClick: () -> Unit) {
+private fun ModelChip(model: String, effort: String?, onClick: () -> Unit) {
     Row(
         modifier = Modifier
             .padding(start = 4.dp)
             .heightIn(min = 48.dp)
             .clip(MaterialTheme.shapes.large)
             .clickable(onClick = onClick)
-            .semantics { contentDescription = "Model: $label" }
+            .semantics {
+                contentDescription = if (effort != null) "Model: $model, effort $effort" else "Model: $model"
+            }
             .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         Text(
-            text = label,
+            text = if (effort != null) "$model · $effort" else model,
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,

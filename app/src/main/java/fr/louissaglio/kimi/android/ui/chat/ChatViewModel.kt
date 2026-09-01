@@ -218,6 +218,12 @@ class ChatViewModel internal constructor(
         /** The current model's server default effort, for the sheet's "Default" hint. */
         val defaultEffort: String?
             get() = currentModel?.defaultEffort
+
+        /** The effort the composer chip shows (ticket 108): the session's choice
+         * (server-synced, 107), else the current model's `default_effort`; null on
+         * effort-less models — the chip then shows the plain model name. */
+        val effectiveEffort: String?
+            get() = if (supportedEfforts.isEmpty()) null else selectedEffort ?: defaultEffort
     }
 
     sealed interface Effect {

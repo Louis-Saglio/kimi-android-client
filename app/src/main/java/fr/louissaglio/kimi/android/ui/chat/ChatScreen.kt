@@ -418,12 +418,11 @@ private fun ChatContent(
                     isSending = uiState.isSending,
                     isWorking = uiState.isWorking,
                     attachments = uiState.attachments,
-                    // "K3 · high": the effective effort trails the model name like the
-                    // web composer's label; hidden entirely until the models fetch lands.
-                    modelLabel = uiState.currentModelLabel?.let { label ->
-                        val effort = uiState.selectedEffort ?: uiState.defaultEffort
-                        if (effort != null) "$label · $effort" else label
-                    },
+                    // "K3 · high": the chip carries the effective effort next to the model
+                    // (ticket 108 — the session's server-synced choice, else the model's
+                    // default); both hidden until the models fetch lands.
+                    modelLabel = uiState.currentModelLabel,
+                    modelEffort = uiState.effectiveEffort,
                     contextUsage = uiState.contextUsage,
                     compactEnabled = canCompact,
                     onCompact = onCompact,

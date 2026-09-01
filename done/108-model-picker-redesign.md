@@ -53,17 +53,22 @@ server-synced session state it introduces, avoiding conflicting edits in
 
 ## Acceptance criteria
 
-- [ ] Unit/Compose test: models sharing a `display_name` render in separate
+- [x] Unit/Compose test: models sharing a `display_name` render in separate
       provider groups with the model id in the subtitle; unique models render
-      without it.
-- [ ] Compose test: tapping a model and then an effort keeps the sheet open
-      and both checks are visible.
-- [ ] Unit test: the chip label includes the effort when one is effective,
-      and omits it for effort-less models.
-- [ ] `./gradlew testDebugUnitTest` passes.
+      without it. (`ModelPickerSheetTest`, Firebase Test Lab 2026-09-01)
+- [x] Compose test: tapping a model and then an effort keeps the sheet open
+      and both checks are visible. (`ModelPickerSheetTest`, same run)
+- [x] Unit test: the chip label includes the effort when one is effective,
+      and omits it for effort-less models. (`ChatViewModelTest` chip-effort
+      test + `ModelChipTest` label/contentDescription pins)
+- [x] `./gradlew testDebugUnitTest` passes.
 - [ ] Live check on a multi-provider server: the duplicate "K3-256k" rows are
-      distinguishable by provider group and model id.
-- [ ] APK built and copied to the file server per AGENTS.md.
+      distinguishable by provider group and model id. (Data side verified live
+      2026-09-01: the production server serves "K3-256k" from both
+      `managed:kimi-code` and `Kimi Platform`; the grouped/disambiguated
+      rendering of exactly that shape is pinned by the instrumented test.
+      On-device visual pass: awaiting Louis's retest on the 2026-09-01 APK.)
+- [x] APK built and copied to the file server per AGENTS.md.
 
 ## Out of scope
 

@@ -1171,6 +1171,26 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         assertNull(state.defaultEffort)
     }
 
+    @Test
+    fun `chip effort is the session choice else the model default, absent on effort-less models`() = runBlocking {
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.modelsAvailable }
+
+        // Nothing stored: K3's server default_effort drives the chip (ticket 108).
+        assertEquals("K3", viewModel.uiState.value.currentModelLabel)
+        assertEquals("high", viewModel.uiState.value.effectiveEffort)
+
+        viewModel.onEffortSelected("low")
+        awaitState(viewModel.uiState) { it.sessionEffort == "low" }
+        assertEquals("low", viewModel.uiState.value.effectiveEffort)
+
+        // An effort-less model drops the effort from the chip entirely.
+        viewModel.onModelSelected("kimi-code/kimi-for-coding")
+        awaitState(viewModel.uiState) { it.sessionModel == "kimi-code/kimi-for-coding" }
+        assertEquals("K2.7 Coding", viewModel.uiState.value.currentModelLabel)
+        assertNull(viewModel.uiState.value.effectiveEffort)
+    }
+
     // --- Server-owned session model (ticket 107) ----------------------------------------
 
     @Test
