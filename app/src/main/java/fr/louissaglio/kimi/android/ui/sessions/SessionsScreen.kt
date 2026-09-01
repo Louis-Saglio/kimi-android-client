@@ -106,6 +106,7 @@ fun SessionsScreen(
         onPullToRefresh = viewModel::onPullToRefresh,
         onEndReached = viewModel::onEndReached,
         onViewModeToggle = viewModel::onViewModeToggle,
+        onGroupShowMore = viewModel::onGroupShowMore,
         onNewSessionClick = viewModel::onNewSessionClick,
         onNewSessionCwdChange = viewModel::onNewSessionCwdChange,
         onNewSessionTitleChange = viewModel::onNewSessionTitleChange,
@@ -125,6 +126,7 @@ private fun SessionsContent(
     onPullToRefresh: () -> Unit,
     onEndReached: () -> Unit,
     onViewModeToggle: () -> Unit,
+    onGroupShowMore: (String) -> Unit,
     onNewSessionClick: () -> Unit,
     onNewSessionCwdChange: (String) -> Unit,
     onNewSessionTitleChange: (String) -> Unit,
@@ -180,7 +182,7 @@ private fun SessionsContent(
                     EmptyState("No sessions yet", modifier = Modifier.verticalScroll(rememberScrollState()))
                 !uiState.groupedView && uiState.sessions!!.isEmpty() ->
                     EmptyState("No sessions yet", modifier = Modifier.verticalScroll(rememberScrollState()))
-                uiState.groupedView -> GroupedSessionList(uiState, onSessionClick)
+                uiState.groupedView -> GroupedSessionList(uiState, onSessionClick, onGroupShowMore)
                 else -> SessionList(uiState, onSessionClick, onEndReached)
             }
         }
@@ -328,13 +330,15 @@ private fun SessionList(
 
 /**
  * The grouped view (ticket 115): one header per workspace group — its 114 label plus
- * the group's full server-side count — followed by the group's rows. No paging: the
- * grouped fetch is a single request, so there is no load-more footer.
+ * the group's full server-side count — followed by the group's rows. A group holding
+ * fewer rows than its total gets a show-more footer (ticket 116) that pages the rest
+ * of the workspace.
  */
 @Composable
 private fun GroupedSessionList(
     uiState: SessionListViewModel.UiState,
     onSessionClick: (Session) -> Unit,
+    onGroupShowMore: (String) -> Unit,
 ) {
     LazyColumn(modifier = Modifier.fillMaxSize()) {
         uiState.groups.orEmpty().forEach { group ->
@@ -344,6 +348,18 @@ private fun GroupedSessionList(
             items(group.sessions, key = Session::id, contentType = { it::class }) { session ->
                 // The header is the workspace label, so the row keeps the bare date.
                 SessionRow(session, workspaceLabel = null, onClick = { onSessionClick(session) })
+            }
+            // The grouped fetch serves only the first 5 sessions per workspace; the
+            // footer pages the rest and goes away once loaded == total.
+            if (group.sessions.size < group.total) {
+                item(key = "footer_${group.workspaceId}", contentType = "footer") {
+                    val expansion = uiState.groupExpansions[group.workspaceId]
+                    GroupShowMoreFooter(
+                        isLoading = expansion?.isLoading == true,
+                        error = expansion?.error,
+                        onShowMore = { onGroupShowMore(group.workspaceId) },
+                    )
+                }
             }
         }
     }
@@ -379,6 +395,33 @@ private fun LoadMoreFooter(error: String?, onRetry: () -> Unit) {
                 style = MaterialTheme.typography.bodyMedium,
             )
             TextButton(onClick = onRetry) { Text("Retry") }
+        }
+    }
+}
+
+/**
+ * A group's show-more footer (ticket 116), mirroring the flat list's [LoadMoreFooter]:
+ * spinner while the next page loads, error with retry when the last attempt failed,
+ * the show-more button otherwise.
+ */
+@Composable
+private fun GroupShowMoreFooter(isLoading: Boolean, error: String?, onShowMore: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(16.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        when {
+            isLoading -> CircularProgressIndicator(Modifier.size(24.dp))
+            error != null -> {
+                Text(
+                    text = error,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                TextButton(onClick = onShowMore) { Text("Retry") }
+            }
+            else -> TextButton(onClick = onShowMore) { Text("Show more") }
         }
     }
 }
@@ -448,6 +491,7 @@ private fun SessionsContentPreview() {
             onPullToRefresh = {},
             onEndReached = {},
             onViewModeToggle = {},
+            onGroupShowMore = {},
             onNewSessionClick = {},
             onNewSessionCwdChange = {},
             onNewSessionTitleChange = {},

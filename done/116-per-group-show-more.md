@@ -33,15 +33,15 @@ a second one.
 
 ## Acceptance criteria
 
-- [ ] MockWebServer test: expansion requests
+- [x] MockWebServer test: expansion requests
   `/api/v1/sessions?workspace_id=<id>&before_id=<last id>` with the group's
   last loaded session id; appended sessions dedup by id.
-- [ ] ViewModel tests: the footer shows only while loaded < `total`; rapid
+- [x] ViewModel tests: the footer shows only while loaded < `total`; rapid
   double-tap fires one request; failure keeps the group intact with an inline
   retry; success at `total` removes the footer.
 - [ ] On-device: expanding the 165-session workspace pages through its history
   20 at a time until the footer disappears.
-- [ ] `./gradlew :app:assembleDebug` succeeds with all unit tests green (VPS
+- [x] `./gradlew :app:assembleDebug` succeeds with all unit tests green (VPS
   rules: `flock /tmp/kimi-android-gradle.lock`, `--max-workers=1`,
   `--no-daemon` when parallel).
 

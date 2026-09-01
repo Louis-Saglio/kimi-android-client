@@ -53,6 +53,9 @@ class SessionListViewModel @Inject constructor(
         val groupedView: Boolean = false,
         /** Workspace groups in grouped mode; null until the first successful grouped load. */
         val groups: List<SessionGroup>? = null,
+        /** Per-group show-more footer state (ticket 116), keyed by workspace id — an entry
+         * exists only while that group's next-page load is in flight or its last attempt failed. */
+        val groupExpansions: Map<String, GroupExpansion> = emptyMap(),
         val showCreateDialog: Boolean = false,
         val newSessionCwd: String = "",
         val newSessionTitle: String = "",
@@ -82,6 +85,12 @@ class SessionListViewModel @Inject constructor(
             get() = if (groupedView) groups != null else sessions != null
     }
 
+    /** One group's show-more footer state (ticket 116): the in-flight next-page load, or the last attempt's error. */
+    data class GroupExpansion(
+        val isLoading: Boolean = false,
+        val error: String? = null,
+    )
+
     sealed interface Effect {
         data class RefreshFailed(val message: String) : Effect
         data class CreateFailed(val message: String) : Effect
@@ -97,6 +106,7 @@ class SessionListViewModel @Inject constructor(
     private var loadJob: Job? = null
     private var loadMoreJob: Job? = null
     private var socketJob: Job? = null
+    private val groupLoadJobs = mutableMapOf<String, Job>()
 
     init {
         // Cold start renders the last-known list from disk before any network traffic
@@ -341,6 +351,51 @@ class SessionListViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Loads the next page of one group (ticket 116): the grouped fetch serves only each
+     * workspace's first 5 sessions, so the show-more footer pages the rest through the
+     * v1 list filtered by workspace (web parity), 20 at a time like the flat list. The
+     * per-group job (not a state flag) is the re-entrancy guard — same reasoning as
+     * [onEndReached]: the footer stays tappable while the request is in flight, and
+     * state updates are not visible synchronously across dispatches.
+     */
+    fun onGroupShowMore(workspaceId: String) {
+        if (groupLoadJobs[workspaceId]?.isActive == true) return
+        val group = uiState.value.groups?.find { it.workspaceId == workspaceId } ?: return
+        // The footer only exists while the group has more sessions server-side.
+        if (group.sessions.size >= group.total) return
+        val beforeId = group.sessions.lastOrNull()?.id ?: return
+        groupLoadJobs[workspaceId] = viewModelScope.launch {
+            uiState.update { state ->
+                state.copy(groupExpansions = state.groupExpansions + (workspaceId to GroupExpansion(isLoading = true)))
+            }
+            sessionsRepository.listSessions(settingsRepository.current(), beforeId = beforeId, workspaceId = workspaceId)
+                .onSuccess { page ->
+                    uiState.update { state ->
+                        state.copy(
+                            groupExpansions = state.groupExpansions - workspaceId,
+                            groups = state.groups?.map { current ->
+                                if (current.workspaceId != workspaceId) {
+                                    current
+                                } else {
+                                    current.copy(sessions = (current.sessions + page.items).distinctBy(Session::id))
+                                }
+                            },
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    // The loaded rows stay as they are; the footer offers a retry.
+                    uiState.update { state ->
+                        state.copy(
+                            groupExpansions = state.groupExpansions +
+                                (workspaceId to GroupExpansion(error = error.toUserMessage())),
+                        )
+                    }
+                }
+        }
+    }
+
     fun onNewSessionClick() {
         uiState.update {
             it.copy(
@@ -452,7 +507,7 @@ class SessionListViewModel @Inject constructor(
         loadJob?.cancel()
         loadMoreJob?.cancel()
         loadJob = viewModelScope.launch {
-            uiState.update { it.copy(isLoadingMore = false, loadMoreError = null) }
+            uiState.update { it.copy(isLoadingMore = false, loadMoreError = null, groupExpansions = emptyMap()) }
             if (uiState.value.groupedView) {
                 sessionsRepository.listSessionGroups(settingsRepository.current())
                     .onSuccess { groups ->
@@ -490,6 +545,7 @@ class SessionListViewModel @Inject constructor(
                     error = null,
                     isLoadingMore = false,
                     loadMoreError = null,
+                    groupExpansions = emptyMap(),
                 )
             }
             // The fetch follows the active mode (115): the grouped view re-fetches the

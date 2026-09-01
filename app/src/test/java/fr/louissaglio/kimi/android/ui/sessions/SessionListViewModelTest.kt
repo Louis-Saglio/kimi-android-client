@@ -1045,6 +1045,126 @@ class SessionListViewModelTest {
         assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
     }
 
+    // --- Per-group show more (ticket 116) ---
+
+    @Test
+    fun `show more appends the group's next v1 page deduplicated`() = runBlocking {
+        enterGroupedMode(groupsBodyWithTotals(Triple("/tmp/a", listOf("session_1", "session_2"), 4)))
+        // The expansion page overlaps the loaded rows by one; the duplicate must not
+        // appear twice (same rule as the flat list's paging).
+        server.enqueue(MockResponse(body = pageBody(hasMore = true, "session_2", "session_3")))
+
+        viewModel.onGroupShowMore("wd_a")
+
+        awaitState(viewModel.uiState) { it.groups?.single()?.sessions?.size == 3 }
+        val group = viewModel.uiState.value.groups!!.single()
+        assertEquals(listOf("session_1", "session_2", "session_3"), group.sessions.map { it.id })
+        assertEquals(4, group.total)
+        // The workspace filter and the group's last loaded id ride the same v1 call.
+        assertEquals(
+            "/api/v1/sessions?workspace_id=wd_a&before_id=session_2",
+            server.takeRequest(5, TimeUnit.SECONDS)!!.target,
+        )
+        // The footer state settled: nothing loading, no error.
+        assertTrue(viewModel.uiState.value.groupExpansions.isEmpty())
+    }
+
+    @Test
+    fun `show more is a no-op once the group is fully loaded`() = runBlocking {
+        // groupsBody's default total == loaded: no footer, so a tap fires nothing.
+        enterGroupedMode(groupsBody("/tmp/a" to listOf("session_1", "session_2")))
+
+        viewModel.onGroupShowMore("wd_a")
+
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun `a rapid second tap while the expansion is in flight fires no second request`() = runBlocking {
+        enterGroupedMode(groupsBodyWithTotals(Triple("/tmp/a", listOf("session_1"), 3)))
+        server.enqueue(
+            MockResponse(body = pageBody(hasMore = true, "session_2"))
+                .newBuilder()
+                .bodyDelay(300, TimeUnit.MILLISECONDS)
+                .build(),
+        )
+
+        viewModel.onGroupShowMore("wd_a")
+        // The eager launch already flagged the group as loading…
+        assertTrue(viewModel.uiState.value.groupExpansions.getValue("wd_a").isLoading)
+        // …and the in-flight job (not a state flag) is the guard: this tap is swallowed.
+        viewModel.onGroupShowMore("wd_a")
+
+        assertEquals(
+            "/api/v1/sessions?workspace_id=wd_a&before_id=session_1",
+            server.takeRequest(5, TimeUnit.SECONDS)!!.target,
+        )
+        awaitState(viewModel.uiState) { it.groups?.single()?.sessions?.size == 2 }
+        // Exactly the grouped load plus one expansion request hit the server.
+        assertEquals(2, server.requestCount)
+    }
+
+    @Test
+    fun `a failed expansion keeps the group intact and the footer retry loads the page`() = runBlocking {
+        enterGroupedMode(groupsBodyWithTotals(Triple("/tmp/a", listOf("session_1", "session_2"), 4)))
+        server.enqueue(MockResponse(code = 500))
+
+        viewModel.onGroupShowMore("wd_a")
+
+        awaitState(viewModel.uiState) { it.groupExpansions["wd_a"]?.error != null }
+        val failed = viewModel.uiState.value
+        assertEquals(listOf("session_1", "session_2"), failed.groups!!.single().sessions.map { it.id })
+        assertEquals("Unexpected server response (HTTP 500)", failed.groupExpansions.getValue("wd_a").error)
+        assertFalse(failed.groupExpansions.getValue("wd_a").isLoading)
+
+        // The footer retry attempts the same page again.
+        server.enqueue(MockResponse(body = pageBody(hasMore = true, "session_3")))
+        viewModel.onGroupShowMore("wd_a")
+
+        awaitState(viewModel.uiState) { it.groups?.single()?.sessions?.size == 3 }
+        assertEquals(
+            listOf("session_1", "session_2", "session_3"),
+            viewModel.uiState.value.groups!!.single().sessions.map { it.id },
+        )
+        assertTrue(viewModel.uiState.value.groupExpansions.isEmpty())
+        assertEquals(
+            "/api/v1/sessions?workspace_id=wd_a&before_id=session_2",
+            server.takeRequest(5, TimeUnit.SECONDS)!!.target,
+        )
+    }
+
+    @Test
+    fun `reaching the group total removes the footer`() = runBlocking {
+        enterGroupedMode(groupsBodyWithTotals(Triple("/tmp/a", listOf("session_1"), 2)))
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_2")))
+
+        viewModel.onGroupShowMore("wd_a")
+
+        awaitState(viewModel.uiState) { it.groups?.single()?.sessions?.size == 2 }
+        // loaded == total: the footer is gone, a further tap fires nothing.
+        viewModel.onGroupShowMore("wd_a")
+        assertEquals(2, server.requestCount)
+    }
+
+    @Test
+    fun `socket patches and archive drops apply to expanded rows`() = runBlocking {
+        enterGroupedMode(groupsBodyWithTotals(Triple("/tmp/a", listOf("session_1"), 3)))
+        server.enqueue(MockResponse(body = pageBody(hasMore = true, "session_2")))
+        viewModel.onGroupShowMore("wd_a")
+        awaitState(viewModel.uiState) { it.groups?.single()?.sessions?.size == 2 }
+        server.takeRequest(5, TimeUnit.SECONDS) // drain the expansion request
+
+        // The row loaded by the expansion patches in place, by session id like any other.
+        fakeSocket.events.tryEmit(SessionListEvent.WorkChanged("session_2", busy = true, pendingInteraction = "approval"))
+        awaitState(viewModel.uiState) { it.groups!!.single().sessions[1].isAwaitingInteraction }
+        assertEquals(listOf("session_1", "session_2"), viewModel.uiState.value.groups!!.single().sessions.map { it.id })
+
+        fakeSocket.events.tryEmit(SessionListEvent.SessionArchived("session_2"))
+        awaitState(viewModel.uiState) { it.groups?.single()?.sessions?.map { s -> s.id } == listOf("session_1") }
+        // Pure WebSocket activity: no REST call beyond the grouped load and the expansion.
+        assertEquals(2, server.requestCount)
+    }
+
     /**
      * Puts the screen in grouped mode with [body] answered to the grouped fetch,
      * drains that request, and runs ON_START — with groups on screen it fires no
@@ -1059,8 +1179,13 @@ class SessionListViewModelTest {
         viewModel.onScreenStarted()
     }
 
-    private fun groupsBody(vararg groups: Pair<String, List<String>>): String {
-        val groupsJson = groups.joinToString(",") { (cwd, ids) ->
+    private fun groupsBody(vararg groups: Pair<String, List<String>>): String =
+        groupsBodyWithTotals(*groups.map { (cwd, ids) -> Triple(cwd, ids, ids.size) }.toTypedArray())
+
+    /** [groupsBody] with an explicit server-side [Triple.third] total per group — a group
+     * holding fewer rows than its total is what the show-more footer expands (116). */
+    private fun groupsBodyWithTotals(vararg groups: Triple<String, List<String>, Int>): String {
+        val groupsJson = groups.joinToString(",") { (cwd, ids, total) ->
             val workspaceId = "wd_" + cwd.substringAfterLast('/')
             val sessions = ids.joinToString(",") { id ->
                 """{"id":"$id","workspace":{"id":"$workspaceId","cwd":"$cwd"},""" +
@@ -1068,7 +1193,7 @@ class SessionListViewModelTest {
                     """"updated_at":1787253993333,"archived":false,"archived_at":null},""" +
                     """"activity":{"status":"idle","model":""}}"""
             }
-            """{"workspace":{"id":"$workspaceId","cwd":"$cwd"},"sessions":[$sessions],"total":${ids.size}}"""
+            """{"workspace":{"id":"$workspaceId","cwd":"$cwd"},"sessions":[$sessions],"total":$total}"""
         }
         return """{"code":0,"msg":"success","data":{"groups":[$groupsJson],""" +
             """"total":${groups.size},"has_more":false,"next_page_token":null},"request_id":"r"}"""

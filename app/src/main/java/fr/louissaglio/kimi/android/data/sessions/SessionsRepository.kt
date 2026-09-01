@@ -21,11 +21,22 @@ class SessionsRepository @Inject constructor(
      * Fetches one page of the session list from `GET /api/v1/sessions`. Settings are
      * passed per call (same pattern as ConnectionChecker) so saved-settings edits apply
      * immediately. [beforeId] is sent as the `before_id` cursor to page backwards;
-     * null fetches the first page. This is the error boundary: failures come back as
-     * [Result.failure] of [fr.louissaglio.kimi.android.data.DataError].
+     * null fetches the first page. [workspaceId] is sent as the `workspace_id` filter —
+     * the grouped view's per-group expansion (ticket 116, web parity). This is the
+     * error boundary: failures come back as [Result.failure] of
+     * [fr.louissaglio.kimi.android.data.DataError].
      */
-    suspend fun listSessions(settings: ServerSettings, beforeId: String? = null): Result<SessionPage> =
-        api.get(settings, "/api/v1/sessions" + (beforeId?.let { "?before_id=$it" } ?: "")) { body ->
+    suspend fun listSessions(
+        settings: ServerSettings,
+        beforeId: String? = null,
+        workspaceId: String? = null,
+    ): Result<SessionPage> {
+        val params = listOfNotNull(
+            workspaceId?.let { "workspace_id=$it" },
+            beforeId?.let { "before_id=$it" },
+        )
+        val query = if (params.isEmpty()) "" else "?" + params.joinToString("&")
+        return api.get(settings, "/api/v1/sessions$query") { body ->
             json.decodeFromString<Envelope<SessionListData>>(body).toResult().map { data ->
                 SessionPage(
                     items = data.items.map { it.toDomain() },
@@ -33,6 +44,7 @@ class SessionsRepository @Inject constructor(
                 )
             }
         }
+    }
 
     /**
      * Fetches the workspace-grouped session list from

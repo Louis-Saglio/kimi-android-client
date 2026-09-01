@@ -80,7 +80,7 @@ class SessionsRepositoryTest {
     @Test
     fun `next page sends before_id and parses has_more`() = runBlocking {
         server.enqueue(
-            MockResponse(body = 
+            MockResponse(body =
                 """
                 {"code":0,"msg":"success","data":{"items":[
                   {"id":"session_21","title":"Older session","updated_at":"2026-07-10T10:00:00.000Z",
@@ -96,6 +96,28 @@ class SessionsRepositoryTest {
         assertEquals("/api/v1/sessions?before_id=session_20", server.takeRequest().target)
         assertEquals(listOf("session_21"), page.items.map { it.id })
         assertFalse(page.hasMore)
+    }
+
+    @Test
+    fun `workspace filter sends workspace_id alongside the before_id cursor`() = runBlocking {
+        server.enqueue(
+            MockResponse(body =
+                """
+                {"code":0,"msg":"success","data":{"items":[
+                  {"id":"session_6","title":"Older in workspace","updated_at":"2026-07-10T10:00:00.000Z",
+                   "busy":false,"metadata":{"cwd":"/tmp/spike"}}
+                ],"has_more":true},"request_id":"01KX"}
+                """.trimIndent(),
+            ),
+        )
+
+        val result = repository.listSessions(settings(), beforeId = "session_5", workspaceId = "wd_spike")
+
+        // The grouped view's show-more expansion (ticket 116): the workspace filter
+        // and the cursor ride the same v1 call.
+        assertEquals("/api/v1/sessions?workspace_id=wd_spike&before_id=session_5", server.takeRequest().target)
+        assertEquals(listOf("session_6"), result.getOrThrow().items.map { it.id })
+        assertTrue(result.getOrThrow().hasMore)
     }
 
     @Test

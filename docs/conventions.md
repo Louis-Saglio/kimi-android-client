@@ -53,7 +53,12 @@
   it. The grouped view itself (ticket 115) comes from
   `SessionsRepository.listSessionGroups` — the app's one v2 call
   (`/api/v2/sessions?view=by_workspace&group.page_size=5`, one unpaged request,
-  epoch-ms v2 DTOs kept separate from v1's). The flat/grouped toggle persists in
+  epoch-ms v2 DTOs kept separate from v1's). A group holding fewer rows than its
+  server-side `total` gets a show-more footer (ticket 116) paging the rest of the
+  workspace through the v1 list (`workspace_id` + `before_id`, 20 at a time like
+  the flat list), appends deduped by session id, with a per-group Job guard like
+  010's flat pagination and the flat footer's inline error/retry. The flat/grouped
+  toggle persists in
   `SettingsRepository` (flat default, re-read on every screen start); the live
   socket machinery patches rows by id inside their group (groups never reorder),
   and the activity bump / create-insert / archive-drop are mode-aware in the
