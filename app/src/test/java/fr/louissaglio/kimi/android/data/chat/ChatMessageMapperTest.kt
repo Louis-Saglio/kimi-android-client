@@ -35,6 +35,52 @@ class ChatMessageMapperTest {
         assertEquals("Run the unit tests", mapper.preview(payload))
     }
 
+    // --- Raw args plumbing (ticket 118) ------------------------------------------------
+
+    @Test
+    fun `a tool_use part carries its input object as args`() {
+        val input = buildJsonObject {
+            put("command", "ls /tmp/spike")
+            put("timeout", 30)
+        }
+
+        val message = mapper.toDomain(
+            MessageDto(
+                id = "msg_1",
+                role = "assistant",
+                content = listOf(
+                    ContentPartDto(type = "tool_use", toolCallId = "tool_1", toolName = "Bash", input = input),
+                ),
+            ),
+        )
+
+        val part = message.parts.single() as ChatMessage.Part.ToolUse
+        assertEquals(input, part.args)
+        // The pretty string stays: the no-object-args expansion fallback still uses it.
+        assertEquals(mapper.formatDetail(input), part.input)
+    }
+
+    @Test
+    fun `a transcript tool frame carries its input object as args`() {
+        val input = buildJsonObject { put("pattern", "*.kt") }
+
+        val page = mapper.toDomain(
+            transcript(
+                TranscriptFrameDto(
+                    kind = "tool",
+                    frameId = "t0.1.tool_1",
+                    toolCallId = "tool_1",
+                    name = "Glob",
+                    state = "done",
+                    input = input,
+                ),
+            ),
+        )
+
+        val frame = page.turns.single().steps.single().frames.single() as TranscriptFrame.Tool
+        assertEquals(input, frame.args)
+    }
+
     @Test
     fun `a user-role transcript frame is stripped of internal envelopes`() {
         val page = mapper.toDomain(

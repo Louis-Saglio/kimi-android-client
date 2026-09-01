@@ -10,6 +10,7 @@ import fr.louissaglio.kimi.android.data.chat.TranscriptFrame
 import fr.louissaglio.kimi.android.data.chat.TranscriptTurn
 import fr.louissaglio.kimi.android.data.chat.bashTaskIdOf
 import fr.louissaglio.kimi.android.data.chat.bashTimeoutOf
+import kotlinx.serialization.json.JsonObject
 
 /**
  * Pure reducer behind the chat screen: flattens history messages into timeline rows
@@ -152,6 +153,7 @@ class ChatTimeline(
                         preview = call.preview,
                         input = call.input,
                         output = tool.output.ifBlank { call.output },
+                        args = tool.args ?: call.args,
                     ).enriched(name = call.name, input = call.input, output = tool.output)
                 },
             )
@@ -339,7 +341,7 @@ class ChatTimeline(
                     // The todo state comes from the call's input, not its result.
                     todoParser.of(event.name, event.input)?.let { liveTodos = it }
                 } else {
-                    upsertTool(event.toolCallId, event.name, ToolStatus.Running, event.preview, input = event.input)
+                    upsertTool(event.toolCallId, event.name, ToolStatus.Running, event.preview, input = event.input, args = event.args)
                 }
             is SessionEvent.ToolCallResult ->
                 if (event.toolCallId in todoCallIds) Unit
@@ -481,6 +483,7 @@ class ChatTimeline(
         input: String = "",
         output: String = "",
         replaceOutput: Boolean = false,
+        args: JsonObject? = null,
     ) {
         var found = false
         healTool(toolCallId) { existing ->
@@ -490,10 +493,11 @@ class ChatTimeline(
                 preview = existing.preview.ifBlank { preview },
                 input = existing.input.ifBlank { input },
                 output = if (replaceOutput) output else existing.output.ifBlank { output },
+                args = existing.args ?: args,
                 status = status,
             )
         }
-        if (!found) appendLiveTool(ChatItem.ToolActivity(toolCallId, name, status, preview, input, output))
+        if (!found) appendLiveTool(ChatItem.ToolActivity(toolCallId, name, status, preview, input, output, args = args))
     }
 
     /** Live row→sub-agent linkage (ticket 045): `subagent.spawned` names the `Agent`
@@ -576,7 +580,7 @@ class ChatTimeline(
                         }
                     } else {
                         target.appendTool(
-                            ChatItem.ToolActivity(it.toolCallId, it.toolName, ToolStatus.Running, it.preview, it.input),
+                            ChatItem.ToolActivity(it.toolCallId, it.toolName, ToolStatus.Running, it.preview, it.input, args = it.args),
                         )
                     }
                 }
@@ -658,6 +662,7 @@ class ChatTimeline(
                                     frame.preview,
                                     frame.input,
                                     frame.output,
+                                    args = frame.args,
                                 ).enriched(),
                             )
                         }

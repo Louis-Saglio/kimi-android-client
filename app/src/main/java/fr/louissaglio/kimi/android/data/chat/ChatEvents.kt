@@ -1,6 +1,7 @@
 package fr.louissaglio.kimi.android.data.chat
 
 import fr.louissaglio.kimi.android.data.DataError
+import kotlinx.serialization.json.JsonObject
 
 /** Payload tag of the main agent (docs/server-api.md, Sub-agents): every transcript
  * frame carries the emitting agent's id — "main", or the sub-agent's id for its own
@@ -62,12 +63,15 @@ sealed interface SessionEvent {
 
     /** [preview] is derived from the started payload's display/args (ToolPreview), so the
      * live row shows what the call is doing from the start, not only after a refetch.
-     * [input] is the full arguments as pretty-printed JSON, for the expanded row. */
+     * [args] is the raw arguments object (ticket 118), rendered by the expanded row as a
+     * key/value table (ToolDetailFields); [input] is the same arguments pretty-printed —
+     * the expanded row's fallback when no object args exist. */
     data class ToolCallStarted(
         val toolCallId: String,
         val name: String,
         val preview: String = "",
         val input: String = "",
+        val args: JsonObject? = null,
         override val agentId: String = MAIN_AGENT_ID,
     ) : SessionEvent, AgentScopedEvent
 

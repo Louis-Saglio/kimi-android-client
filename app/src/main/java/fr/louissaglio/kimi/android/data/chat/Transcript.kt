@@ -1,5 +1,7 @@
 package fr.louissaglio.kimi.android.data.chat
 
+import kotlinx.serialization.json.JsonObject
+
 /**
  * Domain model of `GET /api/v1/sessions/{id}/transcript` (docs/server-api.md,
  * Transcript): turn-granular committed history of ONE agent — the main agent or any
@@ -72,9 +74,14 @@ sealed interface TranscriptFrame {
         val running: Boolean,
         /** One-line input summary (ToolPreview), the collapsed row's label. */
         val preview: String,
-        /** Full call input as pretty JSON, the expanded row's input block (ticket 023). */
+        /** Full call input as pretty JSON — the expanded row's fallback when the call
+         * carried no object [args] (ticket 118). */
         val input: String,
         /** The definitive result text; the volatile progress tail while running. */
         val output: String,
+        /** The raw `input` object (ticket 118): the expanded row renders it as a
+         * key/value table (ToolDetailFields). Null when the wire frame carried no
+         * `input` object — the pretty string is the row's fallback there. */
+        val args: JsonObject? = null,
     ) : TranscriptFrame
 }

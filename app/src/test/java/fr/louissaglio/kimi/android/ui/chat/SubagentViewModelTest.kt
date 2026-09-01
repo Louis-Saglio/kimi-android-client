@@ -27,6 +27,8 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import okhttp3.WebSocketListener
 import mockwebserver3.Dispatcher
 import mockwebserver3.MockResponse
@@ -232,6 +234,7 @@ class SubagentViewModelTest {
                         ChatItem.ToolActivity(
                             "tool_MxYFRM8czboqPL4FXxWD4rC1", "Bash", ToolStatus.Done,
                             "ls -la /tmp/spike", "{\n    \"command\": \"ls -la /tmp/spike\"\n}", "total 0\n",
+                            args = buildJsonObject { put("command", "ls -la /tmp/spike") },
                         ),
                     ),
                 ),

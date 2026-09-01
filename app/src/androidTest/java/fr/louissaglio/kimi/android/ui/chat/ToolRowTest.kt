@@ -7,6 +7,8 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -90,6 +92,52 @@ class ToolRowTest {
         toolRow(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Running, preview = "sleep 10"))
 
         composeTestRule.onNodeWithContentDescription("Expand tool details").assertDoesNotExist()
+    }
+
+    /** Ticket 118: a call with object args expands to the generic key/value table —
+     * labels and values, no raw-JSON braces. */
+    @Test
+    fun rowWithObjectArgsExpandsToKeyValueTable() {
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "Glob",
+                ToolStatus.Done,
+                preview = "glob the sources",
+                args = buildJsonObject {
+                    put("pattern", "*.kt")
+                    put("path", "/tmp/spike")
+                },
+            ),
+        )
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+
+        composeTestRule.onNodeWithText("pattern").assertIsDisplayed()
+        composeTestRule.onNodeWithText("*.kt").assertIsDisplayed()
+        composeTestRule.onNodeWithText("path").assertIsDisplayed()
+        composeTestRule.onNodeWithText("/tmp/spike").assertIsDisplayed()
+        // The table replaced the pretty-printed JSON: no braces anywhere.
+        composeTestRule.onNodeWithText("{").assertDoesNotExist()
+        composeTestRule.onNodeWithText("}").assertDoesNotExist()
+    }
+
+    /** Ticket 118: a call that carried no object args and has no output yet stays
+     * non-expandable — the rule is unchanged. */
+    @Test
+    fun rowWithNeitherArgsNorOutputStaysNonExpandable() {
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "mcp__kiln__list_runners",
+                ToolStatus.Running,
+                preview = """{"runners":3}""",
+            ),
+        )
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").assertDoesNotExist()
+        composeTestRule.onNodeWithText("mcp__kiln__list_runners").performClick()
+        composeTestRule.onNodeWithContentDescription("Collapse tool details").assertDoesNotExist()
     }
 
     @Test

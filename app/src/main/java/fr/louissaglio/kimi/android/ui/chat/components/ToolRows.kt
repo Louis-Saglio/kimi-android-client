@@ -30,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -41,6 +42,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import fr.louissaglio.kimi.android.data.chat.ToolDetailFields
 import fr.louissaglio.kimi.android.ui.theme.successColor
 
 /** Tool-status glyph for the group header and the rows (tickets 022/037): spinner
@@ -128,11 +130,12 @@ internal fun ToolGroupCard(
  * spinner while running, green check on success, red cross on error.
  *
  * Tapping a row that has details expands it (ticket 023, chevron rotates per web):
- * the full call input as pretty-printed JSON, then the result output — monospace,
- * preformatted, in a capped-height region that scrolls internally so a huge test
- * log does not tunnel the timeline. Error output sits on an error-tinted surface.
- * The top-anchored chat list keeps the tapped header in place, so the details
- * unfold downward.
+ * the call's arguments as a key/value table (ticket 118 — ToolDetailFields; the
+ * pretty-printed JSON input string only when the call carried no object args), then
+ * the result output — monospace, preformatted, in a capped-height region that scrolls
+ * internally so a huge test log does not tunnel the timeline. Error output sits on an
+ * error-tinted surface. The top-anchored chat list keeps the tapped header in place,
+ * so the details unfold downward.
  *
  * An `Agent` row linked to its sub-agent (ticket 045) never expands: the sub-agent
  * page already shows everything the details would, so tapping the row navigates to
@@ -159,8 +162,9 @@ internal fun ToolRow(
     val linkedSubagentId = activity.subagentId
     val linkedBashTaskId = activity.bashTaskId
     val isQuestionRow = activity.name == "AskUserQuestion"
+    val detailFields = remember(activity.args) { ToolDetailFields.of(activity.args) }
     val expandable = !isQuestionRow && linkedSubagentId == null && linkedBashTaskId == null &&
-        (activity.input.isNotBlank() || activity.output.isNotBlank())
+        (detailFields.isNotEmpty() || activity.input.isNotBlank() || activity.output.isNotBlank())
     var expanded by rememberSaveable { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth()) {
         Row(
@@ -256,7 +260,11 @@ internal fun ToolRow(
                 modifier = Modifier.padding(bottom = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                if (activity.input.isNotBlank()) {
+                // The args table replaces the pretty-printed input JSON (ticket 118);
+                // the string only remains for calls that carried no object args.
+                if (detailFields.isNotEmpty()) {
+                    ToolArgsTable(detailFields)
+                } else if (activity.input.isNotBlank()) {
                     ToolDetailBlock(text = activity.input, color = MaterialTheme.colorScheme.surfaceVariant)
                 }
                 if (activity.output.isNotBlank()) {
@@ -299,6 +307,39 @@ private fun ToolDetailBlock(text: String, color: Color, pinnedToBottom: Boolean 
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
             )
+        }
+    }
+}
+
+/** The generic key/value table of a call's arguments (ticket 118): one row per
+ * top-level arg — label column in `labelMedium` `onSurfaceVariant`, value column
+ * monospace `bodySmall`. No height cap: unlike a raw output dump, the per-arg rows
+ * stay short (values are one-lined by ToolDetailFields). */
+@Composable
+private fun ToolArgsTable(fields: List<ToolDetailFields.Field>) {
+    Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.small) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            fields.forEach { field ->
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = field.label,
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = field.value,
+                        modifier = Modifier.weight(2f),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+            }
         }
     }
 }

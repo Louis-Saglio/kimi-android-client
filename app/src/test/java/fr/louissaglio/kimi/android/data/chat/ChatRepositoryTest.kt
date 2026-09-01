@@ -19,6 +19,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
@@ -154,6 +156,7 @@ class ChatRepositoryTest {
                         "Bash",
                         "echo doc-verify",
                         input = "{\n    \"command\": \"echo doc-verify\"\n}",
+                        args = buildJsonObject { put("command", "echo doc-verify") },
                     ),
                 ),
                 createdAt = Instant.parse("2026-07-17T04:12:10.500Z"),
@@ -446,6 +449,7 @@ class ChatRepositoryTest {
                         "./gradlew test",
                         input = "{\n    \"command\": \"./gradlew test\"\n}",
                         output = "FAIL 3 tests\n",
+                        args = buildJsonObject { put("command", "./gradlew test") },
                     ),
                 ),
             ),
@@ -483,6 +487,7 @@ class ChatRepositoryTest {
                         ToolStatus.Running,
                         "echo doc-verify",
                         input = "{\n    \"command\": \"echo doc-verify\"\n}",
+                        args = buildJsonObject { put("command", "echo doc-verify") },
                     ),
                 ),
             ),
@@ -1340,11 +1345,18 @@ class ChatRepositoryTest {
                 "Bash",
                 "echo hello-from-spike",
                 input = "{\n    \"command\": \"echo hello-from-spike\"\n}",
+                args = buildJsonObject { put("command", "echo hello-from-spike") },
             ),
             events[0],
         )
         assertEquals(
-            SessionEvent.ToolCallStarted("tool_2", "Read", "/tmp/spike/a.txt", input = "{\n    \"path\": \"/tmp/spike/a.txt\"\n}"),
+            SessionEvent.ToolCallStarted(
+                "tool_2",
+                "Read",
+                "/tmp/spike/a.txt",
+                input = "{\n    \"path\": \"/tmp/spike/a.txt\"\n}",
+                args = buildJsonObject { put("path", "/tmp/spike/a.txt") },
+            ),
             events[1],
         )
     }
@@ -1931,7 +1943,10 @@ class ChatRepositoryTest {
                 SocketEvent.Event(SessionEvent.ToolCallDelta("tool_sub", "Bash", "agent-12")),
                 SocketEvent.Event(
                     SessionEvent.ToolCallStarted(
-                        "tool_sub", "Bash", "ls", input = "{\n    \"command\": \"ls\"\n}", agentId = "agent-12",
+                        "tool_sub", "Bash", "ls",
+                        input = "{\n    \"command\": \"ls\"\n}",
+                        args = buildJsonObject { put("command", "ls") },
+                        agentId = "agent-12",
                     ),
                 ),
                 SocketEvent.Event(SessionEvent.ToolCallProgress("tool_sub", "sub out", "agent-12")),
@@ -2059,6 +2074,7 @@ class ChatRepositoryTest {
                     preview = "ls -la /tmp/spike",
                     input = "{\n    \"command\": \"ls -la /tmp/spike\"\n}",
                     output = "total 0\ndrwxr-xr-x 2 ubuntu ubuntu 40 Jul 27 19:25 .\n",
+                    args = buildJsonObject { put("command", "ls -la /tmp/spike") },
                 ),
             ),
             t0.steps[0].frames,
@@ -2105,6 +2121,10 @@ class ChatRepositoryTest {
                 preview = "sleep 45 && echo awake",
                 input = "{\n    \"command\": \"sleep 45 && echo awake\",\n    \"timeout\": 60\n}",
                 output = "",
+                args = buildJsonObject {
+                    put("command", "sleep 45 && echo awake")
+                    put("timeout", 60)
+                },
             ),
             turn.steps[0].frames[1],
         )

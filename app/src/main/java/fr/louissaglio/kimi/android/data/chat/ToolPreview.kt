@@ -37,6 +37,7 @@ object ToolPreview {
         return oneLine(input.toString())
     }
 
-    /** The row shows one line: collapse embedded newlines/indentation. */
-    private fun oneLine(raw: String): String = raw.replace(WHITESPACE, " ").trim()
+    /** One line only: collapse embedded newlines/indentation. Shared with
+     * ToolDetailFields (the expanded row's arg values get the same treatment). */
+    internal fun oneLine(raw: String): String = raw.replace(WHITESPACE, " ").trim()
 }

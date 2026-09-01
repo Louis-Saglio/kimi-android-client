@@ -20,7 +20,9 @@ import kotlinx.serialization.json.contentOrNull
 class ChatMessageMapper @Inject constructor(json: Json) {
 
     // Pretty-printing for the expanded tool row (ticket 023): strings render as-is,
-    // JSON values (tool inputs, structured outputs) render indented.
+    // JSON values (tool inputs, structured outputs) render indented. Since ticket 118
+    // the expansion renders object inputs as a key/value table (ToolDetailFields) —
+    // this pretty string is the fallback for calls without object args.
     private val prettyJson = Json(json) { prettyPrint = true }
 
     /** Renders a wire JSON value for the expanded tool row: a plain string comes out as
@@ -93,7 +95,13 @@ class ChatMessageMapper @Inject constructor(json: Json) {
         "thinking" -> dto.thinking?.let { ChatMessage.Part.Thinking(it) }
         "image" -> dto.source?.let { toDomain(it) }
         "tool_use" -> dto.toolCallId?.let {
-            ChatMessage.Part.ToolUse(it, dto.toolName.orEmpty(), ToolPreview.of(dto.toolName, dto.input), formatDetail(dto.input))
+            ChatMessage.Part.ToolUse(
+                it,
+                dto.toolName.orEmpty(),
+                ToolPreview.of(dto.toolName, dto.input),
+                formatDetail(dto.input),
+                args = dto.input,
+            )
         }
         "tool_result" -> dto.toolCallId?.let {
             ChatMessage.Part.ToolResult(it, dto.isError ?: false, formatDetail(dto.output))
@@ -248,6 +256,9 @@ class ChatMessageMapper @Inject constructor(json: Json) {
                 input = formatDetail(dto.input).ifBlank { dto.inputText.orEmpty() },
                 // The volatile progress tail stands in while no definitive output exists.
                 output = formatDetail(dto.output).ifBlank { progressText(dto.progress) },
+                // The raw args object (ticket 118) — null when the frame carries no
+                // `input` object, leaving the pretty string as the row's fallback.
+                args = dto.input,
             )
         }
         else -> null

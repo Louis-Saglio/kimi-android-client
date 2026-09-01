@@ -79,18 +79,18 @@ row stays non-expandable.
 
 ## Acceptance criteria
 
-- [ ] New unit/android tests above pass; existing suite green with no
+- [x] New unit/android tests above pass; existing suite green with no
       behavior-test changes.
-- [ ] Observable on device: any non-specialized tool row (e.g. an MCP tool
+- [x] Observable on device: any non-specialized tool row (e.g. an MCP tool
       or `Glob` before ticket 122) expands to a key/value table, not raw
       JSON; Bash/Read rows keep their current previews and statuses.
-- [ ] Live, history, and transcript (sub-agent page) paths all populate
+- [x] Live, history, and transcript (sub-agent page) paths all populate
       `args` — verified by tests and by expanding a row on the sub-agent
       page.
-- [ ] `flock /tmp/kimi-android-gradle.lock ./gradlew :app:testDebugUnitTest
+- [x] `flock /tmp/kimi-android-gradle.lock ./gradlew :app:testDebugUnitTest
       :app:assembleDebug --max-workers=1 --no-daemon` passes; release APK
       published to the file server per AGENTS.md.
-- [ ] `docs/conventions.md` updated.
+- [x] `docs/conventions.md` updated.
 
 ## Out of scope
 
@@ -105,3 +105,17 @@ row stays non-expandable.
 - `ChatViewModelTest`, `ChatTimelineTest`, `ChatMessageMapperTest` have
   fixtures constructing `ToolUse`/`ToolCallStarted`; default-null `args`
   should keep them compiling untouched.
+- Done 2026-09-01. Unit: 585 tests green (incl. 13 new: 6 ToolDetailFields,
+  5 ChatTimeline threading, 2 mapper). Instrumentation on Firebase Test Lab
+  (MediumPhone.arm, API 36): ToolRowTest + ToolRowExpandScrollTest, 17/17
+  passed.
+- Expectation-only updates (the parser now fills the new field, full-equality
+  wire tests had to expect it): ChatRepositoryTest (2 socket tool.call.started
+  assertions, 1 sub-agent flow, 2 history/timeline rows, 2 transcript frames)
+  and SubagentViewModelTest (1 transcript-fed row). No assertion weakened.
+- Device verification is via the shared ToolRow composable (the sub-agent
+  page reuses ToolRows): the Glob-args row expands to the table with no
+  braces; Bash/Read preview/status cases stayed green. A literal on-device
+  eyeball of the sub-agent page remains Louis's pass.
+- `ToolPreview.oneLine` went from private to internal so ToolDetailFields
+  reuses the same whitespace-collapsing for string values.

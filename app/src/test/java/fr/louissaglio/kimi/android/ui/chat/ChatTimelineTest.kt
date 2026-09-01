@@ -10,6 +10,8 @@ import fr.louissaglio.kimi.android.data.chat.TranscriptStep
 import fr.louissaglio.kimi.android.data.chat.TranscriptTurn
 import fr.louissaglio.kimi.android.testutil.testChatTimeline
 import java.time.Instant
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -2064,5 +2066,127 @@ class ChatTimelineTest {
             ),
             timeline.items(),
         )
+    }
+
+    // --- Raw args threading (ticket 118) ----------------------------------------------
+
+    @Test
+    fun `a history tool row carries the call's args object`() {
+        val args = buildJsonObject {
+            put("pattern", "*.kt")
+            put("path", "/tmp/spike")
+        }
+        val timeline = testChatTimeline()
+
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage(
+                    "msg_1",
+                    ChatMessage.Role.Assistant,
+                    listOf(ChatMessage.Part.ToolUse("tool_1", "Glob", "*.kt", input = "{\n    \"pattern\": \"*.kt\"\n}", args = args)),
+                ),
+            ),
+            keepLive = false,
+        )
+
+        val tool = (timeline.items().single() as ChatItem.ToolGroup).tools.single()
+        assertEquals(args, tool.args)
+    }
+
+    @Test
+    fun `a live tool call started carries its args onto the row`() {
+        val args = buildJsonObject { put("command", "ls /tmp/spike") }
+        val timeline = testChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted())
+
+        timeline.apply(
+            SessionEvent.ToolCallStarted(
+                "tool_1",
+                "Bash",
+                "ls /tmp/spike",
+                input = "{\n    \"command\": \"ls /tmp/spike\"\n}",
+                args = args,
+            ),
+        )
+
+        val tool = (timeline.items().single() as ChatItem.ToolGroup).tools.single()
+        assertEquals(args, tool.args)
+    }
+
+    @Test
+    fun `a transcript tool frame's args land on the flattened row`() {
+        val args = buildJsonObject { put("pattern", "*.kt") }
+        val timeline = testChatTimeline(historyBacked = false)
+
+        timeline.replaceTranscript(
+            listOf(
+                transcriptTurn(
+                    "t0", 0,
+                    transcriptStep(
+                        "t0.1",
+                        TranscriptFrame.Tool(
+                            "t0.1.tool_1", "tool_1", "Glob", running = false,
+                            preview = "*.kt", input = "{\n    \"pattern\": \"*.kt\"\n}", output = "a.kt\n",
+                            args = args,
+                        ),
+                    ),
+                ),
+            ),
+            keepLive = false,
+        )
+
+        val tool = (timeline.items().single() as ChatItem.ToolGroup).tools.single()
+        assertEquals(args, tool.args)
+    }
+
+    @Test
+    fun `an orphan result completed by an older page gains the call's args`() {
+        // Page boundary: the newer page opens with the result (orphan row), the older
+        // page brings the call — the in-place completion threads the args across.
+        val args = buildJsonObject { put("command", "echo hi") }
+        val timeline = testChatTimeline()
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage("msg_2", ChatMessage.Role.Tool, listOf(ChatMessage.Part.ToolResult("tool_1", false, "hi\n"))),
+            ),
+            keepLive = false,
+        )
+
+        timeline.prependHistory(
+            listOf(
+                ChatMessage(
+                    "msg_1",
+                    ChatMessage.Role.Assistant,
+                    listOf(ChatMessage.Part.ToolUse("tool_1", "Bash", "echo hi", args = args)),
+                ),
+            ),
+        )
+
+        val tool = (timeline.items().single() as ChatItem.ToolGroup).tools.single()
+        assertEquals(args, tool.args)
+    }
+
+    @Test
+    fun `a healed tool row keeps its first-set args`() {
+        // First writer wins, like preview/input: the definitive result and a replayed
+        // start frame (reconnect) must not clear or replace the row's args.
+        val args = buildJsonObject { put("command", "echo hi") }
+        val timeline = testChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted())
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "echo hi", args = args))
+        timeline.apply(SessionEvent.ToolCallResult("tool_1", false, "hi\n"))
+
+        timeline.apply(
+            SessionEvent.ToolCallStarted(
+                "tool_1",
+                "Bash",
+                "echo hi",
+                args = buildJsonObject { put("command", "echo replayed") },
+            ),
+        )
+
+        val tool = (timeline.items().single() as ChatItem.ToolGroup).tools.single()
+        assertEquals(args, tool.args)
+        assertEquals("hi\n", tool.output)
     }
 }

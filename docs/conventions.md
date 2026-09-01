@@ -14,7 +14,12 @@
   session's bound model/effort through to it, so the chip and the prompt send
   path — both store-fed — follow bindings made from any client; a pick made
   locally but not yet sent wins over server reports), `ChatMessageMapper`
-  (DTO→domain), and `SessionActivityStore` (`data/sessions/` — process-lifetime
+  (DTO→domain; a tool call's raw `args` JsonObject rides the domain/end-to-end
+  models — `tool_use` parts, `tool.call.started` events, transcript tool frames,
+  `ChatItem.ToolActivity` — and payload-derived display renderings live in
+  `data/chat` helpers: `ToolPreview` for the row preview, `ToolDetailFields` for
+  the expanded row's generic key/value args table, ticket 118), and
+  `SessionActivityStore` (`data/sessions/` — process-lifetime
   record of successfully sent prompts/steers; the session list consumes it on
   return to bump those rows, ticket 086 — since ticket 112 no automatic refresh
   follows, so the bump itself is the visible update). New chat

@@ -253,7 +253,7 @@ class SessionSocket @Inject constructor(
                 ?.let {
                     onEvent(
                         SessionEvent.ToolCallStarted(
-                            it.toolCallId, it.name, mapper.preview(it), mapper.formatDetail(it.args), agentId,
+                            it.toolCallId, it.name, mapper.preview(it), mapper.formatDetail(it.args), it.args, agentId,
                         ),
                     )
                 }

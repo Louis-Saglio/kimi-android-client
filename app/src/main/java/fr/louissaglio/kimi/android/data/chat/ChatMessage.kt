@@ -1,6 +1,7 @@
 package fr.louissaglio.kimi.android.data.chat
 
 import java.time.Instant
+import kotlinx.serialization.json.JsonObject
 
 /**
  * Domain model for a history message, as exposed by [ChatRepository] to ViewModels.
@@ -25,12 +26,15 @@ data class ChatMessage(
         data class Thinking(val text: String) : Part
 
         /** [preview] is the one-line summary of the call's input (ToolPreview), shown on the row;
-         * [input] is the full input as pretty-printed JSON, shown by the expanded row (ticket 023). */
+         * [input] is the full input as pretty-printed JSON, the expanded row's fallback when the
+         * call carried no object [args] (ticket 118). [args] is the raw `input` object itself
+         * (ticket 118): the expanded row renders it as a key/value table (ToolDetailFields). */
         data class ToolUse(
             val toolCallId: String,
             val toolName: String,
             val preview: String = "",
             val input: String = "",
+            val args: JsonObject? = null,
         ) : Part
 
         /** [output] is the full result text, shown by the expanded row (ticket 023). */

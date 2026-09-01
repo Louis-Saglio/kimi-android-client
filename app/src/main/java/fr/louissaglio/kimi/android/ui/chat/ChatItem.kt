@@ -2,6 +2,7 @@ package fr.louissaglio.kimi.android.ui.chat
 
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import java.time.Instant
+import kotlinx.serialization.json.JsonObject
 
 enum class ToolStatus { Running, Done, Error }
 
@@ -30,9 +31,11 @@ sealed interface ChatItem {
     ) : ChatItem
 
     /** One row per tool call. [preview] is the one-line summary of the call's input
-     * (e.g. the shell command for Bash); blank when the server sent none. [input] and
-     * [output] are the full call input (pretty JSON) and result text, revealed by the
-     * expanded row (ticket 023); either may be blank while the call is still running.
+     * (e.g. the shell command for Bash); blank when the server sent none. [args] is the
+     * call's raw arguments object (ticket 118), rendered by the expanded row as a
+     * key/value table (ToolDetailFields); [input] is the same input pretty-printed —
+     * the expanded row's fallback when no object args exist. [output] is the result
+     * text; either may be blank while the call is still running.
      * While running, [output] accumulates the volatile tool.progress chunks (ticket 025)
      * — the definitive tool.result output replaces them wholesale. [subagentId] links an
      * `Agent` row to its sub-agent's page (ticket 045); null rows are not tappable.
@@ -50,6 +53,7 @@ sealed interface ChatItem {
         val preview: String = "",
         val input: String = "",
         val output: String = "",
+        val args: JsonObject? = null,
         val subagentId: String? = null,
         val bashTaskId: String? = null,
         val timeoutSeconds: Int? = null,
