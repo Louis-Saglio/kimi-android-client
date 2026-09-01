@@ -824,6 +824,16 @@ unchanged from 0.29.2):
   experiment is off and nothing is configured), and the response gained a
   **`subagent`** object (`{"timeoutMs": 7200000}` here — the subagent
   idle-timeout section, camelCase; upstream commit `c9bfe8b2`).
+- **Config fields the app consumes (ticket 109, verified live 2026-09-01 on
+  0.39.1):** `data.default_model` and `data.thinking.effort` — both writable
+  via `POST /api/v1/config` with a snake_case body (`{"default_model": "<id>"}`,
+  `{"thinking": {"effort": "<e>"}}`; the thinking write was already verified
+  2026-08-28, the model write on 2026-09-01). The POST response echoes the full
+  config projection (same consumed fields snake_case). `data.providers` is a
+  map of provider name to `{"type", "base_url", "has_api_key"}` with
+  credentials redacted — surfaced read-only in Settings. Every config write
+  pushes a global `event.config.changed` frame (see WebSocket, Global events);
+  cache invalidation on that frame is ticket 110.
 
 ## Sessions
 

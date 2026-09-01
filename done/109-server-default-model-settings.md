@@ -59,21 +59,28 @@ UI (`ui/settings/SettingsScreen.kt`, `ui/settings/SettingsViewModel.kt`):
 
 ## Acceptance criteria
 
-- [ ] Unit test: `setDefaultModel` posts `{"default_model": "<id>"}` and the
+- [x] Unit test: `setDefaultModel` posts `{"default_model": "<id>"}` and the
       repository's cached config serves the new default afterwards.
-- [ ] Unit test: `setDefaultEffort` posts `{"thinking": {"effort": "<e>"}`};
+      (`ModelsRepositoryTest`)
+- [x] Unit test: `setDefaultEffort` posts `{"thinking": {"effort": "<e>"}`};
       a failed write surfaces an error and does not touch the cache.
-- [ ] Unit test: the effort row is hidden when the default model has no
-      `support_efforts`.
-- [ ] `./gradlew testDebugUnitTest` passes.
+      (`ModelsRepositoryTest`)
+- [x] Unit test: the effort row is hidden when the default model has no
+      `support_efforts`. (`SettingsViewModelTest` — plus the with-efforts
+      case, a failed-write snackbar test, and the fetch-failure degradation)
+- [x] `./gradlew testDebugUnitTest` passes (2026-09-01, all suites green).
 - [ ] Live check: change the default model in Settings, then verify with
       `curl ... /api/v1/config` that `default_model` changed; restore the
       previous value afterwards (and note the `event.config.changed` frame
-      fires — ticket 110 consumes it).
-- [ ] `docs/server-api.md`: document the consumed `POST /api/v1/config`
+      fires — ticket 110 consumes it). (Endpoint level verified 2026-09-01:
+      POST `{"default_model": "kimi-code/k3"}` → GET reads it back → restored
+      to `Kimi Platform/kimi-k3`; the app sends the identical body, pinned by
+      `ModelsRepositoryTest`. The on-phone Settings UI tap is pending Louis.)
+- [x] `docs/server-api.md`: document the consumed `POST /api/v1/config`
       fields (`default_model`, `thinking.effort`, providers projection) if
-      not already accurate.
-- [ ] APK built and copied to the file server per AGENTS.md.
+      not already accurate. (New bullet in the Models section.)
+- [x] APK built and copied to the file server per AGENTS.md
+      (`kimi-android-client-main.apk`, 2026-09-01).
 
 ## Out of scope
 
@@ -94,3 +101,12 @@ UI (`ui/settings/SettingsScreen.kt`, `ui/settings/SettingsViewModel.kt`):
   confused by that frame (110's invalidation just causes a refetch — safe).
 - Settings screen currently holds only Server URL / Token / Test connection —
   follow its existing section styling.
+
+## Revision (2026-09-01, after Louis's on-device pass)
+
+- The default model and effort merged into ONE "Default model" row ("K3 ·
+  high"); it opens the chat's `ModelPickerSheet` itself — the check marks the
+  server default, no "Default" badge in this context. A failed write dismisses
+  the sheet so the snackbar is not hidden behind its scrim.
+- The providers moved under their own "Providers" section header.
+

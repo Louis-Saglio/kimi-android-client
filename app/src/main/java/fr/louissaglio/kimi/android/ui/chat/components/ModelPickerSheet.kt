@@ -23,7 +23,10 @@ import fr.louissaglio.kimi.android.ui.common.formatTokenCount
  * without `support_efforts` — with a check on the stored choice, or a "Default" hint
  * on the model's `default_effort` when nothing is stored. A tap moves the check and
  * persists but keeps the sheet open (108): model and effort are settable in one visit
- * and the effort section visibly follows a model change; dismissal is by scrim/swipe. */
+ * and the effort section visibly follows a model change; dismissal is by scrim/swipe.
+ * Settings reuses the sheet (109) to edit the SERVER default: there `currentModelId`
+ * is the server default and `serverDefaultModel` is null — the check alone marks the
+ * current value, the "Default" badge would be noise. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun ModelPickerSheet(

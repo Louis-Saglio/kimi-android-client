@@ -43,20 +43,28 @@ class SettingsFlowTest {
 
     @Test
     fun validTokenReportsConnectionSuccess() {
-        server.enqueue(MockResponse(body = """{"code":0,"msg":"success","data":{"ok":true}}"""))
+        // Three bodies: when a previous test left this mock's URL stored, opening the
+        // screen fires GET /api/v1/config + /api/v1/models (ticket 109) before the
+        // connection test's /api/v1/meta — each consumes one.
+        repeat(3) { server.enqueue(MockResponse(body = """{"code":0,"msg":"success","data":{"ok":true}}""")) }
         openSettingsAndType(serverBaseUrl(), token = "tok-abc-123")
 
         clickTestConnection()
 
         waitForText("Connection successful")
-        val recorded = server.takeRequest(5, TimeUnit.SECONDS)!!
-        assertEquals("/api/v1/meta", recorded.target)
-        assertEquals("Bearer tok-abc-123", recorded.headers["Authorization"])
+        var recorded = server.takeRequest(5, TimeUnit.SECONDS)
+        while (recorded != null && recorded.target != "/api/v1/meta") {
+            recorded = server.takeRequest(5, TimeUnit.SECONDS)
+        }
+        assertEquals("/api/v1/meta", recorded!!.target)
+        assertEquals("Bearer tok-abc-123", recorded!!.headers["Authorization"])
     }
 
     @Test
     fun wrongTokenReportsAuthenticationFailure() {
-        server.enqueue(MockResponse(code = 401))
+        // See validTokenReportsConnectionSuccess: the config/models fetches may precede
+        // the meta call, so every candidate request must find a 401 enqueued.
+        repeat(3) { server.enqueue(MockResponse(code = 401)) }
         openSettingsAndType(serverBaseUrl(), token = "wrong-token")
 
         clickTestConnection()
