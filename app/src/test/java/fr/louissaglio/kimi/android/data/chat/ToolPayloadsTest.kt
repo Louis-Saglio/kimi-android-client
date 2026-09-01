@@ -353,7 +353,126 @@ class ToolPayloadsTest {
             put("url", "https://example.com")
         }
 
-        assertNull(ToolPayloads.of("Grep", args))
+        // (Ticket 123: this case asserted Grep — a parseable tool now; Edit keeps
+        // the "another tool" intent.)
+        assertNull(ToolPayloads.of("Edit", args))
         assertNull(ToolPayloads.of("Read", args))
+    }
+
+    // --- Ticket 123: Grep payloads --------------------------------------------
+
+    @Test
+    fun `a full Grep call parses all ten fields`() {
+        val args = buildJsonObject {
+            put("pattern", "foo|bar")
+            put("path", "/tmp/spike")
+            put("glob", "*.kt")
+            put("output_mode", "content")
+            put("-i", true)
+            put("-A", 3)
+            put("-B", 1)
+            put("multiline", true)
+            put("include_ignored", true)
+            put("type", "kt")
+        }
+
+        assertEquals(
+            ToolPayload.Grep(
+                "foo|bar",
+                path = "/tmp/spike",
+                glob = "*.kt",
+                outputMode = "content",
+                caseInsensitive = true,
+                contextBefore = 1,
+                contextAfter = 3,
+                multiline = true,
+                includeIgnored = true,
+                type = "kt",
+            ),
+            ToolPayloads.of("Grep", args),
+        )
+    }
+
+    @Test
+    fun `a bare Grep call parses with defaults`() {
+        val args = buildJsonObject { put("pattern", "foo") }
+
+        assertEquals(
+            ToolPayload.Grep(
+                "foo",
+                path = null,
+                glob = null,
+                outputMode = "files_with_matches",
+                caseInsensitive = false,
+                contextBefore = null,
+                contextAfter = null,
+                multiline = false,
+                includeIgnored = false,
+                type = null,
+            ),
+            ToolPayloads.of("Grep", args),
+        )
+    }
+
+    @Test
+    fun `-C fills both context sides and wins over -A and -B`() {
+        val args = buildJsonObject {
+            put("pattern", "foo")
+            put("-C", 2)
+            put("-A", 5)
+            put("-B", 4)
+        }
+
+        val payload = ToolPayloads.of("Grep", args) as ToolPayload.Grep
+        assertEquals(2, payload.contextBefore)
+        assertEquals(2, payload.contextAfter)
+    }
+
+    @Test
+    fun `blank Grep strings parse as absent and string flags are not flags`() {
+        val args = buildJsonObject {
+            put("pattern", "foo")
+            put("path", "  ")
+            put("glob", "")
+            put("type", " ")
+            put("-i", "true")
+            put("multiline", "true")
+            put("include_ignored", "true")
+        }
+
+        assertEquals(
+            ToolPayload.Grep(
+                "foo",
+                path = null,
+                glob = null,
+                outputMode = "files_with_matches",
+                caseInsensitive = false,
+                contextBefore = null,
+                contextAfter = null,
+                multiline = false,
+                includeIgnored = false,
+                type = null,
+            ),
+            ToolPayloads.of("Grep", args),
+        )
+    }
+
+    @Test
+    fun `a Grep call without a string pattern is rejected`() {
+        assertNull(ToolPayloads.of("Grep", null))
+        assertNull(ToolPayloads.of("Grep", buildJsonObject { }))
+        assertNull(ToolPayloads.of("Grep", buildJsonObject { put("path", "/tmp/spike") }))
+        assertNull(ToolPayloads.of("Grep", buildJsonObject { put("pattern", 42) }))
+    }
+
+    @Test
+    fun `another tool never parses as a Grep payload`() {
+        val args = buildJsonObject {
+            put("pattern", "foo")
+            put("output_mode", "content")
+        }
+
+        assertNull(ToolPayloads.of("Bash", args))
+        assertNull(ToolPayloads.of("FetchURL", args))
     }
 }

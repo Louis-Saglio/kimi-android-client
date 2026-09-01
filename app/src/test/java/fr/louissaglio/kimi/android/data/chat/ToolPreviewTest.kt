@@ -98,6 +98,18 @@ class ToolPreviewTest {
     }
 
     @Test
+    fun `a grep call previews the pattern`() {
+        // Ticket 123: the pattern identifies the call, not the scope path; the row
+        // renders it slash-delimited.
+        val input = buildJsonObject {
+            put("pattern", "foo|bar")
+            put("path", "/tmp/spike")
+        }
+
+        assertEquals("foo|bar", ToolPreview.of("Grep", input))
+    }
+
+    @Test
     fun `no input previews nothing`() {
         assertEquals("", ToolPreview.of("Bash", null))
         assertEquals("", ToolPreview.of(null, buildJsonObject { }))

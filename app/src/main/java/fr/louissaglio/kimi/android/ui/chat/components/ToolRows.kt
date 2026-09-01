@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -48,6 +49,7 @@ import fr.louissaglio.kimi.android.data.chat.BashOutputs
 import fr.louissaglio.kimi.android.data.chat.EditDiffs
 import fr.louissaglio.kimi.android.data.chat.FetchUrlOutputs
 import fr.louissaglio.kimi.android.data.chat.GlobOutputs
+import fr.louissaglio.kimi.android.data.chat.GrepResultParser
 import fr.louissaglio.kimi.android.data.chat.ToolDetailFields
 import fr.louissaglio.kimi.android.data.chat.ToolPayload
 import fr.louissaglio.kimi.android.data.chat.ToolPreview
@@ -197,7 +199,16 @@ internal fun ToolGroupCard(
  * through the chat markdown renderer; `FetchURL` (link glyph, host-first shortened
  * URL preview — [hostFirstUrl]) expands to the full selectable URL, the fetch note
  * as a caption when it parses ([FetchUrlOutputs]) and the content verbatim. An
- * unparseable call of any of the three keeps the generic expansion. */
+ * unparseable call of any of the three keeps the generic expansion.
+ *
+ * A `Grep` row with a parsed payload (ticket 123) keeps the inline expansion too:
+ * the magnifier glyph (the Glob row's), a slash-delimited monospace `/pattern/`
+ * preview and a trailing scope chip (the `path`, or the `glob` when no path is
+ * set). The expansion shows the non-default filter knobs as chips (ignore case,
+ * ±N/+N/-N context, multiline, include hidden, type — never head_limit/offset/-n)
+ * and the result parsed per `output_mode` ([GrepResultParser]): per-file match
+ * groups, the plain path list, or the count-badge rows. Any line failing the
+ * mode's grammar renders the WHOLE output verbatim. */
 @Composable
 internal fun ToolRow(
     activity: ChatItem.ToolActivity,
@@ -219,7 +230,8 @@ internal fun ToolRow(
     val globPayload = activity.payload as? ToolPayload.Glob
     val webSearchPayload = activity.payload as? ToolPayload.WebSearch
     val fetchUrlPayload = activity.payload as? ToolPayload.FetchUrl
-    val lookupPayload = globPayload ?: webSearchPayload ?: fetchUrlPayload
+    val grepPayload = activity.payload as? ToolPayload.Grep
+    val lookupPayload = globPayload ?: webSearchPayload ?: fetchUrlPayload ?: grepPayload
     // The chip counts come from the diff itself (delta types), not a line split.
     val editDiff = remember(editPayload) { editPayload?.let { EditDiffs.of(it.oldString, it.newString) } }
     val detailFields = remember(activity.args) { ToolDetailFields.of(activity.args) }
@@ -237,12 +249,23 @@ internal fun ToolRow(
     val fetchUrlOutput = remember(fetchUrlPayload, activity.output) {
         if (fetchUrlPayload != null) FetchUrlOutputs.of(activity.output) else null
     }
+    // Ticket 123: the Grep row's output parsed per its output_mode. Success-only
+    // like Glob (an error output is tool prose — it renders verbatim on the error
+    // surface); a null parse means "render the whole output verbatim".
+    val grepResult = remember(grepPayload, activity.output, activity.status) {
+        if (grepPayload != null && activity.status != ToolStatus.Error) {
+            GrepResultParser.of(activity.output, grepPayload.outputMode)
+        } else {
+            null
+        }
+    }
     // A parsed lookup row's details no longer include the generic args table, so the
     // row is expandable only when its rich expansion has something to show.
     val lookupExpandable = when {
         fetchUrlPayload != null -> true // the full URL always renders
         globPayload != null -> activity.output.isNotBlank() || globPayload.path != null || globPayload.includeIgnored
         webSearchPayload != null -> activity.output.isNotBlank()
+        grepPayload != null -> activity.output.isNotBlank() || grepPayload.hasNonDefaultKnobs
         else -> false
     }
     val expandable = !isQuestionRow && editPayload == null && filePayload == null && linkedSubagentId == null &&
@@ -273,8 +296,9 @@ internal fun ToolRow(
             // Terminal glyph for shell calls (material-icons-core has no terminal icon),
             // a pencil for parsed Edit calls (ticket 119), a document for parsed
             // Read/Write calls (ticket 120), the lookup glyphs for parsed
-            // Glob/WebSearch/FetchURL calls (ticket 122), a generic tool icon
-            // otherwise. The tags mark the lookup glyphs for the row tests.
+            // Glob/WebSearch/FetchURL calls (ticket 122) and Grep calls (ticket 123 —
+            // the Glob row's magnifier), a generic tool icon otherwise. The tags mark
+            // the lookup glyphs for the row tests.
             if (activity.name == "Bash") {
                 Text(
                     text = ">_",
@@ -290,6 +314,7 @@ internal fun ToolRow(
                         globPayload != null -> SearchIcon
                         webSearchPayload != null -> GlobeIcon
                         fetchUrlPayload != null -> LinkIcon
+                        grepPayload != null -> SearchIcon
                         else -> Icons.Filled.Build
                     },
                     contentDescription = null,
@@ -300,6 +325,7 @@ internal fun ToolRow(
                                 globPayload != null -> Modifier.testTag("toolIconGlob")
                                 webSearchPayload != null -> Modifier.testTag("toolIconWebSearch")
                                 fetchUrlPayload != null -> Modifier.testTag("toolIconFetchUrl")
+                                grepPayload != null -> Modifier.testTag("toolIconGrep")
                                 else -> Modifier
                             },
                         ),
@@ -308,7 +334,12 @@ internal fun ToolRow(
             }
             // A parsed FetchURL row leads with the host (ticket 122): the URL's
             // identifying part on a narrow row; the full URL is the expansion's.
-            val rowPreview = if (fetchUrlPayload != null) hostFirstUrl(fetchUrlPayload.url) else activity.preview
+            // A parsed Grep row carries its pattern slash-delimited (ticket 123).
+            val rowPreview = when {
+                fetchUrlPayload != null -> hostFirstUrl(fetchUrlPayload.url)
+                grepPayload != null -> "/${ToolPreview.oneLine(grepPayload.pattern)}/"
+                else -> activity.preview
+            }
             Text(
                 text = activity.name.ifBlank { "tool" },
                 style = MaterialTheme.typography.labelMedium,
@@ -378,6 +409,20 @@ internal fun ToolRow(
                     style = MaterialTheme.typography.labelMedium,
                     fontFamily = FontFamily.Monospace,
                     color = detailColor,
+                )
+            }
+            // The Grep row's scope chip (ticket 123): the `path`, or the `glob` when
+            // no path is set — the Read range chip's recipe (plain text, no pill),
+            // weight-bounded so a long path ellipsizes instead of crowding the row.
+            (grepPayload?.path ?: grepPayload?.glob)?.let { scope ->
+                Text(
+                    text = scope,
+                    modifier = Modifier.weight(1f, fill = false),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontFamily = FontFamily.Monospace,
+                    color = detailColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
             ToolStatusIcon(activity.status, runningDescription = "Tool running", modifier = Modifier.size(12.dp))
@@ -467,6 +512,7 @@ internal fun ToolRow(
                         BashChipsRow(bashPayload, activity)
                     }
                     globPayload != null -> GlobChipsRow(globPayload)
+                    grepPayload != null -> GrepChipsRow(grepPayload)
                     fetchUrlPayload != null -> {
                         // The full URL (the row shows it host-first, ticket 122).
                         SelectionContainer {
@@ -500,6 +546,24 @@ internal fun ToolRow(
                             ToolDetailBlock(text = globOutput.lines.joinToString("\n"), color = outputColor)
                         }
                         webSearchPayload != null -> WebSearchResultBlock(activity.output, color = outputColor)
+                        grepPayload != null -> when (val result = grepResult) {
+                            // Any line failing the mode's grammar degrades the WHOLE
+                            // output to verbatim (ticket 123) — never a half-parsed mix.
+                            null -> ToolDetailBlock(text = activity.output, color = outputColor)
+                            is GrepResultParser.Result.Content -> {
+                                GrepContentResults(result, outputColor)
+                                GrepNotices(result.notices)
+                            }
+                            is GrepResultParser.Result.FileList -> {
+                                GrepFilesHeader(result.paths.size)
+                                ToolDetailBlock(text = result.paths.joinToString("\n"), color = outputColor)
+                                GrepNotices(result.notices)
+                            }
+                            is GrepResultParser.Result.Counts -> {
+                                GrepCountResults(result, outputColor)
+                                GrepNotices(result.notices)
+                            }
+                        }
                         fetchUrlOutput != null -> {
                             fetchUrlOutput.note?.let { note ->
                                 Text(
@@ -750,6 +814,174 @@ private fun GlobResultHeader(output: GlobOutputs.Lifted) {
                 )
             }
         }
+    }
+}
+
+/** The Grep row's non-default filter knobs (ticket 123): `ignore case` for `-i`,
+ * the context chips (`±N` symmetric, `+N`/`-N` per side when asymmetric —
+ * [ToolPayload.Grep.contextChips]), `multiline`, `include hidden` for
+ * `include_ignored`, and the `type` filter. Nothing renders when everything is
+ * default; head_limit/offset/`-n` never earn UI space (not even carried by the
+ * payload). */
+@Composable
+private fun GrepChipsRow(payload: ToolPayload.Grep) {
+    if (!payload.hasNonDefaultKnobs) return
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        if (payload.caseInsensitive) GrepChip("ignore case")
+        payload.contextChips.forEach { GrepChip(it) }
+        if (payload.multiline) GrepChip("multiline")
+        if (payload.includeIgnored) GrepChip("include hidden")
+        payload.type?.let { GrepChip("type: $it") }
+    }
+}
+
+@Composable
+private fun GrepChip(label: String) {
+    Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.small) {
+        Text(
+            text = label,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+            style = MaterialTheme.typography.labelMedium,
+        )
+    }
+}
+
+/** The Grep files-mode result header (ticket 123): the listed-path count — the
+ * Glob expansion's "N matches" recipe ([GlobResultHeader], minus the truncation
+ * chip: Grep's own notices carry that information, as captions). */
+@Composable
+private fun GrepFilesHeader(pathCount: Int) {
+    Text(
+        text = if (pathCount == 1) "1 match" else "$pathCount matches",
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+/** The Grep content-mode results (ticket 123): per-file groups — a `labelMedium`
+ * `onSurfaceVariant` file header above monospace lines, match lines carrying their
+ * line number dimmed at the left, context lines dimmed without a number. The `--`
+ * separators collapse to plain 4dp spacing. Capped height with internal scroll —
+ * the [ToolDetailBlock] recipe. */
+@Composable
+private fun GrepContentResults(result: GrepResultParser.Result.Content, color: Color) {
+    Surface(color = color, shape = MaterialTheme.shapes.small) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(max = 240.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+        ) {
+            result.items.forEachIndexed { index, item ->
+                when (item) {
+                    is GrepResultParser.ContentItem.Separator -> Spacer(Modifier.height(4.dp))
+                    is GrepResultParser.ContentItem.Group -> {
+                        // A separator already supplied the gap above this group.
+                        if (index > 0 && result.items[index - 1] !is GrepResultParser.ContentItem.Separator) {
+                            Spacer(Modifier.height(4.dp))
+                        }
+                        Text(
+                            text = item.path,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        item.lines.forEach { line -> GrepContentLine(line) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun GrepContentLine(line: GrepResultParser.ContentLine) {
+    if (line.context) {
+        Text(
+            text = line.text,
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    } else {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                text = "${line.number}",
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = line.text,
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+    }
+}
+
+/** The Grep count-mode results (ticket 123): the server's aggregate summary line
+ * when it parsed, then one row per file — the path (monospace, ellipsized) and its
+ * match count as a `surfaceVariant` pill. Capped height with internal scroll — the
+ * [ToolDetailBlock] recipe. */
+@Composable
+private fun GrepCountResults(result: GrepResultParser.Result.Counts, color: Color) {
+    result.summary?.let { summary ->
+        Text(
+            text = summary,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+    Surface(color = color, shape = MaterialTheme.shapes.small) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(max = 240.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            result.entries.forEach { entry ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = entry.path,
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.small) {
+                        Text(
+                            text = "${entry.count}",
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            style = MaterialTheme.typography.labelMedium,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** The tool notices [GrepResultParser] stripped from the output's head/tail
+ * (ticket 123) — the pagination/truncation/timeout/sensitive-filter reports —
+ * kept as dimmed captions below the result block so nothing the server said is
+ * lost. Nothing renders when the output carried none. */
+@Composable
+private fun GrepNotices(notices: List<String>) {
+    notices.forEach { notice ->
+        Text(
+            text = notice,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

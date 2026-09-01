@@ -17,7 +17,9 @@ import kotlinx.serialization.json.intOrNull
  * payload-typed expanded row — the others navigate away);
  * for [Glob]/[WebSearch]/[FetchUrl] (ticket 122), the read-only lookup rows — they
  * keep the inline expansion like [Bash], with the result rendered per tool (counted
- * path list, markdown, verbatim content) instead of the generic args table.
+ * path list, markdown, verbatim content) instead of the generic args table;
+ * for [Grep] (ticket 123), the same inline expansion with the result parsed per
+ * `output_mode` ([GrepResultParser]).
  */
 sealed interface ToolPayload {
 
@@ -97,6 +99,49 @@ sealed interface ToolPayload {
     /** The FetchURL call's input (ticket 122); the row reformats [url] host-first
      * itself, the expansion shows it in full. */
     data class FetchUrl(val url: String) : ToolPayload
+
+    /** The Grep call's inputs (ticket 123). [pattern] is required — a call without
+     * one keeps the generic expansion. [path]/[glob] are null when unset or blank;
+     * the row's scope chip prefers [path]. [outputMode] is the wire's `output_mode`
+     * string, kept as a string: a drifted value still gets the rich row, only the
+     * result parse falls back to verbatim. [contextBefore]/[contextAfter] are the
+     * wire's `-B`/`-A` knobs — `-C` sets both and wins over them (the tool's arg
+     * building, 0.39.1). head_limit/offset/`-n` never earn UI space, so the payload
+     * does not carry them at all. */
+    data class Grep(
+        val pattern: String,
+        val path: String?,
+        val glob: String?,
+        val outputMode: String,
+        val caseInsensitive: Boolean,
+        val contextBefore: Int?,
+        val contextAfter: Int?,
+        val multiline: Boolean,
+        val includeIgnored: Boolean,
+        val type: String?,
+    ) : ToolPayload {
+
+        /** The expansion's context chips: `±N` when the before/after context is
+         * symmetric, a `+N`/`-N` pair when asymmetric; empty when no context was
+         * asked. */
+        val contextChips: List<String>
+            get() {
+                val before = contextBefore ?: 0
+                val after = contextAfter ?: 0
+                return when {
+                    before == after -> if (before > 0) listOf("±$before") else emptyList()
+                    else -> buildList {
+                        if (after > 0) add("+$after")
+                        if (before > 0) add("-$before")
+                    }
+                }
+            }
+
+        /** True when any expansion-chip knob is non-default — the chips row and
+         * the row's expandability rule both read it. */
+        val hasNonDefaultKnobs: Boolean
+            get() = caseInsensitive || contextChips.isNotEmpty() || multiline || includeIgnored || type != null
+    }
 }
 
 /** The payload parser: one variant per known tool, null for anything else —
@@ -111,6 +156,7 @@ object ToolPayloads {
     private const val GLOB_TOOL_NAME = "Glob"
     private const val WEB_SEARCH_TOOL_NAME = "WebSearch"
     private const val FETCH_URL_TOOL_NAME = "FetchURL"
+    private const val GREP_TOOL_NAME = "Grep"
 
     fun of(toolName: String, args: JsonObject?): ToolPayload? = when (toolName) {
         EDIT_TOOL_NAME -> editOf(args)
@@ -120,6 +166,7 @@ object ToolPayloads {
         GLOB_TOOL_NAME -> globOf(args)
         WEB_SEARCH_TOOL_NAME -> webSearchOf(args)
         FETCH_URL_TOOL_NAME -> fetchUrlOf(args)
+        GREP_TOOL_NAME -> grepOf(args)
         else -> null
     }
 
@@ -130,10 +177,7 @@ object ToolPayloads {
         val path = args.stringOf("path") ?: return null
         val oldString = args.stringOf("old_string") ?: return null
         val newString = args.stringOf("new_string") ?: return null
-        val replaceAll = (args["replace_all"] as? JsonPrimitive)
-            ?.takeIf { !it.isString }
-            ?.booleanOrNull ?: false
-        return ToolPayload.Edit(path, oldString, newString, replaceAll)
+        return ToolPayload.Edit(path, oldString, newString, args.flagOf("replace_all"))
     }
 
     private fun readOf(args: JsonObject?): ToolPayload.Read? {
@@ -168,13 +212,30 @@ object ToolPayloads {
     private fun globOf(args: JsonObject?): ToolPayload.Glob? {
         if (args == null) return null
         val pattern = args.stringOf("pattern") ?: return null
-        val includeIgnored = (args["include_ignored"] as? JsonPrimitive)
-            ?.takeIf { !it.isString }
-            ?.booleanOrNull ?: false
         return ToolPayload.Glob(
             pattern,
             path = args.stringOf("path")?.takeIf { it.isNotBlank() },
-            includeIgnored = includeIgnored,
+            includeIgnored = args.flagOf("include_ignored"),
+        )
+    }
+
+    private fun grepOf(args: JsonObject?): ToolPayload.Grep? {
+        if (args == null) return null
+        val pattern = args.stringOf("pattern") ?: return null
+        // `-C` fills both context sides and takes precedence over `-A`/`-B` (the
+        // tool's rg arg building, verified on the bundled 0.39.1 source).
+        val context = args.intOf("-C")
+        return ToolPayload.Grep(
+            pattern,
+            path = args.stringOf("path")?.takeIf { it.isNotBlank() },
+            glob = args.stringOf("glob")?.takeIf { it.isNotBlank() },
+            outputMode = args.stringOf("output_mode") ?: GrepResultParser.MODE_FILES_WITH_MATCHES,
+            caseInsensitive = args.flagOf("-i"),
+            contextBefore = context ?: args.intOf("-B"),
+            contextAfter = context ?: args.intOf("-A"),
+            multiline = args.flagOf("multiline"),
+            includeIgnored = args.flagOf("include_ignored"),
+            type = args.stringOf("type")?.takeIf { it.isNotBlank() },
         )
     }
 
@@ -195,4 +256,9 @@ object ToolPayloads {
 
     private fun JsonObject.intOf(key: String): Int? =
         (this[key] as? JsonPrimitive)?.intOrNull
+
+    /** A wire boolean flag: a string "true" is not the flag (the Edit
+     * `replace_all` rule). */
+    private fun JsonObject.flagOf(key: String): Boolean =
+        (this[key] as? JsonPrimitive)?.takeIf { !it.isString }?.booleanOrNull ?: false
 }

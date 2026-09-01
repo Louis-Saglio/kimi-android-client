@@ -18,7 +18,8 @@ import kotlinx.serialization.json.contentOrNull
  *
  * The lookup tools (ticket 122) identify by their one query argument: Glob's
  * `pattern`, WebSearch's `query`, FetchURL's `url` (the raw URL — the row's
- * host-first reformatting of it lives in ToolRow, not here).
+ * host-first reformatting of it lives in ToolRow, not here). Grep (ticket 123)
+ * identifies by `pattern` too; the row renders it slash-delimited.
  */
 object ToolPreview {
 
@@ -28,6 +29,7 @@ object ToolPreview {
     private val GLOB_IDENTIFYING_KEYS = listOf("pattern")
     private val WEB_SEARCH_IDENTIFYING_KEYS = listOf("query")
     private val FETCH_URL_IDENTIFYING_KEYS = listOf("url")
+    private val GREP_IDENTIFYING_KEYS = listOf("pattern")
     private val WHITESPACE = Regex("\\s+")
 
     fun of(toolName: String?, input: JsonObject?): String {
@@ -38,6 +40,7 @@ object ToolPreview {
             "Glob" -> GLOB_IDENTIFYING_KEYS
             "WebSearch" -> WEB_SEARCH_IDENTIFYING_KEYS
             "FetchURL" -> FETCH_URL_IDENTIFYING_KEYS
+            "Grep" -> GREP_IDENTIFYING_KEYS
             else -> IDENTIFYING_KEYS
         }
         for (key in keys) {

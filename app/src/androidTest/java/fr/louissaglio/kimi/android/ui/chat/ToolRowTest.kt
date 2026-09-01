@@ -949,4 +949,241 @@ class ToolRowTest {
         composeTestRule.onNodeWithText("path").assertIsDisplayed()
         composeTestRule.onNodeWithText("/tmp/spike").assertIsDisplayed()
     }
+
+    // --- Ticket 123: parsed Grep rows ---------------------------------------------
+
+    /** A parsed Grep row, args/payload kept in sync like the live derivation. */
+    private fun grepRow(
+        pattern: String = "match",
+        path: String? = null,
+        glob: String? = null,
+        outputMode: String = "content",
+        caseInsensitive: Boolean = false,
+        contextC: Int? = null,
+        multiline: Boolean = false,
+        includeIgnored: Boolean = false,
+        type: String? = null,
+        status: ToolStatus = ToolStatus.Done,
+        output: String = "",
+    ) = ChatItem.ToolActivity(
+        "tool_1",
+        "Grep",
+        status,
+        preview = pattern,
+        args = buildJsonObject {
+            put("pattern", pattern)
+            path?.let { put("path", it) }
+            glob?.let { put("glob", it) }
+            put("output_mode", outputMode)
+            if (caseInsensitive) put("-i", true)
+            contextC?.let { put("-C", it) }
+            if (multiline) put("multiline", true)
+            if (includeIgnored) put("include_ignored", true)
+            type?.let { put("type", it) }
+        },
+        payload = ToolPayload.Grep(
+            pattern,
+            path,
+            glob,
+            outputMode,
+            caseInsensitive,
+            contextBefore = contextC,
+            contextAfter = contextC,
+            multiline = multiline,
+            includeIgnored = includeIgnored,
+            type = type,
+        ),
+        output = output,
+    )
+
+    @Test
+    fun grepRowShowsMagnifierIconAndSlashDelimitedPatternPreview() {
+        toolRow(grepRow(pattern = "foo|bar", output = "app/a.kt:12:beta match here"))
+
+        composeTestRule.onNodeWithTag("toolIconGrep", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithText("Grep").assertIsDisplayed()
+        composeTestRule.onNodeWithText("/foo|bar/").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Expand tool details").assertIsDisplayed()
+    }
+
+    @Test
+    fun grepRowWithPathShowsScopeChip() {
+        toolRow(grepRow(path = "/tmp/spike", output = "app/a.kt:12:beta match here"))
+
+        composeTestRule.onNodeWithText("/tmp/spike").assertIsDisplayed()
+    }
+
+    @Test
+    fun grepRowWithGlobOnlyShowsGlobScopeChip() {
+        toolRow(grepRow(glob = "*.kt", output = "app/a.kt:12:beta match here"))
+
+        composeTestRule.onNodeWithText("*.kt").assertIsDisplayed()
+    }
+
+    @Test
+    fun grepRowWithPathAndGlobPrefersThePathScopeChip() {
+        toolRow(grepRow(path = "/tmp/spike", glob = "*.kt", output = "app/a.kt:12:beta match here"))
+
+        composeTestRule.onNodeWithText("/tmp/spike").assertIsDisplayed()
+        composeTestRule.onNodeWithText("*.kt").assertDoesNotExist()
+    }
+
+    @Test
+    fun grepContentRowExpandsToPerFileGroups() {
+        toolRow(
+            grepRow(
+                output = "app/a.kt:12:beta match here\n" +
+                    "app/a.kt-13:after context\n" +
+                    "--\n" +
+                    "sub/b.kt:2:match in b",
+            ),
+        )
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+
+        // The per-file group headers, the dimmed line numbers as their own nodes,
+        // the context line's text; the `--` separator never renders as text.
+        composeTestRule.onNodeWithText("app/a.kt").assertIsDisplayed()
+        composeTestRule.onNodeWithText("sub/b.kt").assertIsDisplayed()
+        composeTestRule.onNodeWithText("12").assertIsDisplayed()
+        composeTestRule.onNodeWithText("beta match here").assertIsDisplayed()
+        composeTestRule.onNodeWithText("after context").assertIsDisplayed()
+        composeTestRule.onNodeWithText("--").assertDoesNotExist()
+        // The generic key/value table is replaced: no arg labels.
+        composeTestRule.onNodeWithText("output_mode").assertDoesNotExist()
+    }
+
+    @Test
+    fun defaultGrepRowShowsNoChips() {
+        toolRow(grepRow(output = "app/a.kt:12:beta match here"))
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+
+        composeTestRule.onNodeWithText("app/a.kt").assertIsDisplayed()
+        composeTestRule.onNodeWithText("ignore case").assertDoesNotExist()
+        composeTestRule.onNode(hasText("±", substring = true)).assertDoesNotExist()
+        composeTestRule.onNodeWithText("multiline").assertDoesNotExist()
+        composeTestRule.onNodeWithText("include hidden").assertDoesNotExist()
+        composeTestRule.onNode(hasText("type:", substring = true)).assertDoesNotExist()
+    }
+
+    /** The acceptance case: a `-i -C 2` call shows exactly the `ignore case` and
+     * `±2` chips. */
+    @Test
+    fun grepRowWithCaseInsensitiveAndSymmetricContextShowsExactlyThoseChips() {
+        toolRow(grepRow(caseInsensitive = true, contextC = 2, output = "app/a.kt:12:beta match here"))
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+
+        composeTestRule.onNodeWithText("ignore case").assertIsDisplayed()
+        composeTestRule.onNodeWithText("±2").assertIsDisplayed()
+        composeTestRule.onNodeWithText("multiline").assertDoesNotExist()
+        composeTestRule.onNodeWithText("include hidden").assertDoesNotExist()
+        composeTestRule.onNode(hasText("type:", substring = true)).assertDoesNotExist()
+    }
+
+    @Test
+    fun grepRowWithTypeAndHiddenKnobsShowsThoseChips() {
+        toolRow(grepRow(includeIgnored = true, type = "kt", multiline = true, output = "app/a.kt:12:beta match here"))
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+
+        composeTestRule.onNodeWithText("include hidden").assertIsDisplayed()
+        composeTestRule.onNodeWithText("multiline").assertIsDisplayed()
+        composeTestRule.onNodeWithText("type: kt").assertIsDisplayed()
+    }
+
+    @Test
+    fun grepFilesModeRowExpandsToCountedPathList() {
+        toolRow(grepRow(outputMode = "files_with_matches", output = "app/a.kt\nsub/b.kt"))
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+
+        composeTestRule.onNodeWithText("2 matches").assertIsDisplayed()
+        composeTestRule.onNodeWithText("app/a.kt\nsub/b.kt").assertIsDisplayed()
+    }
+
+    @Test
+    fun grepCountModeRowExpandsToSummaryAndCountBadges() {
+        toolRow(
+            grepRow(
+                outputMode = "count_matches",
+                output = "Found 5 total occurrences across 2 files.\napp/a.kt:2\nsub/b.kt:3",
+            ),
+        )
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+
+        composeTestRule.onNodeWithText("Found 5 total occurrences across 2 files.").assertIsDisplayed()
+        composeTestRule.onNodeWithText("app/a.kt").assertIsDisplayed()
+        composeTestRule.onNodeWithText("2").assertIsDisplayed()
+        composeTestRule.onNodeWithText("sub/b.kt").assertIsDisplayed()
+        composeTestRule.onNodeWithText("3").assertIsDisplayed()
+    }
+
+    @Test
+    fun grepRowWithStrippedNoticeShowsItAsCaption() {
+        toolRow(
+            grepRow(
+                output = "app/a.kt:12:beta match here\n" +
+                    "Results truncated to 250 lines (total: 400). Use offset=250 to see more.",
+            ),
+        )
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+
+        // The body structures, the lifted notice rides as a caption below it.
+        composeTestRule.onNodeWithText("app/a.kt").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Results truncated to 250 lines (total: 400). Use offset=250 to see more.")
+            .assertIsDisplayed()
+    }
+
+    @Test
+    fun grepRowWithOneBadLineRendersTheWholeOutputVerbatim() {
+        val output = "app/a.kt:12:beta match here\ngarbage line\nsub/b.kt:2:match in b"
+        toolRow(grepRow(output = output))
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+
+        // Verbatim: the whole output is one text node; no group structure exists.
+        composeTestRule.onNodeWithText(output).assertIsDisplayed()
+        composeTestRule.onNodeWithText("app/a.kt").assertDoesNotExist()
+        composeTestRule.onNodeWithText("12").assertDoesNotExist()
+    }
+
+    @Test
+    fun grepErrorRowRendersVerbatim() {
+        toolRow(grepRow(status = ToolStatus.Error, output = "Failed to grep: boom"))
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+
+        composeTestRule.onNodeWithText("Failed to grep: boom").assertIsDisplayed()
+    }
+
+    @Test
+    fun runningGrepRowWithoutOutputOrKnobsStaysNonExpandable() {
+        toolRow(grepRow(status = ToolStatus.Running))
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").assertDoesNotExist()
+    }
+
+    /** A Grep call whose args did not parse (no pattern) keeps the generic key/value
+     * expansion. */
+    @Test
+    fun unparseableGrepRowKeepsGenericExpansion() {
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "Grep",
+                ToolStatus.Done,
+                preview = "grep the sources",
+                args = buildJsonObject { put("path", "/tmp/spike") },
+            ),
+        )
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+        composeTestRule.onNodeWithText("path").assertIsDisplayed()
+        composeTestRule.onNodeWithText("/tmp/spike").assertIsDisplayed()
+    }
 }

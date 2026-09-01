@@ -2271,14 +2271,17 @@ invisible here and irrelevant to clients of this endpoint.
 curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/tools
 ```
 
-### Lookup tool output text (Glob / WebSearch / FetchURL)
+### Lookup tool output text (Glob / Grep / WebSearch / FetchURL)
 
-The `tool.result` `output` text shapes the app's rich rows parse (ticket 122).
-Not wire protocol — tool-generated prose from agent-core, like the Bash
-`Command failed with exit code: N` trailer; verified 2026-09-01 against the
-bundled tool source of the running 0.39.1 server binary
+The `tool.result` `output` text shapes the app's rich rows parse (tickets
+122/123). Not wire protocol — tool-generated prose from agent-core, like the
+Bash `Command failed with exit code: N` trailer; verified 2026-09-01 against
+the bundled tool source of the running 0.39.1 server binary
 (`packages/agent-core/src/tools/builtin/fs/glob.ts`, `…/web/fetch-url.ts`,
-`…/web/web-search.ts`), not a live capture.
+`…/web/web-search.ts`; Grep: `packages/agent-core-v2/src/agent/tools/os/grep/grepTool.ts`
+— the live backend is v2 per `/api/v1/meta`; the bundle's v1
+`agent-core/src/tools/builtin/file/grep.ts` twin differs only in shorter
+notice wordings, called out below), not a live capture.
 
 **Glob** — one path per line (relative to the search root when under the
 workspace, absolute otherwise). Optional head notices precede the paths, in
@@ -2300,6 +2303,45 @@ file(s).` and — only when exactly 100 matches WITHOUT truncation — `Found 10
 matches`. No-match outputs: `No matches found`, `No non-sensitive matches found
 ({N} sensitive file(s) filtered).`. Errors (`is_error`): `{root} is not a
 directory`, `{root} does not exist`, `Glob failed[: {stderr}]`, `Glob aborted`.
+
+**Grep** — the tool runs `rg` with `--null` and reformats the NUL-separated
+records into plain text lines (`[...headerLines, body, ...messages]`, empty
+parts dropped, joined by `\n`). Per `output_mode` (default
+`files_with_matches`):
+
+- `content` (with `-n`, the default): match lines `path:NN:text`, context
+  lines (`-A`/`-B`/`-C`) `path-NN-text`, `--` separator lines between
+  non-contiguous ranges (leading/trailing/doubled separators normalized
+  away). With `-n: false` both kinds render `path:text` (no numbers). Paths
+  are relativized under the workspace.
+- `files_with_matches`: one bare path per line, most-recently-modified first.
+- `count_matches`: a head summary line `Found {N} total occurrences across
+  {M} files.` (singular forms; `total non-sensitive` when the sensitive
+  filter redacted a file), then the body as `path:{count}` lines. In this
+  mode the pagination notice sits in the head, right after the summary.
+
+Tail notices (any subset, in this order — except the pagination notice, which
+moves to the head in `count_matches`): `Filtered {N} sensitive file(s): {p1,
+p2}`, `Results truncated to {N} lines (total: {M}). Use offset={K} to see
+more.` (or `…(total: {M} of a partial result set). Use …` after a
+truncated/timed-out run — v1 has only the first form), then the two-line
+buffer marker (its own line break, like Glob's):
+
+```
+[Output truncated at {N} bytes of rg output 
+ the result set is incomplete. Narrow the pattern, path, or glob filters and re-run to recover complete results.]
+```
+
+then `Grep timed out after {N}s; partial results returned. Narrow the path,
+glob, or pattern and retry for complete results.` (v1: just `Grep timed out
+after {N}s; partial results returned`). Empty result, any mode: `No
+non-sensitive matches found`. Errors (`is_error`): `Failed to grep:
+{stderr-summary}` (+ a `ripgrep stderr:` section), `Grep aborted`, `Grep
+timed out after {N}s. Try a more specific path or pattern.`, the
+ripgrep-unavailable message. Local `rg` cross-check of the raw record shapes
+(2026-09-01, bundled rg): content records are `path\0NN:text` / `path\0NN-text`
+with bare `--` separator lines; files mode is NUL-separated paths; count
+records are `path\0{N}`.
 
 **WebSearch** — per result: `Title: {t}\n`, optional `Site:`/`Date:` lines,
 `URL: {u}\n`, `Snippet: {s}\n\n`, results separated by `---\n\n`, closed by the

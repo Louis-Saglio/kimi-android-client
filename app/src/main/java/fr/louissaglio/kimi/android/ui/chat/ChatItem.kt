@@ -42,7 +42,8 @@ sealed interface ChatItem {
      * screen — ticket 120 — instead of expanding inline; a foreground Bash row keeps
      * expanding inline but renders the terminal-styled detail block — ticket 121; the
      * Glob/WebSearch/FetchURL lookup rows keep expanding inline too, the result
-     * rendered per tool in place of the generic args table — ticket 122).
+     * rendered per tool in place of the generic args table — ticket 122; the Grep
+     * row joins them, its result parsed per `output_mode` — ticket 123).
      * [output] is the result
      * text; either may be blank while the call is still running.
      * While running, [output] accumulates the volatile tool.progress chunks (ticket 025)

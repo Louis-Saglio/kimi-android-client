@@ -26,14 +26,21 @@
   instead of navigating away, the precedent for 122–125; ticket 122 adds
   `Glob`/`WebSearch`/`FetchUrl` — the read-only lookup payloads, also inline-expanding:
   the counted path list with its truncation chip, the markdown-rendered result, and
-  the full-URL + note-caption + verbatim content layouts respectively), `ReadOutputs` (the
+  the full-URL + note-caption + verbatim content layouts respectively; ticket 123
+  adds `Grep` — the same inline expansion, its `/pattern/` preview and scope chip
+  on the row, the filter knobs as chips and the result structured per
+  `output_mode`), `ReadOutputs` (the
   Read output's trailing `<system>…</system>` status block lifted into the file
   screen's caption chip — end-anchored, tolerant fallback; `BashOutputs` does the
   same for the Bash output's `Command failed with exit code: N` trailer — ticket
   121's `exit N` chip; `GlobOutputs` lifts the Glob output's head truncation marker
   into the row's chip and counts the non-blank lines for the "N matches" header,
   `FetchUrlOutputs` lifts the FetchURL output's head note sentence into the row's
-  caption — both verified against the 0.39.1 tool source, ticket 122) and
+  caption — both verified against the 0.39.1 tool source, ticket 122;
+  `GrepResultParser` (ticket 123) parses the Grep output per `output_mode` into a
+  sealed result (per-file content groups / path list / count entries, the tool's
+  notices lifted into captions) — any line failing the mode's grammar degrades
+  the whole output to the verbatim block) and
   `EditDiffs` for the unified line-diff model (java-diff-utils Myers on the Edit
   call's old/new strings; rows plus the `+a −b` delta-type counts)), and
   `SessionActivityStore` (`data/sessions/` — process-lifetime
