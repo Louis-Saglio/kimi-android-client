@@ -55,9 +55,17 @@
   (`/api/v2/sessions?view=by_workspace&group.page_size=5`, one unpaged request,
   epoch-ms v2 DTOs kept separate from v1's). A group holding fewer rows than its
   server-side `total` gets a show-more footer (ticket 116) paging the rest of the
-  workspace through the v1 list (`workspace_id` + `before_id`, 20 at a time like
-  the flat list), appends deduped by session id, with a per-group Job guard like
-  010's flat pagination and the flat footer's inline error/retry. The flat/grouped
+  workspace through the v1 list (`workspace_id` + `before_id`, `page_size=5` like
+  the grouped first page), appends deduped by session id, with a per-group Job
+  guard like 010's flat pagination and the flat footer's inline error/retry. Once
+  rows beyond the first page are on screen the footer also offers show less, which
+  hides the last five rows and cancels any in-flight expansion. Group
+  headers fold/unfold their rows on tap (state on `UiState.foldedGroupIds`,
+  in-memory only) and carry a new-session button that opens the create dialog with
+  the group's cwd pre-selected (`SessionListViewModel.onNewSessionClick(cwd)`).
+  The custom folder glyph `ui/common/icons/WorkspaceIcon.kt` (Material Symbols
+  path data) marks both the headers and the flat → grouped toggle; the toggle's
+  icon is always the mode a tap switches TO, with no tint state. The flat/grouped
   toggle persists in
   `SettingsRepository` (flat default, re-read on every screen start); the live
   socket machinery patches rows by id inside their group (groups never reorder),

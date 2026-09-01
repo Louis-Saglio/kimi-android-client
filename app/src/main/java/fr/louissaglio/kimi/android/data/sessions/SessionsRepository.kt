@@ -22,7 +22,9 @@ class SessionsRepository @Inject constructor(
      * passed per call (same pattern as ConnectionChecker) so saved-settings edits apply
      * immediately. [beforeId] is sent as the `before_id` cursor to page backwards;
      * null fetches the first page. [workspaceId] is sent as the `workspace_id` filter —
-     * the grouped view's per-group expansion (ticket 116, web parity). This is the
+     * the grouped view's per-group expansion (ticket 116, web parity). [pageSize]
+     * overrides the server default (20): the group expansion pages 5 at a time, like
+     * the grouped fetch's first page. This is the
      * error boundary: failures come back as [Result.failure] of
      * [fr.louissaglio.kimi.android.data.DataError].
      */
@@ -30,9 +32,11 @@ class SessionsRepository @Inject constructor(
         settings: ServerSettings,
         beforeId: String? = null,
         workspaceId: String? = null,
+        pageSize: Int? = null,
     ): Result<SessionPage> {
         val params = listOfNotNull(
             workspaceId?.let { "workspace_id=$it" },
+            pageSize?.let { "page_size=$it" },
             beforeId?.let { "before_id=$it" },
         )
         val query = if (params.isEmpty()) "" else "?" + params.joinToString("&")

@@ -56,6 +56,9 @@ class SessionListViewModel @Inject constructor(
         /** Per-group show-more footer state (ticket 116), keyed by workspace id — an entry
          * exists only while that group's next-page load is in flight or its last attempt failed. */
         val groupExpansions: Map<String, GroupExpansion> = emptyMap(),
+        /** Workspace ids whose groups are folded (rows hidden) in grouped mode. Survives
+         * refreshes; not persisted — a restart comes back with everything unfolded. */
+        val foldedGroupIds: Set<String> = emptySet(),
         val showCreateDialog: Boolean = false,
         val newSessionCwd: String = "",
         val newSessionTitle: String = "",
@@ -354,7 +357,7 @@ class SessionListViewModel @Inject constructor(
     /**
      * Loads the next page of one group (ticket 116): the grouped fetch serves only each
      * workspace's first 5 sessions, so the show-more footer pages the rest through the
-     * v1 list filtered by workspace (web parity), 20 at a time like the flat list. The
+     * v1 list filtered by workspace (web parity), 5 at a time like the first page. The
      * per-group job (not a state flag) is the re-entrancy guard — same reasoning as
      * [onEndReached]: the footer stays tappable while the request is in flight, and
      * state updates are not visible synchronously across dispatches.
@@ -369,7 +372,12 @@ class SessionListViewModel @Inject constructor(
             uiState.update { state ->
                 state.copy(groupExpansions = state.groupExpansions + (workspaceId to GroupExpansion(isLoading = true)))
             }
-            sessionsRepository.listSessions(settingsRepository.current(), beforeId = beforeId, workspaceId = workspaceId)
+            sessionsRepository.listSessions(
+                settingsRepository.current(),
+                beforeId = beforeId,
+                workspaceId = workspaceId,
+                pageSize = GROUP_PAGE_SIZE,
+            )
                 .onSuccess { page ->
                     uiState.update { state ->
                         state.copy(
@@ -396,11 +404,50 @@ class SessionListViewModel @Inject constructor(
         }
     }
 
-    fun onNewSessionClick() {
+    /** Folds/unfolds one group in grouped mode: the header stays, its rows and
+     * show-more footer hide. Expansion loads in flight keep running. */
+    fun onGroupFoldToggle(workspaceId: String) = uiState.update { state ->
+        state.copy(
+            foldedGroupIds =
+                if (workspaceId in state.foldedGroupIds) {
+                    state.foldedGroupIds - workspaceId
+                } else {
+                    state.foldedGroupIds + workspaceId
+                },
+        )
+    }
+
+    /**
+     * Hides the last [GROUP_PAGE_SIZE] sessions of one group (web parity with the
+     * show-less button): loaded < total again, so the show-more footer comes back.
+     * An expansion in flight is cancelled first so its page cannot re-append rows
+     * the user just hid.
+     */
+    fun onGroupShowLess(workspaceId: String) {
+        groupLoadJobs.remove(workspaceId)?.cancel()
+        uiState.update { state ->
+            state.copy(
+                groupExpansions = state.groupExpansions - workspaceId,
+                groups = state.groups?.map { group ->
+                    if (group.workspaceId != workspaceId || group.sessions.size <= GROUP_PAGE_SIZE) {
+                        group
+                    } else {
+                        group.copy(sessions = group.sessions.dropLast(GROUP_PAGE_SIZE))
+                    }
+                },
+            )
+        }
+    }
+
+    /**
+     * Opens the create-session dialog. [cwd] pre-selects a workspace (the grouped
+     * view's per-group new-session button); null falls back to the default root.
+     */
+    fun onNewSessionClick(cwd: String? = null) {
         uiState.update {
             it.copy(
                 showCreateDialog = true,
-                newSessionCwd = DEFAULT_NEW_SESSION_CWD,
+                newSessionCwd = cwd ?: DEFAULT_NEW_SESSION_CWD,
                 newSessionTitle = "",
                 newSessionCwdError = null,
                 workspaces = null,
@@ -416,7 +463,8 @@ class SessionListViewModel @Inject constructor(
                         if (!it.showCreateDialog) return@update it
                         it.copy(
                             workspaces = workspaces,
-                            // Don't clobber a path the user already typed.
+                            // Don't clobber a path the user already typed or a
+                            // pre-selected group cwd.
                             newSessionCwd =
                                 if (it.newSessionCwd == DEFAULT_NEW_SESSION_CWD) {
                                     workspaces.first().root
@@ -586,8 +634,13 @@ class SessionListViewModel @Inject constructor(
         }
     }
 
-    private companion object {
-        const val DEFAULT_NEW_SESSION_CWD = "/home/ubuntu"
-        const val CACHE_WRITE_DEBOUNCE_MS = 500L
+    companion object {
+        private const val DEFAULT_NEW_SESSION_CWD = "/home/ubuntu"
+        private const val CACHE_WRITE_DEBOUNCE_MS = 500L
+
+        /** Sessions per group page: the grouped fetch's group.page_size and each
+         * show-more expansion (ticket 116). Internal so the screen can place the
+         * show-less threshold on the same number. */
+        internal const val GROUP_PAGE_SIZE = 5
     }
 }

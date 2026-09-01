@@ -1060,9 +1060,10 @@ class SessionListViewModelTest {
         val group = viewModel.uiState.value.groups!!.single()
         assertEquals(listOf("session_1", "session_2", "session_3"), group.sessions.map { it.id })
         assertEquals(4, group.total)
-        // The workspace filter and the group's last loaded id ride the same v1 call.
+        // The workspace filter, the 5-row page size and the group's last loaded id
+        // ride the same v1 call.
         assertEquals(
-            "/api/v1/sessions?workspace_id=wd_a&before_id=session_2",
+            "/api/v1/sessions?workspace_id=wd_a&page_size=5&before_id=session_2",
             server.takeRequest(5, TimeUnit.SECONDS)!!.target,
         )
         // The footer state settled: nothing loading, no error.
@@ -1096,7 +1097,7 @@ class SessionListViewModelTest {
         viewModel.onGroupShowMore("wd_a")
 
         assertEquals(
-            "/api/v1/sessions?workspace_id=wd_a&before_id=session_1",
+            "/api/v1/sessions?workspace_id=wd_a&page_size=5&before_id=session_1",
             server.takeRequest(5, TimeUnit.SECONDS)!!.target,
         )
         awaitState(viewModel.uiState) { it.groups?.single()?.sessions?.size == 2 }
@@ -1128,9 +1129,25 @@ class SessionListViewModelTest {
         )
         assertTrue(viewModel.uiState.value.groupExpansions.isEmpty())
         assertEquals(
-            "/api/v1/sessions?workspace_id=wd_a&before_id=session_2",
+            "/api/v1/sessions?workspace_id=wd_a&page_size=5&before_id=session_2",
             server.takeRequest(5, TimeUnit.SECONDS)!!.target,
         )
+    }
+
+    @Test
+    fun `show more pages five sessions at a time`() = runBlocking {
+        enterGroupedMode(groupsBodyWithTotals(Triple("/tmp/a", listOf("session_1", "session_2"), 8)))
+        server.enqueue(MockResponse(body = pageBody(hasMore = true, "session_3", "session_4", "session_5", "session_6", "session_7")))
+
+        viewModel.onGroupShowMore("wd_a")
+
+        awaitState(viewModel.uiState) { it.groups?.single()?.sessions?.size == 7 }
+        // The group still has one session server-side: the footer stays for another page.
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_8")))
+        viewModel.onGroupShowMore("wd_a")
+
+        awaitState(viewModel.uiState) { it.groups?.single()?.sessions?.size == 8 }
+        assertEquals(3, server.requestCount)
     }
 
     @Test
@@ -1163,6 +1180,105 @@ class SessionListViewModelTest {
         awaitState(viewModel.uiState) { it.groups?.single()?.sessions?.map { s -> s.id } == listOf("session_1") }
         // Pure WebSocket activity: no REST call beyond the grouped load and the expansion.
         assertEquals(2, server.requestCount)
+    }
+
+    // --- Group folding ---
+
+    @Test
+    fun `tapping a group header folds it and tapping again unfolds it`() = runBlocking {
+        enterGroupedMode(groupsBody("/tmp/a" to listOf("session_1"), "/tmp/b" to listOf("session_2")))
+
+        viewModel.onGroupFoldToggle("wd_a")
+        assertEquals(setOf("wd_a"), viewModel.uiState.value.foldedGroupIds)
+
+        viewModel.onGroupFoldToggle("wd_a")
+        assertTrue(viewModel.uiState.value.foldedGroupIds.isEmpty())
+    }
+
+    @Test
+    fun `a refresh keeps the folded groups folded`() = runBlocking {
+        enterGroupedMode(groupsBody("/tmp/a" to listOf("session_1")))
+        viewModel.onGroupFoldToggle("wd_a")
+
+        server.enqueue(MockResponse(body = groupsBody("/tmp/a" to listOf("session_1"))))
+        viewModel.onPullToRefresh()
+
+        awaitState(viewModel.uiState) { !it.isRefreshing }
+        assertEquals(setOf("wd_a"), viewModel.uiState.value.foldedGroupIds)
+        assertEquals(2, server.requestCount)
+    }
+
+    @Test
+    fun `the group new-session button prefills the dialog with that workspace root`() = runBlocking {
+        server.enqueue(MockResponse(body = WORKSPACES_BODY))
+
+        viewModel.onNewSessionClick("/tmp/old")
+
+        awaitState(viewModel.uiState) { it.workspaces != null }
+        val state = viewModel.uiState.value
+        assertTrue(state.showCreateDialog)
+        // The workspaces fetch must not clobber the pre-selected group cwd.
+        assertEquals("/tmp/old", state.newSessionCwd)
+        assertEquals("/api/v1/workspaces", server.takeRequest(5, TimeUnit.SECONDS)!!.target)
+    }
+
+    // --- Group show less ---
+
+    @Test
+    fun `show less drops the last five rows and the show-more footer comes back`() = runBlocking {
+        enterGroupedMode(groupsBodyWithTotals(Triple("/tmp/a", listOf("session_1", "session_2"), 8)))
+        server.enqueue(MockResponse(body = pageBody(hasMore = true, "session_3", "session_4", "session_5", "session_6", "session_7")))
+        viewModel.onGroupShowMore("wd_a")
+        awaitState(viewModel.uiState) { it.groups?.single()?.sessions?.size == 7 }
+        server.takeRequest(5, TimeUnit.SECONDS) // drain the expansion request
+
+        viewModel.onGroupShowLess("wd_a")
+
+        assertEquals(listOf("session_1", "session_2"), viewModel.uiState.value.groups!!.single().sessions.map { it.id })
+        // Back below the total: show more pages again from the last visible row.
+        server.enqueue(MockResponse(body = pageBody(hasMore = true, "session_3", "session_4", "session_5", "session_6", "session_7")))
+        viewModel.onGroupShowMore("wd_a")
+        awaitState(viewModel.uiState) { it.groups?.single()?.sessions?.size == 7 }
+        assertEquals(
+            "/api/v1/sessions?workspace_id=wd_a&page_size=5&before_id=session_2",
+            server.takeRequest(5, TimeUnit.SECONDS)!!.target,
+        )
+    }
+
+    @Test
+    fun `show less while an expansion is in flight cancels it`() = runBlocking {
+        enterGroupedMode(
+            groupsBodyWithTotals(
+                Triple("/tmp/a", listOf("session_1", "session_2", "session_3", "session_4", "session_5", "session_6"), 12),
+            ),
+        )
+        server.enqueue(
+            MockResponse(body = pageBody(hasMore = true, "session_7", "session_8", "session_9", "session_10", "session_11"))
+                .newBuilder()
+                .bodyDelay(300, TimeUnit.MILLISECONDS)
+                .build(),
+        )
+        viewModel.onGroupShowMore("wd_a")
+        assertTrue(viewModel.uiState.value.groupExpansions.getValue("wd_a").isLoading)
+
+        viewModel.onGroupShowLess("wd_a")
+
+        // The loading entry is dropped immediately, the last five rows hidden…
+        assertTrue(viewModel.uiState.value.groupExpansions.isEmpty())
+        assertEquals(listOf("session_1"), viewModel.uiState.value.groups!!.single().sessions.map { it.id })
+        // …and the cancelled page never lands.
+        delay(500)
+        assertEquals(listOf("session_1"), viewModel.uiState.value.groups!!.single().sessions.map { it.id })
+    }
+
+    @Test
+    fun `show less at five rows or fewer hides nothing`() = runBlocking {
+        enterGroupedMode(groupsBodyWithTotals(Triple("/tmp/a", listOf("session_1", "session_2"), 8)))
+
+        viewModel.onGroupShowLess("wd_a")
+
+        assertEquals(listOf("session_1", "session_2"), viewModel.uiState.value.groups!!.single().sessions.map { it.id })
+        assertEquals(1, server.requestCount)
     }
 
     /**

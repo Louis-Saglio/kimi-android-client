@@ -1,6 +1,7 @@
 package fr.louissaglio.kimi.android.ui.sessions
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,6 +21,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
@@ -33,7 +36,6 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
-import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -69,6 +71,7 @@ import fr.louissaglio.kimi.android.ui.common.EmptyState
 import fr.louissaglio.kimi.android.ui.common.ErrorState
 import fr.louissaglio.kimi.android.ui.common.LoadingState
 import fr.louissaglio.kimi.android.ui.common.formatTimestamp
+import fr.louissaglio.kimi.android.ui.common.icons.WorkspaceIcon
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 import java.time.Instant
 
@@ -108,6 +111,8 @@ fun SessionsScreen(
         onEndReached = viewModel::onEndReached,
         onViewModeToggle = viewModel::onViewModeToggle,
         onGroupShowMore = viewModel::onGroupShowMore,
+        onGroupShowLess = viewModel::onGroupShowLess,
+        onGroupFoldToggle = viewModel::onGroupFoldToggle,
         onNewSessionClick = viewModel::onNewSessionClick,
         onNewSessionCwdChange = viewModel::onNewSessionCwdChange,
         onNewSessionTitleChange = viewModel::onNewSessionTitleChange,
@@ -128,7 +133,9 @@ private fun SessionsContent(
     onEndReached: () -> Unit,
     onViewModeToggle: () -> Unit,
     onGroupShowMore: (String) -> Unit,
-    onNewSessionClick: () -> Unit,
+    onGroupShowLess: (String) -> Unit,
+    onGroupFoldToggle: (String) -> Unit,
+    onNewSessionClick: (String?) -> Unit,
     onNewSessionCwdChange: (String) -> Unit,
     onNewSessionTitleChange: (String) -> Unit,
     onCreateDialogDismiss: () -> Unit,
@@ -139,14 +146,15 @@ private fun SessionsContent(
             TopAppBar(
                 title = { Text("Kimi Code") },
                 actions = {
-                    // Flat ↔ grouped toggle (ticket 115); the tint carries the state,
-                    // the content description the action.
+                    // Flat ↔ grouped toggle (ticket 115): the icon is the mode a tap
+                    // switches TO — a list glyph while grouped, the workspace folder
+                    // while flat. The icon carries the state; the tint stays neutral.
                     IconButton(onClick = onViewModeToggle) {
                         Icon(
-                            Icons.AutoMirrored.Filled.List,
+                            imageVector =
+                                if (uiState.groupedView) Icons.AutoMirrored.Filled.List else WorkspaceIcon,
                             contentDescription =
                                 if (uiState.groupedView) "Show flat session list" else "Group sessions by workspace",
-                            tint = if (uiState.groupedView) MaterialTheme.colorScheme.primary else LocalContentColor.current,
                         )
                     }
                     IconButton(onClick = onNavigateToSettings) {
@@ -156,7 +164,7 @@ private fun SessionsContent(
             )
         },
         floatingActionButton = {
-            FloatingActionButton(onClick = onNewSessionClick) {
+            FloatingActionButton(onClick = { onNewSessionClick(null) }) {
                 Icon(Icons.Filled.Add, contentDescription = "New session")
             }
         },
@@ -183,7 +191,14 @@ private fun SessionsContent(
                     EmptyState("No sessions yet", modifier = Modifier.verticalScroll(rememberScrollState()))
                 !uiState.groupedView && uiState.sessions!!.isEmpty() ->
                     EmptyState("No sessions yet", modifier = Modifier.verticalScroll(rememberScrollState()))
-                uiState.groupedView -> GroupedSessionList(uiState, onSessionClick, onGroupShowMore)
+                uiState.groupedView -> GroupedSessionList(
+                    uiState,
+                    onSessionClick,
+                    onGroupShowMore,
+                    onGroupShowLess,
+                    onGroupFoldToggle,
+                    onNewSessionClick,
+                )
                 else -> SessionList(uiState, onSessionClick, onEndReached)
             }
         }
@@ -331,53 +346,104 @@ private fun SessionList(
 
 /**
  * The grouped view (ticket 115): one header per workspace group — its 114 label plus
- * the group's full server-side count — followed by the group's rows. A group holding
- * fewer rows than its total gets a show-more footer (ticket 116) that pages the rest
- * of the workspace.
+ * the group's full server-side count — followed by the group's rows, indented to read
+ * as the header's children. A group holding fewer rows than its total gets a footer
+ * (ticket 116) that pages the rest of the workspace five at a time; once rows beyond
+ * the first page are on screen the footer also offers show less. Tapping the header
+ * folds the group away, leaving only the header.
  */
 @Composable
 private fun GroupedSessionList(
     uiState: SessionListViewModel.UiState,
     onSessionClick: (Session) -> Unit,
     onGroupShowMore: (String) -> Unit,
+    onGroupShowLess: (String) -> Unit,
+    onGroupFoldToggle: (String) -> Unit,
+    onNewSessionClick: (String?) -> Unit,
 ) {
     LazyColumn(modifier = Modifier.fillMaxSize()) {
         uiState.groups.orEmpty().forEach { group ->
+            val folded = group.workspaceId in uiState.foldedGroupIds
             item(key = "header_${group.workspaceId}", contentType = "header") {
-                GroupHeader(label = uiState.groupLabels[group.cwd] ?: group.cwd, total = group.total)
+                GroupHeader(
+                    label = uiState.groupLabels[group.cwd] ?: group.cwd,
+                    total = group.total,
+                    folded = folded,
+                    onToggleFold = { onGroupFoldToggle(group.workspaceId) },
+                    onNewSession = { onNewSessionClick(group.cwd) },
+                )
             }
-            items(group.sessions, key = Session::id, contentType = { it::class }) { session ->
-                // The header is the workspace label, so the row keeps the bare date.
-                SessionRow(session, workspaceLabel = null, onClick = { onSessionClick(session) })
-            }
-            // The grouped fetch serves only the first 5 sessions per workspace; the
-            // footer pages the rest and goes away once loaded == total.
-            if (group.sessions.size < group.total) {
-                item(key = "footer_${group.workspaceId}", contentType = "footer") {
-                    val expansion = uiState.groupExpansions[group.workspaceId]
-                    GroupShowMoreFooter(
-                        isLoading = expansion?.isLoading == true,
-                        error = expansion?.error,
-                        onShowMore = { onGroupShowMore(group.workspaceId) },
+            if (!folded) {
+                items(group.sessions, key = Session::id, contentType = { it::class }) { session ->
+                    // The header is the workspace label, so the row keeps the bare date.
+                    SessionRow(
+                        session,
+                        workspaceLabel = null,
+                        onClick = { onSessionClick(session) },
+                        modifier = Modifier.padding(start = 16.dp),
                     )
+                }
+                // The grouped fetch serves only the first 5 sessions per workspace; the
+                // footer's show more pages the rest. Show less appears once expanded
+                // rows are on screen and stays after the group is fully loaded.
+                val canShowMore = group.sessions.size < group.total
+                val canShowLess = group.sessions.size > SessionListViewModel.GROUP_PAGE_SIZE
+                if (canShowMore || canShowLess) {
+                    item(key = "footer_${group.workspaceId}", contentType = "footer") {
+                        val expansion = uiState.groupExpansions[group.workspaceId]
+                        GroupFooter(
+                            canShowMore = canShowMore,
+                            isLoading = expansion?.isLoading == true,
+                            error = expansion?.error,
+                            onShowMore = { onGroupShowMore(group.workspaceId) },
+                            onShowLess = if (canShowLess) ({ onGroupShowLess(group.workspaceId) }) else null,
+                        )
+                    }
                 }
             }
         }
     }
 }
 
+/**
+ * A workspace group's header: the workspace icon and label (plain text color —
+ * primary read as a link), the group's total, a new-session button pre-filling the
+ * dialog with this workspace, and a fold chevron. The row itself is the fold/unfold
+ * tap target.
+ */
 @Composable
-private fun GroupHeader(label: String, total: Int) {
-    Text(
-        text = "$label ($total)",
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        style = MaterialTheme.typography.titleSmall,
-        color = MaterialTheme.colorScheme.primary,
+private fun GroupHeader(
+    label: String,
+    total: Int,
+    folded: Boolean,
+    onToggleFold: () -> Unit,
+    onNewSession: () -> Unit,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp),
-    )
+            .clickable(onClick = onToggleFold)
+            .padding(start = 16.dp, top = 8.dp, end = 4.dp),
+    ) {
+        Icon(WorkspaceIcon, contentDescription = null, modifier = Modifier.size(18.dp))
+        Text(
+            text = "$label ($total)",
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.titleSmall,
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = 8.dp),
+        )
+        IconButton(onClick = onNewSession) {
+            Icon(Icons.Filled.Add, contentDescription = "New session in $label")
+        }
+        Icon(
+            imageVector = if (folded) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowUp,
+            contentDescription = if (folded) "Unfold $label" else "Fold $label",
+        )
+    }
 }
 
 @Composable
@@ -401,12 +467,20 @@ private fun LoadMoreFooter(error: String?, onRetry: () -> Unit) {
 }
 
 /**
- * A group's show-more footer (ticket 116), mirroring the flat list's [LoadMoreFooter]:
- * spinner while the next page loads, error with retry when the last attempt failed,
- * the show-more button otherwise.
+ * A group's footer (ticket 116), mirroring the flat list's [LoadMoreFooter]: spinner
+ * while the next page loads, error with retry when the last attempt failed, the
+ * show-more button while the group has more sessions server-side. [onShowLess] is
+ * non-null once rows beyond the first page are on screen — show less hides the last
+ * five and survives the group being fully loaded.
  */
 @Composable
-private fun GroupShowMoreFooter(isLoading: Boolean, error: String?, onShowMore: () -> Unit) {
+private fun GroupFooter(
+    canShowMore: Boolean,
+    isLoading: Boolean,
+    error: String?,
+    onShowMore: () -> Unit,
+    onShowLess: (() -> Unit)?,
+) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(16.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
@@ -422,13 +496,21 @@ private fun GroupShowMoreFooter(isLoading: Boolean, error: String?, onShowMore: 
                 )
                 TextButton(onClick = onShowMore) { Text("Retry") }
             }
-            else -> TextButton(onClick = onShowMore) { Text("Show more") }
+            canShowMore -> TextButton(onClick = onShowMore) { Text("Show more") }
+        }
+        if (onShowLess != null) {
+            TextButton(onClick = onShowLess) { Text("Show less") }
         }
     }
 }
 
 @Composable
-internal fun SessionRow(session: Session, workspaceLabel: String?, onClick: () -> Unit) {
+internal fun SessionRow(
+    session: Session,
+    workspaceLabel: String?,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     // The row ellipsizes the name to one line; long-press reveals it whole (ticket 117).
     var fullNameShown by remember { mutableStateOf(false) }
     if (fullNameShown) {
@@ -465,7 +547,7 @@ internal fun SessionRow(session: Session, workspaceLabel: String?, onClick: () -
                 )
             }
         },
-        modifier = Modifier.combinedClickable(
+        modifier = modifier.combinedClickable(
             onClick = onClick,
             onLongClick = { fullNameShown = true },
         ),
@@ -519,6 +601,8 @@ private fun SessionsContentPreview() {
             onEndReached = {},
             onViewModeToggle = {},
             onGroupShowMore = {},
+            onGroupShowLess = {},
+            onGroupFoldToggle = {},
             onNewSessionClick = {},
             onNewSessionCwdChange = {},
             onNewSessionTitleChange = {},
