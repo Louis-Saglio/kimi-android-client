@@ -218,15 +218,16 @@ class MarkdownBubbleTest {
         bubble.performTouchInput { up() }
     }
 
-    // Ticket 039: a history user message shows its server timestamp as a caption
-    // under the bubble (locale short date + time — the exact text is locale- and
-    // timezone-dependent, but a short time always shows colon-separated digits).
+    // Ticket 113: a history user message shows its server timestamp as a caption
+    // under the bubble (platform relative span — the exact text is locale-
+    // dependent, but a few-minutes-old message always renders as localized
+    // "N minutes ago", i.e. carries the minute count).
     @Test
     fun userBubbleShowsTimestampCaption() {
         composeTestRule.setContent {
             KimiTheme {
                 UserBubble(
-                    ChatItem.UserMessage("u1", "hi", createdAt = Instant.parse("2026-07-26T06:30:00Z")),
+                    ChatItem.UserMessage("u1", "hi", createdAt = Instant.now().minusSeconds(30 * 60)),
                 )
             }
         }
@@ -234,7 +235,7 @@ class MarkdownBubbleTest {
         composeTestRule.onNode(
             SemanticsMatcher("timestamp caption") { node ->
                 node.config.getOrNull(SemanticsProperties.Text)
-                    ?.any { it.text.contains(Regex("\\d{1,2}:\\d{2}")) } == true
+                    ?.any { it.text.contains(Regex("\\d{1,2}")) } == true
             },
         ).assertIsDisplayed()
     }

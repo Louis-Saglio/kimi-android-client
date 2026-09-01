@@ -1,18 +1,18 @@
 package fr.louissaglio.kimi.android.ui.common
 
+import android.text.format.DateUtils
 import java.time.Duration
 import java.time.Instant
-import java.time.ZoneId
-import java.time.format.DateTimeFormatter
-import java.time.format.FormatStyle
 
-/** Web-style timestamp (ticket 039): locale short date + time, device zone. Shared by
- * the chat bubble captions and the session list rows. */
-private val TimestampFormat: DateTimeFormatter =
-    DateTimeFormatter.ofLocalizedDateTime(FormatStyle.SHORT, FormatStyle.SHORT)
-
+/** Platform relative timestamp (ticket 113): the framework owns the strings
+ * ("5 minutes ago", "Yesterday", absolute date past a week) and their
+ * localization — no app-side age branching. The no-Context overload uses system
+ * resources, so this stays callable from any composable. Shared by the chat
+ * bubble captions and the session list rows. */
 internal fun formatTimestamp(instant: Instant): String =
-    TimestampFormat.withZone(ZoneId.systemDefault()).format(instant)
+    DateUtils.getRelativeTimeSpanString(
+        instant.toEpochMilli(), System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS,
+    ).toString()
 
 /** The one k/M scaler (ticket 071): one TRUNCATED decimal, dropped when zero —
  * "25.5k", "1M". Token counts and byte sizes both go through it, so the two cannot

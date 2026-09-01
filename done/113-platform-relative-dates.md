@@ -36,14 +36,14 @@ web-parity argument for the short-date format is superseded by this decision.
 
 ## Acceptance criteria
 
-- [ ] `Formatters.kt` no longer contains the `DateTimeFormatter` web-style
+- [x] `Formatters.kt` no longer contains the `DateTimeFormatter` web-style
   format (grep-verifiable); `formatTimestamp` delegates to `DateUtils`.
 - [ ] On-device: a session updated yesterday shows "Yesterday" in the list; a
   session updated minutes ago shows a relative span; chat bubble captions use
   the same relative style.
 - [ ] Switching the device between English/French (or 12/24h) changes the
   output accordingly — framework-driven, no app code involved.
-- [ ] `./gradlew :app:assembleDebug` succeeds with all unit tests green (VPS
+- [x] `./gradlew :app:assembleDebug` succeeds with all unit tests green (VPS
   rules: `flock /tmp/kimi-android-gradle.lock`, `--max-workers=1`,
   `--no-daemon` when parallel).
 
