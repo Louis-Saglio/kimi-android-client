@@ -46,18 +46,18 @@ Stays automatic (none of these are list refreshes):
 
 ## Acceptance criteria
 
-- [ ] ON_START with a loaded list fires no HTTP request (ViewModel test:
+- [x] ON_START with a loaded list fires no HTTP request (ViewModel test:
   MockWebServer request count stays 0 after `onScreenStarted()` with sessions
   present; socket work is faked as in the existing 087 tests).
-- [ ] ON_START with `sessions == null` still performs the visible initial
+- [x] ON_START with `sessions == null` still performs the visible initial
   load (spinner, error state on failure).
-- [ ] Pull-to-refresh still reloads with `isRefreshing` and emits
+- [x] Pull-to-refresh still reloads with `isRefreshing` and emits
   `RefreshFailed` on failure; Retry still reloads (existing tests stay green).
-- [ ] A socket reconnect still triggers exactly one silent refresh (existing
+- [x] A socket reconnect still triggers exactly one silent refresh (existing
   087 test stays green).
-- [ ] The activity bump and the create-session insert still apply without any
+- [x] The activity bump and the create-session insert still apply without any
   refresh (existing 086 tests adjusted to the no-request expectation).
-- [ ] `./gradlew :app:assembleDebug` succeeds with all unit tests green (VPS
+- [x] `./gradlew :app:assembleDebug` succeeds with all unit tests green (VPS
   rules: `flock /tmp/kimi-android-gradle.lock`, `--max-workers=1`,
   `--no-daemon` when parallel).
 

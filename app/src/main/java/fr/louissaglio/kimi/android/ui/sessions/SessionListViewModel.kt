@@ -72,8 +72,8 @@ class SessionListViewModel @Inject constructor(
 
     init {
         // Cold start renders the last-known list from disk before any network traffic
-        // (ticket 111): a warm cache never shows the sessions == null spinner. The ON_START
-        // refresh still runs on top and reconciles (removing it is ticket 112).
+        // (ticket 111): a warm cache never shows the sessions == null spinner, and with
+        // the list populated ON_START fetches nothing (ticket 112).
         viewModelScope.launch {
             val cached = sessionListCache.load(settingsRepository.current().serverUrl) ?: return@launch
             uiState.update { state ->
@@ -99,9 +99,11 @@ class SessionListViewModel @Inject constructor(
 
     fun onScreenStarted() {
         bumpPendingActivity()
-        // With a list already loaded the refresh runs silently — no spinner, no
-        // visible disturbance (ticket 086); otherwise this is the visible initial load.
-        if (uiState.value.sessions != null) silentRefresh() else reload()
+        // The list never refreshes itself (ticket 112): with rows on screen the 087
+        // socket patches and the bump above keep it current, and staleness from other
+        // clients is accepted until the next manual refresh. sessions == null means
+        // no cache for this server — that is the visible initial load, not a refresh.
+        if (uiState.value.sessions == null) reload()
         startSocket()
     }
 
@@ -133,7 +135,7 @@ class SessionListViewModel @Inject constructor(
     private fun onSocketEvent(event: SessionListEvent) {
         when (event) {
             // The connection dropped and came back: events in the gap are lost, so
-            // re-sync the whole list once (same path as the ON_START silent refresh).
+            // re-sync the whole list once — the only automatic refresh left (ticket 112).
             SessionListEvent.Reconnected -> silentRefresh()
             is SessionListEvent.WorkChanged -> patchRow(event.sessionId) {
                 it.copy(
@@ -157,8 +159,8 @@ class SessionListViewModel @Inject constructor(
 
     /**
      * Applies [transform] to the row of [sessionId] in place (ticket 087): the row
-     * never moves — ordering stays owned by the silent/initial refresh. An unknown id
-     * is ignored; the next refresh reconciles.
+     * never moves — ordering stays owned by full list (re)loads. An unknown id is
+     * ignored; the next (re)load reconciles.
      */
     private inline fun patchRow(sessionId: String, transform: (Session) -> Session) {
         uiState.update { state ->
@@ -174,12 +176,13 @@ class SessionListViewModel @Inject constructor(
     fun onPullToRefresh() = reload()
 
     /**
-     * Applies the recorded chat activity synchronously, before the refresh fires
-     * (ticket 086): messaged sessions move to the top, most recent activity first,
-     * with [Session.updatedAt] set to the recorded instant — matching the server-side
-     * `updated_at` bump a sent message causes, so the refresh lands with the same
-     * ordering. Entries outside the loaded page are dropped: the refresh places them
-     * via server ordering. Nothing recorded → the list is untouched.
+     * Applies the recorded chat activity synchronously on return from chat (ticket
+     * 086): messaged sessions move to the top, most recent activity first, with
+     * [Session.updatedAt] set to the recorded instant — matching the server-side
+     * `updated_at` bump a sent message causes, so the next manual refresh lands with
+     * the same ordering (no automatic refresh follows anymore, ticket 112). Entries
+     * outside the loaded page are dropped: the next load places them via server
+     * ordering. Nothing recorded → the list is untouched.
      */
     private fun bumpPendingActivity() {
         val pending = activityStore.consumeAll()
@@ -200,7 +203,7 @@ class SessionListViewModel @Inject constructor(
      * in flight or once the server reported no more pages. The job check (not the
      * state flag) is the re-entrancy guard: the UI calls this on every recomposition
      * near the end, and state updates are not visible synchronously across dispatches.
-     * [loadJob] is checked too: the silent refresh (ticket 086) sets no flag.
+     * [loadJob] is checked too: the reconnect's silent refresh (087) sets no flag.
      */
     fun onEndReached() {
         val state = uiState.value
@@ -310,11 +313,11 @@ class SessionListViewModel @Inject constructor(
     }
 
     /**
-     * ON_START refresh with a list already loaded (ticket 086): never sets
-     * [UiState.isLoading]/[UiState.isRefreshing]; on success replaces the list; on
-     * failure the old list stays and no [Effect.RefreshFailed] is emitted — no
-     * snackbar on every return while offline. Pull-to-refresh keeps the visible
-     * behavior via [reload].
+     * Silent re-sync, called only from the socket-reconnect heal (the ON_START call
+     * went away with ticket 112): never sets [UiState.isLoading]/[UiState.isRefreshing];
+     * on success replaces the list; on failure the old list stays and no
+     * [Effect.RefreshFailed] is emitted — no snackbar from a reconnect while offline.
+     * Pull-to-refresh keeps the visible behavior via [reload].
      */
     private fun silentRefresh() {
         loadJob?.cancel()

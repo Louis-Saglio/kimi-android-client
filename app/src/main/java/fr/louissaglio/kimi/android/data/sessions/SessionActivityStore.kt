@@ -8,9 +8,10 @@ import javax.inject.Singleton
  * Process-lifetime record of sessions the user messaged from the chat screen
  * (ticket 086): the chat data layer records a successfully sent prompt/steer, the
  * session list consumes the pending entries on return to bump those rows to the
- * top before its silent refresh lands. Recording on success, not attempt — a
+ * top — with no automatic refresh left (ticket 112), the bump itself is the
+ * visible update until the next manual one. Recording on success, not attempt — a
  * failed send must not bump a session the server doesn't consider active. Nothing
- * is persisted: after process death the initial load returns server truth anyway.
+ * is persisted: after process death the disk cache already holds the bumped rows.
  */
 @Singleton
 class SessionActivityStore @Inject constructor() {

@@ -16,7 +16,8 @@
   locally but not yet sent wins over server reports), `ChatMessageMapper`
   (DTO→domain), and `SessionActivityStore` (`data/sessions/` — process-lifetime
   record of successfully sent prompts/steers; the session list consumes it on
-  return to bump those rows before its silent refresh, ticket 086). New chat
+  return to bump those rows, ticket 086 — since ticket 112 no automatic refresh
+  follows, so the bump itself is the visible update). New chat
   endpoints belong in a collaborator, not the facade. Background tasks (ticket
   092): `ChatApi.listTasks/cancelTask` (REST `/tasks`; a terminal-task cancel
   answers envelope 40904 → typed `DataError.Api`), `task.started`/
@@ -38,7 +39,10 @@
   cold start renders before any network traffic. The session-list ViewModel owns
   both sides — init load, plus one debounced (~500 ms, IO) write-through
   collection covering every mutation path. A corrupt file is deleted and treated
-  as absent.
+  as absent. The list never refreshes itself (ticket 112): ON_START with rows on
+  screen only re-opens the socket — refresh is pull-to-refresh, the error state's
+  Retry, the visible initial load when the cache is empty, or one silent re-sync
+  on socket reconnect.
 - `data/attachments/` — `AttachmentStore` owns all platform file I/O (content
   resolver reads capped at 256 MiB — a client-side guard; the server removed
   its own upload cap in 0.31.0, see ticket 059; cache writes;
