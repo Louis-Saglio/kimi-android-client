@@ -13,6 +13,7 @@ import fr.louissaglio.kimi.android.data.sessions.SessionListSocket
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
 import fr.louissaglio.kimi.android.data.sessions.Workspace
 import fr.louissaglio.kimi.android.data.sessions.isAwaitingInteraction
+import fr.louissaglio.kimi.android.data.sessions.workspaceLabelsFor
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
@@ -54,7 +55,18 @@ class SessionListViewModel @Inject constructor(
         val isCreating: Boolean = false,
         /** Null while unknown/failed/empty — the dialog then falls back to a plain text field. */
         val workspaces: List<Workspace>? = null,
-    )
+    ) {
+        /**
+         * cwd → disambiguated workspace label for the row supporting line (ticket 114).
+         * Lives on the state, not on [Session]: a label depends on the other rows'
+         * cwds. Derived per state instance — every list mutation copies the state, so
+         * a page bringing in a colliding cwd relabels on its own (labels just gain a
+         * parent segment).
+         */
+        val workspaceLabels: Map<String, String> by lazy {
+            workspaceLabelsFor(sessions.orEmpty().map(Session::cwd))
+        }
+    }
 
     sealed interface Effect {
         data class RefreshFailed(val message: String) : Effect

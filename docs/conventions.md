@@ -46,7 +46,11 @@
   as absent. The list never refreshes itself (ticket 112): ON_START with rows on
   screen only re-opens the socket — refresh is pull-to-refresh, the error state's
   Retry, the visible initial load when the cache is empty, or one silent re-sync
-  on socket reconnect.
+  on socket reconnect. `WorkspaceLabels` (ticket 114) is the pure cwd →
+  disambiguated-label function (last path segment, parent segments prepended
+  while another cwd labels the same); the flat rows' supporting lines consume it
+  via `SessionListViewModel.UiState.workspaceLabels`, the 115 group headers reuse
+  it.
 - `data/attachments/` — `AttachmentStore` owns all platform file I/O (content
   resolver reads capped at 256 MiB — a client-side guard; the server removed
   its own upload cap in 0.31.0, see ticket 059; cache writes;

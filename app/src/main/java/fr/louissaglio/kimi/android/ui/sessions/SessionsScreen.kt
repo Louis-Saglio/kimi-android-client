@@ -295,7 +295,11 @@ private fun SessionList(
     LaunchedEffect(endReached) { if (endReached) onEndReached() }
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
         items(sessions, key = Session::id, contentType = { it::class }) { session ->
-            SessionRow(session, onClick = { onSessionClick(session) })
+            SessionRow(
+                session,
+                workspaceLabel = session.cwd?.let(uiState.workspaceLabels::get),
+                onClick = { onSessionClick(session) },
+            )
         }
         if (uiState.isLoadingMore || uiState.loadMoreError != null) {
             item(key = "load_more_footer", contentType = "footer") {
@@ -326,7 +330,7 @@ private fun LoadMoreFooter(error: String?, onRetry: () -> Unit) {
 }
 
 @Composable
-internal fun SessionRow(session: Session, onClick: () -> Unit) {
+internal fun SessionRow(session: Session, workspaceLabel: String?, onClick: () -> Unit) {
     ListItem(
         headlineContent = {
             Text(
@@ -335,7 +339,15 @@ internal fun SessionRow(session: Session, onClick: () -> Unit) {
                 overflow = TextOverflow.Ellipsis,
             )
         },
-        supportingContent = { Text(formatTimestamp(session.updatedAt)) },
+        supportingContent = {
+            // "<label> · <date>" when the session's cwd yields a workspace label
+            // (ticket 114), the bare date when it has none.
+            Text(
+                text = listOfNotNull(workspaceLabel, formatTimestamp(session.updatedAt)).joinToString(" · "),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        },
         trailingContent = {
             when {
                 // A pending interaction reads as "needs me" and wins over "working": a

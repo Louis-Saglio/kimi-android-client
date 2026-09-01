@@ -36,16 +36,17 @@ tested.
 
 ## Acceptance criteria
 
-- [ ] Unit tests for the label function: distinct basenames → basename only;
+- [x] Unit tests for the label function: distinct basenames → basename only;
   collision → parents prepended until unique (`/home/a/app` vs `/home/b/app`
   → `a/app` / `b/app`); identical cwds → identical labels; nested collision
   (`/x/a/app`, `/y/a/app`, `/b/app`) resolves each minimally; trailing slash
-  and `/` handled.
-- [ ] `SessionRow` renders `<label> · <date>` when the session has a cwd
-  (semantics test updated), bare date when it has none.
+  and `/` handled. (`WorkspaceLabelsTest`)
+- [x] `SessionRow` renders `<label> · <date>` when the session has a cwd
+  (semantics test updated), bare date when it has none. (`SessionRowTest`,
+  run on Firebase Test Lab)
 - [ ] On-device: two workspaces sharing a directory name show disambiguated
   labels in the list.
-- [ ] `./gradlew :app:assembleDebug` succeeds with all unit tests green (VPS
+- [x] `./gradlew :app:assembleDebug` succeeds with all unit tests green (VPS
   rules: `flock /tmp/kimi-android-gradle.lock`, `--max-workers=1`,
   `--no-daemon` when parallel).
 

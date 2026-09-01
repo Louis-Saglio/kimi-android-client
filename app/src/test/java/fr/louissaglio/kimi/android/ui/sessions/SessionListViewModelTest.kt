@@ -579,6 +579,41 @@ class SessionListViewModelTest {
         assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
     }
 
+    // --- Workspace labels (ticket 114) ---
+
+    @Test
+    fun `workspace labels derive from the loaded cwds and relabel when a page changes the set`() = runBlocking {
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"items":[
+                  {"id":"session_1","title":"A","updated_at":"2026-07-17T03:48:31.606Z",
+                   "busy":false,"metadata":{"cwd":"/home/a/app"}}
+                ],"has_more":true},"request_id":"r"}""",
+            ),
+        )
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+
+        assertEquals(mapOf("/home/a/app" to "app"), viewModel.uiState.value.workspaceLabels)
+
+        // The next page brings a colliding basename: both labels gain a parent segment.
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"items":[
+                  {"id":"session_2","title":"B","updated_at":"2026-07-17T03:48:31.606Z",
+                   "busy":false,"metadata":{"cwd":"/home/b/app"}}
+                ],"has_more":false},"request_id":"r"}""",
+            ),
+        )
+        viewModel.onEndReached()
+
+        awaitState(viewModel.uiState) { it.sessions?.size == 2 }
+        assertEquals(
+            mapOf("/home/a/app" to "a/app", "/home/b/app" to "b/app"),
+            viewModel.uiState.value.workspaceLabels,
+        )
+    }
+
     // --- Disk cache (ticket 111) ---
 
     @Test
