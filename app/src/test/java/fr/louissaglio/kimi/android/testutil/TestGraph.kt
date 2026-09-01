@@ -60,6 +60,9 @@ fun testSessionsRepository(): SessionsRepository {
     return SessionsRepository(ApiClient(OkHttpClient(), json), json)
 }
 
+fun testModelsRepository(): ModelsRepository =
+    ModelsRepository(ApiClient(OkHttpClient(), Json { ignoreUnknownKeys = true }))
+
 fun testConnectionChecker(): ConnectionChecker {
     val json = Json { ignoreUnknownKeys = true }
     return ConnectionChecker(ApiClient(OkHttpClient(), json), json)

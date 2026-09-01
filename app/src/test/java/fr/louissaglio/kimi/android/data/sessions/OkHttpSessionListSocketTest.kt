@@ -258,6 +258,41 @@ class OkHttpSessionListSocketTest {
     }
 
     @Test
+    fun `the global config and model catalog changed events are delivered`() = runBlocking {
+        // 0.39.1 (docs/server-api.md, Global events — ticket 110): configChangedFrame
+        // is the trimmed verbatim capture; model_catalog.changed was never triggered
+        // live, so its frame mirrors the same shape. Both payloads are ignored — the
+        // frame type alone is the signal — and both survive the foreign-frame filter
+        // on the __global__ envelope, like event.session.archived.
+        sessionIds.value = linkedSetOf("session_1")
+        val events = CopyOnWriteArrayList<SessionListEvent>()
+        server.enqueue(
+            webSocketUpgradeResponse(
+                recordingListener(
+                    CopyOnWriteArrayList(),
+                    onClientFrame = { webSocket ->
+                        webSocket.send(configChangedFrame)
+                        webSocket.send(modelCatalogChangedFrame)
+                    },
+                ),
+            ),
+        )
+        coroutineScope {
+            val job = launch { socket.observe(settings(), sessionIds).collect { events += it } }
+            try {
+                awaitCondition { events.size >= 2 }
+            } finally {
+                job.cancel()
+            }
+        }
+
+        assertEquals(
+            listOf(SessionListEvent.ConfigChanged, SessionListEvent.ModelCatalogChanged),
+            events,
+        )
+    }
+
+    @Test
     fun `a malformed frame is dropped without killing the connection`() = runBlocking {
         sessionIds.value = linkedSetOf("session_1")
         val events = CopyOnWriteArrayList<SessionListEvent>()
@@ -336,4 +371,19 @@ class OkHttpSessionListSocketTest {
             """"timestamp":"2026-08-20T19:31:40.052Z","payload":{"type":"event.session.archived",""" +
             """"workspace_id":"wd_spike_6baf4c130e63","agentId":"main",""" +
             """"sessionId":"session_a57d4784-4fe8-4268-bbe1-b5f3e23b37ba"},"epoch":"ep_01KX01QDWWRZFHBCEEQ8A5SZ8T"}"""
+
+    // Trimmed verbatim 0.39.1 capture (docs/server-api.md, "Global events —
+    // event.config.changed"): the full redacted config projection rides in
+    // payload.config; only the default_model key is kept here.
+    private val configChangedFrame =
+        """{"type":"event.config.changed","seq":181,"session_id":"__global__",""" +
+            """"timestamp":"2026-08-28T19:46:13.649Z","payload":{"type":"event.config.changed",""" +
+            """"changedFields":["thinking"],"config":{"default_model":"kimi-code/k3"}},""" +
+            """"epoch":"ep_01M14XPS0FE7GX6J2H5NA8MP52"}"""
+
+    // Never triggered live (docs/server-api.md): the shape mirrors event.config.changed's.
+    private val modelCatalogChangedFrame =
+        """{"type":"event.model_catalog.changed","seq":182,"session_id":"__global__",""" +
+            """"timestamp":"2026-08-28T19:46:14.000Z","payload":{"type":"event.model_catalog.changed"},""" +
+            """"epoch":"ep_01M14XPS0FE7GX6J2H5NA8MP52"}"""
 }

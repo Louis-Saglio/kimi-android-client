@@ -29,7 +29,8 @@ interface SessionListSocket {
     fun observe(settings: ServerSettings, sessionIds: Flow<Set<String>>): Flow<SessionListEvent>
 }
 
-/** One list-screen event: a live patch for one row, a row removal, or the reconnect-heal signal. */
+/** One list-screen event: a live patch for one row, a row removal, a global
+ * cache-invalidation signal (ticket 110), or the reconnect-heal signal. */
 sealed interface SessionListEvent {
 
     /**
@@ -60,4 +61,20 @@ sealed interface SessionListEvent {
      * `session_id` is `__global__`, so [sessionId] comes from the payload.
      */
     data class SessionArchived(val sessionId: String) : SessionListEvent
+
+    /**
+     * `event.config.changed` (delivered since 0.39.1, docs/server-api.md): a config
+     * write from any client. A global frame (`session_id` is the `__global__`
+     * watermark); the payload's full config projection is not decoded — the frame
+     * type alone tells the collector to drop the models/config caches so the next
+     * read refetches (ticket 110).
+     */
+    data object ConfigChanged : SessionListEvent
+
+    /**
+     * `event.model_catalog.changed` (delivered since 0.39.1, docs/server-api.md): a
+     * provider model refresh. Same global shape and same cache-invalidation handling
+     * as [ConfigChanged].
+     */
+    data object ModelCatalogChanged : SessionListEvent
 }

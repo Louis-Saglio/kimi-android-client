@@ -2,6 +2,7 @@ package fr.louissaglio.kimi.android.ui.sessions
 
 import androidx.datastore.preferences.core.preferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
+import fr.louissaglio.kimi.android.data.chat.ModelsRepository
 import fr.louissaglio.kimi.android.data.sessions.Session
 import fr.louissaglio.kimi.android.data.sessions.SessionActivityStore
 import fr.louissaglio.kimi.android.data.sessions.SessionListCache
@@ -12,6 +13,7 @@ import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
 import fr.louissaglio.kimi.android.fakes.FakeSessionListSocket
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.awaitState
+import fr.louissaglio.kimi.android.testutil.testModelsRepository
 import fr.louissaglio.kimi.android.testutil.testSessionsRepository
 import java.io.File
 import java.time.Instant
@@ -55,6 +57,7 @@ class SessionListViewModelTest {
     private lateinit var viewModel: SessionListViewModel
     private lateinit var activityStore: SessionActivityStore
     private lateinit var fakeSocket: FakeSessionListSocket
+    private lateinit var modelsRepository: ModelsRepository
     private lateinit var cacheDir: File
     private lateinit var sessionListCache: SessionListCache
 
@@ -70,6 +73,7 @@ class SessionListViewModelTest {
         )
         activityStore = SessionActivityStore()
         fakeSocket = FakeSessionListSocket()
+        modelsRepository = testModelsRepository()
         cacheDir = createTempDirectory("session-list-view-model-test").toFile()
         sessionListCache = SessionListCache(cacheDir, Json { ignoreUnknownKeys = true })
         viewModel = createViewModel()
@@ -92,6 +96,7 @@ class SessionListViewModelTest {
         activityStore,
         fakeSocket,
         sessionListCache,
+        modelsRepository,
     )
 
     @Test
@@ -742,6 +747,64 @@ class SessionListViewModelTest {
         assertEquals(1, server.requestCount)
     }
 
+    // --- Global config/model-catalog events (ticket 110) ---
+
+    @Test
+    fun `a config changed event drops the models and config caches`() = runBlocking {
+        // Warm both per-server caches (models list + config projection).
+        server.enqueue(MockResponse(body = MODELS_BODY))
+        server.enqueue(MockResponse(body = configBody("high")))
+        val settings = settingsRepository.current()
+        modelsRepository.models(settings).getOrThrow()
+        modelsRepository.config(settings).getOrThrow()
+        server.takeRequest(5, TimeUnit.SECONDS)
+        server.takeRequest(5, TimeUnit.SECONDS)
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+
+        server.enqueue(MockResponse(body = MODELS_BODY_UPDATED))
+        server.enqueue(MockResponse(body = configBody("low")))
+        fakeSocket.events.tryEmit(SessionListEvent.ConfigChanged)
+
+        // The event has landed once the models cache is gone (both caches drop together).
+        awaitCondition { modelsRepository.cachedSupportEfforts(settings, "kimi-code/k3") == null }
+        // The next reads refetch and serve the new values.
+        assertEquals("K3.5", modelsRepository.models(settings).getOrThrow().single().displayName)
+        assertEquals("low", modelsRepository.config(settings).getOrThrow().defaultEffort)
+        assertEquals(5, server.requestCount)
+    }
+
+    @Test
+    fun `a model catalog changed event drops the caches, a session archived event does not`() = runBlocking {
+        server.enqueue(MockResponse(body = MODELS_BODY))
+        server.enqueue(MockResponse(body = configBody("high")))
+        val settings = settingsRepository.current()
+        modelsRepository.models(settings).getOrThrow()
+        modelsRepository.config(settings).getOrThrow()
+        server.takeRequest(5, TimeUnit.SECONDS)
+        server.takeRequest(5, TimeUnit.SECONDS)
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+
+        // An unrelated global event leaves the caches alone: the row drops, the
+        // config read keeps serving the cache.
+        fakeSocket.events.tryEmit(SessionListEvent.SessionArchived("session_1"))
+        awaitState(viewModel.uiState) { it.sessions!!.isEmpty() }
+        assertEquals("high", modelsRepository.config(settings).getOrThrow().defaultEffort)
+        assertEquals(3, server.requestCount)
+
+        server.enqueue(MockResponse(body = configBody("low")))
+        fakeSocket.events.tryEmit(SessionListEvent.ModelCatalogChanged)
+
+        awaitCondition { modelsRepository.cachedSupportEfforts(settings, "kimi-code/k3") == null }
+        assertEquals("low", modelsRepository.config(settings).getOrThrow().defaultEffort)
+        assertEquals(4, server.requestCount)
+    }
+
     @Test
     fun `events for sessions not in the list are ignored`() = runBlocking {
         server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1", "session_2")))
@@ -796,7 +859,27 @@ class SessionListViewModelTest {
         return """{"code":0,"msg":"success","data":{"items":[$items],"has_more":$hasMore},"request_id":"r"}"""
     }
 
+    private fun configBody(effort: String): String =
+        """{"code":0,"msg":"success","data":{"default_model":"kimi-code/k3",""" +
+            """"thinking":{"enabled":true,"effort":"$effort"},""" +
+            """"providers":{"managed:kimi-code":{"type":"kimi",""" +
+            """"base_url":"https://api.kimi.com/coding/v1","has_api_key":true}}},"request_id":"r"}"""
+
     private companion object {
+        const val MODELS_BODY = """
+            {"code":0,"msg":"success","data":{"items":[
+              {"provider":"kimi-code","model":"kimi-code/k3","display_name":"K3",
+               "max_context_size":1048576,"support_efforts":["low","medium","high"],
+               "default_effort":"high"}
+            ]},"request_id":"r"}
+        """
+        const val MODELS_BODY_UPDATED = """
+            {"code":0,"msg":"success","data":{"items":[
+              {"provider":"kimi-code","model":"kimi-code/k3","display_name":"K3.5",
+               "max_context_size":1048576,"support_efforts":["low","medium","high"],
+               "default_effort":"high"}
+            ]},"request_id":"r"}
+        """
         const val WORKSPACES_BODY = """
             {"code":0,"msg":"success","data":{"items":[
               {"id":"wd_old","root":"/tmp/old","name":"old",

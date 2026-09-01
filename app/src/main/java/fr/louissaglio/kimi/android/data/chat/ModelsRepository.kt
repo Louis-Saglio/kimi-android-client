@@ -13,7 +13,9 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 
 /** Models/config REST (`GET /api/v1/models`, `GET`/`POST /api/v1/config`) with the
- * per-server-URL caches the send path and the Settings "Models" section (109) read. */
+ * per-server-URL caches the send path and the Settings "Models" section (109) read.
+ * A cache entry lives until the server URL changes or a global
+ * `event.config.changed`/`event.model_catalog.changed` frame drops it (110). */
 @Singleton
 class ModelsRepository @Inject constructor(
     private val api: ApiClient,
@@ -99,6 +101,19 @@ class ModelsRepository @Inject constructor(
     private fun patchCachedConfig(settings: ServerSettings, patch: (ServerConfig) -> ServerConfig) {
         val baseUrl = api.baseUrl(settings)
         cachedConfig?.let { if (it.first == baseUrl) cachedConfig = it.first to patch(it.second) }
+    }
+
+    /**
+     * Drops the caches (models list + config projection) of [settings]' server, so the
+     * next read refetches. Called on the global `event.config.changed` /
+     * `event.model_catalog.changed` frames (0.39.1, docs/server-api.md — ticket 110):
+     * the catalog and config drift under any client's writes, and the frames' payloads
+     * are not applied — invalidation only.
+     */
+    fun invalidate(settings: ServerSettings) {
+        val baseUrl = api.baseUrl(settings)
+        cachedModels?.let { if (it.first == baseUrl) cachedModels = null }
+        cachedConfig?.let { if (it.first == baseUrl) cachedConfig = null }
     }
 
     /** GET /api/v1/models → `data.items` (docs/server-api.md). */

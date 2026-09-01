@@ -3,6 +3,7 @@ package fr.louissaglio.kimi.android.ui.sessions
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import fr.louissaglio.kimi.android.data.chat.ModelsRepository
 import fr.louissaglio.kimi.android.data.toUserMessage
 import fr.louissaglio.kimi.android.data.sessions.Session
 import fr.louissaglio.kimi.android.data.sessions.SessionActivityStore
@@ -33,6 +34,7 @@ class SessionListViewModel @Inject constructor(
     private val activityStore: SessionActivityStore,
     private val sessionListSocket: SessionListSocket,
     private val sessionListCache: SessionListCache,
+    private val modelsRepository: ModelsRepository,
 ) : ViewModel() {
 
     /** [sessions] is null until the disk cache or the first successful load populates it; [error] is shown only when there is no list to display. */
@@ -117,10 +119,12 @@ class SessionListViewModel @Inject constructor(
     /**
      * Collects the sessions-list socket for the life of the screen (ticket 087): rows
      * patch in place on work_changed / meta.updated, the archived row drops out on the
-     * global event.session.archived (0.38.0 — ticket 105), a reconnect heals via one
-     * silent refresh. The loaded ids ride a derived flow, so page loads while connected
-     * re-subscribe on their own. Restart-safe: ON_START/ON_STOP pair up, but a repeat
-     * start never opens a second collection.
+     * global event.session.archived (0.38.0 — ticket 105), the global
+     * config/model-catalog changed events drop the ModelsRepository caches (0.39.1 —
+     * ticket 110), a reconnect heals via one silent refresh. The loaded ids ride a
+     * derived flow, so page loads while connected re-subscribe on their own.
+     * Restart-safe: ON_START/ON_STOP pair up, but a repeat start never opens a second
+     * collection.
      */
     private fun startSocket() {
         if (socketJob?.isActive == true) return
@@ -132,7 +136,7 @@ class SessionListViewModel @Inject constructor(
         }
     }
 
-    private fun onSocketEvent(event: SessionListEvent) {
+    private suspend fun onSocketEvent(event: SessionListEvent) {
         when (event) {
             // The connection dropped and came back: events in the gap are lost, so
             // re-sync the whole list once — the only automatic refresh left (ticket 112).
@@ -154,6 +158,12 @@ class SessionListViewModel @Inject constructor(
                 if (sessions.none { it.id == event.sessionId }) return@update state
                 state.copy(sessions = sessions.filterNot { it.id == event.sessionId })
             }
+            // A config write or model-catalog refresh from any client (0.39.1 —
+            // ticket 110): drop the models/config caches, so the next read (chat
+            // model sheet, Settings models section) refetches.
+            SessionListEvent.ConfigChanged,
+            SessionListEvent.ModelCatalogChanged,
+            -> modelsRepository.invalidate(settingsRepository.current())
         }
     }
 

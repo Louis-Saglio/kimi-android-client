@@ -33,7 +33,11 @@
   `BackgroundTask`/`TaskInfo` in `data/chat/Tasks.kt` — kind `tool` (question
   flows) is filtered out at the mapping boundary.
 - `data/sessions/` — `SessionsRepository` (list/get/create REST facade), the 087
-  `SessionListSocket`, the 086 `SessionActivityStore`, and `SessionListCache`
+  `SessionListSocket` (its global-frame path also surfaces
+  `event.config.changed`/`event.model_catalog.changed` — 0.39.1, ticket 110 —
+  which the session-list ViewModel turns into a `ModelsRepository` cache
+  invalidation, so the next models/config read refetches), the 086
+  `SessionActivityStore`, and `SessionListCache`
   (ticket 111): the last-known list as one JSON file per server under
   `filesDir/session-list-cache/` (file name = SHA-256 hex of the base URL), so a
   cold start renders before any network traffic. The session-list ViewModel owns

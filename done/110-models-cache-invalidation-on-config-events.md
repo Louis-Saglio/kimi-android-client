@@ -42,17 +42,22 @@ single projection; the invalidation targets that shape.
 
 ## Acceptance criteria
 
-- [ ] Unit test: an `event.config.changed` frame causes the next
+- [x] Unit test: an `event.config.changed` frame causes the next
       `models()`/config read to refetch (cache miss) for the current server
-      URL.
-- [ ] Unit test: same for `event.model_catalog.changed`; unrelated global
+      URL. (`OkHttpSessionListSocketTest` covers frame → event;
+      `SessionListViewModelTest` covers event → refetch of both caches)
+- [x] Unit test: same for `event.model_catalog.changed`; unrelated global
       frames (e.g. `event.session.archived`) do not invalidate.
-- [ ] `./gradlew testDebugUnitTest` passes.
+      (`SessionListViewModelTest`)
+- [x] `./gradlew testDebugUnitTest` passes (2026-09-01, all suites green).
 - [ ] Live check: with the app open, `curl -X POST /api/v1/config
       '{"thinking":{"effort":"low"}}'`, then open the chat model sheet / the
       Settings models section — the new value shows without restarting the
-      app. Restore the previous config value afterwards.
-- [ ] APK built and copied to the file server per AGENTS.md.
+      app. Restore the previous config value afterwards. (Frame delivery was
+      already verified live 2026-08-28, see docs/server-api.md; the on-phone
+      pass is pending Louis.)
+- [x] APK built and copied to the file server per AGENTS.md
+      (`kimi-android-client-main.apk`, 2026-09-01).
 
 ## Out of scope
 

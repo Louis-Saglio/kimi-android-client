@@ -41,7 +41,9 @@ import okhttp3.WebSocketListener
  * channel, reconnect loop with 1 s → 30 s exponential backoff) copies
  * [fr.louissaglio.kimi.android.data.chat.SessionSocket]'s shape; the frame parsing is
  * the list's own: exactly `event.session.work_changed`, `session.meta.updated`, the
- * global `event.session.archived` (0.38.0 — ticket 105), and the subscribe ack.
+ * global `event.session.archived` (0.38.0 — ticket 105) and the global
+ * `event.config.changed`/`event.model_catalog.changed` (0.39.1 — ticket 110), and the
+ * subscribe ack.
  * SessionSocket stays single-session/chat-specific — patching it for multi-session
  * use was rejected in the ticket.
  */
@@ -205,6 +207,19 @@ class OkHttpSessionListSocket @Inject constructor(
             frame.decodePayload<SessionArchivedPayload>()?.let { payload ->
                 onEvent(SessionListEvent.SessionArchived(payload.sessionId))
             }
+            return
+        }
+        // 0.39.1 global events (docs/server-api.md — ticket 110): a config write or a
+        // provider model refresh, from any client. Same __global__ envelope as the
+        // archived event; the payload (the full config projection) is never decoded —
+        // the frame type alone tells the collector to invalidate the models/config
+        // caches.
+        if (frame.type == "event.config.changed") {
+            onEvent(SessionListEvent.ConfigChanged)
+            return
+        }
+        if (frame.type == "event.model_catalog.changed") {
+            onEvent(SessionListEvent.ModelCatalogChanged)
             return
         }
         // 0.31.0 caveat (docs/server-api.md): the server also sends events for sessions

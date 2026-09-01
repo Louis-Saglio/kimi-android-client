@@ -89,8 +89,10 @@ churn) touched the client-facing wire in exactly these places:
   `["thinking"]` — was the raw snake_case request keys, a breaking change
   for that event) and a **full config projection** with credentials redacted
   to `has_api_key` (providers/models/services). `event.config.warning`
-  (delivered since 0.32.0) is now registered in the schema unions. All
-  global/unknown-frame territory — the app ignores them.
+  (delivered since 0.32.0) is now registered in the schema unions.
+  `event.config.changed`/`event.model_catalog.changed` are handled since
+  ticket 110 (models/config cache invalidation); `event.config.warning`
+  stays unknown-frame territory the app ignores.
 - **Invisible/behavioral:** the cold transcript now folds only user-origin
   steers by content (`dc6028dc` — the live projection is unchanged; not
   observed); a resumed session reminds the model once about background tasks
@@ -833,7 +835,7 @@ unchanged from 0.29.2):
   map of provider name to `{"type", "base_url", "has_api_key"}` with
   credentials redacted — surfaced read-only in Settings. Every config write
   pushes a global `event.config.changed` frame (see WebSocket, Global events);
-  cache invalidation on that frame is ticket 110.
+  the app drops its models/config caches on it (ticket 110).
 
 ## Sessions
 
@@ -2923,9 +2925,12 @@ restored afterwards):
 ```
 
 `event.model_catalog.changed` rides the same forwarding path (provider model
-refreshes; not triggered live). The app ignores both — unknown frame types
-fall into the ignore rule, and the `__global__` envelope fails per-session
-filters by design.
+refreshes; not triggered live). The Android app handles both since ticket 110:
+the session-list socket maps the frame type alone (the payload is never
+decoded) to a `SessionListEvent` ahead of the foreign-session filter, and the
+session-list ViewModel drops the `ModelsRepository` models/config caches for
+the current server URL, so the next read refetches. `event.config.warning`
+below stays ignored.
 
 ### Global events — `event.session.archived` (new in 0.38.0)
 
