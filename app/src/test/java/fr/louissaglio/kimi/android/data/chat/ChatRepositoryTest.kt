@@ -1065,7 +1065,46 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun `agent status usage frame emits the context usage, phase frame emits nothing`() = runBlocking {
+    fun `getSessionStatus maps the bound model and the thinking level`() = runBlocking {
+        // 0.39.1 (ticket 107, live-verified 2026-09-01): /status serves the session's
+        // persisted binding — also for sessions cold since server start.
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"busy":false,"model":"kimi-code/k3-256k",""" +
+                    """"thinking_level":"low","context_tokens":100,""" +
+                    """"max_context_tokens":262144,"context_usage":0.0},"request_id":"01KX"}""",
+            ),
+        )
+
+        assertEquals(
+            SessionStatus(
+                busy = false,
+                contextUsage = ContextUsage(100, 262144),
+                model = "kimi-code/k3-256k",
+                thinkingLevel = "low",
+            ),
+            repository.getSessionStatus(settings(), "session_1").getOrThrow(),
+        )
+    }
+
+    @Test
+    fun `getSessionStatus maps an omitted model and a blank thinking level to null`() = runBlocking {
+        // Fresh never-prompted session (live-verified 2026-09-01): no model key at all,
+        // thinking_level "" — both must read as "no value", never as a choice to store.
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"busy":false,"thinking_level":"",""" +
+                    """"context_tokens":0,"max_context_tokens":1048576,"context_usage":0},"request_id":"01KX"}""",
+            ),
+        )
+
+        val status = repository.getSessionStatus(settings(), "session_1").getOrThrow()
+        assertNull(status.model)
+        assertNull(status.thinkingLevel)
+    }
+
+    @Test
+    fun `agent status usage frame emits the context usage and the session model, phase frame emits nothing`() = runBlocking {
         // Verbatim 0.29.0 shapes (docs/server-api.md, Agent status). The settle wait
         // covers the phase frame: it must arrive and still produce no event.
         val emitted = runSocketEvents(
@@ -1079,12 +1118,15 @@ class ChatRepositoryTest {
                 """"payload":{"type":"agent.status.updated",""" +
                 """"phase":{"kind":"running","turnId":0,"step":0,"stepId":"",""" +
                 """"since":1784777223312},"agentId":"main","sessionId":"session_1"}}""",
-            eventCount = 1,
+            eventCount = 2,
             settleMillis = 200,
         )
 
         assertEquals(
-            listOf(SocketEvent.Event(SessionEvent.ContextUsageUpdated(ContextUsage(25050, 1048576)))),
+            listOf(
+                SocketEvent.Event(SessionEvent.ContextUsageUpdated(ContextUsage(25050, 1048576))),
+                SocketEvent.Event(SessionEvent.SessionModelUpdated("kimi-code/k3", "high")),
+            ),
             emitted.filterIsInstance<SocketEvent.Event>(),
         )
     }

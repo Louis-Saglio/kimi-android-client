@@ -341,6 +341,10 @@ class ChatApi @Inject constructor(
                     // (same rule as the snapshot guard, ChatMessageMapper).
                     contextUsage = data?.takeIf { it.maxContextTokens > 0 }
                         ?.let { ContextUsage(it.contextTokens, it.maxContextTokens) },
+                    // The session's binding (ticket 107): a blank thinking_level is a
+                    // fresh session's "none", never a value to store.
+                    model = data?.model?.takeIf { it.isNotBlank() },
+                    thinkingLevel = data?.thinkingLevel?.takeIf { it.isNotBlank() },
                 )
             }
         }

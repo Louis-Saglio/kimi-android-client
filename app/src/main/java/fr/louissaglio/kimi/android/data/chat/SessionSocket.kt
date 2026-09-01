@@ -298,6 +298,13 @@ class SessionSocket @Inject constructor(
                     if (used != null && max != null) {
                         onEvent(SessionEvent.ContextUsageUpdated(ContextUsage(used, max), agentId))
                     }
+                    // The same variant reports the session's bound model/effort
+                    // (ticket 107); blanks decode as "nothing said".
+                    val model = payload.model?.takeIf { it.isNotBlank() }
+                    val effort = payload.thinkingEffort?.takeIf { it.isNotBlank() }
+                    if (model != null || effort != null) {
+                        onEvent(SessionEvent.SessionModelUpdated(model, effort, agentId))
+                    }
                 }
             "context.spliced" -> frame.decodePayload<ContextSplicedPayload>()
                 ?.let { onEvent(SessionEvent.ContextSpliced(it.messages.map { msg -> mapper.toDomain(msg) }, agentId)) }

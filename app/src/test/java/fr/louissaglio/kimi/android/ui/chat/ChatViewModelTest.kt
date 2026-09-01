@@ -19,6 +19,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -640,22 +641,28 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     }
 
     @Test
-    fun `a non-placeholder snapshot usage applies without a status re-read`() = runBlocking {
-        // The converse of the placeholder rule: a bundle carrying a real fill (the
-        // pre-0.32.0 wire) is watermark-atomic and needs no convergence re-read.
+    fun `a non-placeholder snapshot usage still seeds the status for the model sync`() = runBlocking {
+        // Since 0.38.0 the bundle carries a REAL fill, so gating the /status re-read
+        // on a placeholder bundle skipped it on every session that has run turns —
+        // and with it the ticket-107 model sync: sessions bound from the web client
+        // showed the server default on the chip (Louis, 2026-09-01). The seed now
+        // runs on every cold start; the bundle's fill applies and the seed's fresh
+        // read confirms it.
         snapshotBody = """{"code":0,"msg":"success","data":{"as_of_seq":1,"epoch":"ep_1",""" +
             """"session":{"id":"session_1","busy":false,""" +
             """"usage":{"context_tokens":25050,"context_limit":1048576}},""" +
             """"messages":{"items":[],"has_more":false},"in_flight_turn":null,"subagents":[],""" +
             """"pending_approvals":[],"pending_questions":[]},"request_id":"r"}"""
+        statusBody = """{"code":0,"msg":"success","data":{"busy":false,""" +
+            """"model":"kimi-code/kimi-for-coding","thinking_level":"low",""" +
+            """"context_tokens":25050,"max_context_tokens":1048576,"context_usage":0.0239},"request_id":"r"}"""
 
         viewModel.onScreenStarted()
-        awaitState(viewModel.uiState) { it.contextUsage == ContextUsage(25050, 1048576) }
-        awaitServerSocket()
-        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+        awaitRequest("/status")
 
-        delay(200)
-        assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
+        assertEquals(ContextUsage(25050, 1048576), viewModel.uiState.value.contextUsage)
+        awaitState(viewModel.uiState) { it.sessionModel == "kimi-code/kimi-for-coding" }
+        assertEquals("low", viewModel.uiState.value.sessionEffort)
     }
 
     @Test
@@ -1162,6 +1169,111 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         assertEquals(emptyList<String>(), state.supportedEfforts)
         assertNull(state.selectedEffort)
         assertNull(state.defaultEffort)
+    }
+
+    // --- Server-owned session model (ticket 107) ----------------------------------------
+
+    @Test
+    fun `status seed syncs the server-reported model and effort into the session prefs`() = runBlocking {
+        // The server owns the session's binding: /status serves it even for sessions
+        // cold since server start (live-verified 2026-09-01). The bound model is not
+        // the server default — the pre-107 chip would have shown the default instead.
+        modelsBody = """{"code":0,"msg":"success","data":{"items":[""" +
+            """{"provider":"managed:kimi-code","model":"kimi-code/k3","display_name":"K3",""" +
+            """"max_context_size":1048576,"support_efforts":["low","high","max"],"default_effort":"high"},""" +
+            """{"provider":"deepseek","model":"deepseek/deepseek-v4-pro","display_name":"DeepSeek V4 Pro",""" +
+            """"max_context_size":1000000,"support_efforts":["low","high"],"default_effort":"high"}""" +
+            """]},"request_id":"r"}"""
+        statusBody = """{"code":0,"msg":"success","data":{"busy":false,"model":"deepseek/deepseek-v4-pro",""" +
+            """"thinking_level":"low","context_tokens":0,"max_context_tokens":1000000,""" +
+            """"context_usage":0.0},"request_id":"r"}"""
+        viewModel.onScreenStarted()
+
+        awaitState(viewModel.uiState) { it.sessionModel == "deepseek/deepseek-v4-pro" }
+        assertEquals("low", viewModel.uiState.value.sessionEffort)
+
+        // Persisted: the next prompt carries the server-reported values.
+        viewModel.onInputChange("hi")
+        viewModel.onSend()
+        val body = awaitRequest("/prompts").body!!.utf8()
+        assertTrue(""""model":"deepseek/deepseek-v4-pro"""" in body)
+        assertTrue(""""thinking":"low"""" in body)
+    }
+
+    @Test
+    fun `agent status frame syncs the server-reported model and effort`() = runBlocking {
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.modelsAvailable }
+        val socket = awaitServerSocket()
+
+        socket.send(agentStatusUsageFrame(100, 262144, model = "kimi-code/kimi-for-coding", effort = "max"))
+
+        awaitState(viewModel.uiState) { it.sessionModel == "kimi-code/kimi-for-coding" }
+        assertEquals("max", viewModel.uiState.value.sessionEffort)
+        // Written through to the store the send path reads (the edit lands off the
+        // frame's call stack — poll until it commits).
+        withTimeout(5_000) {
+            while (dataStore.data.first()[stringPreferencesKey("model_for_session_session_1")] != "kimi-code/kimi-for-coding") delay(10)
+        }
+        assertEquals("max", dataStore.data.first()[stringPreferencesKey("effort_for_session_session_1")])
+    }
+
+    @Test
+    fun `blank status values leave the stored model choice untouched`() = runBlocking {
+        dataStore.edit { it[stringPreferencesKey("model_for_session_session_1")] = "kimi-code/kimi-for-coding" }
+        // Default statusBody: no model key, no thinking_level — a fresh session's answer
+        // must not erase the stored choice.
+        viewModel.onScreenStarted()
+        // The seed has applied once its context usage lands in the state.
+        awaitState(viewModel.uiState) { it.contextUsage != null && it.modelsAvailable }
+
+        assertEquals("kimi-code/kimi-for-coding", viewModel.uiState.value.sessionModel)
+        assertEquals(
+            "kimi-code/kimi-for-coding",
+            dataStore.data.first()[stringPreferencesKey("model_for_session_session_1")],
+        )
+    }
+
+    @Test
+    fun `a pending pick is not clobbered by a status frame of the running turn`() = runBlocking {
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.modelsAvailable }
+        val socket = awaitServerSocket()
+
+        viewModel.onModelSelected("kimi-code/kimi-for-coding")
+        awaitState(viewModel.uiState) { it.sessionModel == "kimi-code/kimi-for-coding" }
+
+        // A frame of the still-running turn reports the OLD binding (k3): the unsent
+        // model pick must survive. The effort was not picked, so it does sync.
+        socket.send(agentStatusUsageFrame(100, 1048576, model = "kimi-code/k3", effort = "max"))
+
+        // The frame was processed once its distinct context usage lands.
+        awaitState(viewModel.uiState) { it.contextUsage == ContextUsage(100, 1048576) }
+        assertEquals("kimi-code/kimi-for-coding", viewModel.uiState.value.sessionModel)
+        assertEquals("max", viewModel.uiState.value.sessionEffort)
+    }
+
+    @Test
+    fun `the next status frame syncs again once the prompt carrying the pick was sent`() = runBlocking {
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.modelsAvailable }
+        val socket = awaitServerSocket()
+
+        viewModel.onModelSelected("kimi-code/kimi-for-coding")
+        awaitState(viewModel.uiState) { it.sessionModel == "kimi-code/kimi-for-coding" }
+        viewModel.onInputChange("hi")
+        viewModel.onSend()
+
+        val body = awaitRequest("/prompts").body!!.utf8()
+        assertTrue(""""model":"kimi-code/kimi-for-coding"""" in body)
+        awaitState(viewModel.uiState) { !it.isSending }
+
+        // The prompt bound the session; later frames reflect the server's state again
+        // (here: another client rebound the session to K3 with max effort).
+        socket.send(agentStatusUsageFrame(100, 1048576, model = "kimi-code/k3", effort = "max"))
+
+        awaitState(viewModel.uiState) { it.sessionModel == "kimi-code/k3" }
+        assertEquals("max", viewModel.uiState.value.sessionEffort)
     }
 
     // --- Compact session (ticket 056) ---------------------------------------------------

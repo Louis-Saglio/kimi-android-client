@@ -9,7 +9,11 @@
   ticket 048; a refused cursor acks as `resync_required` → snapshot re-sync,
   ticket 085),
   `ModelsRepository`,
-  `SessionPrefsStore` (per-session model/effort prefs), `ChatMessageMapper`
+  `SessionPrefsStore` (per-session model/effort prefs — server-synced since
+  ticket 107: `/status` seeds and `agent.status.updated` frames write the
+  session's bound model/effort through to it, so the chip and the prompt send
+  path — both store-fed — follow bindings made from any client; a pick made
+  locally but not yet sent wins over server reports), `ChatMessageMapper`
   (DTO→domain), and `SessionActivityStore` (`data/sessions/` — process-lifetime
   record of successfully sent prompts/steers; the session list consumes it on
   return to bump those rows before its silent refresh, ticket 086). New chat
@@ -78,10 +82,10 @@
   `Agent` calls (`applyAgentCall` — chat-independent, so the page-on-top restore
   recovers prompts/links too), and hands the chat-side bundle (history page,
   busy, pending approvals/questions) to the calling ChatViewModel. The bundle's
-  `session.usage` is the server's all-zero placeholder on every read path since
-  0.32.0 (mapped to null), so the ring's contextUsage converges from a
-  placeholder-conditional /status re-read on apply (seed-guarded — web parity:
-  kimi-web does the same).
+  `session.usage` carries the real fill since 0.38.0 (a 0 limit still maps to
+  null), and every cold start re-reads /status regardless: the session's bound
+  model/effort (107) is served only there, and the ring converges on the live
+  value (seed-guarded — web parity: kimi-web does the same).
   The fetch is cached per session only until the session is LEFT:
   `SubagentStreamStore.release` calls `SnapshotSync.forget`, so the next entry
   re-fetches (one cheap GET per entry — no process-lifetime cache of mutable server

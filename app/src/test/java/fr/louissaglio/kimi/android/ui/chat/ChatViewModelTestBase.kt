@@ -548,10 +548,15 @@ abstract class ChatViewModelTestBase {
             """"approval_id":"$id","decision":"approved","resolved_at":"2026-07-19T00:00:00.500Z"}}"""
 
     /** Verbatim 0.29.0 model/usage variant (docs/server-api.md, Agent status). */
-    protected fun agentStatusUsageFrame(used: Long, max: Long): String =
+    protected fun agentStatusUsageFrame(
+        used: Long,
+        max: Long,
+        model: String = "kimi-code/k3",
+        effort: String = "high",
+    ): String =
         """{"type":"agent.status.updated","seq":30,"epoch":"ep_1","volatile":true,""" +
             """"session_id":"session_1","timestamp":"2026-07-26T00:00:00.000Z",""" +
-            """"payload":{"type":"agent.status.updated","model":"kimi-code/k3","thinkingEffort":"high",""" +
+            """"payload":{"type":"agent.status.updated","model":"$model","thinkingEffort":"$effort",""" +
             """"maxContextTokens":$max,"usage":{},"contextTokens":$used,""" +
             """"agentId":"main","sessionId":"session_1"}}"""
 

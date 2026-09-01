@@ -884,6 +884,15 @@ Session object shape (0.31.0, fields truncated for brevity):
   hardcoded `""` served up to 0.39.0 (upstream commit `2bf7ed22`). Cold
   sessions still report `""`. The app reads this field (ModelsRepository
   falls back to `default_model` when empty) — strictly an improvement.
+  **2026-09-01 (ticket 107 spike, verified live):** the binding is
+  **persisted** — a session cold since server start reports `""` here, but
+  its first `/status` call already serves the real `model`/`thinking_level`
+  and warms it: a subsequent get then reports `agent_config.model` too. So
+  `/status`, not list/get, is the reliable read of a session's bound model.
+  Persistence covers bindings made under older server versions too: sessions
+  last active 2026-08-25/27 (0.38-era), still cold after the 2026-08-28
+  restart to 0.39.1, answered their first `/status` with their persisted
+  binding (verified 2026-09-01).
 - `message_count` and `last_seq` are still present but observed stuck at `0`
   (re-verified 2026-07-23 after several turns) — do not rely on them.
 - The list envelope carries `has_more` for pagination (verified with
@@ -953,8 +962,15 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/session
 ```
 
 `busy: true` ⇔ the session is mid-turn. `model` is omitted entirely when the
-session has no model configured. `thinking_level` and `permission` reflect the
-session's current config (`"off"`/`"yolo"` observed on a fresh session;
+session has no model configured (re-verified 2026-09-01 on a fresh
+never-prompted session: no `model` key, `thinking_level: ""`). A prompt
+carrying `model`/`thinking` binds the session: afterwards `/status` reports
+both (verified 2026-09-01, `kimi-code/k3-256k` + `"low"`). The binding is
+**persisted across the cold/warm boundary**: a session untouched since server
+start reports `agent_config.model: ""` on list/get, yet its first `/status`
+call already serves the real `model`/`thinking_level` and warms the session
+(verified 2026-09-01, ticket 107). `thinking_level` and `permission` reflect
+the session's current config (`"off"`/`"yolo"` observed on a fresh session;
 **0.34.0:** a fresh session now reports `thinking_level: ""`). **0.34.0:**
 `max_context_tokens` is now **omittable when the context limit is unknown**
 (upstream schema change — `0` is the engine's "unknown" marker, never a real

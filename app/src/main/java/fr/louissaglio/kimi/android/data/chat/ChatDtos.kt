@@ -83,6 +83,10 @@ data class SessionStatusData(
     // omission degrades to a partial read instead of failing the whole status poll.
     @SerialName("context_tokens") val contextTokens: Long = 0,
     @SerialName("max_context_tokens") val maxContextTokens: Long = 0,
+    // The session's bound model/effort (ticket 107): `model` is omitted entirely when
+    // unbound, `thinking_level` reads "" on a fresh never-prompted session.
+    val model: String? = null,
+    @SerialName("thinking_level") val thinkingLevel: String? = null,
 )
 
 /**
@@ -94,6 +98,9 @@ data class SessionStatusData(
 data class AgentStatusUpdatedPayload(
     val contextTokens: Long? = null,
     val maxContextTokens: Long? = null,
+    // Model/usage variant only (ticket 107): the session's bound model and effort.
+    val model: String? = null,
+    val thinkingEffort: String? = null,
 )
 
 /** `data` of `GET /api/v1/config`; only the server-wide default model is consumed. */
@@ -415,10 +422,10 @@ data class SnapshotData(
 
 /** The snapshot's rich `session` object; only [busy] and the context fill of [usage]
  * are consumed (usage carries `context_tokens`/`context_limit` — not the /status
- * `max_context_tokens` naming). Since 0.32.0 the wire usage is the server's all-zero
- * placeholder on every read path (live-verified busy + idle, 2026-08-05; kimi-web's
- * isPlaceholderSessionUsage documents the same for list/snapshot) — the mapper drops
- * it, the live fill comes from /status and the WS agent.status.updated stream. */
+ * `max_context_tokens` naming). The usage was the server's all-zero placeholder from
+ * 0.32.0 until 0.38.0 made it real (docs/server-api.md) — a 0 limit still means
+ * "unknown", never a real fill, so the mapper drops it and the ring converges from
+ * the /status seed and the WS agent.status.updated stream. */
 @Serializable
 data class SnapshotSessionDto(
     val busy: Boolean = false,

@@ -139,10 +139,10 @@ class ChatMessageMapper @Inject constructor(json: Json) {
         asOfSeq = dto.asOfSeq,
         epoch = dto.epoch,
         busy = dto.session?.busy == true,
-        // The wire usage is the server's all-zero placeholder on every read path
-        // (0.32.0, live-verified busy + idle; kimi-web treats it identically): a
-        // zero limit means "unknown", never a real fill — the live value only
-        // comes from /status and the WS agent.status.updated stream.
+        // A zero limit means "unknown", never a real fill — drop it and let the
+        // ring converge from the /status seed and the WS agent.status.updated
+        // stream. (The usage was the all-zero placeholder from 0.32.0 until 0.38.0
+        // made it real, ChatDtos.kt's SnapshotSessionDto has the history.)
         contextUsage = dto.session?.usage
             ?.takeIf { it.contextLimit > 0 }
             ?.let { ContextUsage(it.contextTokens, it.contextLimit) },

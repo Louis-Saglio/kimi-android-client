@@ -140,6 +140,15 @@ sealed interface SessionEvent {
         override val agentId: String = MAIN_AGENT_ID,
     ) : SessionEvent, AgentScopedEvent
 
+    /** The session's bound model/effort as the server reports it (agent.status.updated,
+     * model/usage variant — ticket 107). Emitted when the frame carries either value;
+     * a null field means the frame said nothing about it, never "unset". */
+    data class SessionModelUpdated(
+        val model: String?,
+        val thinkingEffort: String?,
+        override val agentId: String = MAIN_AGENT_ID,
+    ) : SessionEvent, AgentScopedEvent
+
     /** `compaction.started` (docs/server-api.md, Compact — ticket 056): the server
      * began summarizing the session — no turn events, compaction is not a turn. */
     data class CompactionStarted(val trigger: String, val instruction: String?) : SessionEvent
@@ -182,10 +191,14 @@ data class ContextUsage(
 )
 
 /** Snapshot of `GET /api/v1/sessions/{id}/status` (ticket 041): [busy] is the mid-turn
- * flag; [contextUsage] is null only when the success envelope carried no data object. */
+ * flag; [contextUsage] is null only when the success envelope carried no data object.
+ * [model]/[thinkingLevel] are the session's server-side binding (ticket 107) — null
+ * when the server reported none (unbound session, or a blank `thinking_level`). */
 data class SessionStatus(
     val busy: Boolean,
     val contextUsage: ContextUsage?,
+    val model: String? = null,
+    val thinkingLevel: String? = null,
 )
 
 /** What the socket reports to the collector: connection lifecycle + session events. */

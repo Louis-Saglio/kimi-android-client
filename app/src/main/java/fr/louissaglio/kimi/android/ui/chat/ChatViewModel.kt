@@ -163,9 +163,9 @@ class ChatViewModel internal constructor(
         /** The thinking effort chosen for this session; null = follow the server default. */
         val sessionEffort: String? = null,
         /** Context window fill for the composer's ring (041, moved into the composer
-         * in 053); null until the first /status response or live agent.status.updated
-         * event arrives — the snapshot's usage is the server's all-zero placeholder
-         * since 0.32.0, so it never seeds a real value. */
+         * in 053); null until the first read carrying a real fill arrives — the
+         * snapshot (real usage since 0.38.0), the /status seed, or a live
+         * agent.status.updated frame. */
         val contextUsage: ContextUsage? = null,
         /** The agent's latest todo list, mirrored from its TodoList tool calls
          * (ticket 042); null or empty hides the widget above the composer. */
@@ -385,8 +385,8 @@ class ChatViewModel internal constructor(
     /**
      * The one cold start of this chat open: awaits the session's snapshot sync and
      * applies its outcome. A [SnapshotSync.Outcome.Fresh] bundle IS the initial load
-     * (history, busy state, pending approvals/questions — the ring's context fill
-     * converges from /status, the bundle's usage being the server's placeholder); an
+     * (history, busy state, pending approvals/questions — a /status re-read follows
+     * for the session's bound model/effort and the ring's live fill); an
      * [SnapshotSync.Outcome.AlreadyFresh] join means the session synced since it was
      * last left (page-on-top restore, or the chat → page → chat round trip) — the
      * within-process resume set (ticket 048) heals instead, and the sub-agent row
@@ -482,11 +482,14 @@ class ChatViewModel internal constructor(
             )
         }
         questions.applySnapshot(snapshot.pendingQuestions, guards.questions)
-        // The bundle's usage is the server's all-zero placeholder on every read path
-        // since 0.32.0 (mapped to null — web parity: kimi-web re-reads /status on a
-        // placeholder bundle "so the ring converges on the live value"). The seed's
-        // guard drops the late response when a live usage frame overtakes it.
-        if (snapshot.contextUsage == null) seedSessionStatus()
+        // /status re-read on EVERY cold start: the session's bound model/effort
+        // (ticket 107) is served only there. Gating this seed on a placeholder
+        // bundle usage stopped working when 0.38.0 made the bundle's usage real —
+        // the gate would now skip the seed on every session that has run turns,
+        // and with it the model sync (Louis, 2026-09-01). The ring converges on
+        // the live value the same way; the seed's guard drops the late response
+        // when a live usage frame overtakes it.
+        seedSessionStatus()
         // The subscribe resuming exactly at this watermark needs no resync — this
         // apply already healed everything up to it.
         appliedSnapshotCursor = snapshot.asOfSeq to snapshot.epoch
@@ -680,6 +683,10 @@ class ChatViewModel internal constructor(
             }
             result
                 .onSuccess {
+                    // The server bound the session to the sent model/effort: its
+                    // reports describe the pick from here on and may sync again.
+                    pendingModelPick = false
+                    pendingEffortPick = false
                     // No local echo: the user message arrives inline in the socket's
                     // context.spliced frame (docs/server-api.md), the reply via the
                     // streaming events.
@@ -938,6 +945,9 @@ class ChatViewModel internal constructor(
                 contextUsageSeedGuard.bump()
                 uiState.update { it.copy(contextUsage = event.contextUsage) }
             }
+            // Same frame family, session-scope fields: the live model/effort binding.
+            is SessionEvent.SessionModelUpdated ->
+                syncServerSessionModel(event.model, event.thinkingEffort)
             // Compaction (ticket 056): no turn events fire for it — these frames alone
             // drive the divider and the compacting state. Started also arrives for
             // compactions triggered from another client (the TUI's /compact), so it —
@@ -1034,6 +1044,14 @@ class ChatViewModel internal constructor(
     fun onHistoryTopReached() = historyPager.loadOlder()
 
     /**
+     * A model/effort picked here is stored at once but only reaches the server with the
+     * next prompt: until that send succeeds, server-reported bindings (the ticket 107
+     * write-through) still describe the PREVIOUS prompt and must not clobber the pick.
+     */
+    private var pendingModelPick = false
+    private var pendingEffortPick = false
+
+    /**
      * Loads the model picker's data (ticket 031): the server's model list, its default,
      * and this session's stored choice. Lazy — first chat-screen open, cached in the
      * repository afterwards. A failed models fetch hides the chip and changes nothing
@@ -1049,8 +1067,10 @@ class ChatViewModel internal constructor(
                             availableModels = models,
                             modelsAvailable = true,
                             serverDefaultModel = chatRepository.getDefaultModel(settings),
-                            sessionModel = chatRepository.getSessionModel(sessionId),
-                            sessionEffort = chatRepository.getSessionEffort(sessionId),
+                            // A server sync may have landed while the models fetch was
+                            // in flight; its value is newer than this store read.
+                            sessionModel = it.sessionModel ?: chatRepository.getSessionModel(sessionId),
+                            sessionEffort = it.sessionEffort ?: chatRepository.getSessionEffort(sessionId),
                         )
                     }
                 }
@@ -1062,14 +1082,34 @@ class ChatViewModel internal constructor(
 
     /** Persists the picked model for this session; subsequent prompts carry it. */
     fun onModelSelected(model: String) {
+        pendingModelPick = true
         uiState.update { it.copy(sessionModel = model) }
         viewModelScope.launch { chatRepository.setSessionModel(sessionId, model) }
     }
 
     /** Persists the picked effort for this session; subsequent prompts carry it. */
     fun onEffortSelected(effort: String) {
+        pendingEffortPick = true
         uiState.update { it.copy(sessionEffort = effort) }
         viewModelScope.launch { chatRepository.setSessionEffort(sessionId, effort) }
+    }
+
+    /**
+     * The server owns the session's model/effort binding (ticket 107): what /status and
+     * agent.status.updated report is written through to the per-session store, so the
+     * chip and the send path (both store-fed) follow bindings made from any client.
+     * Null reports mean the server said nothing (fresh session) and never clobber; a
+     * local pick awaiting its first prompt wins over a report (see [pendingModelPick]).
+     */
+    private fun syncServerSessionModel(model: String?, effort: String?) {
+        if (model != null && !pendingModelPick) {
+            uiState.update { it.copy(sessionModel = model) }
+            viewModelScope.launch { chatRepository.setSessionModel(sessionId, model) }
+        }
+        if (effort != null && !pendingEffortPick) {
+            uiState.update { it.copy(sessionEffort = effort) }
+            viewModelScope.launch { chatRepository.setSessionEffort(sessionId, effort) }
+        }
     }
 
     /**
@@ -1086,11 +1126,10 @@ class ChatViewModel internal constructor(
     }
 
     /** Seeds the working indicator when opening a session that is already mid-turn
-     * (turn events only fire on transitions), and the composer's context-usage ring
-     * (ticket 041) from the same /status snapshot. Also the ring's convergence
-     * re-read after a snapshot apply whose usage was the server's all-zero
-     * placeholder (every read path since 0.32.0 — web parity). Failure just leaves
-     * both untouched. A turn event or a live context-usage event landing while the
+     * (turn events only fire on transitions), the session's bound model/effort
+     * (ticket 107 — served only by /status), and the composer's context-usage ring
+     * (ticket 041), all from the same /status snapshot. Failure just leaves all
+     * three untouched. A turn event or a live context-usage event landing while the
      * GET is in flight is newer than the seed's snapshot, so the late response is
      * dropped for that field instead of overriding it. */
     private fun seedSessionStatus() {
@@ -1099,6 +1138,7 @@ class ChatViewModel internal constructor(
         viewModelScope.launch {
             chatRepository.getSessionStatus(settingsRepository.current(), sessionId)
                 .onSuccess { status ->
+                    syncServerSessionModel(status.model, status.thinkingLevel)
                     uiState.update {
                         it.copy(
                             isWorking = if (!turnSeedGuard.isStale(turnEventsAtSeed)) status.busy else it.isWorking,
