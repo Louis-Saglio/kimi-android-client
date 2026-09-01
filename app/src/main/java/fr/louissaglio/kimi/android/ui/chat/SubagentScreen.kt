@@ -25,6 +25,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import fr.louissaglio.kimi.android.data.chat.BashTimeout
+import fr.louissaglio.kimi.android.data.chat.ToolPayload
 import fr.louissaglio.kimi.android.data.chat.bashCommandOf
 import fr.louissaglio.kimi.android.data.chat.bashDescriptionOf
 import fr.louissaglio.kimi.android.ui.common.EmptyState
@@ -63,6 +64,9 @@ fun SubagentScreen(
         description: String?,
         command: String?,
     ) -> Unit = { _, _, _, _, _, _, _ -> },
+    /** Ticket 119: a parsed `Edit` row opens the unified diff screen, exactly like
+     * the chat's rows — the payload rides along for the ToolContentStore hand-off. */
+    onNavigateToEditDiff: (toolCallId: String, payload: ToolPayload.Edit) -> Unit = { _, _ -> },
     viewModel: SubagentViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -157,6 +161,7 @@ fun SubagentScreen(
                     uiState.items,
                     onOpenSubagent = onOpenSubagent,
                     onOpenJob = onOpenJob,
+                    onOpenEditDiff = onNavigateToEditDiff,
                     isLoadingMoreHistory = uiState.isLoadingMoreHistory,
                     onHistoryTopReached = viewModel::onHistoryTopReached,
                 )

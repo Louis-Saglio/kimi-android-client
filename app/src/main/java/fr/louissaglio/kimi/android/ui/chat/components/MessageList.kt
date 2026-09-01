@@ -25,6 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
+import fr.louissaglio.kimi.android.data.chat.ToolPayload
 
 /** Near-bottom slop: a fling that stops a few pixels above the end still counts
  * as "at the bottom" for auto-scroll purposes (ticket 030). */
@@ -63,6 +64,10 @@ internal fun MessageList(
     /** Invoked with the taskId when a linked background `Bash` tool row is tapped
      * (ticket 096) — the row's `task_id: bash-…` stub navigates to the job screen. */
     onOpenJob: (String) -> Unit = {},
+    /** Ticket 119: an `Edit` row with a parsed payload opens the unified diff screen
+     * instead of expanding — the tap carries the payload for the ToolContentStore
+     * hand-off. */
+    onOpenEditDiff: (toolCallId: String, payload: ToolPayload.Edit) -> Unit = { _, _ -> },
     /** Tickets 088/089: any `AskUserQuestion` row tap (the row id is the tool call id;
      * since 0.38.0 the pending question carries it as a distinct field next to its
      * question id — ticket 106). The pending row toggles the live card; a resolved
@@ -170,11 +175,13 @@ internal fun MessageList(
                             loadImageBytes = loadImageBytes,
                         )
                     is ChatItem.AssistantMessage -> AssistantBubble(item)
-                    is ChatItem.ToolGroup -> ToolGroupCard(item, onOpenSubagent, onOpenJob, onQuestionRowTapped)
+                    is ChatItem.ToolGroup ->
+                        ToolGroupCard(item, onOpenSubagent, onOpenJob, onQuestionRowTapped, onOpenEditDiff)
                     is ChatItem.CompactionDivider -> CompactionDividerRow(item)
                     // Bare rows are not produced by ChatTimeline anymore (ticket 037) but
                     // stay renderable for tests and previews.
-                    is ChatItem.ToolActivity -> ToolRow(item, onOpenSubagent, onOpenJob, onQuestionRowTapped)
+                    is ChatItem.ToolActivity ->
+                        ToolRow(item, onOpenSubagent, onOpenJob, onQuestionRowTapped, onOpenEditDiff)
                 }
             }
         }

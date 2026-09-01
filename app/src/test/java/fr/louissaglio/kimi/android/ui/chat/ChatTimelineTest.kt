@@ -4,6 +4,7 @@ import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.ORIGIN_KIND_COMPACTION_SUMMARY
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.Todo
+import fr.louissaglio.kimi.android.data.chat.ToolPayload
 import fr.louissaglio.kimi.android.data.chat.TranscriptFrame
 import fr.louissaglio.kimi.android.data.chat.TranscriptState
 import fr.louissaglio.kimi.android.data.chat.TranscriptStep
@@ -2188,5 +2189,151 @@ class ChatTimelineTest {
         val tool = (timeline.items().single() as ChatItem.ToolGroup).tools.single()
         assertEquals(args, tool.args)
         assertEquals("hi\n", tool.output)
+    }
+
+    // --- Typed payloads (ticket 119) --------------------------------------------------
+
+    @Test
+    fun `a live Edit call started carries its parsed payload onto the row`() {
+        val args = buildJsonObject {
+            put("path", "/tmp/spike/a.txt")
+            put("old_string", "one\ntwo")
+            put("new_string", "one\nTWO")
+        }
+        val timeline = testChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted())
+
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Edit", "/tmp/spike/a.txt", args = args))
+
+        val tool = (timeline.items().single() as ChatItem.ToolGroup).tools.single()
+        assertEquals(ToolPayload.Edit("/tmp/spike/a.txt", "one\ntwo", "one\nTWO", replaceAll = false), tool.payload)
+    }
+
+    @Test
+    fun `a history Edit row carries the parsed payload`() {
+        val args = buildJsonObject {
+            put("path", "/tmp/spike/a.txt")
+            put("old_string", "one")
+            put("new_string", "two")
+            put("replace_all", true)
+        }
+        val timeline = testChatTimeline()
+
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage(
+                    "msg_1",
+                    ChatMessage.Role.Assistant,
+                    listOf(ChatMessage.Part.ToolUse("tool_1", "Edit", "/tmp/spike/a.txt", args = args)),
+                ),
+            ),
+            keepLive = false,
+        )
+
+        val tool = (timeline.items().single() as ChatItem.ToolGroup).tools.single()
+        assertEquals(ToolPayload.Edit("/tmp/spike/a.txt", "one", "two", replaceAll = true), tool.payload)
+    }
+
+    @Test
+    fun `a transcript Edit frame lands its parsed payload on the flattened row`() {
+        val args = buildJsonObject {
+            put("path", "/tmp/spike/a.txt")
+            put("old_string", "one")
+            put("new_string", "two")
+        }
+        val timeline = testChatTimeline(historyBacked = false)
+
+        timeline.replaceTranscript(
+            listOf(
+                transcriptTurn(
+                    "t0", 0,
+                    transcriptStep(
+                        "t0.1",
+                        TranscriptFrame.Tool(
+                            "t0.1.tool_1", "tool_1", "Edit", running = false,
+                            preview = "/tmp/spike/a.txt", input = "", output = "ok",
+                            args = args,
+                        ),
+                    ),
+                ),
+            ),
+            keepLive = false,
+        )
+
+        val tool = (timeline.items().single() as ChatItem.ToolGroup).tools.single()
+        assertEquals(ToolPayload.Edit("/tmp/spike/a.txt", "one", "two", replaceAll = false), tool.payload)
+    }
+
+    @Test
+    fun `an unparseable Edit call leaves the payload null`() {
+        // Missing old_string: the row keeps the generic expansion instead of the diff.
+        val args = buildJsonObject { put("path", "/tmp/spike/a.txt") }
+        val timeline = testChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted())
+
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Edit", "/tmp/spike/a.txt", args = args))
+
+        val tool = (timeline.items().single() as ChatItem.ToolGroup).tools.single()
+        assertEquals(args, tool.args)
+        assertEquals(null, tool.payload)
+    }
+
+    @Test
+    fun `a healed Edit row keeps its first-parsed payload`() {
+        // First writer wins, like the args themselves: a replayed start frame must
+        // not replace the payload.
+        val args = buildJsonObject {
+            put("path", "/tmp/spike/a.txt")
+            put("old_string", "one")
+            put("new_string", "two")
+        }
+        val timeline = testChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted())
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Edit", "/tmp/spike/a.txt", args = args))
+
+        timeline.apply(
+            SessionEvent.ToolCallStarted(
+                "tool_1",
+                "Edit",
+                "/tmp/spike/a.txt",
+                args = buildJsonObject {
+                    put("path", "/tmp/spike/a.txt")
+                    put("old_string", "replayed")
+                    put("new_string", "replayed")
+                },
+            ),
+        )
+
+        val tool = (timeline.items().single() as ChatItem.ToolGroup).tools.single()
+        assertEquals(ToolPayload.Edit("/tmp/spike/a.txt", "one", "two", replaceAll = false), tool.payload)
+    }
+
+    @Test
+    fun `an orphan Edit result completed by an older page gains the call's payload`() {
+        val args = buildJsonObject {
+            put("path", "/tmp/spike/a.txt")
+            put("old_string", "one")
+            put("new_string", "two")
+        }
+        val timeline = testChatTimeline()
+        timeline.replaceHistory(
+            listOf(
+                ChatMessage("msg_2", ChatMessage.Role.Tool, listOf(ChatMessage.Part.ToolResult("tool_1", false, "ok"))),
+            ),
+            keepLive = false,
+        )
+
+        timeline.prependHistory(
+            listOf(
+                ChatMessage(
+                    "msg_1",
+                    ChatMessage.Role.Assistant,
+                    listOf(ChatMessage.Part.ToolUse("tool_1", "Edit", "/tmp/spike/a.txt", args = args)),
+                ),
+            ),
+        )
+
+        val tool = (timeline.items().single() as ChatItem.ToolGroup).tools.single()
+        assertEquals(ToolPayload.Edit("/tmp/spike/a.txt", "one", "two", replaceAll = false), tool.payload)
     }
 }

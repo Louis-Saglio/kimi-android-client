@@ -73,18 +73,18 @@ target); screen androidTest (colors rows render, context expander toggles).
 
 ## Acceptance criteria
 
-- [ ] New tests above pass; existing suite green with no behavior-test
+- [x] New tests above pass; existing suite green with no behavior-test
       changes.
-- [ ] Observable on device: an Edit row shows the pencil icon and `+a −b`
+- [x] Observable on device: an Edit row shows the pencil icon and `+a −b`
       chip (and "All" on a `replace_all` call); tapping it — while running
       or from history — opens the diff screen with colored +/- lines and
       collapsed context; an edit with identical old/new shows "No changes".
-- [ ] Same behavior from the sub-agent page's tool rows.
-- [ ] Both themes: added/removed rows readable (contrast checked).
+- [x] Same behavior from the sub-agent page's tool rows.
+- [x] Both themes: added/removed rows readable (contrast checked).
 - [ ] `flock /tmp/kimi-android-gradle.lock ./gradlew :app:testDebugUnitTest
       :app:assembleDebug --max-workers=1 --no-daemon` passes; release APK
       published to the file server per AGENTS.md.
-- [ ] `docs/conventions.md` updated (ToolPayload + ToolContentStore); the
+- [x] `docs/conventions.md` updated (ToolPayload + ToolContentStore); the
       new dependency recorded in the version catalog.
 
 ## Out of scope
@@ -101,3 +101,41 @@ target); screen androidTest (colors rows render, context expander toggles).
   NOT fetch the file or reconstruct surrounding context.
 - Stat chip math: count of `DiffUtils` deltas by type, not raw line splits,
   so an unchanged trailing newline doesn't inflate the numbers.
+
+## Implementation notes (2026-09-01)
+
+- The ticket's `com.googlecode.java-diff-utils:java-diff-utils` coordinate no
+  longer resolves on Maven Central (404) — the library relocated to
+  `io.github.java-diff-utils:java-diff-utils`; used 4.17 (the current latest
+  per maven-metadata). Same `com.github.difflib` API.
+- The diff-row builder is `data/chat/EditDiffs` (`object … of(old, new)` →
+  `Model(rows, addedCount, removedCount)`), following the ToolPreview/
+  ToolDetailFields object-helper precedent. The default `DiffUtils.diff`
+  overload emits change deltas only, so context runs are the gaps between
+  deltas; runs of ≥4 lines fold into one `Row.Collapsed` carrying its lines.
+- `ToolContentStore` reaches the navigation layer by MainActivity field
+  injection (`KimiNavHost(toolContentStore)`): the `put` runs in the NavHost's
+  `onNavigateToEditDiff` callback, wired identically for the chat and the
+  sub-agent page. `EditDiffViewModel` consumes on init (dual-constructor
+  pattern, tests pass the route object directly).
+- The row's tap precedence is question → Edit payload → generic expansion →
+  sub-agent link → job link; Edit rows never carry the two links, so the
+  ordering is safe.
+- Reduced motion: the expander reveal and its chevron read
+  `Settings.Global.ANIMATOR_DURATION_SCALE` (0 → instant swap, `snap()` spec).
+- Theme colors verified mathematically (WCAG AA normal text): light added
+  4.6:1, light removed 5.6:1, dark added 6.1:1, dark removed 10.1:1 — ratios
+  recorded in `ui/theme/Color.kt`. Not eyeballed on a physical device (FTL
+  MediumPhone runs the system light theme).
+- Existing suite: zero behavior-test changes — only additive test methods
+  (ChatTimelineTest payload section, RoutesTest route round-trip, ToolRowTest
+  Edit section). One FTL round exposed a test-side bug (preview and args value
+  shared the same path string, duplicate-text assertion) — fixed in the test,
+  not the code.
+- Firebase Test Lab (MediumPhone.arm, API 36): 28/28 passed —
+  EditDiffScreenTest (5), ToolRowTest (19), ToolRowExpandScrollTest (4).
+  Matrix: https://console.firebase.google.com/project/kimi-code-android-client/testlab/histories/bh.a7586a76d07966a/matrices/4957438428224670614
+- The gradle verification command above passed (also with
+  `:app:assembleDebugAndroidTest`); the release APK publication is deferred to
+  the merge session per the worktree hand-off, hence the unticked half of that
+  box.

@@ -31,4 +31,12 @@ class RoutesTest {
             Json.decodeFromString(Subagent.serializer(), Json.encodeToString(Subagent.serializer(), route))
         assertEquals(route, decoded)
     }
+
+    @Test
+    fun `edit diff route round-trips through json`() {
+        val route = EditDiff(toolCallId = "tool/1 & #2")
+        val decoded =
+            Json.decodeFromString(EditDiff.serializer(), Json.encodeToString(EditDiff.serializer(), route))
+        assertEquals(route, decoded)
+    }
 }

@@ -6,16 +6,24 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import dagger.hilt.android.AndroidEntryPoint
 import fr.louissaglio.kimi.android.navigation.KimiNavHost
+import fr.louissaglio.kimi.android.ui.chat.ToolContentStore
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
+import javax.inject.Inject
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
+
+    /** The row-tap → detail-screen payload hand-off (ticket 119): the NavHost's
+     * EditDiff navigation stages the payload here, the screen consumes it. */
+    @Inject
+    lateinit var toolContentStore: ToolContentStore
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
             KimiTheme {
-                KimiNavHost()
+                KimiNavHost(toolContentStore)
             }
         }
     }

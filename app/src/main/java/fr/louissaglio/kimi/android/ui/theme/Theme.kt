@@ -32,6 +32,28 @@ val MaterialTheme.successColor: Color
     @Composable
     get() = LocalSuccessColor.current
 
+/** The diff row palettes (ticket 119): one container/content pair per direction,
+ * same CompositionLocal extension pattern as [LocalSuccessColor]. */
+class DiffColors(
+    val addedContainer: Color,
+    val addedContent: Color,
+    val removedContainer: Color,
+    val removedContent: Color,
+)
+
+val LocalDiffColors = staticCompositionLocalOf {
+    DiffColors(
+        KimiDiffAddedLightContainer,
+        KimiDiffAddedLightContent,
+        KimiDiffRemovedLightContainer,
+        KimiDiffRemovedLightContent,
+    )
+}
+
+val MaterialTheme.diffColors: DiffColors
+    @Composable
+    get() = LocalDiffColors.current
+
 @Composable
 fun KimiTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
@@ -39,6 +61,21 @@ fun KimiTheme(
 ) {
     CompositionLocalProvider(
         LocalSuccessColor provides if (darkTheme) KimiSuccessDark else KimiSuccessLight,
+        LocalDiffColors provides if (darkTheme) {
+            DiffColors(
+                KimiDiffAddedDarkContainer,
+                KimiDiffAddedDarkContent,
+                KimiDiffRemovedDarkContainer,
+                KimiDiffRemovedDarkContent,
+            )
+        } else {
+            DiffColors(
+                KimiDiffAddedLightContainer,
+                KimiDiffAddedLightContent,
+                KimiDiffRemovedLightContainer,
+                KimiDiffRemovedLightContent,
+            )
+        },
     ) {
         MaterialTheme(
             colorScheme = if (darkTheme) kimiDarkColorScheme else kimiLightColorScheme,

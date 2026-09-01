@@ -51,6 +51,7 @@ import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.data.chat.ServerModel
+import fr.louissaglio.kimi.android.data.chat.ToolPayload
 import fr.louissaglio.kimi.android.data.chat.asCardModel
 import fr.louissaglio.kimi.android.data.chat.bashCommandOf
 import fr.louissaglio.kimi.android.data.chat.bashDescriptionOf
@@ -73,6 +74,9 @@ fun ChatScreen(
         description: String?,
         command: String?,
     ) -> Unit = { _, _, _, _, _, _, _ -> },
+    /** Ticket 119: a parsed `Edit` row opens the unified diff screen — the payload
+     * rides along for the ToolContentStore hand-off (too large for nav arguments). */
+    onNavigateToEditDiff: (toolCallId: String, payload: ToolPayload.Edit) -> Unit = { _, _ -> },
     viewModel: ChatViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -195,6 +199,7 @@ fun ChatScreen(
         loadImageBytes = loadImageBytes,
         onOpenSubagent = onOpenSubagent,
         onOpenJob = onOpenJob,
+        onOpenEditDiff = onNavigateToEditDiff,
         onHistoryTopReached = onHistoryTopReached,
         onCompact = viewModel::onCompact,
         onCancelJob = viewModel::onCancelJob,
@@ -270,6 +275,7 @@ private fun ChatContent(
     loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray?,
     onOpenSubagent: (String) -> Unit = {},
     onOpenJob: (String) -> Unit = {},
+    onOpenEditDiff: (toolCallId: String, payload: ToolPayload.Edit) -> Unit = { _, _ -> },
     onHistoryTopReached: () -> Unit = {},
     onCompact: () -> Unit = {},
     onCancelJob: (String) -> Unit = {},
@@ -468,6 +474,7 @@ private fun ChatContent(
                     loadImageBytes = loadImageBytes,
                     onOpenSubagent = onOpenSubagent,
                     onOpenJob = onOpenJob,
+                    onOpenEditDiff = onOpenEditDiff,
                     // Tickets 088/089: AskUserQuestion rows never expand — the pending
                     // row toggles the live card, a resolved row opens its read-only view.
                     onQuestionRowTapped = onQuestionRowTapped,

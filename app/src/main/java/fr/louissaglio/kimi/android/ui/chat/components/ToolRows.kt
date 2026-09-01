@@ -42,7 +42,10 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import fr.louissaglio.kimi.android.data.chat.EditDiffs
 import fr.louissaglio.kimi.android.data.chat.ToolDetailFields
+import fr.louissaglio.kimi.android.data.chat.ToolPayload
+import fr.louissaglio.kimi.android.ui.common.icons.EditIcon
 import fr.louissaglio.kimi.android.ui.theme.successColor
 
 /** Tool-status glyph for the group header and the rows (tickets 022/037): spinner
@@ -84,6 +87,7 @@ internal fun ToolGroupCard(
     onOpenSubagent: (String) -> Unit = {},
     onOpenJob: (String) -> Unit = {},
     onQuestionRowTapped: (toolCallId: String, input: String, output: String) -> Unit = { _, _, _ -> },
+    onOpenEditDiff: (toolCallId: String, payload: ToolPayload.Edit) -> Unit = { _, _ -> },
 ) {
     val status = when {
         group.tools.any { it.status == ToolStatus.Running } -> ToolStatus.Running
@@ -119,7 +123,7 @@ internal fun ToolGroupCard(
             group.tools.forEachIndexed { index, tool ->
                 // 1dp outlineVariant hairline between rows, like the web's row separators.
                 if (index > 0) HorizontalDivider()
-                ToolRow(tool, onOpenSubagent, onOpenJob, onQuestionRowTapped)
+                ToolRow(tool, onOpenSubagent, onOpenJob, onQuestionRowTapped, onOpenEditDiff)
             }
         }
     }
@@ -150,20 +154,30 @@ internal fun ToolGroupCard(
  * the raw JSON is superseded by the card UI. The tap is forwarded as
  * [onQuestionRowTapped] with the row's id (= tool call id = question id), input and
  * output — the collaborator decides: the pending row toggles the live card, a
- * resolved row opens/closes its read-only view. */
+ * resolved row opens/closes its read-only view.
+ *
+ * An `Edit` row with a parsed payload (ticket 119) never expands either: the pencil
+ * icon, the trailing `+a −b` stat chip (the diff's line counts by delta type) and an
+ * "All" badge on a replace_all call sketch the edit's shape, and the tap — row or
+ * trailing open button — navigates to the diff screen. An Edit call whose args did
+ * not parse keeps the generic expansion. */
 @Composable
 internal fun ToolRow(
     activity: ChatItem.ToolActivity,
     onOpenSubagent: (String) -> Unit = {},
     onOpenJob: (String) -> Unit = {},
     onQuestionRowTapped: (toolCallId: String, input: String, output: String) -> Unit = { _, _, _ -> },
+    onOpenEditDiff: (toolCallId: String, payload: ToolPayload.Edit) -> Unit = { _, _ -> },
 ) {
     val detailColor = MaterialTheme.colorScheme.onSurfaceVariant
     val linkedSubagentId = activity.subagentId
     val linkedBashTaskId = activity.bashTaskId
     val isQuestionRow = activity.name == "AskUserQuestion"
+    val editPayload = activity.payload as? ToolPayload.Edit
+    // The chip counts come from the diff itself (delta types), not a line split.
+    val editDiff = remember(editPayload) { editPayload?.let { EditDiffs.of(it.oldString, it.newString) } }
     val detailFields = remember(activity.args) { ToolDetailFields.of(activity.args) }
-    val expandable = !isQuestionRow && linkedSubagentId == null && linkedBashTaskId == null &&
+    val expandable = !isQuestionRow && editPayload == null && linkedSubagentId == null && linkedBashTaskId == null &&
         (detailFields.isNotEmpty() || activity.input.isNotBlank() || activity.output.isNotBlank())
     var expanded by rememberSaveable { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth()) {
@@ -172,8 +186,12 @@ internal fun ToolRow(
                 .fillMaxWidth()
                 // M3: the whole row is the tap target, at least 48dp tall.
                 .heightIn(min = 48.dp)
-                .clickable(enabled = expandable || linkedSubagentId != null || linkedBashTaskId != null || isQuestionRow) {
+                .clickable(
+                    enabled = expandable || linkedSubagentId != null || linkedBashTaskId != null ||
+                        isQuestionRow || editPayload != null,
+                ) {
                     if (isQuestionRow) onQuestionRowTapped(activity.id, activity.input, activity.output)
+                    else if (editPayload != null) onOpenEditDiff(activity.id, editPayload)
                     else if (expandable) expanded = !expanded
                     else if (linkedSubagentId != null) onOpenSubagent(linkedSubagentId)
                     else linkedBashTaskId?.let(onOpenJob)
@@ -182,7 +200,7 @@ internal fun ToolRow(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             // Terminal glyph for shell calls (material-icons-core has no terminal icon),
-            // a generic tool icon otherwise.
+            // a pencil for parsed Edit calls (ticket 119), a generic tool icon otherwise.
             if (activity.name == "Bash") {
                 Text(
                     text = ">_",
@@ -192,7 +210,7 @@ internal fun ToolRow(
                 )
             } else {
                 Icon(
-                    imageVector = Icons.Filled.Build,
+                    imageVector = if (editPayload != null) EditIcon else Icons.Filled.Build,
                     contentDescription = null,
                     modifier = Modifier.size(14.dp),
                     tint = detailColor,
@@ -216,6 +234,31 @@ internal fun ToolRow(
             } else {
                 Spacer(Modifier.weight(1f))
             }
+            if (editPayload != null && editPayload.replaceAll) {
+                // The replace_all flag (ticket 119): the one badge case, matching the
+                // sub-agent status chip's shape.
+                Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.small) {
+                    Text(
+                        text = "All",
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+            }
+            if (editDiff != null) {
+                Text(
+                    text = "+${editDiff.addedCount}",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.successColor,
+                )
+                Text(
+                    text = "−${editDiff.removedCount}",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
             ToolStatusIcon(activity.status, runningDescription = "Tool running", modifier = Modifier.size(12.dp))
             if (expandable) {
                 val chevronRotation by animateFloatAsState(if (expanded) 180f else 0f, label = "chevron")
@@ -236,6 +279,21 @@ internal fun ToolRow(
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
                         contentDescription = "Open sub-agent",
+                        modifier = Modifier.size(16.dp),
+                        tint = detailColor,
+                    )
+                }
+            }
+            if (editPayload != null) {
+                // Same open affordance as the linked rows above: the row tap already
+                // navigates, this chevron is the explicit target (ticket 119).
+                IconButton(
+                    onClick = { onOpenEditDiff(activity.id, editPayload) },
+                    modifier = Modifier.size(40.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = "Open diff",
                         modifier = Modifier.size(16.dp),
                         tint = detailColor,
                     )

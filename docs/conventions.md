@@ -18,7 +18,10 @@
   models — `tool_use` parts, `tool.call.started` events, transcript tool frames,
   `ChatItem.ToolActivity` — and payload-derived display renderings live in
   `data/chat` helpers: `ToolPreview` for the row preview, `ToolDetailFields` for
-  the expanded row's generic key/value args table, ticket 118), and
+  the expanded row's generic key/value args table, ticket 118, `ToolPayloads`
+  for the typed per-tool payload parse (ticket 119 — `ToolPayload.Edit` first) and
+  `EditDiffs` for the unified line-diff model (java-diff-utils Myers on the Edit
+  call's old/new strings; rows plus the `+a −b` delta-type counts)), and
   `SessionActivityStore` (`data/sessions/` — process-lifetime
   record of successfully sent prompts/steers; the session list consumes it on
   return to bump those rows, ticket 086 — since ticket 112 no automatic refresh
@@ -88,7 +91,19 @@
   `ModelPickerSheet` doubles as the Settings screen's server-default model/effort
   editor, ticket 109).
   `ui/common/` holds shared `StateViews` (loading/error/empty) and
-  `Formatters` — reuse them instead of adding one-off copies.
+  `Formatters` — reuse them instead of adding one-off copies. Large tool-payload
+  content reaches its detail screen through `ToolContentStore` (ui/chat,
+  process-lifetime @Singleton — ticket 119): the row's navigation callback `put`s
+  the payload under the tool call id, the screen's ViewModel `consume`s it on init,
+  and a miss (process death with the screen on top) is the screen's
+  missing-content state with back navigation. First consumer: the Edit call's
+  unified diff screen (`EditDiff` route — toolCallId only — plus `EditDiffScreen`/
+  `EditDiffViewModel` in ui/chat), opened from parsed Edit rows on the chat and the
+  sub-agent page alike; those rows never expand inline and carry the pencil glyph
+  (`ui/common/icons/EditIcon.kt`), the `+a −b` stat chip and the replace_all "All"
+  badge. The diff rows' added/removed palettes are the `LocalDiffColors`
+  container/content pairs (the `LocalSuccessColor` extension pattern), AA-checked
+  in both themes.
 - Chat feature collaborators (the 065 `DeltaCoalescer` pattern, generalized by
   072): a cohesive chat feature gets an `internal` class in `ui/chat`
   (`DeltaCoalescer`, `SeedGuard`, `ChatAttachments`, `QuestionWizard`,

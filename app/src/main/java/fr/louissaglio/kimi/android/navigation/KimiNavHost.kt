@@ -6,8 +6,10 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
 import fr.louissaglio.kimi.android.ui.chat.ChatScreen
+import fr.louissaglio.kimi.android.ui.chat.EditDiffScreen
 import fr.louissaglio.kimi.android.ui.chat.JobDetailScreen
 import fr.louissaglio.kimi.android.ui.chat.SubagentScreen
+import fr.louissaglio.kimi.android.ui.chat.ToolContentStore
 import fr.louissaglio.kimi.android.ui.sessions.SessionsScreen
 import fr.louissaglio.kimi.android.ui.settings.SettingsScreen
 import kotlinx.serialization.Serializable
@@ -57,8 +59,15 @@ data class JobDetail(
     val ownerAgentId: String? = null,
 )
 
+/** The Edit call's unified diff screen (ticket 119): only the tool call id rides
+ * the route — the payload itself (potentially large old/new strings) goes through
+ * the process-lifetime [ToolContentStore], staged by the navigating tap and
+ * consumed by the screen's ViewModel. */
+@Serializable
+data class EditDiff(val toolCallId: String)
+
 @Composable
-fun KimiNavHost() {
+fun KimiNavHost(toolContentStore: ToolContentStore) {
     val navController = rememberNavController()
     NavHost(navController = navController, startDestination = Sessions) {
         composable<Sessions> {
@@ -92,6 +101,12 @@ fun KimiNavHost() {
                         launchSingleTop = true
                     }
                 },
+                onNavigateToEditDiff = { toolCallId, payload ->
+                    toolContentStore.put(toolCallId, payload)
+                    navController.navigate(EditDiff(toolCallId)) {
+                        launchSingleTop = true
+                    }
+                },
             )
         }
         composable<Subagent> { entry ->
@@ -118,10 +133,20 @@ fun KimiNavHost() {
                         launchSingleTop = true
                     }
                 },
+                // Same store hand-off as the chat's Edit rows (ticket 119).
+                onNavigateToEditDiff = { toolCallId, payload ->
+                    toolContentStore.put(toolCallId, payload)
+                    navController.navigate(EditDiff(toolCallId)) {
+                        launchSingleTop = true
+                    }
+                },
             )
         }
         composable<JobDetail> {
             JobDetailScreen(onNavigateBack = { navController.popBackStack() })
+        }
+        composable<EditDiff> {
+            EditDiffScreen(onNavigateBack = { navController.popBackStack() })
         }
     }
 }

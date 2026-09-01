@@ -6,6 +6,7 @@ import fr.louissaglio.kimi.android.data.chat.ORIGIN_KIND_COMPACTION_SUMMARY
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.TodoParser
+import fr.louissaglio.kimi.android.data.chat.ToolPayloads
 import fr.louissaglio.kimi.android.data.chat.TranscriptFrame
 import fr.louissaglio.kimi.android.data.chat.TranscriptTurn
 import fr.louissaglio.kimi.android.data.chat.bashTaskIdOf
@@ -154,6 +155,7 @@ class ChatTimeline(
                         input = call.input,
                         output = tool.output.ifBlank { call.output },
                         args = tool.args ?: call.args,
+                        payload = tool.payload ?: ToolPayloads.of(call.name, tool.args ?: call.args),
                     ).enriched(name = call.name, input = call.input, output = tool.output)
                 },
             )
@@ -488,16 +490,29 @@ class ChatTimeline(
         var found = false
         healTool(toolCallId) { existing ->
             found = true
+            val mergedName = existing.name.ifBlank { name }
+            val mergedArgs = existing.args ?: args
             existing.copy(
-                name = existing.name.ifBlank { name },
+                name = mergedName,
                 preview = existing.preview.ifBlank { preview },
                 input = existing.input.ifBlank { input },
                 output = if (replaceOutput) output else existing.output.ifBlank { output },
-                args = existing.args ?: args,
+                args = mergedArgs,
+                // The typed payload (ticket 119) follows the args' first-writer-wins
+                // rule, derived from the row's EFFECTIVE name/args.
+                payload = existing.payload ?: ToolPayloads.of(mergedName, mergedArgs),
                 status = status,
             )
         }
-        if (!found) appendLiveTool(ChatItem.ToolActivity(toolCallId, name, status, preview, input, output, args = args))
+        if (!found) {
+            appendLiveTool(
+                ChatItem.ToolActivity(
+                    toolCallId, name, status, preview, input, output,
+                    args = args,
+                    payload = ToolPayloads.of(name, args),
+                ),
+            )
+        }
     }
 
     /** Live row→sub-agent linkage (ticket 045): `subagent.spawned` names the `Agent`
@@ -580,7 +595,11 @@ class ChatTimeline(
                         }
                     } else {
                         target.appendTool(
-                            ChatItem.ToolActivity(it.toolCallId, it.toolName, ToolStatus.Running, it.preview, it.input, args = it.args),
+                            ChatItem.ToolActivity(
+                                it.toolCallId, it.toolName, ToolStatus.Running, it.preview, it.input,
+                                args = it.args,
+                                payload = ToolPayloads.of(it.toolName, it.args),
+                            ),
                         )
                     }
                 }
@@ -663,6 +682,7 @@ class ChatTimeline(
                                     frame.input,
                                     frame.output,
                                     args = frame.args,
+                                    payload = ToolPayloads.of(frame.name, frame.args),
                                 ).enriched(),
                             )
                         }

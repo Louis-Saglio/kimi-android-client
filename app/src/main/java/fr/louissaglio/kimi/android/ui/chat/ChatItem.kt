@@ -1,6 +1,7 @@
 package fr.louissaglio.kimi.android.ui.chat
 
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
+import fr.louissaglio.kimi.android.data.chat.ToolPayload
 import java.time.Instant
 import kotlinx.serialization.json.JsonObject
 
@@ -34,7 +35,11 @@ sealed interface ChatItem {
      * (e.g. the shell command for Bash); blank when the server sent none. [args] is the
      * call's raw arguments object (ticket 118), rendered by the expanded row as a
      * key/value table (ToolDetailFields); [input] is the same input pretty-printed —
-     * the expanded row's fallback when no object args exist. [output] is the result
+     * the expanded row's fallback when no object args exist. [payload] is the args'
+     * typed, per-tool parse (ticket 119 — ToolPayloads, derived wherever args is set,
+     * first-writer-wins like it): a parsed payload switches the row to its rich
+     * treatment (an Edit row opens the diff screen instead of expanding inline).
+     * [output] is the result
      * text; either may be blank while the call is still running.
      * While running, [output] accumulates the volatile tool.progress chunks (ticket 025)
      * — the definitive tool.result output replaces them wholesale. [subagentId] links an
@@ -54,6 +59,7 @@ sealed interface ChatItem {
         val input: String = "",
         val output: String = "",
         val args: JsonObject? = null,
+        val payload: ToolPayload? = null,
         val subagentId: String? = null,
         val bashTaskId: String? = null,
         val timeoutSeconds: Int? = null,

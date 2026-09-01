@@ -6,6 +6,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import fr.louissaglio.kimi.android.data.chat.ToolPayload
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -278,5 +279,118 @@ class ToolRowTest {
         }
 
         composeTestRule.onNodeWithContentDescription("Expand tool details").assertDoesNotExist()
+    }
+
+    // --- Ticket 119: parsed Edit rows -------------------------------------------------
+
+    private val editPayload = ToolPayload.Edit("/tmp/spike/a.txt", "one\ntwo", "one\nTWO\nthree", replaceAll = false)
+
+    @Test
+    fun editRowShowsStatChipAndOpenDiffChevronWithoutExpansion() {
+        // old [one, two] vs new [one, TWO, three]: one removed, two added.
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "Edit",
+                ToolStatus.Done,
+                preview = "/tmp/spike/a.txt",
+                payload = editPayload,
+            ),
+        )
+
+        composeTestRule.onNodeWithText("+2").assertIsDisplayed()
+        composeTestRule.onNodeWithText("−1").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Expand tool details").assertDoesNotExist()
+        composeTestRule.onNodeWithContentDescription("Open diff").assertIsDisplayed()
+    }
+
+    @Test
+    fun editRowWithReplaceAllShowsAllBadge() {
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "Edit",
+                ToolStatus.Done,
+                preview = "/tmp/spike/a.txt",
+                payload = editPayload.copy(replaceAll = true),
+            ),
+        )
+
+        composeTestRule.onNodeWithText("All").assertIsDisplayed()
+    }
+
+    @Test
+    fun editRowWithoutReplaceAllShowsNoAllBadge() {
+        toolRow(
+            ChatItem.ToolActivity("tool_1", "Edit", ToolStatus.Done, preview = "/tmp/spike/a.txt", payload = editPayload),
+        )
+
+        composeTestRule.onNodeWithText("All").assertDoesNotExist()
+    }
+
+    @Test
+    fun tappingEditRowNavigatesInsteadOfExpanding() {
+        var opened: Pair<String, ToolPayload.Edit>? = null
+        composeTestRule.setContent {
+            KimiTheme {
+                ToolRow(
+                    ChatItem.ToolActivity(
+                        "tool_1",
+                        "Edit",
+                        ToolStatus.Done,
+                        preview = "/tmp/spike/a.txt",
+                        args = buildJsonObject {
+                            put("path", "/tmp/spike/a.txt")
+                            put("old_string", "one\ntwo")
+                            put("new_string", "one\nTWO\nthree")
+                        },
+                        payload = editPayload,
+                    ),
+                    onOpenEditDiff = { id, payload -> opened = id to payload },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("Edit").performClick()
+
+        assertEquals("tool_1" to editPayload, opened)
+        // No inline expansion: the args table's labels never render.
+        composeTestRule.onNodeWithText("old_string").assertDoesNotExist()
+    }
+
+    @Test
+    fun editRowChevronNavigates() {
+        var opened: String? = null
+        composeTestRule.setContent {
+            KimiTheme {
+                ToolRow(
+                    ChatItem.ToolActivity("tool_1", "Edit", ToolStatus.Running, preview = "/tmp/spike/a.txt", payload = editPayload),
+                    onOpenEditDiff = { id, _ -> opened = id },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithContentDescription("Open diff").performClick()
+        assertEquals("tool_1", opened)
+    }
+
+    /** An Edit call whose args did not parse (no payload) keeps the generic
+     * key/value expansion. */
+    @Test
+    fun unparseableEditRowKeepsGenericExpansion() {
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "Edit",
+                ToolStatus.Done,
+                preview = "/tmp/spike/a.txt",
+                args = buildJsonObject { put("path", "/tmp/spike/other.txt") },
+            ),
+        )
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+        composeTestRule.onNodeWithText("path").assertIsDisplayed()
+        composeTestRule.onNodeWithText("/tmp/spike/other.txt").assertIsDisplayed()
     }
 }
