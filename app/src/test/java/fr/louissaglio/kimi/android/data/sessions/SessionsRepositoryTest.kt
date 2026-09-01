@@ -184,6 +184,57 @@ class SessionsRepositoryTest {
     }
 
     @Test
+    fun `grouped fetch hits the v2 by_workspace endpoint and maps groups onto domain sessions`() = runBlocking {
+        server.enqueue(MockResponse(body = GROUPS_BODY))
+
+        val result = repository.listSessionGroups(settings())
+
+        assertEquals("/api/v2/sessions?view=by_workspace&group.page_size=5", server.takeRequest().target)
+        val groups = result.getOrThrow()
+        assertEquals(2, groups.size)
+        // Group fields come from the group envelope, not the items.
+        val spike = groups[0]
+        assertEquals("wd_spike", spike.workspaceId)
+        assertEquals("/tmp/spike", spike.cwd)
+        // total is the workspace's full server-side count, not the page size.
+        assertEquals(42, spike.total)
+        assertEquals(4, spike.sessions.size)
+        // v2 mapping: epoch-ms updated_at, cwd from the item's workspace, and the
+        // activity.status state space — running → dot, approval/question → badge,
+        // idle → neither.
+        assertEquals(
+            Session(
+                id = "session_running",
+                title = "Running",
+                cwd = "/tmp/spike",
+                updatedAt = Instant.ofEpochMilli(1787253993333),
+                isRunning = true,
+                isAwaitingInteraction = false,
+            ),
+            spike.sessions[0],
+        )
+        assertFalse(spike.sessions[1].isRunning)
+        assertTrue(spike.sessions[1].isAwaitingInteraction)
+        assertFalse(spike.sessions[2].isRunning)
+        assertTrue(spike.sessions[2].isAwaitingInteraction)
+        // A null title stays null so the UI falls back to the cwd.
+        assertNull(spike.sessions[3].title)
+        assertFalse(spike.sessions[3].isRunning)
+        assertFalse(spike.sessions[3].isAwaitingInteraction)
+        assertEquals(listOf("wd_other"), groups[1].let { listOf(it.workspaceId) })
+        assertEquals(1, groups[1].total)
+    }
+
+    @Test
+    fun `grouped fetch surfaces a non-zero envelope code as Api error`() = runBlocking {
+        server.enqueue(
+            MockResponse(body = """{"code":40001,"msg":"bad view","data":null,"request_id":"01KX"}"""),
+        )
+
+        assertEquals(DataError.Api(40001, "bad view"), repository.listSessionGroups(settings()).exceptionOrNull())
+    }
+
+    @Test
     fun `workspaces are sorted by last_opened_at descending`() = runBlocking {
         server.enqueue(
             MockResponse(body = 
@@ -246,6 +297,46 @@ class SessionsRepositoryTest {
              "metadata":{"cwd":"/tmp/spike-008"},"agent_config":{"model":""},
              "usage":{"input_tokens":0},"permission_rules":[],"message_count":0,"last_seq":0},
              "request_id":"01KX"}
+        """
+
+        // v2 wire shape (docs/server-api.md): epoch-ms timestamps, present-but-null
+        // fields, activity.status carrying the live state. Extra keys (last_prompt,
+        // archived_at, activity.model) are ignored like every unconsumed field.
+        const val GROUPS_BODY = """
+            {"code":0,"msg":"success","data":{"groups":[
+              {"workspace":{"id":"wd_spike","cwd":"/tmp/spike"},
+               "sessions":[
+                 {"id":"session_running",
+                  "workspace":{"id":"wd_spike","cwd":"/tmp/spike"},
+                  "meta":{"title":"Running","last_prompt":null,"created_at":1787253993333,
+                          "updated_at":1787253993333,"archived":false,"archived_at":null},
+                  "activity":{"status":"running","model":""}},
+                 {"id":"session_approval",
+                  "workspace":{"id":"wd_spike","cwd":"/tmp/spike"},
+                  "meta":{"title":"Approval","last_prompt":null,"created_at":1787253993333,
+                          "updated_at":1787253993333,"archived":false,"archived_at":null},
+                  "activity":{"status":"approval","model":""}},
+                 {"id":"session_question",
+                  "workspace":{"id":"wd_spike","cwd":"/tmp/spike"},
+                  "meta":{"title":"Question","last_prompt":null,"created_at":1787253993333,
+                          "updated_at":1787253993333,"archived":false,"archived_at":null},
+                  "activity":{"status":"question","model":""}},
+                 {"id":"session_idle",
+                  "workspace":{"id":"wd_spike","cwd":"/tmp/spike"},
+                  "meta":{"title":null,"last_prompt":null,"created_at":1787253993333,
+                          "updated_at":1787253993333,"archived":false,"archived_at":null},
+                  "activity":{"status":"idle","model":""}}],
+               "total":42},
+              {"workspace":{"id":"wd_other","cwd":"/tmp/other"},
+               "sessions":[
+                 {"id":"session_other",
+                  "workspace":{"id":"wd_other","cwd":"/tmp/other"},
+                  "meta":{"title":"Other","last_prompt":null,"created_at":1787253993333,
+                          "updated_at":1787253993333,"archived":false,"archived_at":null},
+                  "activity":{"status":"idle","model":""}}],
+               "total":1}],
+             "total":2,"has_more":false,"next_page_token":null},
+            "request_id":"01KX"}
         """
     }
 }

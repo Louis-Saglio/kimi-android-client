@@ -2,6 +2,7 @@ package fr.louissaglio.kimi.android.data.settings
 
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -25,6 +26,7 @@ class SettingsRepository @Inject constructor(
     private object Keys {
         val SERVER_URL = stringPreferencesKey("server_url")
         val TOKEN = stringPreferencesKey("token")
+        val SESSION_LIST_GROUPED = booleanPreferencesKey("session_list_grouped")
     }
 
     private val settingsFlow = dataStore.data
@@ -48,5 +50,19 @@ class SettingsRepository @Inject constructor(
             prefs[Keys.SERVER_URL] = settings.serverUrl.trim()
             prefs[Keys.TOKEN] = settings.token.trim()
         }
+    }
+
+    private val sessionListGroupedFlow = dataStore.data
+        .catch { e -> if (e is IOException) emit(emptyPreferences()) else throw e }
+        .map { prefs -> prefs[Keys.SESSION_LIST_GROUPED] ?: false }
+
+    /**
+     * The persisted flat/grouped toggle of the session list (ticket 115); flat is the
+     * default. Suspends until the first disk read, like [current].
+     */
+    suspend fun isSessionListGrouped(): Boolean = sessionListGroupedFlow.first()
+
+    suspend fun setSessionListGrouped(grouped: Boolean) {
+        dataStore.edit { prefs -> prefs[Keys.SESSION_LIST_GROUPED] = grouped }
     }
 }

@@ -7,6 +7,7 @@ import fr.louissaglio.kimi.android.data.chat.ModelsRepository
 import fr.louissaglio.kimi.android.data.toUserMessage
 import fr.louissaglio.kimi.android.data.sessions.Session
 import fr.louissaglio.kimi.android.data.sessions.SessionActivityStore
+import fr.louissaglio.kimi.android.data.sessions.SessionGroup
 import fr.louissaglio.kimi.android.data.sessions.SessionListCache
 import fr.louissaglio.kimi.android.data.sessions.SessionListEvent
 import fr.louissaglio.kimi.android.data.sessions.SessionListSocket
@@ -48,6 +49,10 @@ class SessionListViewModel @Inject constructor(
         val isLoadingMore: Boolean = false,
         /** Set when a next-page load failed; shown inline at the bottom of the list. */
         val loadMoreError: String? = null,
+        /** The flat/grouped toggle (ticket 115), persisted in SettingsRepository; flat default. */
+        val groupedView: Boolean = false,
+        /** Workspace groups in grouped mode; null until the first successful grouped load. */
+        val groups: List<SessionGroup>? = null,
         val showCreateDialog: Boolean = false,
         val newSessionCwd: String = "",
         val newSessionTitle: String = "",
@@ -66,6 +71,15 @@ class SessionListViewModel @Inject constructor(
         val workspaceLabels: Map<String, String> by lazy {
             workspaceLabelsFor(sessions.orEmpty().map(Session::cwd))
         }
+
+        /** cwd → disambiguated label for the group headers (ticket 115) — the 114 rule over the groups' cwds. */
+        val groupLabels: Map<String, String> by lazy {
+            workspaceLabelsFor(groups.orEmpty().map(SessionGroup::cwd))
+        }
+
+        /** True once the active mode has its list on screen — the 112 "rows on screen" check is mode-aware. */
+        val hasContent: Boolean
+            get() = if (groupedView) groups != null else sessions != null
     }
 
     sealed interface Effect {
@@ -113,12 +127,32 @@ class SessionListViewModel @Inject constructor(
 
     fun onScreenStarted() {
         bumpPendingActivity()
-        // The list never refreshes itself (ticket 112): with rows on screen the 087
-        // socket patches and the bump above keep it current, and staleness from other
-        // clients is accepted until the next manual refresh. sessions == null means
-        // no cache for this server — that is the visible initial load, not a refresh.
-        if (uiState.value.sessions == null) reload()
+        viewModelScope.launch {
+            // The persisted flat/grouped toggle (ticket 115) is re-read on every screen
+            // start, before the content check, so the first load hits the active mode's
+            // endpoint. Re-reading also heals a mode change made in another session.
+            val grouped = settingsRepository.isSessionListGrouped()
+            if (grouped != uiState.value.groupedView) uiState.update { it.copy(groupedView = grouped) }
+            // The list never refreshes itself (ticket 112): with rows on screen the 087
+            // socket patches and the bump above keep it current, and staleness from other
+            // clients is accepted until the next manual refresh. No content in the active
+            // mode (no cache, or a flat cache that cannot serve the grouped view) means
+            // this is the visible initial load, not a refresh.
+            if (!uiState.value.hasContent) reload()
+        }
         startSocket()
+    }
+
+    /**
+     * The top-bar flat ↔ grouped toggle (ticket 115): the choice persists to DataStore
+     * and switching to a mode with nothing to show fires its initial load. Already
+     * loaded modes survive the switch, so toggling back is free.
+     */
+    fun onViewModeToggle() {
+        val grouped = !uiState.value.groupedView
+        uiState.update { it.copy(groupedView = grouped) }
+        viewModelScope.launch { settingsRepository.setSessionListGrouped(grouped) }
+        if (!uiState.value.hasContent) reload()
     }
 
     /** ON_STOP (chat opened, app backgrounded): the live connection closes with the
@@ -140,8 +174,16 @@ class SessionListViewModel @Inject constructor(
      */
     private fun startSocket() {
         if (socketJob?.isActive == true) return
+        // The subscribed ids follow the active mode: the flat page's rows, or every
+        // group's rows in grouped mode.
         val sessionIds = uiState
-            .map { state -> state.sessions?.mapTo(LinkedHashSet(), Session::id).orEmpty() }
+            .map { state ->
+                if (state.groupedView) {
+                    state.groups.orEmpty().flatMapTo(LinkedHashSet()) { group -> group.sessions.map(Session::id) }
+                } else {
+                    state.sessions?.mapTo(LinkedHashSet(), Session::id).orEmpty()
+                }
+            }
             .distinctUntilChanged()
         socketJob = viewModelScope.launch {
             sessionListSocket.observe(settingsRepository.current(), sessionIds).collect(::onSocketEvent)
@@ -166,9 +208,19 @@ class SessionListViewModel @Inject constructor(
             // Archived from any client (0.38.0): the row leaves the list. An unknown
             // id is ignored, like in patchRow; the next refresh reconciles.
             is SessionListEvent.SessionArchived -> uiState.update { state ->
-                val sessions = state.sessions ?: return@update state
-                if (sessions.none { it.id == event.sessionId }) return@update state
-                state.copy(sessions = sessions.filterNot { it.id == event.sessionId })
+                val sessions = state.sessions
+                val groups = state.groups
+                val inFlat = sessions?.any { it.id == event.sessionId } == true
+                val inGroups = groups?.any { group -> group.sessions.any { it.id == event.sessionId } } == true
+                if (!inFlat && !inGroups) return@update state
+                state.copy(
+                    sessions = if (inFlat) sessions!!.filterNot { it.id == event.sessionId } else sessions,
+                    groups = if (inGroups) {
+                        groups!!.map { group -> group.copy(sessions = group.sessions.filterNot { it.id == event.sessionId }) }
+                    } else {
+                        groups
+                    },
+                )
             }
             // A config write or model-catalog refresh from any client (0.39.1 —
             // ticket 110): drop the models/config caches, so the next read (chat
@@ -181,15 +233,31 @@ class SessionListViewModel @Inject constructor(
 
     /**
      * Applies [transform] to the row of [sessionId] in place (ticket 087): the row
-     * never moves — ordering stays owned by full list (re)loads. An unknown id is
-     * ignored; the next (re)load reconciles.
+     * never moves — ordering stays owned by full list (re)loads. Mode-agnostic (115):
+     * every loaded list is patched, so the row updates inside its group too. An
+     * unknown id is ignored; the next (re)load reconciles.
      */
     private inline fun patchRow(sessionId: String, transform: (Session) -> Session) {
         uiState.update { state ->
-            val sessions = state.sessions ?: return@update state
-            val index = sessions.indexOfFirst { it.id == sessionId }
-            if (index < 0) return@update state
-            state.copy(sessions = sessions.toMutableList().apply { this[index] = transform(sessions[index]) })
+            val sessions = state.sessions
+            val groups = state.groups
+            val inFlat = sessions?.any { it.id == sessionId } == true
+            val inGroups = groups?.any { group -> group.sessions.any { it.id == sessionId } } == true
+            if (!inFlat && !inGroups) return@update state
+            state.copy(
+                sessions = if (inFlat) sessions!!.map { if (it.id == sessionId) transform(it) else it } else sessions,
+                groups = if (inGroups) {
+                    groups!!.map { group ->
+                        if (group.sessions.none { it.id == sessionId }) {
+                            group
+                        } else {
+                            group.copy(sessions = group.sessions.map { if (it.id == sessionId) transform(it) else it })
+                        }
+                    }
+                } else {
+                    groups
+                },
+            )
         }
     }
 
@@ -204,19 +272,39 @@ class SessionListViewModel @Inject constructor(
      * `updated_at` bump a sent message causes, so the next manual refresh lands with
      * the same ordering (no automatic refresh follows anymore, ticket 112). Entries
      * outside the loaded page are dropped: the next load places them via server
-     * ordering. Nothing recorded → the list is untouched.
+     * ordering. Nothing recorded → the list is untouched. In grouped mode (115) the
+     * same bump moves the session to the top of ITS group only — groups never reorder.
      */
     private fun bumpPendingActivity() {
         val pending = activityStore.consumeAll()
         if (pending.isEmpty()) return
         uiState.update { state ->
-            val sessions = state.sessions ?: return@update state
-            val bumped = pending.entries
-                .sortedByDescending { (_, at) -> at }
-                .mapNotNull { (id, at) -> sessions.find { it.id == id }?.copy(updatedAt = at) }
-            if (bumped.isEmpty()) return@update state
-            val bumpedIds = bumped.mapTo(HashSet()) { it.id }
-            state.copy(sessions = bumped + sessions.filter { it.id !in bumpedIds })
+            var newState = state
+            state.sessions?.let { sessions ->
+                val bumped = pending.entries
+                    .sortedByDescending { (_, at) -> at }
+                    .mapNotNull { (id, at) -> sessions.find { it.id == id }?.copy(updatedAt = at) }
+                if (bumped.isNotEmpty()) {
+                    val bumpedIds = bumped.mapTo(HashSet()) { it.id }
+                    newState = newState.copy(sessions = bumped + sessions.filter { it.id !in bumpedIds })
+                }
+            }
+            state.groups?.let { groups ->
+                newState = newState.copy(
+                    groups = groups.map { group ->
+                        val bumped = group.sessions
+                            .filter { it.id in pending }
+                            .sortedByDescending { pending.getValue(it.id) }
+                            .map { it.copy(updatedAt = pending.getValue(it.id)) }
+                        if (bumped.isEmpty()) {
+                            group
+                        } else {
+                            group.copy(sessions = bumped + group.sessions.filter { it.id !in pending })
+                        }
+                    },
+                )
+            }
+            newState
         }
     }
 
@@ -229,6 +317,8 @@ class SessionListViewModel @Inject constructor(
      */
     fun onEndReached() {
         val state = uiState.value
+        // The grouped view is one unpaged request (ticket 115) — there is no next page.
+        if (state.groupedView) return
         if (state.isLoading || state.isRefreshing || !state.hasMore) return
         if (loadJob?.isActive == true || loadMoreJob?.isActive == true) return
         val beforeId = state.sessions?.lastOrNull()?.id ?: return
@@ -322,7 +412,24 @@ class SessionListViewModel @Inject constructor(
                         loadMoreError = null,
                         isCreating = false,
                         showCreateDialog = false,
-                        sessions = listOf(session) + it.sessions.orEmpty().filter { s -> s.id != session.id },
+                        // In grouped mode a never-loaded flat list stays null: growing
+                        // it to one row would clobber the disk cache with a partial list.
+                        sessions = if (it.groupedView && it.sessions == null) {
+                            null
+                        } else {
+                            listOf(session) + it.sessions.orEmpty().filter { s -> s.id != session.id }
+                        },
+                        // 115: the row lands at the top of the group matching the new
+                        // session's cwd. Group totals are server counts and a workspace
+                        // with no group yet is left out — both reconcile on the next
+                        // grouped load.
+                        groups = it.groups?.map { group ->
+                            if (group.cwd == session.cwd) {
+                                group.copy(sessions = listOf(session) + group.sessions.filter { s -> s.id != session.id })
+                            } else {
+                                group
+                            }
+                        },
                     )
                 }
                 _effects.send(Effect.SessionCreated(session))
@@ -337,27 +444,36 @@ class SessionListViewModel @Inject constructor(
     /**
      * Silent re-sync, called only from the socket-reconnect heal (the ON_START call
      * went away with ticket 112): never sets [UiState.isLoading]/[UiState.isRefreshing];
-     * on success replaces the list; on failure the old list stays and no
-     * [Effect.RefreshFailed] is emitted — no snackbar from a reconnect while offline.
-     * Pull-to-refresh keeps the visible behavior via [reload].
+     * on success replaces the active mode's list (115); on failure the old list stays
+     * and no [Effect.RefreshFailed] is emitted — no snackbar from a reconnect while
+     * offline. Pull-to-refresh keeps the visible behavior via [reload].
      */
     private fun silentRefresh() {
         loadJob?.cancel()
         loadMoreJob?.cancel()
         loadJob = viewModelScope.launch {
             uiState.update { it.copy(isLoadingMore = false, loadMoreError = null) }
-            sessionsRepository.listSessions(settingsRepository.current())
-                .onSuccess { page ->
-                    uiState.update {
-                        it.copy(
-                            isLoading = false,
-                            isRefreshing = false,
-                            sessions = page.items,
-                            hasMore = page.hasMore,
-                            error = null,
-                        )
+            if (uiState.value.groupedView) {
+                sessionsRepository.listSessionGroups(settingsRepository.current())
+                    .onSuccess { groups ->
+                        uiState.update {
+                            it.copy(isLoading = false, isRefreshing = false, groups = groups, error = null)
+                        }
                     }
-                }
+            } else {
+                sessionsRepository.listSessions(settingsRepository.current())
+                    .onSuccess { page ->
+                        uiState.update {
+                            it.copy(
+                                isLoading = false,
+                                isRefreshing = false,
+                                sessions = page.items,
+                                hasMore = page.hasMore,
+                                error = null,
+                            )
+                        }
+                    }
+            }
         }
     }
 
@@ -366,37 +482,51 @@ class SessionListViewModel @Inject constructor(
         loadJob?.cancel()
         loadMoreJob?.cancel()
         loadJob = viewModelScope.launch {
-            val hadSessions = uiState.value.sessions != null
+            val hadContent = uiState.value.hasContent
             uiState.update {
                 it.copy(
-                    isLoading = !hadSessions,
-                    isRefreshing = hadSessions,
+                    isLoading = !hadContent,
+                    isRefreshing = hadContent,
                     error = null,
                     isLoadingMore = false,
                     loadMoreError = null,
                 )
             }
-            sessionsRepository.listSessions(settingsRepository.current())
-                .onSuccess { page ->
-                    uiState.update {
-                        it.copy(
-                            isLoading = false,
-                            isRefreshing = false,
-                            sessions = page.items,
-                            hasMore = page.hasMore,
-                            error = null,
-                        )
+            // The fetch follows the active mode (115): the grouped view re-fetches the
+            // groups, the flat list its first page.
+            if (uiState.value.groupedView) {
+                sessionsRepository.listSessionGroups(settingsRepository.current())
+                    .onSuccess { groups ->
+                        uiState.update {
+                            it.copy(isLoading = false, isRefreshing = false, groups = groups, error = null)
+                        }
                     }
-                }
-                .onFailure { error ->
-                    val message = error.toUserMessage()
-                    if (hadSessions) {
-                        uiState.update { it.copy(isLoading = false, isRefreshing = false) }
-                        _effects.send(Effect.RefreshFailed(message))
-                    } else {
-                        uiState.update { it.copy(isLoading = false, isRefreshing = false, error = message) }
+                    .onFailure { error -> onReloadFailure(error, hadContent) }
+            } else {
+                sessionsRepository.listSessions(settingsRepository.current())
+                    .onSuccess { page ->
+                        uiState.update {
+                            it.copy(
+                                isLoading = false,
+                                isRefreshing = false,
+                                sessions = page.items,
+                                hasMore = page.hasMore,
+                                error = null,
+                            )
+                        }
                     }
-                }
+                    .onFailure { error -> onReloadFailure(error, hadContent) }
+            }
+        }
+    }
+
+    private suspend fun onReloadFailure(error: Throwable, hadContent: Boolean) {
+        val message = error.toUserMessage()
+        if (hadContent) {
+            uiState.update { it.copy(isLoading = false, isRefreshing = false) }
+            _effects.send(Effect.RefreshFailed(message))
+        } else {
+            uiState.update { it.copy(isLoading = false, isRefreshing = false, error = message) }
         }
     }
 

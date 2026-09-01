@@ -226,7 +226,8 @@ client-facing wire in exactly these places:
   `group.page_size` (1–100, default 5; only valid with the grouped view).
   Under `view=by_workspace` the page becomes `{groups:[{workspace,
   sessions[], total}], total, has_more, next_page_token}` — see the v2
-  section. The Android app does not use v2 (doc-only).
+  section. The Android app uses it since ticket 115 (the grouped-by-workspace
+  session list).
 - **New global WS event `event.session.archived`** (commit `15da8460`):
   fires on both the live and the cold archive path, no subscription needed;
   the envelope `session_id` is the global watermark `__global__` and the real
@@ -1092,8 +1093,9 @@ verified live on 0.31.1 (2026-08-01). Top-level keys of `data`:
 spreadsheet-like session table). GET-only (`POST` → plain 404), wrapped in
 the **v1 response envelope**. A leaner, cold-storage-friendly session
 listing: epoch-**ms** timestamps, `null` (not absent) unset fields, no usage
-block. The Android app does not use it; documented for completeness
-(verified live 2026-08-06).
+block. The Android app uses it since ticket 115 — the grouped-by-workspace
+session list calls `view=by_workspace&group.page_size=5` (verified live
+2026-08-06).
 
 ```bash
 curl -s -H "Authorization: Bearer <token>" \
@@ -1131,15 +1133,21 @@ curl -s -H "Authorization: Bearer <token>" \
   only empty ones)**, **`view` (0.38.0: `flat` default | `by_workspace`, see
   below)**, and **`group.page_size` (0.38.0: sessions per workspace under the
   grouped view, 1–100, default 5, up to 10000 with the `id,archived`
-  projection; rejected without the grouped view → `40001`)**. Items are ordered by
+  projection; rejected without the grouped view → `40001`)**. The 0.39.1 web
+  bundle additionally filters by **`workspace.id=<id>`** (one workspace's
+  sessions) and **`activity.status=<value>`** (sessions in that live state) —
+  from the bundle's `listSessionGroupsV2`, 2026-09-01. Items are ordered by
   `meta.updated_at` desc by default. Unknown params (`limit`, `cursor`,
   `workspace_id`, `archived`, `q`, …) are **silently ignored**.
 - Bad page tokens are a **new error code `40922`** (HTTP 200, envelope;
   distinct from search's `40001`): undecodable → `"page_token is corrupted;
   discard it and restart from the first page"`; valid-base64-but-foreign →
   `"page_token does not match the query conditions; …"`.
-- `activity.status` observed only as `"idle"` on this server; `title` /
-  `last_prompt` are `null` when unset. **0.39.1 (additive, verified live):**
+- `activity.status` value space: **`"idle"` / `"running"` / `"approval"` /
+  `"question"`** — it carries the pending-interaction state (`"running"`
+  verified live 2026-09-01, the rest from the 0.39.1 web bundle's mapper; the
+  earlier "observed only as idle" claim was stale). `title` / `last_prompt`
+  are `null` when unset. **0.39.1 (additive, verified live):**
   `activity` gained a **`model`** field — the session's bound model, `""`
   when unset (commit `2bf7ed22`).
 - **0.37.2:** every page carries **`total`** (the size of the filtered set);

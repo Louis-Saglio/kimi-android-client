@@ -886,6 +886,194 @@ class SessionListViewModelTest {
         awaitCondition { fakeSocket.collections == 2 }
     }
 
+    // --- Grouped-by-workspace view (ticket 115) ---
+
+    @Test
+    fun `the toggle defaults to flat, switches to grouped and survives recreation`() = runBlocking {
+        assertFalse(viewModel.uiState.value.groupedView)
+        assertNull(viewModel.uiState.value.groups)
+        server.enqueue(MockResponse(body = groupsBody("/tmp/a" to listOf("session_1"))))
+
+        viewModel.onViewModeToggle()
+
+        assertTrue(viewModel.uiState.value.groupedView)
+        awaitState(viewModel.uiState) { it.groups != null }
+        assertEquals(GROUPED_TARGET, server.takeRequest(5, TimeUnit.SECONDS)!!.target)
+        assertTrue(settingsRepository.isSessionListGrouped())
+
+        // Recreated with the same DataStore (process death): the persisted mode is
+        // re-read, so ON_START loads the groups, never the flat list.
+        viewModel = createViewModel()
+        server.enqueue(MockResponse(body = groupsBody("/tmp/a" to listOf("session_1"))))
+        viewModel.onScreenStarted()
+
+        awaitState(viewModel.uiState) { it.groupedView && it.groups != null }
+        assertEquals(GROUPED_TARGET, server.takeRequest(5, TimeUnit.SECONDS)!!.target)
+        assertEquals(listOf("session_1"), viewModel.uiState.value.groups!!.single().sessions.map { it.id })
+        assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun `toggling back to a never-loaded flat list fires its initial load`() = runBlocking {
+        enterGroupedMode(groupsBody("/tmp/a" to listOf("session_1")))
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1")))
+
+        viewModel.onViewModeToggle()
+
+        assertFalse(viewModel.uiState.value.groupedView)
+        awaitState(viewModel.uiState) { it.sessions != null }
+        assertEquals("/api/v1/sessions", server.takeRequest(5, TimeUnit.SECONDS)!!.target)
+        assertFalse(settingsRepository.isSessionListGrouped())
+    }
+
+    @Test
+    fun `ON_START with loaded groups fires no request`() = runBlocking {
+        enterGroupedMode(groupsBody("/tmp/a" to listOf("session_1")))
+
+        viewModel.onScreenStarted()
+
+        // Manual refresh only (ticket 112), mode-aware: groups on screen = content.
+        assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
+        assertFalse(viewModel.uiState.value.isLoading)
+        assertFalse(viewModel.uiState.value.isRefreshing)
+    }
+
+    @Test
+    fun `pull-to-refresh in grouped mode re-fetches the groups`() = runBlocking {
+        enterGroupedMode(groupsBody("/tmp/a" to listOf("session_1")))
+        server.enqueue(MockResponse(body = groupsBody("/tmp/a" to listOf("session_1", "session_2"))))
+
+        viewModel.onPullToRefresh()
+
+        assertEquals(GROUPED_TARGET, server.takeRequest(5, TimeUnit.SECONDS)!!.target)
+        awaitState(viewModel.uiState) { it.groups?.single()?.sessions?.size == 2 }
+        assertFalse(viewModel.uiState.value.isRefreshing)
+    }
+
+    @Test
+    fun `a reconnect in grouped mode re-fetches the groups once`() = runBlocking {
+        enterGroupedMode(groupsBody("/tmp/a" to listOf("session_1")))
+        server.enqueue(MockResponse(body = groupsBody("/tmp/a" to listOf("session_1", "session_2"))))
+
+        fakeSocket.events.tryEmit(SessionListEvent.Reconnected)
+
+        assertEquals(GROUPED_TARGET, server.takeRequest(5, TimeUnit.SECONDS)!!.target)
+        awaitState(viewModel.uiState) { it.groups?.single()?.sessions?.size == 2 }
+        assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun `a work_changed event patches the row inside its group without moving it`() = runBlocking {
+        enterGroupedMode(groupsBody("/tmp/a" to listOf("session_1", "session_2"), "/tmp/b" to listOf("session_3")))
+
+        fakeSocket.events.tryEmit(SessionListEvent.WorkChanged("session_2", busy = true, pendingInteraction = "approval"))
+
+        awaitState(viewModel.uiState) { it.groups!![0].sessions[1].isAwaitingInteraction }
+        val groups = viewModel.uiState.value.groups!!
+        assertTrue(groups[0].sessions[1].isRunning)
+        // The row patched in place: order untouched, in both groups.
+        assertEquals(listOf("session_1", "session_2"), groups[0].sessions.map { it.id })
+        assertEquals(listOf("session_3"), groups[1].sessions.map { it.id })
+        // Pure WebSocket patch: no REST call beyond the initial grouped load.
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun `a meta updated event patches the row title inside its group`() = runBlocking {
+        enterGroupedMode(groupsBody("/tmp/a" to listOf("session_1", "session_2"), "/tmp/b" to listOf("session_3")))
+
+        fakeSocket.events.tryEmit(SessionListEvent.MetaUpdated("session_3", "Retitled"))
+
+        awaitState(viewModel.uiState) { it.groups!![1].sessions[0].title == "Retitled" }
+        val groups = viewModel.uiState.value.groups!!
+        assertEquals(listOf("session_3"), groups[1].sessions.map { it.id })
+        assertEquals(listOf("session_1", "session_2"), groups[0].sessions.map { it.id })
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun `a session archived event drops the row from its group`() = runBlocking {
+        enterGroupedMode(groupsBody("/tmp/a" to listOf("session_1", "session_2"), "/tmp/b" to listOf("session_3")))
+
+        fakeSocket.events.tryEmit(SessionListEvent.SessionArchived("session_1"))
+
+        awaitState(viewModel.uiState) { it.groups!![0].sessions.map { s -> s.id } == listOf("session_2") }
+        assertEquals(listOf("session_3"), viewModel.uiState.value.groups!![1].sessions.map { it.id })
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun `create success prepends the new session to the matching group`() = runBlocking {
+        enterGroupedMode(groupsBody("/tmp/a" to listOf("session_1"), "/tmp/b" to listOf("session_2")))
+        server.enqueue(MockResponse(code = 500)) // workspaces fetch
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"id":"session_new","title":"New session",""" +
+                    """"updated_at":"2026-08-02T06:00:00.000Z","busy":false,""" +
+                    """"metadata":{"cwd":"/tmp/b"}},"request_id":"r"}""",
+            ),
+        )
+        viewModel.onNewSessionClick()
+        server.takeRequest(5, TimeUnit.SECONDS) // workspaces fetch
+        viewModel.onNewSessionCwdChange("/tmp/b")
+
+        viewModel.onCreateSessionConfirm()
+
+        awaitState(viewModel.uiState) { it.groups!![1].sessions.first().id == "session_new" }
+        val groups = viewModel.uiState.value.groups!!
+        assertEquals(listOf("session_new", "session_2"), groups[1].sessions.map { it.id })
+        assertEquals(listOf("session_1"), groups[0].sessions.map { it.id })
+        // The flat list was never loaded in grouped mode and stays that way — a
+        // one-row flat list would clobber the disk cache.
+        assertNull(viewModel.uiState.value.sessions)
+    }
+
+    @Test
+    fun `the activity bump moves the session to the top of its group only`() = runBlocking {
+        enterGroupedMode(groupsBody("/tmp/a" to listOf("session_1", "session_2"), "/tmp/b" to listOf("session_3")))
+
+        val sentAt = Instant.parse("2026-08-02T06:00:00.000Z")
+        activityStore.record("session_2", sentAt)
+        viewModel.onScreenStarted()
+
+        val groups = viewModel.uiState.value.groups!!
+        assertEquals(listOf("session_2", "session_1"), groups[0].sessions.map { it.id })
+        assertEquals(sentAt, groups[0].sessions.first().updatedAt)
+        // Groups themselves never reorder.
+        assertEquals(listOf("/tmp/a", "/tmp/b"), groups.map { it.cwd })
+        assertEquals(listOf("session_3"), groups[1].sessions.map { it.id })
+        assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
+    }
+
+    /**
+     * Puts the screen in grouped mode with [body] answered to the grouped fetch,
+     * drains that request, and runs ON_START — with groups on screen it fires no
+     * further request (112) but opens the (faked) socket collection. The mode is
+     * exercised through the real toggle, so the DataStore write is covered too.
+     */
+    private suspend fun enterGroupedMode(body: String) {
+        server.enqueue(MockResponse(body = body))
+        viewModel.onViewModeToggle()
+        awaitState(viewModel.uiState) { it.groups != null }
+        assertEquals(GROUPED_TARGET, server.takeRequest(5, TimeUnit.SECONDS)!!.target)
+        viewModel.onScreenStarted()
+    }
+
+    private fun groupsBody(vararg groups: Pair<String, List<String>>): String {
+        val groupsJson = groups.joinToString(",") { (cwd, ids) ->
+            val workspaceId = "wd_" + cwd.substringAfterLast('/')
+            val sessions = ids.joinToString(",") { id ->
+                """{"id":"$id","workspace":{"id":"$workspaceId","cwd":"$cwd"},""" +
+                    """"meta":{"title":"Title $id","last_prompt":null,"created_at":1787253993333,""" +
+                    """"updated_at":1787253993333,"archived":false,"archived_at":null},""" +
+                    """"activity":{"status":"idle","model":""}}"""
+            }
+            """{"workspace":{"id":"$workspaceId","cwd":"$cwd"},"sessions":[$sessions],"total":${ids.size}}"""
+        }
+        return """{"code":0,"msg":"success","data":{"groups":[$groupsJson],""" +
+            """"total":${groups.size},"has_more":false,"next_page_token":null},"request_id":"r"}"""
+    }
+
     private fun pageBody(hasMore: Boolean, vararg ids: String): String {
         val items = ids.joinToString(",") { id ->
             """{"id":"$id","title":"Title $id","updated_at":"2026-07-17T03:48:31.606Z",""" +
@@ -915,6 +1103,8 @@ class SessionListViewModelTest {
                "default_effort":"high"}
             ]},"request_id":"r"}
         """
+        const val GROUPED_TARGET = "/api/v2/sessions?view=by_workspace&group.page_size=5"
+
         const val WORKSPACES_BODY = """
             {"code":0,"msg":"success","data":{"items":[
               {"id":"wd_old","root":"/tmp/old","name":"old",

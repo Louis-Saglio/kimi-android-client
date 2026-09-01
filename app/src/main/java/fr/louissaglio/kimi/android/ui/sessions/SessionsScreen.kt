@@ -17,6 +17,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
@@ -31,6 +32,7 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -103,6 +105,7 @@ fun SessionsScreen(
         onRetry = viewModel::onRetry,
         onPullToRefresh = viewModel::onPullToRefresh,
         onEndReached = viewModel::onEndReached,
+        onViewModeToggle = viewModel::onViewModeToggle,
         onNewSessionClick = viewModel::onNewSessionClick,
         onNewSessionCwdChange = viewModel::onNewSessionCwdChange,
         onNewSessionTitleChange = viewModel::onNewSessionTitleChange,
@@ -121,6 +124,7 @@ private fun SessionsContent(
     onRetry: () -> Unit,
     onPullToRefresh: () -> Unit,
     onEndReached: () -> Unit,
+    onViewModeToggle: () -> Unit,
     onNewSessionClick: () -> Unit,
     onNewSessionCwdChange: (String) -> Unit,
     onNewSessionTitleChange: (String) -> Unit,
@@ -132,6 +136,16 @@ private fun SessionsContent(
             TopAppBar(
                 title = { Text("Kimi Code") },
                 actions = {
+                    // Flat ↔ grouped toggle (ticket 115); the tint carries the state,
+                    // the content description the action.
+                    IconButton(onClick = onViewModeToggle) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.List,
+                            contentDescription =
+                                if (uiState.groupedView) "Show flat session list" else "Group sessions by workspace",
+                            tint = if (uiState.groupedView) MaterialTheme.colorScheme.primary else LocalContentColor.current,
+                        )
+                    }
                     IconButton(onClick = onNavigateToSettings) {
                         Icon(Icons.Filled.Settings, contentDescription = "Settings")
                     }
@@ -153,17 +167,20 @@ private fun SessionsContent(
                 .padding(innerPadding),
         ) {
             when {
-                uiState.sessions == null && uiState.error != null ->
+                !uiState.hasContent && uiState.error != null ->
                     // verticalScroll makes the otherwise static state reach pull-to-refresh's nested scroll.
                     ErrorState(
                         uiState.error,
                         onRetry,
                         modifier = Modifier.verticalScroll(rememberScrollState()),
                     )
-                uiState.sessions == null ->
+                !uiState.hasContent ->
                     LoadingState()
-                uiState.sessions.isEmpty() ->
+                uiState.groupedView && uiState.groups!!.isEmpty() ->
                     EmptyState("No sessions yet", modifier = Modifier.verticalScroll(rememberScrollState()))
+                !uiState.groupedView && uiState.sessions!!.isEmpty() ->
+                    EmptyState("No sessions yet", modifier = Modifier.verticalScroll(rememberScrollState()))
+                uiState.groupedView -> GroupedSessionList(uiState, onSessionClick)
                 else -> SessionList(uiState, onSessionClick, onEndReached)
             }
         }
@@ -309,6 +326,43 @@ private fun SessionList(
     }
 }
 
+/**
+ * The grouped view (ticket 115): one header per workspace group — its 114 label plus
+ * the group's full server-side count — followed by the group's rows. No paging: the
+ * grouped fetch is a single request, so there is no load-more footer.
+ */
+@Composable
+private fun GroupedSessionList(
+    uiState: SessionListViewModel.UiState,
+    onSessionClick: (Session) -> Unit,
+) {
+    LazyColumn(modifier = Modifier.fillMaxSize()) {
+        uiState.groups.orEmpty().forEach { group ->
+            item(key = "header_${group.workspaceId}", contentType = "header") {
+                GroupHeader(label = uiState.groupLabels[group.cwd] ?: group.cwd, total = group.total)
+            }
+            items(group.sessions, key = Session::id, contentType = { it::class }) { session ->
+                // The header is the workspace label, so the row keeps the bare date.
+                SessionRow(session, workspaceLabel = null, onClick = { onSessionClick(session) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun GroupHeader(label: String, total: Int) {
+    Text(
+        text = "$label ($total)",
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        style = MaterialTheme.typography.titleSmall,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp),
+    )
+}
+
 @Composable
 private fun LoadMoreFooter(error: String?, onRetry: () -> Unit) {
     Row(
@@ -393,6 +447,7 @@ private fun SessionsContentPreview() {
             onRetry = {},
             onPullToRefresh = {},
             onEndReached = {},
+            onViewModeToggle = {},
             onNewSessionClick = {},
             onNewSessionCwdChange = {},
             onNewSessionTitleChange = {},

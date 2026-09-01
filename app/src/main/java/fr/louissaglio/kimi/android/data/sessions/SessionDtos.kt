@@ -29,6 +29,53 @@ data class SessionMetadataDto(
     val cwd: String? = null,
 )
 
+// DTOs for GET /api/v2/sessions?view=by_workspace (docs/server-api.md — ticket 115).
+// v2 differs from v1 wire-wise: epoch-ms timestamps and present-but-null unset fields,
+// so these are deliberately not shared with the v1 DTOs above.
+
+@Serializable
+data class SessionGroupListData(
+    val groups: List<SessionGroupDto> = emptyList(),
+    @SerialName("has_more") val hasMore: Boolean = false,
+    @SerialName("next_page_token") val nextPageToken: String? = null,
+    val total: Int = 0,
+)
+
+@Serializable
+data class SessionGroupDto(
+    val workspace: SessionV2WorkspaceDto,
+    val sessions: List<SessionV2Dto> = emptyList(),
+    /** The workspace's full session count server-side — [sessions] holds only the first page. */
+    val total: Int = 0,
+)
+
+@Serializable
+data class SessionV2Dto(
+    val id: String,
+    val workspace: SessionV2WorkspaceDto,
+    val meta: SessionV2MetaDto = SessionV2MetaDto(),
+    val activity: SessionV2ActivityDto = SessionV2ActivityDto(),
+)
+
+@Serializable
+data class SessionV2WorkspaceDto(
+    val id: String,
+    val cwd: String,
+)
+
+@Serializable
+data class SessionV2MetaDto(
+    val title: String? = null,
+    /** Epoch milliseconds, unlike v1's ISO strings. */
+    @SerialName("updated_at") val updatedAt: Long = 0,
+)
+
+@Serializable
+data class SessionV2ActivityDto(
+    /** "idle" | "running" | "approval" | "question" (docs/server-api.md). */
+    val status: String = "idle",
+)
+
 // DTOs for GET /api/v1/workspaces (docs/server-api.md); same conventions as above.
 
 @Serializable

@@ -35,6 +35,21 @@ class SessionsRepository @Inject constructor(
         }
 
     /**
+     * Fetches the workspace-grouped session list from
+     * `GET /api/v2/sessions?view=by_workspace&group.page_size=5` (docs/server-api.md —
+     * ticket 115): each workspace group carries its 5 most recent sessions and its full
+     * count. One request only: the page size counts groups (default 50), which covers
+     * Louis's workspaces — a true `has_more` leaves the remaining groups unshown (out
+     * of scope). Same error-boundary contract as [listSessions].
+     */
+    suspend fun listSessionGroups(settings: ServerSettings): Result<List<SessionGroup>> =
+        api.get(settings, "/api/v2/sessions?view=by_workspace&group.page_size=5") { body ->
+            json.decodeFromString<Envelope<SessionGroupListData>>(body).toResult().map { data ->
+                data.groups.map { it.toDomain() }
+            }
+        }
+
+    /**
      * Fetches one session via `GET /api/v1/sessions/{id}` (docs/server-api.md) — same
      * payload shape as the list items. Used by the chat screen for its top-bar title.
      * Same error-boundary contract as [listSessions].
@@ -79,6 +94,24 @@ class SessionsRepository @Inject constructor(
         updatedAt = runCatching { Instant.parse(updatedAt) }.getOrDefault(Instant.EPOCH),
         isRunning = busy,
         isAwaitingInteraction = isAwaitingInteraction(pendingInteraction),
+    )
+
+    private fun SessionGroupDto.toDomain(): SessionGroup = SessionGroup(
+        workspaceId = workspace.id,
+        cwd = workspace.cwd,
+        sessions = sessions.map { it.toDomain() },
+        total = total,
+    )
+
+    private fun SessionV2Dto.toDomain(): Session = Session(
+        id = id,
+        title = meta.title?.takeIf { it.isNotBlank() },
+        cwd = workspace.cwd,
+        updatedAt = runCatching { Instant.ofEpochMilli(meta.updatedAt) }.getOrDefault(Instant.EPOCH),
+        isRunning = activity.status == "running",
+        // v2's activity.status carries the pending-interaction state; the badge rule
+        // (ticket 087) is the same as v1's — approvals AND questions read as "needs me".
+        isAwaitingInteraction = activity.status == "approval" || activity.status == "question",
     )
 
     private fun WorkspaceDto.toDomain(): Workspace = Workspace(

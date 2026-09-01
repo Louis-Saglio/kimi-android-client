@@ -38,6 +38,18 @@ data class SessionPage(
     val hasMore: Boolean,
 )
 
+/**
+ * One workspace group of the grouped session list (ticket 115). [sessions] holds only
+ * the group's first page (5 per workspace); [total] is the workspace's full matching
+ * count server-side, shown in the group header.
+ */
+data class SessionGroup(
+    val workspaceId: String,
+    val cwd: String,
+    val sessions: List<Session>,
+    val total: Int,
+)
+
 /** Domain model for a workspace, as exposed by [SessionsRepository] to ViewModels. */
 data class Workspace(
     val id: String,

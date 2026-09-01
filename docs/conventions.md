@@ -50,7 +50,14 @@
   disambiguated-label function (last path segment, parent segments prepended
   while another cwd labels the same); the flat rows' supporting lines consume it
   via `SessionListViewModel.UiState.workspaceLabels`, the 115 group headers reuse
-  it.
+  it. The grouped view itself (ticket 115) comes from
+  `SessionsRepository.listSessionGroups` — the app's one v2 call
+  (`/api/v2/sessions?view=by_workspace&group.page_size=5`, one unpaged request,
+  epoch-ms v2 DTOs kept separate from v1's). The flat/grouped toggle persists in
+  `SettingsRepository` (flat default, re-read on every screen start); the live
+  socket machinery patches rows by id inside their group (groups never reorder),
+  and the activity bump / create-insert / archive-drop are mode-aware in the
+  ViewModel.
 - `data/attachments/` — `AttachmentStore` owns all platform file I/O (content
   resolver reads capped at 256 MiB — a client-side guard; the server removed
   its own upload cap in 0.31.0, see ticket 059; cache writes;

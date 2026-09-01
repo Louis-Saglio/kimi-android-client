@@ -64,23 +64,23 @@ view would reshuffle while scrolling.
 
 ## Acceptance criteria
 
-- [ ] The toggle switches between flat and grouped and survives process death
+- [x] The toggle switches between flat and grouped and survives process death
   (DataStore-backed; ViewModel test on the persistence read).
-- [ ] MockWebServer test: the grouped fetch requests exactly
+- [x] MockWebServer test: the grouped fetch requests exactly
   `/api/v2/sessions?view=by_workspace&group.page_size=5`; group mapping turns
   `activity.status` `running` → running dot state, `approval` / `question` →
   needs-attention badge state, `idle` → neither.
-- [ ] ViewModel tests: socket `work_changed` / `meta.updated` patch a row
+- [x] ViewModel tests: socket `work_changed` / `meta.updated` patch a row
   inside its group without moving it; `SessionArchived` drops the row from its
   group; a create-insert lands at the top of the matching group; the activity
   bump reorders only within the group.
 - [ ] On-device: grouped view shows all workspaces with their 5 most recent
   sessions and per-group counts; badges/dots match the web client's.
-- [ ] `docs/server-api.md` corrected: `activity.status` value space
+- [x] `docs/server-api.md` corrected: `activity.status` value space
   (`idle`/`running`/`approval`/`question` — `running` live-verified
   2026-09-01, the rest from the 0.39.1 web bundle) and the `workspace.id`,
   `activity.status`, `meta.has_prompt` query params.
-- [ ] `./gradlew :app:assembleDebug` succeeds with all unit tests green (VPS
+- [x] `./gradlew :app:assembleDebug` succeeds with all unit tests green (VPS
   rules: `flock /tmp/kimi-android-gradle.lock`, `--max-workers=1`,
   `--no-daemon` when parallel).
 
