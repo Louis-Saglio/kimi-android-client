@@ -1,9 +1,11 @@
 package fr.louissaglio.kimi.android.data.chat
 
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 
 /**
@@ -27,6 +29,12 @@ import kotlinx.serialization.json.intOrNull
  * to the job screen via the carried `task_id` (the background-Bash treatment —
  * linked rows never expand inline); [TaskList] and a task-less [WaitFor] keep the
  * generic expansion.
+ * The meta calls (ticket 125) close the arc with lean tuned rows — nothing
+ * navigates away: [Skill] previews the invocation, [ReadMedia] carries the crop
+ * badge's dimensions, [ExitPlanMode] the expansion's option chips, [CreateGoal]
+ * the objective preview, [UpdateGoal] the status badge, [SetGoalBudget] the
+ * budget preview. `GetGoal`/`EnterPlanMode` have no payload by design — their
+ * rows stay fully generic.
  */
 sealed interface ToolPayload {
 
@@ -184,6 +192,62 @@ sealed interface ToolPayload {
      * (`active_only` true, no limit) — parsed for completeness; the row keeps the
      * generic expansion. */
     data class TaskList(val activeOnly: Boolean, val limit: Int?) : ToolPayload
+
+    /** The Skill call's inputs (ticket 125). [skill] is required — a call without
+     * one keeps the generic expansion. [args] is the optional argument string,
+     * null when unset or blank; the row preview (ToolPreview) appends it to the
+     * skill name. The expansion stays the generic key/value table. */
+    data class Skill(val skill: String, val args: String?) : ToolPayload
+
+    /** The ReadMediaFile call's inputs (ticket 125). [path] is required.
+     * [regionWidth]/[regionHeight] are the crop's dimensions — the parser is
+     * all-or-nothing, so both are null for a half-specified `region` (no badge).
+     * The row keeps the inline generic expansion. */
+    data class ReadMedia(
+        val path: String,
+        val regionWidth: Int?,
+        val regionHeight: Int?,
+    ) : ToolPayload {
+
+        /** The row's crop badge ("crop 100×200"), null without a full region. */
+        val cropLabel: String?
+            get() = if (regionWidth != null && regionHeight != null) "crop ${regionWidth}×${regionHeight}" else null
+    }
+
+    /** The ExitPlanMode call's options (ticket 125): [optionLabels] render as chips
+     * above the generic args table in the expansion. Empty for a plain plan
+     * approval (the wire's `options` is optional); an entry without a string
+     * label is dropped. */
+    data class ExitPlanMode(val optionLabels: List<String>) : ToolPayload
+
+    /** The CreateGoal call's inputs (ticket 125). [objective] is required (the
+     * row's preview); [completionCriterion] is null when unset or blank and stays
+     * in the generic expansion (as does the `replace` flag, never carried). */
+    data class CreateGoal(val objective: String, val completionCriterion: String?) : ToolPayload
+
+    /** The UpdateGoal call's input (ticket 125): [status] renders as the row's
+     * small badge instead of a preview. Kept as a string (the Grep `output_mode`
+     * rule): a drifted value still earns the badge, only the color falls back to
+     * neutral. */
+    data class UpdateGoal(val status: String) : ToolPayload {
+
+        /** The badge's color role — the wire's three statuses map to success /
+         * error / primary. */
+        enum class BadgeColor { SUCCESS, ERROR, PRIMARY, NEUTRAL }
+
+        val badgeColor: BadgeColor
+            get() = when (status) {
+                "complete" -> BadgeColor.SUCCESS
+                "blocked" -> BadgeColor.ERROR
+                "active" -> BadgeColor.PRIMARY
+                else -> BadgeColor.NEUTRAL
+            }
+    }
+
+    /** The SetGoalBudget call's inputs (ticket 125): the row previews
+     * "[value] [unit]" ("30 minutes" — ToolPreview). The wire's `value` is a
+     * positive number, fractional allowed (1.5 hours). */
+    data class SetGoalBudget(val value: Double, val unit: String) : ToolPayload
 }
 
 /** The payload parser: one variant per known tool, null for anything else —
@@ -205,6 +269,12 @@ object ToolPayloads {
     private const val TASK_STOP_TOOL_NAME = "TaskStop"
     private const val WAIT_FOR_TOOL_NAME = "WaitFor"
     private const val TASK_LIST_TOOL_NAME = "TaskList"
+    private const val SKILL_TOOL_NAME = "Skill"
+    private const val READ_MEDIA_TOOL_NAME = "ReadMediaFile"
+    private const val EXIT_PLAN_MODE_TOOL_NAME = "ExitPlanMode"
+    private const val CREATE_GOAL_TOOL_NAME = "CreateGoal"
+    private const val UPDATE_GOAL_TOOL_NAME = "UpdateGoal"
+    private const val SET_GOAL_BUDGET_TOOL_NAME = "SetGoalBudget"
 
     fun of(toolName: String, args: JsonObject?): ToolPayload? = when (toolName) {
         EDIT_TOOL_NAME -> editOf(args)
@@ -221,6 +291,12 @@ object ToolPayloads {
         TASK_STOP_TOOL_NAME -> taskStopOf(args)
         WAIT_FOR_TOOL_NAME -> waitForOf(args)
         TASK_LIST_TOOL_NAME -> taskListOf(args)
+        SKILL_TOOL_NAME -> skillOf(args)
+        READ_MEDIA_TOOL_NAME -> readMediaOf(args)
+        EXIT_PLAN_MODE_TOOL_NAME -> exitPlanModeOf(args)
+        CREATE_GOAL_TOOL_NAME -> createGoalOf(args)
+        UPDATE_GOAL_TOOL_NAME -> updateGoalOf(args)
+        SET_GOAL_BUDGET_TOOL_NAME -> setGoalBudgetOf(args)
         else -> null
     }
 
@@ -344,11 +420,64 @@ object ToolPayloads {
         )
     }
 
+    private fun skillOf(args: JsonObject?): ToolPayload.Skill? {
+        if (args == null) return null
+        val skill = args.stringOf("skill") ?: return null
+        return ToolPayload.Skill(skill, args.stringOf("args")?.takeIf { it.isNotBlank() })
+    }
+
+    private fun readMediaOf(args: JsonObject?): ToolPayload.ReadMedia? {
+        if (args == null) return null
+        val path = args.stringOf("path") ?: return null
+        // The crop badge needs both dimensions — a half-specified region parses
+        // as no region at all (all-or-nothing, so the payload's invariant holds).
+        val region = args["region"] as? JsonObject
+        val width = region?.intOf("width")
+        val height = region?.intOf("height")
+        val fullRegion = width != null && height != null
+        return ToolPayload.ReadMedia(
+            path,
+            regionWidth = if (fullRegion) width else null,
+            regionHeight = if (fullRegion) height else null,
+        )
+    }
+
+    private fun exitPlanModeOf(args: JsonObject?): ToolPayload.ExitPlanMode? {
+        if (args == null) return null
+        // `options` is optional on the wire — a plain plan approval carries none.
+        val labels = (args["options"] as? JsonArray)
+            ?.mapNotNull { (it as? JsonObject)?.stringOf("label") }
+            ?: emptyList()
+        return ToolPayload.ExitPlanMode(labels)
+    }
+
+    private fun createGoalOf(args: JsonObject?): ToolPayload.CreateGoal? {
+        if (args == null) return null
+        val objective = args.stringOf("objective") ?: return null
+        return ToolPayload.CreateGoal(objective, args.stringOf("completionCriterion")?.takeIf { it.isNotBlank() })
+    }
+
+    private fun updateGoalOf(args: JsonObject?): ToolPayload.UpdateGoal? {
+        if (args == null) return null
+        val status = args.stringOf("status") ?: return null
+        return ToolPayload.UpdateGoal(status)
+    }
+
+    private fun setGoalBudgetOf(args: JsonObject?): ToolPayload.SetGoalBudget? {
+        if (args == null) return null
+        val value = args.doubleOf("value") ?: return null
+        val unit = args.stringOf("unit") ?: return null
+        return ToolPayload.SetGoalBudget(value, unit)
+    }
+
     private fun JsonObject.stringOf(key: String): String? =
         (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
 
     private fun JsonObject.intOf(key: String): Int? =
         (this[key] as? JsonPrimitive)?.intOrNull
+
+    private fun JsonObject.doubleOf(key: String): Double? =
+        (this[key] as? JsonPrimitive)?.doubleOrNull
 
     /** A wire boolean flag: a string "true" is not the flag (the Edit
      * `replace_all` rule). */

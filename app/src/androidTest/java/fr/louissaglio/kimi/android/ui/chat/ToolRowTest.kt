@@ -13,6 +13,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import fr.louissaglio.kimi.android.data.chat.ToolPayload
 import fr.louissaglio.kimi.android.data.chat.ToolPreview
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
@@ -1419,5 +1420,255 @@ class ToolRowTest {
         composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
         composeTestRule.onNodeWithText("active_only").assertIsDisplayed()
         composeTestRule.onNodeWithText("task output").assertIsDisplayed()
+    }
+
+    // --- Ticket 125: meta rows (Skill, plan mode, goal, ReadMediaFile) ----------------
+
+    /** A parsed Skill row, args/payload/preview kept in sync like the live derivation. */
+    private fun skillRow(skill: String = "unslop", skillArgs: String? = null): ChatItem.ToolActivity {
+        val args = buildJsonObject {
+            put("skill", skill)
+            skillArgs?.let { put("args", it) }
+        }
+        return ChatItem.ToolActivity(
+            "tool_1",
+            "Skill",
+            ToolStatus.Done,
+            preview = ToolPreview.of("Skill", args),
+            args = args,
+            payload = ToolPayload.Skill(skill, skillArgs),
+        )
+    }
+
+    @Test
+    fun skillRowShowsSkillNamePreviewAndGenericExpansion() {
+        toolRow(skillRow())
+
+        composeTestRule.onNodeWithText("Skill").assertIsDisplayed()
+        composeTestRule.onNodeWithText("unslop").assertIsDisplayed()
+        // No bespoke glyph: the meta rows bar ReadMediaFile keep the generic tool icon.
+        composeTestRule.onNodeWithTag("toolIconReadMedia", useUnmergedTree = true).assertDoesNotExist()
+
+        // The lean row keeps the generic key/value expansion.
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+        composeTestRule.onNodeWithText("skill").assertIsDisplayed()
+        // …the name now shown twice — the row's preview and the table's value.
+        composeTestRule.onAllNodesWithText("unslop").assertCountEquals(2)
+    }
+
+    @Test
+    fun skillRowWithArgsShowsTheInvocationPreview() {
+        toolRow(skillRow(skill = "commit", skillArgs = "-m \"fix bug\""))
+
+        composeTestRule.onNodeWithText("commit -m \"fix bug\"").assertIsDisplayed()
+    }
+
+    /** A parsed ReadMediaFile row, args/payload kept in sync like the live derivation
+     * (the parser's all-or-nothing region rule mirrored by hand). */
+    private fun readMediaRow(width: Int? = null, height: Int? = null): ChatItem.ToolActivity {
+        val fullRegion = width != null && height != null
+        val args = buildJsonObject {
+            put("path", "/tmp/spike/shot.png")
+            if (width != null || height != null) {
+                put(
+                    "region",
+                    buildJsonObject {
+                        put("x", 0)
+                        put("y", 0)
+                        width?.let { put("width", it) }
+                        height?.let { put("height", it) }
+                    },
+                )
+            }
+        }
+        return ChatItem.ToolActivity(
+            "tool_1",
+            "ReadMediaFile",
+            ToolStatus.Done,
+            preview = ToolPreview.of("ReadMediaFile", args),
+            args = args,
+            payload = ToolPayload.ReadMedia(
+                "/tmp/spike/shot.png",
+                regionWidth = if (fullRegion) width else null,
+                regionHeight = if (fullRegion) height else null,
+            ),
+        )
+    }
+
+    @Test
+    fun readMediaRowShowsImageIconPathPreviewAndCropBadge() {
+        toolRow(readMediaRow(width = 100, height = 200))
+
+        composeTestRule.onNodeWithTag("toolIconReadMedia", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithText("ReadMediaFile").assertIsDisplayed()
+        composeTestRule.onNodeWithText("/tmp/spike/shot.png").assertIsDisplayed()
+        composeTestRule.onNodeWithText("crop 100×200").assertIsDisplayed()
+    }
+
+    @Test
+    fun readMediaRowWithoutRegionShowsNoCropBadgeAndKeepsGenericExpansion() {
+        toolRow(readMediaRow())
+
+        composeTestRule.onNodeWithTag("toolIconReadMedia", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNode(hasText("crop", substring = true)).assertDoesNotExist()
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+        composeTestRule.onNodeWithText("path").assertIsDisplayed()
+        composeTestRule.onAllNodesWithText("/tmp/spike/shot.png").assertCountEquals(2)
+    }
+
+    /** The ticket's acceptance case on the row: a half-specified region earns no
+     * badge (the parser nulled both dimensions). */
+    @Test
+    fun readMediaRowWithHalfSpecifiedRegionShowsNoCropBadge() {
+        toolRow(readMediaRow(width = 100))
+
+        composeTestRule.onNode(hasText("crop", substring = true)).assertDoesNotExist()
+    }
+
+    /** A parsed ExitPlanMode row, args/payload kept in sync like the live derivation. */
+    private fun exitPlanRow(vararg labels: String): ChatItem.ToolActivity {
+        val args = buildJsonObject {
+            if (labels.isNotEmpty()) {
+                put(
+                    "options",
+                    buildJsonArray {
+                        labels.forEach { label ->
+                            add(buildJsonObject { put("label", label) })
+                        }
+                    },
+                )
+            }
+        }
+        return ChatItem.ToolActivity(
+            "tool_1",
+            "ExitPlanMode",
+            ToolStatus.Done,
+            preview = ToolPreview.of("ExitPlanMode", args),
+            args = args,
+            payload = ToolPayload.ExitPlanMode(labels.toList()),
+        )
+    }
+
+    @Test
+    fun exitPlanRowShowsFixedPreviewAndOptionChipsInExpansion() {
+        toolRow(exitPlanRow("Rewrite the parser (Recommended)", "Patch the lexer"))
+
+        // The fixed prose label leads the row, never the raw options JSON.
+        composeTestRule.onNodeWithText("Plan ready for review").assertIsDisplayed()
+        composeTestRule.onNode(hasText("options", substring = true)).assertDoesNotExist()
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+
+        // The option labels as chips…
+        composeTestRule.onNodeWithText("Rewrite the parser (Recommended)").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Patch the lexer").assertIsDisplayed()
+        // …above the generic key/value table, which stays (the 118 rule).
+        composeTestRule.onNodeWithText("options").assertIsDisplayed()
+    }
+
+    @Test
+    fun plainExitPlanRowShowsTheFixedPreviewWithoutChips() {
+        toolRow(exitPlanRow())
+
+        composeTestRule.onNodeWithText("Plan ready for review").assertIsDisplayed()
+        // No options on the wire: nothing to expand (no args, no output).
+        composeTestRule.onNodeWithContentDescription("Expand tool details").assertDoesNotExist()
+    }
+
+    @Test
+    fun updateGoalRowShowsStatusBadgeInsteadOfPreview() {
+        val args = buildJsonObject { put("status", "complete") }
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "UpdateGoal",
+                ToolStatus.Done,
+                // The unsuppressed preview would be the compact-JSON fallback.
+                preview = ToolPreview.of("UpdateGoal", args),
+                args = args,
+                payload = ToolPayload.UpdateGoal("complete"),
+            ),
+        )
+
+        composeTestRule.onNodeWithText("UpdateGoal").assertIsDisplayed()
+        composeTestRule.onNodeWithText("complete").assertIsDisplayed()
+        composeTestRule.onNodeWithText("""{"status":"complete"}""").assertDoesNotExist()
+
+        // The lean row keeps the generic key/value expansion.
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+        composeTestRule.onNodeWithText("status").assertIsDisplayed()
+        composeTestRule.onAllNodesWithText("complete").assertCountEquals(2)
+    }
+
+    @Test
+    fun createGoalRowShowsObjectivePreviewAndGenericExpansion() {
+        val args = buildJsonObject {
+            put("objective", "Fix the memory leak")
+            put("completionCriterion", "The leak test passes")
+        }
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "CreateGoal",
+                ToolStatus.Done,
+                preview = ToolPreview.of("CreateGoal", args),
+                args = args,
+                payload = ToolPayload.CreateGoal("Fix the memory leak", "The leak test passes"),
+            ),
+        )
+
+        composeTestRule.onNodeWithText("Fix the memory leak").assertIsDisplayed()
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+        composeTestRule.onNodeWithText("completionCriterion").assertIsDisplayed()
+        composeTestRule.onNodeWithText("The leak test passes").assertIsDisplayed()
+    }
+
+    @Test
+    fun setGoalBudgetRowShowsBudgetPreviewAndGenericExpansion() {
+        val args = buildJsonObject {
+            put("value", 30)
+            put("unit", "minutes")
+        }
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "SetGoalBudget",
+                ToolStatus.Done,
+                preview = ToolPreview.of("SetGoalBudget", args),
+                args = args,
+                payload = ToolPayload.SetGoalBudget(30.0, "minutes"),
+            ),
+        )
+
+        composeTestRule.onNodeWithText("30 minutes").assertIsDisplayed()
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+        composeTestRule.onNodeWithText("value").assertIsDisplayed()
+        composeTestRule.onNodeWithText("30").assertIsDisplayed()
+        composeTestRule.onNodeWithText("unit").assertIsDisplayed()
+        composeTestRule.onNodeWithText("minutes").assertIsDisplayed()
+    }
+
+    /** GetGoal/EnterPlanMode carry no payload by design: the default generic row —
+     * generic icon, no tuned preview, verbatim output in the expansion. */
+    @Test
+    fun goalAndPlanEntryRowsKeepTheDefaultGenericRow() {
+        toolRow(ChatItem.ToolActivity("tool_1", "GetGoal", ToolStatus.Done, output = "No active goal."))
+
+        composeTestRule.onNodeWithText("GetGoal").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("toolIconReadMedia", useUnmergedTree = true).assertDoesNotExist()
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+        composeTestRule.onNodeWithText("No active goal.").assertIsDisplayed()
+    }
+
+    @Test
+    fun enterPlanModeRowKeepsTheDefaultGenericRow() {
+        toolRow(ChatItem.ToolActivity("tool_1", "EnterPlanMode", ToolStatus.Done, output = "Entered plan mode."))
+
+        composeTestRule.onNodeWithText("EnterPlanMode").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+        composeTestRule.onNodeWithText("Entered plan mode.").assertIsDisplayed()
     }
 }

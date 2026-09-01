@@ -24,6 +24,13 @@ import kotlinx.serialization.json.contentOrNull
  * The cron tools (ticket 124) identify by their scheduling argument:
  * CronCreate's `cron` expression, CronDelete's job `id`. CronList carries no
  * arguments at all — its "list schedules" preview is the row's own label.
+ *
+ * The meta tools (ticket 125): a Skill call previews the invocation — the `skill`
+ * name with the `args` string appended when present; a SetGoalBudget call
+ * previews both arguments together ("30 minutes"); CreateGoal identifies by its
+ * `objective`. UpdateGoal shows no preview — the row's status badge replaces it
+ * (the row owns that, like ExitPlanMode's fixed "Plan ready for review" label).
+ * ReadMediaFile's `path` is already a generic identifying key.
  */
 object ToolPreview {
 
@@ -36,10 +43,30 @@ object ToolPreview {
     private val GREP_IDENTIFYING_KEYS = listOf("pattern")
     private val CRON_CREATE_IDENTIFYING_KEYS = listOf("cron")
     private val CRON_DELETE_IDENTIFYING_KEYS = listOf("id")
+    private val CREATE_GOAL_IDENTIFYING_KEYS = listOf("objective")
     private val WHITESPACE = Regex("\\s+")
 
     fun of(toolName: String?, input: JsonObject?): String {
         if (input.isNullOrEmpty()) return ""
+        when (toolName) {
+            // Ticket 125: a Skill row reads as the invocation — the skill name,
+            // its argument string appended when present.
+            "Skill" -> {
+                val skill = (input["skill"] as? JsonPrimitive)?.contentOrNull
+                if (!skill.isNullOrBlank()) {
+                    val skillArgs = (input["args"] as? JsonPrimitive)?.contentOrNull
+                    return oneLine(if (skillArgs.isNullOrBlank()) skill else "$skill $skillArgs")
+                }
+            }
+            // Ticket 125: the budget call previews "value unit" ("30 minutes") —
+            // both arguments together; the primitive's own content keeps 30 as
+            // "30", never "30.0".
+            "SetGoalBudget" -> {
+                val value = (input["value"] as? JsonPrimitive)?.contentOrNull
+                val unit = (input["unit"] as? JsonPrimitive)?.contentOrNull
+                if (!value.isNullOrBlank() && !unit.isNullOrBlank()) return oneLine("$value $unit")
+            }
+        }
         val keys = when (toolName) {
             "Bash" -> BASH_IDENTIFYING_KEYS
             "Agent", "AgentSwarm" -> AGENT_IDENTIFYING_KEYS
@@ -49,6 +76,7 @@ object ToolPreview {
             "Grep" -> GREP_IDENTIFYING_KEYS
             "CronCreate" -> CRON_CREATE_IDENTIFYING_KEYS
             "CronDelete" -> CRON_DELETE_IDENTIFYING_KEYS
+            "CreateGoal" -> CREATE_GOAL_IDENTIFYING_KEYS
             else -> IDENTIFYING_KEYS
         }
         for (key in keys) {

@@ -5,7 +5,8 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 /** The payload-derived row display values (ticket 120): the Read range chip and the
- * Write size chip's raw numbers; plus the Grep filter-chip derivation (ticket 123). */
+ * Write size chip's raw numbers; plus the Grep filter-chip derivation (ticket 123)
+ * and the meta rows' crop label / status-badge color mapping (ticket 125). */
 class ToolPayloadTest {
 
     @Test
@@ -90,5 +91,31 @@ class ToolPayloadTest {
         assertEquals(true, grep(multiline = true).hasNonDefaultKnobs)
         assertEquals(true, grep(includeIgnored = true).hasNonDefaultKnobs)
         assertEquals(true, grep(type = "kt").hasNonDefaultKnobs)
+    }
+
+    // --- Ticket 125: the meta rows' derived display values -------------------------
+
+    @Test
+    fun `a full region shows the crop label`() {
+        assertEquals(
+            "crop 100×200",
+            ToolPayload.ReadMedia("/tmp/a.png", regionWidth = 100, regionHeight = 200).cropLabel,
+        )
+    }
+
+    @Test
+    fun `a media read without a full region shows no crop label`() {
+        assertNull(ToolPayload.ReadMedia("/tmp/a.png", regionWidth = null, regionHeight = null).cropLabel)
+        assertNull(ToolPayload.ReadMedia("/tmp/a.png", regionWidth = 100, regionHeight = null).cropLabel)
+    }
+
+    /** The UpdateGoal badge's color mapping (ticket 125): success for `complete`,
+     * error for `blocked`, primary for `active`, neutral for a drifted value. */
+    @Test
+    fun `the update goal badge color maps per status`() {
+        assertEquals(ToolPayload.UpdateGoal.BadgeColor.SUCCESS, ToolPayload.UpdateGoal("complete").badgeColor)
+        assertEquals(ToolPayload.UpdateGoal.BadgeColor.ERROR, ToolPayload.UpdateGoal("blocked").badgeColor)
+        assertEquals(ToolPayload.UpdateGoal.BadgeColor.PRIMARY, ToolPayload.UpdateGoal("active").badgeColor)
+        assertEquals(ToolPayload.UpdateGoal.BadgeColor.NEUTRAL, ToolPayload.UpdateGoal("paused").badgeColor)
     }
 }

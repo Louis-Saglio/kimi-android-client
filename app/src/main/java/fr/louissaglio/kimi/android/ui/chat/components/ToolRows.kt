@@ -58,9 +58,11 @@ import fr.louissaglio.kimi.android.ui.common.icons.ClockIcon
 import fr.louissaglio.kimi.android.ui.common.icons.DocumentIcon
 import fr.louissaglio.kimi.android.ui.common.icons.EditIcon
 import fr.louissaglio.kimi.android.ui.common.icons.GlobeIcon
+import fr.louissaglio.kimi.android.ui.common.icons.ImageIcon
 import fr.louissaglio.kimi.android.ui.common.icons.LinkIcon
 import fr.louissaglio.kimi.android.ui.common.icons.SearchIcon
 import fr.louissaglio.kimi.android.ui.common.icons.WorkspaceIcon
+import fr.louissaglio.kimi.android.ui.theme.diffColors
 import fr.louissaglio.kimi.android.ui.theme.successColor
 
 /** Tool-status glyph for the group header and the rows (tickets 022/037): spinner
@@ -225,6 +227,17 @@ internal fun ToolGroupCard(
  * Bash row: the tap or the trailing "Open job" chevron navigates to the job
  * screen, and the row never expands inline. A wait-any `WaitFor` (no task_id)
  * and `TaskList` keep the generic expansion.
+ *
+ * The meta tools (ticket 125) are lean tuned rows — nothing navigates away and
+ * the generic key/value table stays (only `ExitPlanMode` adds its option labels
+ * as a chips row above it). `Skill` previews the invocation (name + args —
+ * ToolPreview), `ReadMediaFile` carries the image glyph ([ImageIcon]) and a
+ * `crop W×H` badge when the region parsed, `ExitPlanMode` previews the fixed
+ * "Plan ready for review" label (prose, the CronList label's recipe), `CreateGoal`
+ * previews the objective, `UpdateGoal` shows no preview — the parsed status is a
+ * small badge instead (success/error/primary per the payload's badgeColor, the
+ * AA-checked container/content pairs), and `SetGoalBudget` previews "30 minutes"
+ * (ToolPreview). `GetGoal`/`EnterPlanMode` carry no payload at all — default row.
  */
 @Composable
 internal fun ToolRow(
@@ -262,6 +275,12 @@ internal fun ToolRow(
         else -> null
     }
     val linkedJobTaskId = linkedBashTaskId ?: linkedTaskControlId
+    // Ticket 125: the meta rows' structured bits (icon, badges, option chips) read
+    // the parsed payload; Skill/CreateGoal/SetGoalBudget are ToolPreview-only and
+    // need no row local.
+    val readMediaPayload = activity.payload as? ToolPayload.ReadMedia
+    val exitPlanPayload = activity.payload as? ToolPayload.ExitPlanMode
+    val updateGoalPayload = activity.payload as? ToolPayload.UpdateGoal
     // The chip counts come from the diff itself (delta types), not a line split.
     val editDiff = remember(editPayload) { editPayload?.let { EditDiffs.of(it.oldString, it.newString) } }
     val detailFields = remember(activity.args) { ToolDetailFields.of(activity.args) }
@@ -329,8 +348,9 @@ internal fun ToolRow(
             // Glob/WebSearch/FetchURL calls (ticket 122) and Grep calls (ticket 123 —
             // the Glob row's magnifier), the clock for cron calls (ticket 124 —
             // CronCreate/CronDelete by payload, CronList by name: it carries no
-            // args), a generic tool icon otherwise. The tags mark the lookup/cron
-            // glyphs for the row tests.
+            // args), the image glyph for parsed ReadMediaFile calls (ticket 125 —
+            // the one meta row with a bespoke glyph), a generic tool icon otherwise.
+            // The tags mark the lookup/cron/media glyphs for the row tests.
             if (activity.name == "Bash") {
                 Text(
                     text = ">_",
@@ -348,6 +368,7 @@ internal fun ToolRow(
                         fetchUrlPayload != null -> LinkIcon
                         grepPayload != null -> SearchIcon
                         cronCreatePayload != null || cronDeletePayload != null || isCronListRow -> ClockIcon
+                        readMediaPayload != null -> ImageIcon
                         else -> Icons.Filled.Build
                     },
                     contentDescription = null,
@@ -361,6 +382,7 @@ internal fun ToolRow(
                                 grepPayload != null -> Modifier.testTag("toolIconGrep")
                                 cronCreatePayload != null || cronDeletePayload != null || isCronListRow ->
                                     Modifier.testTag("toolIconCron")
+                                readMediaPayload != null -> Modifier.testTag("toolIconReadMedia")
                                 else -> Modifier
                             },
                         ),
@@ -371,11 +393,16 @@ internal fun ToolRow(
             // identifying part on a narrow row; the full URL is the expansion's.
             // A parsed Grep row carries its pattern slash-delimited (ticket 123).
             // CronList has no identifying argument (no args at all) — its preview
-            // is a fixed label (ticket 124).
+            // is a fixed label (ticket 124). Ticket 125: a parsed ExitPlanMode row
+            // previews the fixed "Plan ready for review" label (the CronList
+            // recipe); an UpdateGoal row shows NO preview — the status badge
+            // replaces it.
             val rowPreview = when {
                 fetchUrlPayload != null -> hostFirstUrl(fetchUrlPayload.url)
                 grepPayload != null -> "/${ToolPreview.oneLine(grepPayload.pattern)}/"
                 isCronListRow -> "list schedules"
+                exitPlanPayload != null -> "Plan ready for review"
+                updateGoalPayload != null -> ""
                 else -> activity.preview
             }
             Text(
@@ -389,9 +416,14 @@ internal fun ToolRow(
                     modifier = Modifier.weight(1f),
                     style = MaterialTheme.typography.labelMedium,
                     // The WebSearch query is prose (ticket 122), and CronList's
-                    // preview is a fixed label (ticket 124) — every other preview
-                    // is a machine string and stays monospace.
-                    fontFamily = if (webSearchPayload != null || isCronListRow) null else FontFamily.Monospace,
+                    // preview is a fixed label (ticket 124) — as is ExitPlanMode's
+                    // (ticket 125). Every other preview is a machine string and
+                    // stays monospace.
+                    fontFamily = if (webSearchPayload != null || isCronListRow || exitPlanPayload != null) {
+                        null
+                    } else {
+                        FontFamily.Monospace
+                    },
                     color = detailColor,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -427,6 +459,42 @@ internal fun ToolRow(
                         text = "one-shot",
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                         style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+            }
+            readMediaPayload?.cropLabel?.let { label ->
+                // The region crop (ticket 125), the "All" badge's shape — absent
+                // without a full region (the parser is all-or-nothing).
+                Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.small) {
+                    Text(
+                        text = label,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+            }
+            updateGoalPayload?.let { payload ->
+                // The goal status badge (ticket 125) replaces the row's preview. The
+                // ticket's named colors ride as the badge's CONTENT on their
+                // AA-checked container pairs: the diff palettes (whose content
+                // colors ARE successColor / the scheme's error) and the primary
+                // pair; a drifted status gets the neutral badge every flag uses.
+                val (container, content) = when (payload.badgeColor) {
+                    ToolPayload.UpdateGoal.BadgeColor.SUCCESS ->
+                        MaterialTheme.diffColors.addedContainer to MaterialTheme.diffColors.addedContent
+                    ToolPayload.UpdateGoal.BadgeColor.ERROR ->
+                        MaterialTheme.diffColors.removedContainer to MaterialTheme.diffColors.removedContent
+                    ToolPayload.UpdateGoal.BadgeColor.PRIMARY ->
+                        MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
+                    ToolPayload.UpdateGoal.BadgeColor.NEUTRAL ->
+                        MaterialTheme.colorScheme.secondaryContainer to MaterialTheme.colorScheme.onSecondaryContainer
+                }
+                Surface(color = container, shape = MaterialTheme.shapes.small) {
+                    Text(
+                        text = payload.status,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = content,
                     )
                 }
             }
@@ -583,6 +651,19 @@ internal fun ToolRow(
                     }
                     // WebSearch: nothing to add — the query already leads the row.
                     webSearchPayload != null -> Unit
+                    exitPlanPayload != null -> {
+                        // Ticket 125: the option labels as a chips row ABOVE the
+                        // generic args table (which stays — the wire's options
+                        // objects render as one compact-JSON value row).
+                        if (exitPlanPayload.optionLabels.isNotEmpty()) {
+                            ExitPlanOptionsRow(exitPlanPayload.optionLabels)
+                        }
+                        if (detailFields.isNotEmpty()) {
+                            ToolArgsTable(detailFields)
+                        } else if (activity.input.isNotBlank()) {
+                            ToolDetailBlock(text = activity.input, color = MaterialTheme.colorScheme.surfaceVariant)
+                        }
+                    }
                     detailFields.isNotEmpty() -> {
                         // The args table replaces the pretty-printed input JSON (ticket
                         // 118); the string only remains for calls that carried no object
@@ -761,6 +842,24 @@ private fun BashChipsRow(payload: ToolPayload.Bash, activity: ChatItem.ToolActiv
                     // An explicit timeout wins over disable_timeout — the
                     // BashTimeout.effectiveSeconds ordering.
                     text = if (timeoutSeconds != null) "⏱ ${timeoutSeconds}s" else "no timeout",
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
+        }
+    }
+}
+
+/** The ExitPlanMode expansion's option labels (ticket 125): one pill per label —
+ * the "All" badge's shape. Sits above the generic args table; nothing renders
+ * for a plain plan approval (no options on the wire). */
+@Composable
+private fun ExitPlanOptionsRow(labels: List<String>) {
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        labels.forEach { label ->
+            Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.small) {
+                Text(
+                    text = label,
                     modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                     style = MaterialTheme.typography.labelMedium,
                 )

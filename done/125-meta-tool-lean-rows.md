@@ -55,16 +55,24 @@ chips in expansion, generic rows unchanged).
 
 ## Acceptance criteria
 
-- [ ] New tests above pass; existing suite green with no behavior-test
-      changes.
+- [x] New tests above pass; existing suite green with no behavior-test
+      changes (purely additive test additions; the one edited line is a test
+      class doc comment). Device run of the new androidTests blocked by
+      TEST_QUOTA_EXCEEDED (2026-09-01) — they compile
+      (`:app:assembleDebugAndroidTest` green) but did not execute.
 - [ ] Observable on device: a `Skill` row reads as the skill name, an
       `UpdateGoal` row shows its colored status badge, a `ReadMediaFile`
       row with a `region` shows the crop badge, an `ExitPlanMode`
       expansion lists the option labels as chips.
+      **NOT device-verified: daily Firebase Test Lab quota exhausted**
+      (matrix failed during validation, zero executions — the whole
+      `ToolRowTest` class was targeted, so the ticket-124 grep fixture
+      correction also still awaits its device re-run).
 - [ ] `flock /tmp/kimi-android-gradle.lock ./gradlew :app:testDebugUnitTest
-      :app:assembleDebug --max-workers=1 --no-daemon` passes; release APK
-      published to the file server per AGENTS.md.
-- [ ] `docs/conventions.md` notes the meta-row tuning lives in
+      :app:assembleDebug --max-workers=1 --no-daemon` passes (**done** — also
+      `:app:assembleDebugAndroidTest`); release APK publish deferred to
+      post-merge per session instructions.
+- [x] `docs/conventions.md` notes the meta-row tuning lives in
       `ToolPreview` + payload badges (closing the 118–125 arc).
 
 ## Out of scope

@@ -1,5 +1,6 @@
 package fr.louissaglio.kimi.android.data.chat
 
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
@@ -624,5 +625,279 @@ class ToolPayloadsTest {
         assertNull(ToolPayloads.of("Edit", args))
         assertNull(ToolPayloads.of("Bash", args))
         assertNull(ToolPayloads.of("Grep", args))
+    }
+
+    // --- Ticket 125: meta tool payloads (Skill, plan mode, goal, ReadMediaFile) -----
+
+    @Test
+    fun `a full Skill call parses skill and args`() {
+        val args = buildJsonObject {
+            put("skill", "commit")
+            put("args", "-m \"fix bug\"")
+        }
+
+        assertEquals(ToolPayload.Skill("commit", "-m \"fix bug\""), ToolPayloads.of("Skill", args))
+    }
+
+    @Test
+    fun `a Skill call without a useful argument string parses it as absent`() {
+        assertEquals(
+            ToolPayload.Skill("unslop", args = null),
+            ToolPayloads.of("Skill", buildJsonObject { put("skill", "unslop") }),
+        )
+        assertEquals(
+            ToolPayload.Skill("unslop", args = null),
+            ToolPayloads.of(
+                "Skill",
+                buildJsonObject {
+                    put("skill", "unslop")
+                    put("args", "  ")
+                },
+            ),
+        )
+    }
+
+    @Test
+    fun `a Skill call without a string skill is rejected`() {
+        assertNull(ToolPayloads.of("Skill", null))
+        assertNull(ToolPayloads.of("Skill", buildJsonObject { }))
+        assertNull(ToolPayloads.of("Skill", buildJsonObject { put("args", "x") }))
+        assertNull(ToolPayloads.of("Skill", buildJsonObject { put("skill", 42) }))
+    }
+
+    @Test
+    fun `a ReadMediaFile call parses path and a full region`() {
+        val args = buildJsonObject {
+            put("path", "/tmp/spike/shot.png")
+            put(
+                "region",
+                buildJsonObject {
+                    put("x", 10)
+                    put("y", 20)
+                    put("width", 100)
+                    put("height", 200)
+                },
+            )
+        }
+
+        assertEquals(
+            ToolPayload.ReadMedia("/tmp/spike/shot.png", regionWidth = 100, regionHeight = 200),
+            ToolPayloads.of("ReadMediaFile", args),
+        )
+    }
+
+    @Test
+    fun `a ReadMediaFile call without a region parses with no crop`() {
+        val args = buildJsonObject {
+            put("path", "/tmp/spike/shot.png")
+            put("full_resolution", true)
+        }
+
+        assertEquals(
+            ToolPayload.ReadMedia("/tmp/spike/shot.png", regionWidth = null, regionHeight = null),
+            ToolPayloads.of("ReadMediaFile", args),
+        )
+    }
+
+    /** The ticket's acceptance case: a half-specified region earns no badge — the
+     * parser is all-or-nothing. */
+    @Test
+    fun `a half-specified region parses as no region`() {
+        fun argsWithRegion(width: Int?, height: Int?) = buildJsonObject {
+            put("path", "/tmp/spike/shot.png")
+            put(
+                "region",
+                buildJsonObject {
+                    width?.let { put("width", it) }
+                    height?.let { put("height", it) }
+                },
+            )
+        }
+
+        assertEquals(
+            ToolPayload.ReadMedia("/tmp/spike/shot.png", regionWidth = null, regionHeight = null),
+            ToolPayloads.of("ReadMediaFile", argsWithRegion(width = 100, height = null)),
+        )
+        assertEquals(
+            ToolPayload.ReadMedia("/tmp/spike/shot.png", regionWidth = null, regionHeight = null),
+            ToolPayloads.of("ReadMediaFile", argsWithRegion(width = null, height = 200)),
+        )
+    }
+
+    @Test
+    fun `a ReadMediaFile call without a string path is rejected`() {
+        assertNull(ToolPayloads.of("ReadMediaFile", null))
+        assertNull(ToolPayloads.of("ReadMediaFile", buildJsonObject { }))
+        assertNull(ToolPayloads.of("ReadMediaFile", buildJsonObject { put("path", 42) }))
+    }
+
+    @Test
+    fun `an ExitPlanMode call parses its option labels`() {
+        val args = buildJsonObject {
+            put(
+                "options",
+                buildJsonArray {
+                    add(
+                        buildJsonObject {
+                            put("label", "Rewrite the parser (Recommended)")
+                            put("description", "Clean but slow")
+                        },
+                    )
+                    add(buildJsonObject { put("label", "Patch the lexer") })
+                },
+            )
+        }
+
+        // The descriptions stay in the generic expansion — only labels are carried.
+        assertEquals(
+            ToolPayload.ExitPlanMode(listOf("Rewrite the parser (Recommended)", "Patch the lexer")),
+            ToolPayloads.of("ExitPlanMode", args),
+        )
+    }
+
+    @Test
+    fun `an ExitPlanMode call without options parses with no labels`() {
+        // A plain plan approval carries no options array at all.
+        assertEquals(ToolPayload.ExitPlanMode(emptyList()), ToolPayloads.of("ExitPlanMode", buildJsonObject { }))
+        // An entry without a string label is dropped, never rejecting the payload.
+        val args = buildJsonObject {
+            put(
+                "options",
+                buildJsonArray {
+                    add(buildJsonObject { put("description", "no label here") })
+                    add(buildJsonObject { put("label", "Kept") })
+                },
+            )
+        }
+        assertEquals(ToolPayload.ExitPlanMode(listOf("Kept")), ToolPayloads.of("ExitPlanMode", args))
+    }
+
+    @Test
+    fun `an ExitPlanMode call with null args is rejected`() {
+        assertNull(ToolPayloads.of("ExitPlanMode", null))
+    }
+
+    @Test
+    fun `a CreateGoal call parses objective and completion criterion`() {
+        val args = buildJsonObject {
+            put("objective", "Fix the memory leak")
+            put("completionCriterion", "The leak test passes")
+            put("replace", true)
+        }
+
+        // `replace` never earns UI space — not carried (the Grep knobs rule).
+        assertEquals(
+            ToolPayload.CreateGoal("Fix the memory leak", "The leak test passes"),
+            ToolPayloads.of("CreateGoal", args),
+        )
+    }
+
+    @Test
+    fun `a CreateGoal call without a useful criterion parses it as absent`() {
+        assertEquals(
+            ToolPayload.CreateGoal("Fix the memory leak", completionCriterion = null),
+            ToolPayloads.of("CreateGoal", buildJsonObject { put("objective", "Fix the memory leak") }),
+        )
+        assertEquals(
+            ToolPayload.CreateGoal("Fix the memory leak", completionCriterion = null),
+            ToolPayloads.of(
+                "CreateGoal",
+                buildJsonObject {
+                    put("objective", "Fix the memory leak")
+                    put("completionCriterion", " ")
+                },
+            ),
+        )
+    }
+
+    @Test
+    fun `a CreateGoal call without a string objective is rejected`() {
+        assertNull(ToolPayloads.of("CreateGoal", null))
+        assertNull(ToolPayloads.of("CreateGoal", buildJsonObject { }))
+        assertNull(ToolPayloads.of("CreateGoal", buildJsonObject { put("completionCriterion", "x") }))
+        assertNull(ToolPayloads.of("CreateGoal", buildJsonObject { put("objective", 42) }))
+    }
+
+    @Test
+    fun `an UpdateGoal call parses its status`() {
+        for (status in listOf("active", "complete", "blocked")) {
+            assertEquals(
+                ToolPayload.UpdateGoal(status),
+                ToolPayloads.of("UpdateGoal", buildJsonObject { put("status", status) }),
+            )
+        }
+    }
+
+    @Test
+    fun `an UpdateGoal call without a string status is rejected`() {
+        assertNull(ToolPayloads.of("UpdateGoal", null))
+        assertNull(ToolPayloads.of("UpdateGoal", buildJsonObject { }))
+        assertNull(ToolPayloads.of("UpdateGoal", buildJsonObject { put("status", 42) }))
+    }
+
+    @Test
+    fun `a SetGoalBudget call parses value and unit`() {
+        assertEquals(
+            ToolPayload.SetGoalBudget(30.0, "minutes"),
+            ToolPayloads.of(
+                "SetGoalBudget",
+                buildJsonObject {
+                    put("value", 30)
+                    put("unit", "minutes")
+                },
+            ),
+        )
+        // The wire allows fractional time budgets (1.5 hours).
+        assertEquals(
+            ToolPayload.SetGoalBudget(1.5, "hours"),
+            ToolPayloads.of(
+                "SetGoalBudget",
+                buildJsonObject {
+                    put("value", 1.5)
+                    put("unit", "hours")
+                },
+            ),
+        )
+    }
+
+    @Test
+    fun `a SetGoalBudget call without a numeric value or a string unit is rejected`() {
+        assertNull(ToolPayloads.of("SetGoalBudget", null))
+        assertNull(ToolPayloads.of("SetGoalBudget", buildJsonObject { }))
+        assertNull(ToolPayloads.of("SetGoalBudget", buildJsonObject { put("value", 30) }))
+        assertNull(ToolPayloads.of("SetGoalBudget", buildJsonObject { put("unit", "minutes") }))
+        assertNull(
+            ToolPayloads.of(
+                "SetGoalBudget",
+                buildJsonObject {
+                    put("value", "thirty")
+                    put("unit", "minutes")
+                },
+            ),
+        )
+    }
+
+    /** GetGoal and EnterPlanMode carry no fields worth tuning — no payload, the
+     * default generic row (the ticket's explicit call). */
+    @Test
+    fun `GetGoal and EnterPlanMode have no payload`() {
+        assertNull(ToolPayloads.of("GetGoal", buildJsonObject { }))
+        assertNull(ToolPayloads.of("EnterPlanMode", buildJsonObject { }))
+    }
+
+    @Test
+    fun `another tool never parses as a meta payload`() {
+        val args = buildJsonObject {
+            put("skill", "unslop")
+            put("path", "/tmp/spike/shot.png")
+            put("objective", "Fix the leak")
+            put("status", "complete")
+            put("value", 30)
+            put("unit", "minutes")
+        }
+
+        assertNull(ToolPayloads.of("Edit", args))
+        assertNull(ToolPayloads.of("Bash", args))
+        assertNull(ToolPayloads.of("CronDelete", args))
     }
 }

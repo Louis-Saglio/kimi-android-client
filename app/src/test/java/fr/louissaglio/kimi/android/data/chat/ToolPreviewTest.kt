@@ -134,6 +134,90 @@ class ToolPreviewTest {
         assertEquals("", ToolPreview.of("CronList", null))
     }
 
+    // Ticket 125: the meta tools.
+
+    @Test
+    fun `a skill call previews the skill name`() {
+        val input = buildJsonObject { put("skill", "unslop") }
+
+        assertEquals("unslop", ToolPreview.of("Skill", input))
+    }
+
+    @Test
+    fun `a skill call with an argument string appends it`() {
+        // Written like a command line — the invocation reads as one.
+        val input = buildJsonObject {
+            put("skill", "commit")
+            put("args", "-m \"fix bug\"")
+        }
+
+        assertEquals("commit -m \"fix bug\"", ToolPreview.of("Skill", input))
+    }
+
+    @Test
+    fun `a skill call without a skill falls back to the compact json`() {
+        val input = buildJsonObject { put("args", "x") }
+
+        assertEquals("""{"args":"x"}""", ToolPreview.of("Skill", input))
+    }
+
+    @Test
+    fun `a goal budget call previews value and unit`() {
+        val input = buildJsonObject {
+            put("value", 30)
+            put("unit", "minutes")
+        }
+
+        // The primitive's own content: 30, never "30.0".
+        assertEquals("30 minutes", ToolPreview.of("SetGoalBudget", input))
+    }
+
+    @Test
+    fun `a fractional goal budget previews as sent`() {
+        val input = buildJsonObject {
+            put("value", 1.5)
+            put("unit", "hours")
+        }
+
+        assertEquals("1.5 hours", ToolPreview.of("SetGoalBudget", input))
+    }
+
+    @Test
+    fun `a goal budget call missing either argument falls back to the compact json`() {
+        assertEquals("""{"value":30}""", ToolPreview.of("SetGoalBudget", buildJsonObject { put("value", 30) }))
+        assertEquals("""{"unit":"minutes"}""", ToolPreview.of("SetGoalBudget", buildJsonObject { put("unit", "minutes") }))
+    }
+
+    @Test
+    fun `a create goal call previews the objective`() {
+        // The criterion stays in the expansion — the objective identifies the call.
+        val input = buildJsonObject {
+            put("objective", "Fix the memory leak")
+            put("completionCriterion", "The leak test passes")
+        }
+
+        assertEquals("Fix the memory leak", ToolPreview.of("CreateGoal", input))
+    }
+
+    @Test
+    fun `a read media call previews the path`() {
+        // `path` is already a generic identifying key — pinned here for the arc.
+        val input = buildJsonObject {
+            put("path", "/tmp/spike/shot.png")
+            put(
+                "region",
+                buildJsonObject {
+                    put("x", 0)
+                    put("y", 0)
+                    put("width", 100)
+                    put("height", 200)
+                },
+            )
+        }
+
+        assertEquals("/tmp/spike/shot.png", ToolPreview.of("ReadMediaFile", input))
+    }
+
     @Test
     fun `no input previews nothing`() {
         assertEquals("", ToolPreview.of("Bash", null))

@@ -35,7 +35,18 @@
   `CronDelete` (lean, generic), `TaskOutput`/`TaskStop`/`WaitFor` (a carried
   `task_id` links the row to the job screen, the 096 background-Bash treatment) and
   `TaskList` (generic — a task-less `WaitFor` too). `CronList` has no payload: the
-  call carries no args, so its row is name-keyed), `ReadOutputs` (the
+  call carries no args, so its row is name-keyed). Ticket 125 closes the 118–125
+  arc with the meta tools (`Skill`, `ReadMediaFile`, `ExitPlanMode`, `CreateGoal`,
+  `UpdateGoal`, `SetGoalBudget` — `GetGoal`/`EnterPlanMode` carry no payload by
+  design): lean tuned rows, nothing navigates away, and the tuning splits exactly
+  two ways — `ToolPreview` string keys where a string suffices (Skill's invocation
+  preview, SetGoalBudget's "30 minutes" phrasing, CreateGoal's `objective`) and
+  payload-read badges/chips on the row where structure is needed (ReadMediaFile's
+  image glyph + `crop W×H` badge — the region parses all-or-nothing, so a
+  half-specified one earns none —, UpdateGoal's colored status badge replacing the
+  preview, ExitPlanMode's fixed "Plan ready for review" label + option-label chips
+  above the generic args table). Anything still falling back to the plain generic
+  table is by design (unknown/future/MCP tools). `ReadOutputs` (the
   Read output's trailing `<system>…</system>` status block lifted into the file
   screen's caption chip — end-anchored, tolerant fallback; `BashOutputs` does the
   same for the Bash output's `Command failed with exit code: N` trailer — ticket
@@ -145,7 +156,15 @@
   link `LinkIcon.kt` for FetchURL — with per-tool previews (pattern monospace,
   query prose, host-first shortened URL via ToolRows' `hostFirstUrl`). The cron rows
   (ticket 124) carry the clock `ui/common/icons/ClockIcon.kt` and a "one-shot"
-  badge on `recurring: false`. The diff rows' added/removed palettes are the
+  badge on `recurring: false`. The ticket-125 meta rows close the 118–125 arc with
+  the lean treatment: ReadMediaFile gets the one new glyph
+  (`ui/common/icons/ImageIcon.kt`) and a `crop W×H` badge, ExitPlanMode the fixed
+  "Plan ready for review" label plus option-label chips above the generic args
+  table, UpdateGoal a status badge instead of a preview — colored per the
+  payload's `badgeColor`, riding the AA-checked container/content pairs (the diff
+  palettes' contents ARE `successColor` and the scheme's error; the primary pair
+  for `active`) — and Skill/CreateGoal/SetGoalBudget are pure `ToolPreview` tuning
+  (invocation preview, objective, "30 minutes"). The diff rows' added/removed palettes are the
   `LocalDiffColors` container/content pairs (the `LocalSuccessColor` extension
   pattern), AA-checked in both themes.
 - Chat feature collaborators (the 065 `DeltaCoalescer` pattern, generalized by
