@@ -41,7 +41,7 @@ class EditDiffViewModel internal constructor(
     /** The staged Edit payload; null when the store lost the entry. A non-Edit
      * payload under the id (a later viewer ticket's hand-off reaching this screen)
      * is equally a miss. */
-    val payload: ToolPayload.Edit? = toolContentStore.consume(routeArgs.toolCallId) as? ToolPayload.Edit
+    val payload: ToolPayload.Edit? = toolContentStore.consume(routeArgs.toolCallId)?.payload as? ToolPayload.Edit
 
     /** The unified line-diff model; null together with [payload]. */
     val diff: EditDiffs.Model? = payload?.let { EditDiffs.of(it.oldString, it.newString) }

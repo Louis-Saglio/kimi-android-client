@@ -68,6 +68,10 @@ internal fun MessageList(
      * instead of expanding — the tap carries the payload for the ToolContentStore
      * hand-off. */
     onOpenEditDiff: (toolCallId: String, payload: ToolPayload.Edit) -> Unit = { _, _ -> },
+    /** Ticket 120: a `Read`/`Write` row with a parsed payload opens the file content
+     * screen instead of expanding — the tap carries the payload and the call's output
+     * snapshot for the ToolContentStore hand-off. */
+    onOpenFileContent: (toolCallId: String, payload: ToolPayload, output: String) -> Unit = { _, _, _ -> },
     /** Tickets 088/089: any `AskUserQuestion` row tap (the row id is the tool call id;
      * since 0.38.0 the pending question carries it as a distinct field next to its
      * question id — ticket 106). The pending row toggles the live card; a resolved
@@ -176,12 +180,12 @@ internal fun MessageList(
                         )
                     is ChatItem.AssistantMessage -> AssistantBubble(item)
                     is ChatItem.ToolGroup ->
-                        ToolGroupCard(item, onOpenSubagent, onOpenJob, onQuestionRowTapped, onOpenEditDiff)
+                        ToolGroupCard(item, onOpenSubagent, onOpenJob, onQuestionRowTapped, onOpenEditDiff, onOpenFileContent)
                     is ChatItem.CompactionDivider -> CompactionDividerRow(item)
                     // Bare rows are not produced by ChatTimeline anymore (ticket 037) but
                     // stay renderable for tests and previews.
                     is ChatItem.ToolActivity ->
-                        ToolRow(item, onOpenSubagent, onOpenJob, onQuestionRowTapped, onOpenEditDiff)
+                        ToolRow(item, onOpenSubagent, onOpenJob, onQuestionRowTapped, onOpenEditDiff, onOpenFileContent)
                 }
             }
         }

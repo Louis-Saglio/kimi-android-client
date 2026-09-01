@@ -67,6 +67,9 @@ fun SubagentScreen(
     /** Ticket 119: a parsed `Edit` row opens the unified diff screen, exactly like
      * the chat's rows — the payload rides along for the ToolContentStore hand-off. */
     onNavigateToEditDiff: (toolCallId: String, payload: ToolPayload.Edit) -> Unit = { _, _ -> },
+    /** Ticket 120: a parsed `Read`/`Write` row opens the file content screen, exactly
+     * like the chat's rows — payload and output snapshot ride along. */
+    onNavigateToFileContent: (toolCallId: String, payload: ToolPayload, output: String) -> Unit = { _, _, _ -> },
     viewModel: SubagentViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -162,6 +165,7 @@ fun SubagentScreen(
                     onOpenSubagent = onOpenSubagent,
                     onOpenJob = onOpenJob,
                     onOpenEditDiff = onNavigateToEditDiff,
+                    onOpenFileContent = onNavigateToFileContent,
                     isLoadingMoreHistory = uiState.isLoadingMoreHistory,
                     onHistoryTopReached = viewModel::onHistoryTopReached,
                 )

@@ -38,7 +38,8 @@ sealed interface ChatItem {
      * the expanded row's fallback when no object args exist. [payload] is the args'
      * typed, per-tool parse (ticket 119 — ToolPayloads, derived wherever args is set,
      * first-writer-wins like it): a parsed payload switches the row to its rich
-     * treatment (an Edit row opens the diff screen instead of expanding inline).
+     * treatment (an Edit row opens the diff screen, a Read/Write row the file content
+     * screen — ticket 120 — instead of expanding inline).
      * [output] is the result
      * text; either may be blank while the call is still running.
      * While running, [output] accumulates the volatile tool.progress chunks (ticket 025)

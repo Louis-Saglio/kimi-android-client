@@ -16,7 +16,16 @@ class ToolContentStoreTest {
 
         store.put("tool_1", payload)
 
-        assertEquals(payload, store.consume("tool_1"))
+        assertEquals(ToolContentStore.Entry(payload), store.consume("tool_1"))
+    }
+
+    @Test
+    fun `the staged output snapshot round-trips`() {
+        val store = ToolContentStore()
+
+        store.put("tool_1", payload, output = "     1→one")
+
+        assertEquals(ToolContentStore.Entry(payload, "     1→one"), store.consume("tool_1"))
     }
 
     @Test
@@ -41,6 +50,6 @@ class ToolContentStoreTest {
         val newer = payload.copy(newString = "three")
         store.put("tool_1", newer)
 
-        assertEquals(newer, store.consume("tool_1"))
+        assertEquals(ToolContentStore.Entry(newer), store.consume("tool_1"))
     }
 }

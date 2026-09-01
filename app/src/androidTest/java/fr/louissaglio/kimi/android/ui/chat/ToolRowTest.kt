@@ -1,6 +1,7 @@
 package fr.louissaglio.kimi.android.ui.chat
 
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
@@ -392,5 +393,168 @@ class ToolRowTest {
         composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
         composeTestRule.onNodeWithText("path").assertIsDisplayed()
         composeTestRule.onNodeWithText("/tmp/spike/other.txt").assertIsDisplayed()
+    }
+
+    // --- Ticket 120: parsed Read/Write rows -----------------------------------------
+
+    private val readPayload = ToolPayload.Read("/tmp/spike/a.txt", offset = 40, limit = 100)
+    private val writePayload = ToolPayload.Write("/tmp/spike/a.txt", "one\ntwo\nthree", append = false)
+
+    @Test
+    fun rangedReadRowShowsLineRangeChipAndOpenFileChevronWithoutExpansion() {
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "Read",
+                ToolStatus.Done,
+                preview = "/tmp/spike/a.txt",
+                payload = readPayload,
+                output = "    40→forty",
+            ),
+        )
+
+        composeTestRule.onNodeWithText("lines 40–139").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Expand tool details").assertDoesNotExist()
+        composeTestRule.onNodeWithContentDescription("Open file").assertIsDisplayed()
+    }
+
+    @Test
+    fun fullFileReadRowShowsNoRangeChip() {
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "Read",
+                ToolStatus.Done,
+                preview = "/tmp/spike/a.txt",
+                payload = ToolPayload.Read("/tmp/spike/a.txt", offset = null, limit = null),
+            ),
+        )
+
+        composeTestRule.onNode(hasText("lines", substring = true)).assertDoesNotExist()
+        composeTestRule.onNodeWithContentDescription("Open file").assertIsDisplayed()
+    }
+
+    @Test
+    fun tappingReadRowNavigatesWithPayloadAndOutputSnapshot() {
+        var opened: Triple<String, ToolPayload, String>? = null
+        composeTestRule.setContent {
+            KimiTheme {
+                ToolRow(
+                    ChatItem.ToolActivity(
+                        "tool_1",
+                        "Read",
+                        ToolStatus.Running,
+                        preview = "/tmp/spike/a.txt",
+                        args = buildJsonObject {
+                            put("path", "/tmp/spike/a.txt")
+                            put("line_offset", 40)
+                            put("n_lines", 100)
+                        },
+                        payload = readPayload,
+                        output = "    40→partial",
+                    ),
+                    onOpenFileContent = { id, payload, output -> opened = Triple(id, payload, output) },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("Read").performClick()
+
+        assertEquals(Triple("tool_1", readPayload, "    40→partial"), opened)
+        // No inline expansion: the args table's labels never render.
+        composeTestRule.onNodeWithText("line_offset").assertDoesNotExist()
+    }
+
+    @Test
+    fun readRowChevronNavigates() {
+        var opened: String? = null
+        composeTestRule.setContent {
+            KimiTheme {
+                ToolRow(
+                    ChatItem.ToolActivity("tool_1", "Read", ToolStatus.Done, preview = "/tmp/spike/a.txt", payload = readPayload),
+                    onOpenFileContent = { id, _, _ -> opened = id },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithContentDescription("Open file").performClick()
+        assertEquals("tool_1", opened)
+    }
+
+    @Test
+    fun writeRowShowsSizeChipAndNoAppendBadgeForOverwrite() {
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "Write",
+                ToolStatus.Done,
+                preview = "/tmp/spike/a.txt",
+                payload = writePayload,
+            ),
+        )
+
+        // "one\ntwo\nthree": 3 lines, 13 bytes.
+        composeTestRule.onNodeWithText("3 lines · 13 B").assertIsDisplayed()
+        composeTestRule.onNodeWithText("append").assertDoesNotExist()
+        composeTestRule.onNodeWithContentDescription("Expand tool details").assertDoesNotExist()
+        composeTestRule.onNodeWithContentDescription("Open file").assertIsDisplayed()
+    }
+
+    @Test
+    fun appendWriteRowShowsAppendBadge() {
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "Write",
+                ToolStatus.Done,
+                preview = "/tmp/spike/a.txt",
+                payload = writePayload.copy(append = true),
+            ),
+        )
+
+        composeTestRule.onNodeWithText("append").assertIsDisplayed()
+    }
+
+    @Test
+    fun tappingWriteRowNavigatesWithPayloadAndOutputSnapshot() {
+        var opened: Triple<String, ToolPayload, String>? = null
+        composeTestRule.setContent {
+            KimiTheme {
+                ToolRow(
+                    ChatItem.ToolActivity(
+                        "tool_1",
+                        "Write",
+                        ToolStatus.Done,
+                        preview = "/tmp/spike/a.txt",
+                        payload = writePayload,
+                        output = "File written",
+                    ),
+                    onOpenFileContent = { id, payload, output -> opened = Triple(id, payload, output) },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("Write").performClick()
+
+        assertEquals(Triple("tool_1", writePayload, "File written"), opened)
+    }
+
+    /** A Read/Write call whose args did not parse (no payload) keeps the generic
+     * key/value expansion. */
+    @Test
+    fun unparseableReadRowKeepsGenericExpansion() {
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "Read",
+                ToolStatus.Done,
+                preview = "/tmp/spike/a.txt",
+                args = buildJsonObject { put("line_offset", 40) },
+            ),
+        )
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+        composeTestRule.onNodeWithText("line_offset").assertIsDisplayed()
     }
 }

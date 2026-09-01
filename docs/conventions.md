@@ -19,7 +19,11 @@
   `ChatItem.ToolActivity` — and payload-derived display renderings live in
   `data/chat` helpers: `ToolPreview` for the row preview, `ToolDetailFields` for
   the expanded row's generic key/value args table, ticket 118, `ToolPayloads`
-  for the typed per-tool payload parse (ticket 119 — `ToolPayload.Edit` first) and
+  for the typed per-tool payload parse (ticket 119 — `ToolPayload.Edit` first;
+  ticket 120 adds `Read`/`Write`, the payload carrying the row chip derivations:
+  Read's `lines a–b` range label, Write's line/byte counts), `ReadOutputs` (the
+  Read output's trailing `<system>…</system>` status block lifted into the file
+  screen's caption chip — end-anchored, tolerant fallback) and
   `EditDiffs` for the unified line-diff model (java-diff-utils Myers on the Edit
   call's old/new strings; rows plus the `+a −b` delta-type counts)), and
   `SessionActivityStore` (`data/sessions/` — process-lifetime
@@ -94,16 +98,27 @@
   `Formatters` — reuse them instead of adding one-off copies. Large tool-payload
   content reaches its detail screen through `ToolContentStore` (ui/chat,
   process-lifetime @Singleton — ticket 119): the row's navigation callback `put`s
-  the payload under the tool call id, the screen's ViewModel `consume`s it on init,
+  the payload (plus, since ticket 120, the call's output snapshot — the entry type
+  is `ToolContentStore.Entry`) under the tool call id, and the screen `consume`s it
+  on arrival (the Edit diff screen's ViewModel on init; the 120 file content screen
+  has no ViewModel — the destination consumes once into a `remember`),
   and a miss (process death with the screen on top) is the screen's
   missing-content state with back navigation. First consumer: the Edit call's
   unified diff screen (`EditDiff` route — toolCallId only — plus `EditDiffScreen`/
   `EditDiffViewModel` in ui/chat), opened from parsed Edit rows on the chat and the
   sub-agent page alike; those rows never expand inline and carry the pencil glyph
   (`ui/common/icons/EditIcon.kt`), the `+a −b` stat chip and the replace_all "All"
-  badge. The diff rows' added/removed palettes are the `LocalDiffColors`
-  container/content pairs (the `LocalSuccessColor` extension pattern), AA-checked
-  in both themes.
+  badge. Second consumer (ticket 120): the Read/Write file content screen
+  (`FileContent` route — `FileContentRoute`/`FileContentScreen(path, content,
+  caption?)` in ui/chat, one shared body for both payloads; a Write shows the call's
+  content verbatim, a Read the call's OUTPUT verbatim with its line-number
+  prefixes, a still-running Read a "Call still running" placeholder), opened from
+  parsed Read/Write rows on the chat and the sub-agent page alike; those rows never
+  expand inline and carry the document glyph
+  (`ui/common/icons/DocumentIcon.kt`), Read's range chip / Write's size chip and the
+  mode-append "append" badge. The diff rows' added/removed palettes are the
+  `LocalDiffColors` container/content pairs (the `LocalSuccessColor` extension
+  pattern), AA-checked in both themes.
 - Chat feature collaborators (the 065 `DeltaCoalescer` pattern, generalized by
   072): a cohesive chat feature gets an `internal` class in `ui/chat`
   (`DeltaCoalescer`, `SeedGuard`, `ChatAttachments`, `QuestionWizard`,

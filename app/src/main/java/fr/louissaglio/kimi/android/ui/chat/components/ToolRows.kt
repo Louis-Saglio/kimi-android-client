@@ -45,6 +45,8 @@ import androidx.compose.ui.unit.dp
 import fr.louissaglio.kimi.android.data.chat.EditDiffs
 import fr.louissaglio.kimi.android.data.chat.ToolDetailFields
 import fr.louissaglio.kimi.android.data.chat.ToolPayload
+import fr.louissaglio.kimi.android.ui.common.formatFileSize
+import fr.louissaglio.kimi.android.ui.common.icons.DocumentIcon
 import fr.louissaglio.kimi.android.ui.common.icons.EditIcon
 import fr.louissaglio.kimi.android.ui.theme.successColor
 
@@ -88,6 +90,7 @@ internal fun ToolGroupCard(
     onOpenJob: (String) -> Unit = {},
     onQuestionRowTapped: (toolCallId: String, input: String, output: String) -> Unit = { _, _, _ -> },
     onOpenEditDiff: (toolCallId: String, payload: ToolPayload.Edit) -> Unit = { _, _ -> },
+    onOpenFileContent: (toolCallId: String, payload: ToolPayload, output: String) -> Unit = { _, _, _ -> },
 ) {
     val status = when {
         group.tools.any { it.status == ToolStatus.Running } -> ToolStatus.Running
@@ -123,7 +126,7 @@ internal fun ToolGroupCard(
             group.tools.forEachIndexed { index, tool ->
                 // 1dp outlineVariant hairline between rows, like the web's row separators.
                 if (index > 0) HorizontalDivider()
-                ToolRow(tool, onOpenSubagent, onOpenJob, onQuestionRowTapped, onOpenEditDiff)
+                ToolRow(tool, onOpenSubagent, onOpenJob, onQuestionRowTapped, onOpenEditDiff, onOpenFileContent)
             }
         }
     }
@@ -160,7 +163,14 @@ internal fun ToolGroupCard(
  * icon, the trailing `+a −b` stat chip (the diff's line counts by delta type) and an
  * "All" badge on a replace_all call sketch the edit's shape, and the tap — row or
  * trailing open button — navigates to the diff screen. An Edit call whose args did
- * not parse keeps the generic expansion. */
+ * not parse keeps the generic expansion.
+ *
+ * `Read`/`Write` rows with a parsed payload (ticket 120) behave the same way: the
+ * document icon, a Read's `lines a–b` chip (only when line_offset/n_lines restrict
+ * the read) or a Write's `N lines · size` chip (and an "append" badge for
+ * `mode: append`), and the tap — row or trailing open button — navigates to the
+ * file content screen with the call's output as the snapshot. An unparseable
+ * Read/Write call keeps the generic expansion. */
 @Composable
 internal fun ToolRow(
     activity: ChatItem.ToolActivity,
@@ -168,16 +178,21 @@ internal fun ToolRow(
     onOpenJob: (String) -> Unit = {},
     onQuestionRowTapped: (toolCallId: String, input: String, output: String) -> Unit = { _, _, _ -> },
     onOpenEditDiff: (toolCallId: String, payload: ToolPayload.Edit) -> Unit = { _, _ -> },
+    onOpenFileContent: (toolCallId: String, payload: ToolPayload, output: String) -> Unit = { _, _, _ -> },
 ) {
     val detailColor = MaterialTheme.colorScheme.onSurfaceVariant
     val linkedSubagentId = activity.subagentId
     val linkedBashTaskId = activity.bashTaskId
     val isQuestionRow = activity.name == "AskUserQuestion"
     val editPayload = activity.payload as? ToolPayload.Edit
+    val readPayload = activity.payload as? ToolPayload.Read
+    val writePayload = activity.payload as? ToolPayload.Write
+    val filePayload: ToolPayload? = readPayload ?: writePayload
     // The chip counts come from the diff itself (delta types), not a line split.
     val editDiff = remember(editPayload) { editPayload?.let { EditDiffs.of(it.oldString, it.newString) } }
     val detailFields = remember(activity.args) { ToolDetailFields.of(activity.args) }
-    val expandable = !isQuestionRow && editPayload == null && linkedSubagentId == null && linkedBashTaskId == null &&
+    val expandable = !isQuestionRow && editPayload == null && filePayload == null && linkedSubagentId == null &&
+        linkedBashTaskId == null &&
         (detailFields.isNotEmpty() || activity.input.isNotBlank() || activity.output.isNotBlank())
     var expanded by rememberSaveable { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth()) {
@@ -188,10 +203,11 @@ internal fun ToolRow(
                 .heightIn(min = 48.dp)
                 .clickable(
                     enabled = expandable || linkedSubagentId != null || linkedBashTaskId != null ||
-                        isQuestionRow || editPayload != null,
+                        isQuestionRow || editPayload != null || filePayload != null,
                 ) {
                     if (isQuestionRow) onQuestionRowTapped(activity.id, activity.input, activity.output)
                     else if (editPayload != null) onOpenEditDiff(activity.id, editPayload)
+                    else if (filePayload != null) onOpenFileContent(activity.id, filePayload, activity.output)
                     else if (expandable) expanded = !expanded
                     else if (linkedSubagentId != null) onOpenSubagent(linkedSubagentId)
                     else linkedBashTaskId?.let(onOpenJob)
@@ -200,7 +216,8 @@ internal fun ToolRow(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             // Terminal glyph for shell calls (material-icons-core has no terminal icon),
-            // a pencil for parsed Edit calls (ticket 119), a generic tool icon otherwise.
+            // a pencil for parsed Edit calls (ticket 119), a document for parsed
+            // Read/Write calls (ticket 120), a generic tool icon otherwise.
             if (activity.name == "Bash") {
                 Text(
                     text = ">_",
@@ -210,7 +227,11 @@ internal fun ToolRow(
                 )
             } else {
                 Icon(
-                    imageVector = if (editPayload != null) EditIcon else Icons.Filled.Build,
+                    imageVector = when {
+                        editPayload != null -> EditIcon
+                        filePayload != null -> DocumentIcon
+                        else -> Icons.Filled.Build
+                    },
                     contentDescription = null,
                     modifier = Modifier.size(14.dp),
                     tint = detailColor,
@@ -245,6 +266,16 @@ internal fun ToolRow(
                     )
                 }
             }
+            if (writePayload != null && writePayload.append) {
+                // The `mode: append` flag (ticket 120), the "All" badge's shape.
+                Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.small) {
+                    Text(
+                        text = "append",
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+            }
             if (editDiff != null) {
                 Text(
                     text = "+${editDiff.addedCount}",
@@ -257,6 +288,22 @@ internal fun ToolRow(
                     style = MaterialTheme.typography.labelMedium,
                     fontFamily = FontFamily.Monospace,
                     color = MaterialTheme.colorScheme.error,
+                )
+            }
+            readPayload?.rangeLabel?.let { label ->
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontFamily = FontFamily.Monospace,
+                    color = detailColor,
+                )
+            }
+            if (writePayload != null) {
+                Text(
+                    text = "${writePayload.lineCount} lines · ${formatFileSize(writePayload.byteSize)}",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontFamily = FontFamily.Monospace,
+                    color = detailColor,
                 )
             }
             ToolStatusIcon(activity.status, runningDescription = "Tool running", modifier = Modifier.size(12.dp))
@@ -294,6 +341,20 @@ internal fun ToolRow(
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
                         contentDescription = "Open diff",
+                        modifier = Modifier.size(16.dp),
+                        tint = detailColor,
+                    )
+                }
+            }
+            if (filePayload != null) {
+                // Same open affordance as the Edit row above (ticket 120).
+                IconButton(
+                    onClick = { onOpenFileContent(activity.id, filePayload, activity.output) },
+                    modifier = Modifier.size(40.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = "Open file",
                         modifier = Modifier.size(16.dp),
                         tint = detailColor,
                     )

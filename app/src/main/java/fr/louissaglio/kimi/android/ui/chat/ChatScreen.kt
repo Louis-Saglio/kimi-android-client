@@ -77,6 +77,9 @@ fun ChatScreen(
     /** Ticket 119: a parsed `Edit` row opens the unified diff screen — the payload
      * rides along for the ToolContentStore hand-off (too large for nav arguments). */
     onNavigateToEditDiff: (toolCallId: String, payload: ToolPayload.Edit) -> Unit = { _, _ -> },
+    /** Ticket 120: a parsed `Read`/`Write` row opens the file content screen — the
+     * payload and the call's output snapshot ride along for the hand-off. */
+    onNavigateToFileContent: (toolCallId: String, payload: ToolPayload, output: String) -> Unit = { _, _, _ -> },
     viewModel: ChatViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -200,6 +203,7 @@ fun ChatScreen(
         onOpenSubagent = onOpenSubagent,
         onOpenJob = onOpenJob,
         onOpenEditDiff = onNavigateToEditDiff,
+        onOpenFileContent = onNavigateToFileContent,
         onHistoryTopReached = onHistoryTopReached,
         onCompact = viewModel::onCompact,
         onCancelJob = viewModel::onCancelJob,
@@ -276,6 +280,7 @@ private fun ChatContent(
     onOpenSubagent: (String) -> Unit = {},
     onOpenJob: (String) -> Unit = {},
     onOpenEditDiff: (toolCallId: String, payload: ToolPayload.Edit) -> Unit = { _, _ -> },
+    onOpenFileContent: (toolCallId: String, payload: ToolPayload, output: String) -> Unit = { _, _, _ -> },
     onHistoryTopReached: () -> Unit = {},
     onCompact: () -> Unit = {},
     onCancelJob: (String) -> Unit = {},
@@ -475,6 +480,7 @@ private fun ChatContent(
                     onOpenSubagent = onOpenSubagent,
                     onOpenJob = onOpenJob,
                     onOpenEditDiff = onOpenEditDiff,
+                    onOpenFileContent = onOpenFileContent,
                     // Tickets 088/089: AskUserQuestion rows never expand — the pending
                     // row toggles the live card, a resolved row opens its read-only view.
                     onQuestionRowTapped = onQuestionRowTapped,

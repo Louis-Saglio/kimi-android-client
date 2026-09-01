@@ -1,12 +1,14 @@
 package fr.louissaglio.kimi.android.navigation
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
 import fr.louissaglio.kimi.android.ui.chat.ChatScreen
 import fr.louissaglio.kimi.android.ui.chat.EditDiffScreen
+import fr.louissaglio.kimi.android.ui.chat.FileContentRoute
 import fr.louissaglio.kimi.android.ui.chat.JobDetailScreen
 import fr.louissaglio.kimi.android.ui.chat.SubagentScreen
 import fr.louissaglio.kimi.android.ui.chat.ToolContentStore
@@ -66,6 +68,12 @@ data class JobDetail(
 @Serializable
 data class EditDiff(val toolCallId: String)
 
+/** The Read/Write file content screen (ticket 120): same shape as [EditDiff] — only
+ * the tool call id rides the route; the payload and the call's output snapshot go
+ * through the [ToolContentStore]. */
+@Serializable
+data class FileContent(val toolCallId: String)
+
 @Composable
 fun KimiNavHost(toolContentStore: ToolContentStore) {
     val navController = rememberNavController()
@@ -107,6 +115,12 @@ fun KimiNavHost(toolContentStore: ToolContentStore) {
                         launchSingleTop = true
                     }
                 },
+                onNavigateToFileContent = { toolCallId, payload, output ->
+                    toolContentStore.put(toolCallId, payload, output)
+                    navController.navigate(FileContent(toolCallId)) {
+                        launchSingleTop = true
+                    }
+                },
             )
         }
         composable<Subagent> { entry ->
@@ -140,6 +154,13 @@ fun KimiNavHost(toolContentStore: ToolContentStore) {
                         launchSingleTop = true
                     }
                 },
+                // Same store hand-off as the chat's Read/Write rows (ticket 120).
+                onNavigateToFileContent = { toolCallId, payload, output ->
+                    toolContentStore.put(toolCallId, payload, output)
+                    navController.navigate(FileContent(toolCallId)) {
+                        launchSingleTop = true
+                    }
+                },
             )
         }
         composable<JobDetail> {
@@ -147,6 +168,17 @@ fun KimiNavHost(toolContentStore: ToolContentStore) {
         }
         composable<EditDiff> {
             EditDiffScreen(onNavigateBack = { navController.popBackStack() })
+        }
+        composable<FileContent> { backStackEntry ->
+            val route = backStackEntry.toRoute<FileContent>()
+            // No ViewModel for this static snapshot screen (ticket 120): the staged
+            // entry is consumed once per destination instance — the remember is what
+            // keeps later recompositions from re-consuming an already-served id. A
+            // recreation after the store lost the entry (process death with this
+            // screen on top) finds nothing and renders the missing-content state —
+            // the Edit diff screen's store-miss recovery.
+            val staged = remember { toolContentStore.consume(route.toolCallId) }
+            FileContentRoute(route.toolCallId, staged, onNavigateBack = { navController.popBackStack() })
         }
     }
 }

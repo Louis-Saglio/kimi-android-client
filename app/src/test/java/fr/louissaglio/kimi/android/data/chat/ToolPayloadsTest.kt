@@ -105,4 +105,114 @@ class ToolPayloadsTest {
         assertNull(ToolPayloads.of("Write", args))
         assertNull(ToolPayloads.of("Bash", args))
     }
+
+    // --- Ticket 120: Read/Write payloads -------------------------------------------
+
+    @Test
+    fun `a full-file Read call parses with no range`() {
+        val args = buildJsonObject { put("path", "/tmp/spike/a.txt") }
+
+        assertEquals(
+            ToolPayload.Read("/tmp/spike/a.txt", offset = null, limit = null),
+            ToolPayloads.of("Read", args),
+        )
+    }
+
+    @Test
+    fun `a ranged Read call parses offset and limit`() {
+        val args = buildJsonObject {
+            put("path", "/tmp/spike/a.txt")
+            put("line_offset", 40)
+            put("n_lines", 100)
+        }
+
+        assertEquals(
+            ToolPayload.Read("/tmp/spike/a.txt", offset = 40, limit = 100),
+            ToolPayloads.of("Read", args),
+        )
+    }
+
+    @Test
+    fun `a Read call may carry only one of the range arguments`() {
+        val offsetOnly = buildJsonObject {
+            put("path", "/tmp/spike/a.txt")
+            put("line_offset", 40)
+        }
+        val limitOnly = buildJsonObject {
+            put("path", "/tmp/spike/a.txt")
+            put("n_lines", 50)
+        }
+
+        assertEquals(
+            ToolPayload.Read("/tmp/spike/a.txt", offset = 40, limit = null),
+            ToolPayloads.of("Read", offsetOnly),
+        )
+        assertEquals(
+            ToolPayload.Read("/tmp/spike/a.txt", offset = null, limit = 50),
+            ToolPayloads.of("Read", limitOnly),
+        )
+    }
+
+    @Test
+    fun `a Read call without a string path is rejected`() {
+        assertNull(ToolPayloads.of("Read", null))
+        assertNull(ToolPayloads.of("Read", buildJsonObject { put("line_offset", 40) }))
+        assertNull(
+            ToolPayloads.of(
+                "Read",
+                buildJsonObject {
+                    put("path", 42)
+                    put("n_lines", 50)
+                },
+            ),
+        )
+    }
+
+    @Test
+    fun `a Write call parses content and defaults to overwrite`() {
+        val args = buildJsonObject {
+            put("path", "/tmp/spike/a.txt")
+            put("content", "one\ntwo\n")
+        }
+
+        assertEquals(
+            ToolPayload.Write("/tmp/spike/a.txt", "one\ntwo\n", append = false),
+            ToolPayloads.of("Write", args),
+        )
+    }
+
+    @Test
+    fun `only mode append sets the Write append flag`() {
+        fun argsWithMode(mode: String) = buildJsonObject {
+            put("path", "/tmp/spike/a.txt")
+            put("content", "x")
+            put("mode", mode)
+        }
+
+        assertEquals(true, (ToolPayloads.of("Write", argsWithMode("append")) as ToolPayload.Write).append)
+        assertEquals(false, (ToolPayloads.of("Write", argsWithMode("overwrite")) as ToolPayload.Write).append)
+    }
+
+    @Test
+    fun `a Write call may carry empty content but not missing or non-string content`() {
+        val empty = buildJsonObject {
+            put("path", "/tmp/spike/a.txt")
+            put("content", "")
+        }
+
+        assertEquals(
+            ToolPayload.Write("/tmp/spike/a.txt", "", append = false),
+            ToolPayloads.of("Write", empty),
+        )
+        assertNull(ToolPayloads.of("Write", buildJsonObject { put("path", "/tmp/spike/a.txt") }))
+        assertNull(
+            ToolPayloads.of(
+                "Write",
+                buildJsonObject {
+                    put("path", "/tmp/spike/a.txt")
+                    put("content", 42)
+                },
+            ),
+        )
+    }
 }

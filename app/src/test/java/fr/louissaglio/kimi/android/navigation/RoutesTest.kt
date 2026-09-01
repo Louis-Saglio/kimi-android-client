@@ -39,4 +39,12 @@ class RoutesTest {
             Json.decodeFromString(EditDiff.serializer(), Json.encodeToString(EditDiff.serializer(), route))
         assertEquals(route, decoded)
     }
+
+    @Test
+    fun `file content route round-trips through json`() {
+        val route = FileContent(toolCallId = "tool/1 & #2")
+        val decoded =
+            Json.decodeFromString(FileContent.serializer(), Json.encodeToString(FileContent.serializer(), route))
+        assertEquals(route, decoded)
+    }
 }
