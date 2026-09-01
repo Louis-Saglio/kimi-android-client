@@ -475,4 +475,154 @@ class ToolPayloadsTest {
         assertNull(ToolPayloads.of("Bash", args))
         assertNull(ToolPayloads.of("FetchURL", args))
     }
+
+    // --- Ticket 124: cron and task-control payloads -------------------------------
+
+    @Test
+    fun `a full CronCreate call parses all three fields`() {
+        val args = buildJsonObject {
+            put("cron", "15 7 1 8 *")
+            put("prompt", "Run the blocked robo test")
+            put("recurring", false)
+        }
+
+        assertEquals(
+            ToolPayload.CronCreate("15 7 1 8 *", "Run the blocked robo test", recurring = false),
+            ToolPayloads.of("CronCreate", args),
+        )
+    }
+
+    @Test
+    fun `CronCreate recurring defaults to true and a string is not the flag`() {
+        val absent = buildJsonObject {
+            put("cron", "0 9 * * *")
+            put("prompt", "morning check")
+        }
+        val asString = buildJsonObject {
+            put("cron", "0 9 * * *")
+            put("prompt", "morning check")
+            put("recurring", "false")
+        }
+
+        // The wire default is true — unlike every other flag (the Edit rule).
+        assertEquals(true, (ToolPayloads.of("CronCreate", absent) as ToolPayload.CronCreate).recurring)
+        assertEquals(true, (ToolPayloads.of("CronCreate", asString) as ToolPayload.CronCreate).recurring)
+    }
+
+    @Test
+    fun `a CronCreate call without a string cron or prompt is rejected`() {
+        assertNull(ToolPayloads.of("CronCreate", null))
+        assertNull(ToolPayloads.of("CronCreate", buildJsonObject { }))
+        assertNull(ToolPayloads.of("CronCreate", buildJsonObject { put("cron", "0 9 * * *") }))
+        assertNull(ToolPayloads.of("CronCreate", buildJsonObject { put("prompt", "x") }))
+        assertNull(
+            ToolPayloads.of(
+                "CronCreate",
+                buildJsonObject {
+                    put("cron", 42)
+                    put("prompt", "x")
+                },
+            ),
+        )
+    }
+
+    @Test
+    fun `a CronDelete call parses its id`() {
+        val args = buildJsonObject { put("id", "01KYXPV7A4HPX4GNZAAGTSRSMH") }
+
+        assertEquals(ToolPayload.CronDelete("01KYXPV7A4HPX4GNZAAGTSRSMH"), ToolPayloads.of("CronDelete", args))
+    }
+
+    @Test
+    fun `a CronDelete call without a string id is rejected`() {
+        assertNull(ToolPayloads.of("CronDelete", null))
+        assertNull(ToolPayloads.of("CronDelete", buildJsonObject { }))
+        assertNull(ToolPayloads.of("CronDelete", buildJsonObject { put("id", 42) }))
+    }
+
+    @Test
+    fun `CronList has no payload — the row is name-keyed`() {
+        assertNull(ToolPayloads.of("CronList", buildJsonObject { }))
+    }
+
+    @Test
+    fun `TaskOutput and TaskStop parse their task id`() {
+        val args = buildJsonObject { put("task_id", "bash-abc123") }
+
+        assertEquals(ToolPayload.TaskOutput("bash-abc123"), ToolPayloads.of("TaskOutput", args))
+        assertEquals(ToolPayload.TaskStop("bash-abc123"), ToolPayloads.of("TaskStop", args))
+    }
+
+    @Test
+    fun `a TaskOutput or TaskStop call without a string task_id is rejected`() {
+        assertNull(ToolPayloads.of("TaskOutput", null))
+        assertNull(ToolPayloads.of("TaskOutput", buildJsonObject { }))
+        assertNull(ToolPayloads.of("TaskOutput", buildJsonObject { put("task_id", 42) }))
+        assertNull(ToolPayloads.of("TaskStop", null))
+        assertNull(ToolPayloads.of("TaskStop", buildJsonObject { put("reason", "stuck") }))
+    }
+
+    @Test
+    fun `WaitFor parses with or without a task id`() {
+        assertEquals(
+            ToolPayload.WaitFor("bash-abc123"),
+            ToolPayloads.of(
+                "WaitFor",
+                buildJsonObject {
+                    put("task_id", "bash-abc123")
+                    put("timeout", 300)
+                },
+            ),
+        )
+        // The wait-any call: no task_id, the row keeps the generic expansion.
+        assertEquals(
+            ToolPayload.WaitFor(null),
+            ToolPayloads.of("WaitFor", buildJsonObject { put("timeout", 300) }),
+        )
+    }
+
+    @Test
+    fun `WaitFor requires args`() {
+        assertNull(ToolPayloads.of("WaitFor", null))
+    }
+
+    @Test
+    fun `TaskList parses with the wire defaults`() {
+        assertEquals(
+            ToolPayload.TaskList(activeOnly = true, limit = null),
+            ToolPayloads.of("TaskList", buildJsonObject { }),
+        )
+        assertEquals(
+            ToolPayload.TaskList(activeOnly = false, limit = 50),
+            ToolPayloads.of(
+                "TaskList",
+                buildJsonObject {
+                    put("active_only", false)
+                    put("limit", 50)
+                },
+            ),
+        )
+    }
+
+    @Test
+    fun `a string active_only is not the TaskList flag and null args reject`() {
+        val args = buildJsonObject { put("active_only", "false") }
+
+        assertEquals(true, (ToolPayloads.of("TaskList", args) as ToolPayload.TaskList).activeOnly)
+        assertNull(ToolPayloads.of("TaskList", null))
+    }
+
+    @Test
+    fun `another tool never parses as a cron or task payload`() {
+        val args = buildJsonObject {
+            put("cron", "0 9 * * *")
+            put("prompt", "x")
+            put("task_id", "bash-1")
+            put("id", "01KYXPV7A4HPX4GNZAAGTSRSMH")
+        }
+
+        assertNull(ToolPayloads.of("Edit", args))
+        assertNull(ToolPayloads.of("Bash", args))
+        assertNull(ToolPayloads.of("Grep", args))
+    }
 }

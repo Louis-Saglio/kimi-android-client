@@ -2358,6 +2358,45 @@ cite this page as a markdown link, e.g. [title](url).`. Errors: `Failed to
 fetch URL. Status: {N}. {msg}`, `Failed to fetch URL due to network error:
 {url}. {msg}`, `The response body is empty.`.
 
+### Cron tool output text (CronCreate / CronDelete / CronList)
+
+The cron tools' `tool.result` `output` text (ticket 124). Live captures from a
+real session's `wire.jsonl` on the running 0.39.1 server (v2 backend),
+cross-checked against the bundled tool source
+(`packages/agent-core-v2/src/features/cron/tools/`, extracted with `strings`
+from `~/.kimi-code/bin/kimi` — the ticket-122 method).
+
+**CronCreate** — NOT JSON: newline-joined `key: value` lines. Verbatim live
+capture (2026-09-01, session `04a03224…`, one-shot create):
+
+```
+id: 01KYXPV7A4HPX4GNZAAGTSRSMH
+cron: 15 7 1 8 *
+humanSchedule: at 07:15 on day 1 of August
+recurring: false
+nextFireAt: 2026-08-01T07:15:00.000+00:00
+```
+
+(`formatOutput()` in `cronCreateTool.ts`; `nextFireAt` is the local ISO
+timestamp with numeric offset, or the literal `null`.) This drove the ticket's
+parse-or-verbatim decision to **verbatim**: the row shows the cron-expression
+preview and renders the result untouched. Errors (`is_error`): `Invalid cron
+expression: …`, `Cron expression "…" has no fire within 5 years; refusing to
+schedule.`, `Cron job cap reached (max 50 per session).`, `Prompt exceeds 8192
+bytes (got N).`, the one-shot-too-far-out message, `Cron scheduling is disabled
+(KIMI_DISABLE_CRON=1).`.
+
+**CronDelete** — one line: `Deleted cron job {id}.` (live capture, same
+session). Errors: `No cron job with id {id}.`, `Invalid cron job id "…" — must
+be a ULID.`.
+
+**CronList** — `cron_jobs: {N}` header, then records joined by `\n---\n`, each
+record the `key: value` lines `id`/`cron`/`humanSchedule`/`prompt`
+(JSON-encoded, 200-byte preview cap)/`nextFireAt`/`recurring`/`ageDays`
+(2-decimal)/`stale`; the empty case is `cron_jobs: 0\nNo cron jobs scheduled.`
+(source-verified; no live capture — and deliberately unparsed by the app:
+multi-record prose, drift-prone).
+
 ## Sub-agents
 
 How the server exposes the sub-agents the main agent spawns with its `Agent`

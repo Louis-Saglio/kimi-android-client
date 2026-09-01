@@ -54,6 +54,7 @@ import fr.louissaglio.kimi.android.data.chat.ToolDetailFields
 import fr.louissaglio.kimi.android.data.chat.ToolPayload
 import fr.louissaglio.kimi.android.data.chat.ToolPreview
 import fr.louissaglio.kimi.android.ui.common.formatFileSize
+import fr.louissaglio.kimi.android.ui.common.icons.ClockIcon
 import fr.louissaglio.kimi.android.ui.common.icons.DocumentIcon
 import fr.louissaglio.kimi.android.ui.common.icons.EditIcon
 import fr.louissaglio.kimi.android.ui.common.icons.GlobeIcon
@@ -208,7 +209,23 @@ internal fun ToolGroupCard(
  * ±N/+N/-N context, multiline, include hidden, type — never head_limit/offset/-n)
  * and the result parsed per `output_mode` ([GrepResultParser]): per-file match
  * groups, the plain path list, or the count-badge rows. Any line failing the
- * mode's grammar renders the WHOLE output verbatim. */
+ * mode's grammar renders the WHOLE output verbatim.
+ *
+ * The cron rows (ticket 124) carry the clock glyph: a parsed `CronCreate` keeps
+ * the inline expansion — the scheduled prompt in full replaces the generic args
+ * table and the result renders verbatim (its wire shape is `key: value` prose,
+ * not JSON — docs/server-api.md) — with the cron expression as the monospace
+ * preview and a "one-shot" badge on `recurring: false`. A parsed `CronDelete`
+ * stays a lean row (id preview, generic expansion); `CronList` (no payload — a
+ * call carries no args, so the row is name-keyed) previews "list schedules" and
+ * renders its multi-record output verbatim.
+ *
+ * A task-control row whose parsed payload carries a `task_id` (`TaskOutput`,
+ * `TaskStop`, `WaitFor` when set — ticket 124) behaves like a background-linked
+ * Bash row: the tap or the trailing "Open job" chevron navigates to the job
+ * screen, and the row never expands inline. A wait-any `WaitFor` (no task_id)
+ * and `TaskList` keep the generic expansion.
+ */
 @Composable
 internal fun ToolRow(
     activity: ChatItem.ToolActivity,
@@ -232,6 +249,19 @@ internal fun ToolRow(
     val fetchUrlPayload = activity.payload as? ToolPayload.FetchUrl
     val grepPayload = activity.payload as? ToolPayload.Grep
     val lookupPayload = globPayload ?: webSearchPayload ?: fetchUrlPayload ?: grepPayload
+    val cronCreatePayload = activity.payload as? ToolPayload.CronCreate
+    val cronDeletePayload = activity.payload as? ToolPayload.CronDelete
+    // CronList carries no args, so no payload exists — the row is name-keyed.
+    val isCronListRow = activity.name == "CronList"
+    // Ticket 124: a task-control row links to the job screen by its payload's
+    // task_id — the exact background-Bash treatment (a wait-any WaitFor has none).
+    val linkedTaskControlId = when (val payload = activity.payload) {
+        is ToolPayload.TaskOutput -> payload.taskId
+        is ToolPayload.TaskStop -> payload.taskId
+        is ToolPayload.WaitFor -> payload.taskId
+        else -> null
+    }
+    val linkedJobTaskId = linkedBashTaskId ?: linkedTaskControlId
     // The chip counts come from the diff itself (delta types), not a line split.
     val editDiff = remember(editPayload) { editPayload?.let { EditDiffs.of(it.oldString, it.newString) } }
     val detailFields = remember(activity.args) { ToolDetailFields.of(activity.args) }
@@ -269,8 +299,8 @@ internal fun ToolRow(
         else -> false
     }
     val expandable = !isQuestionRow && editPayload == null && filePayload == null && linkedSubagentId == null &&
-        linkedBashTaskId == null &&
-        (lookupExpandable || (lookupPayload == null &&
+        linkedJobTaskId == null &&
+        (lookupExpandable || cronCreatePayload != null || (lookupPayload == null &&
             (detailFields.isNotEmpty() || activity.input.isNotBlank() || activity.output.isNotBlank())))
     var expanded by rememberSaveable { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth()) {
@@ -280,7 +310,7 @@ internal fun ToolRow(
                 // M3: the whole row is the tap target, at least 48dp tall.
                 .heightIn(min = 48.dp)
                 .clickable(
-                    enabled = expandable || linkedSubagentId != null || linkedBashTaskId != null ||
+                    enabled = expandable || linkedSubagentId != null || linkedJobTaskId != null ||
                         isQuestionRow || editPayload != null || filePayload != null,
                 ) {
                     if (isQuestionRow) onQuestionRowTapped(activity.id, activity.input, activity.output)
@@ -288,7 +318,7 @@ internal fun ToolRow(
                     else if (filePayload != null) onOpenFileContent(activity.id, filePayload, activity.output)
                     else if (expandable) expanded = !expanded
                     else if (linkedSubagentId != null) onOpenSubagent(linkedSubagentId)
-                    else linkedBashTaskId?.let(onOpenJob)
+                    else linkedJobTaskId?.let(onOpenJob)
                 },
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -297,8 +327,10 @@ internal fun ToolRow(
             // a pencil for parsed Edit calls (ticket 119), a document for parsed
             // Read/Write calls (ticket 120), the lookup glyphs for parsed
             // Glob/WebSearch/FetchURL calls (ticket 122) and Grep calls (ticket 123 —
-            // the Glob row's magnifier), a generic tool icon otherwise. The tags mark
-            // the lookup glyphs for the row tests.
+            // the Glob row's magnifier), the clock for cron calls (ticket 124 —
+            // CronCreate/CronDelete by payload, CronList by name: it carries no
+            // args), a generic tool icon otherwise. The tags mark the lookup/cron
+            // glyphs for the row tests.
             if (activity.name == "Bash") {
                 Text(
                     text = ">_",
@@ -315,6 +347,7 @@ internal fun ToolRow(
                         webSearchPayload != null -> GlobeIcon
                         fetchUrlPayload != null -> LinkIcon
                         grepPayload != null -> SearchIcon
+                        cronCreatePayload != null || cronDeletePayload != null || isCronListRow -> ClockIcon
                         else -> Icons.Filled.Build
                     },
                     contentDescription = null,
@@ -326,6 +359,8 @@ internal fun ToolRow(
                                 webSearchPayload != null -> Modifier.testTag("toolIconWebSearch")
                                 fetchUrlPayload != null -> Modifier.testTag("toolIconFetchUrl")
                                 grepPayload != null -> Modifier.testTag("toolIconGrep")
+                                cronCreatePayload != null || cronDeletePayload != null || isCronListRow ->
+                                    Modifier.testTag("toolIconCron")
                                 else -> Modifier
                             },
                         ),
@@ -335,9 +370,12 @@ internal fun ToolRow(
             // A parsed FetchURL row leads with the host (ticket 122): the URL's
             // identifying part on a narrow row; the full URL is the expansion's.
             // A parsed Grep row carries its pattern slash-delimited (ticket 123).
+            // CronList has no identifying argument (no args at all) — its preview
+            // is a fixed label (ticket 124).
             val rowPreview = when {
                 fetchUrlPayload != null -> hostFirstUrl(fetchUrlPayload.url)
                 grepPayload != null -> "/${ToolPreview.oneLine(grepPayload.pattern)}/"
+                isCronListRow -> "list schedules"
                 else -> activity.preview
             }
             Text(
@@ -350,9 +388,10 @@ internal fun ToolRow(
                     text = rowPreview,
                     modifier = Modifier.weight(1f),
                     style = MaterialTheme.typography.labelMedium,
-                    // The WebSearch query is prose (ticket 122) — every other preview
+                    // The WebSearch query is prose (ticket 122), and CronList's
+                    // preview is a fixed label (ticket 124) — every other preview
                     // is a machine string and stays monospace.
-                    fontFamily = if (webSearchPayload != null) null else FontFamily.Monospace,
+                    fontFamily = if (webSearchPayload != null || isCronListRow) null else FontFamily.Monospace,
                     color = detailColor,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -376,6 +415,16 @@ internal fun ToolRow(
                 Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.small) {
                     Text(
                         text = "append",
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+            }
+            if (cronCreatePayload != null && !cronCreatePayload.recurring) {
+                // The `recurring: false` flag (ticket 124), the "All" badge's shape.
+                Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.small) {
+                    Text(
+                        text = "one-shot",
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                         style = MaterialTheme.typography.labelMedium,
                     )
@@ -479,9 +528,11 @@ internal fun ToolRow(
                     )
                 }
             }
-            if (linkedBashTaskId != null) {
+            if (linkedJobTaskId != null) {
+                // Background-Bash rows (ticket 096) and task-control rows (ticket
+                // 124) share this one "Open job" affordance.
                 IconButton(
-                    onClick = { onOpenJob(linkedBashTaskId) },
+                    onClick = { onOpenJob(linkedJobTaskId) },
                     modifier = Modifier.size(40.dp),
                 ) {
                     Icon(
@@ -513,6 +564,13 @@ internal fun ToolRow(
                     }
                     globPayload != null -> GlobChipsRow(globPayload)
                     grepPayload != null -> GrepChipsRow(grepPayload)
+                    cronCreatePayload != null -> {
+                        // Ticket 124: the scheduled prompt in full replaces the
+                        // generic args table (the table one-lines its values); the
+                        // cron expression is the row's preview, the recurring flag
+                        // the row's badge — nothing else to show.
+                        ToolDetailBlock(text = cronCreatePayload.prompt, color = MaterialTheme.colorScheme.surfaceVariant)
+                    }
                     fetchUrlPayload != null -> {
                         // The full URL (the row shows it host-first, ticket 122).
                         SelectionContainer {

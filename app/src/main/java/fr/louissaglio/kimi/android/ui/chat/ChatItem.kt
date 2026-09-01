@@ -43,7 +43,11 @@ sealed interface ChatItem {
      * expanding inline but renders the terminal-styled detail block — ticket 121; the
      * Glob/WebSearch/FetchURL lookup rows keep expanding inline too, the result
      * rendered per tool in place of the generic args table — ticket 122; the Grep
-     * row joins them, its result parsed per `output_mode` — ticket 123).
+     * row joins them, its result parsed per `output_mode` — ticket 123; a CronCreate
+     * row expands to the full scheduled prompt — its `key: value` prose result stays
+     * verbatim — CronDelete/CronList stay lean, and a TaskOutput/TaskStop/WaitFor
+     * payload's task_id links the row to the job screen like [bashTaskId] does —
+     * ticket 124).
      * [output] is the result
      * text; either may be blank while the call is still running.
      * While running, [output] accumulates the volatile tool.progress chunks (ticket 025)

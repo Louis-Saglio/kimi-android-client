@@ -29,7 +29,13 @@
   the full-URL + note-caption + verbatim content layouts respectively; ticket 123
   adds `Grep` — the same inline expansion, its `/pattern/` preview and scope chip
   on the row, the filter knobs as chips and the result structured per
-  `output_mode`), `ReadOutputs` (the
+  `output_mode`; ticket 124 adds the scheduling/task-control payloads —
+  `CronCreate` (inline expansion: the full prompt replaces the args table; the
+  result is `key: value` prose on the wire, rendered verbatim — docs/server-api.md),
+  `CronDelete` (lean, generic), `TaskOutput`/`TaskStop`/`WaitFor` (a carried
+  `task_id` links the row to the job screen, the 096 background-Bash treatment) and
+  `TaskList` (generic — a task-less `WaitFor` too). `CronList` has no payload: the
+  call carries no args, so its row is name-keyed), `ReadOutputs` (the
   Read output's trailing `<system>…</system>` status block lifted into the file
   screen's caption chip — end-anchored, tolerant fallback; `BashOutputs` does the
   same for the Bash output's `Command failed with exit code: N` trailer — ticket
@@ -137,7 +143,9 @@
   and carry their own glyphs — magnifier `ui/common/icons/SearchIcon.kt` for Glob
   (generic on purpose: Grep reuses it in 123), globe `GlobeIcon.kt` for WebSearch,
   link `LinkIcon.kt` for FetchURL — with per-tool previews (pattern monospace,
-  query prose, host-first shortened URL via ToolRows' `hostFirstUrl`). The diff rows' added/removed palettes are the
+  query prose, host-first shortened URL via ToolRows' `hostFirstUrl`). The cron rows
+  (ticket 124) carry the clock `ui/common/icons/ClockIcon.kt` and a "one-shot"
+  badge on `recurring: false`. The diff rows' added/removed palettes are the
   `LocalDiffColors` container/content pairs (the `LocalSuccessColor` extension
   pattern), AA-checked in both themes.
 - Chat feature collaborators (the 065 `DeltaCoalescer` pattern, generalized by

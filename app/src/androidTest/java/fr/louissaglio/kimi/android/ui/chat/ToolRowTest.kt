@@ -11,6 +11,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import fr.louissaglio.kimi.android.data.chat.ToolPayload
+import fr.louissaglio.kimi.android.data.chat.ToolPreview
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -1032,8 +1033,10 @@ class ToolRowTest {
     fun grepContentRowExpandsToPerFileGroups() {
         toolRow(
             grepRow(
+                // The wire's context-line shape is `path-NN-text` (dash both
+                // sides) — `path-NN:text` fails the grammar and renders verbatim.
                 output = "app/a.kt:12:beta match here\n" +
-                    "app/a.kt-13:after context\n" +
+                    "app/a.kt-13-after context\n" +
                     "--\n" +
                     "sub/b.kt:2:match in b",
             ),
@@ -1185,5 +1188,236 @@ class ToolRowTest {
         composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
         composeTestRule.onNodeWithText("path").assertIsDisplayed()
         composeTestRule.onNodeWithText("/tmp/spike").assertIsDisplayed()
+    }
+
+    // --- Ticket 124: cron rows --------------------------------------------------------
+
+    /** A parsed CronCreate row, args/payload kept in sync like the live derivation. */
+    private fun cronCreateRow(
+        cron: String = "15 7 1 8 *",
+        prompt: String = "Run the blocked robo test",
+        recurring: Boolean = true,
+        status: ToolStatus = ToolStatus.Done,
+        output: String = "",
+    ) = ChatItem.ToolActivity(
+        "tool_1",
+        "CronCreate",
+        status,
+        preview = cron,
+        args = buildJsonObject {
+            put("cron", cron)
+            put("prompt", prompt)
+            put("recurring", recurring)
+        },
+        payload = ToolPayload.CronCreate(cron, prompt, recurring),
+        output = output,
+    )
+
+    @Test
+    fun cronCreateRowShowsClockIconAndCronPreview() {
+        toolRow(cronCreateRow())
+
+        composeTestRule.onNodeWithTag("toolIconCron", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithText("CronCreate").assertIsDisplayed()
+        composeTestRule.onNodeWithText("15 7 1 8 *").assertIsDisplayed()
+        composeTestRule.onNodeWithText("one-shot").assertDoesNotExist()
+    }
+
+    @Test
+    fun oneShotCronCreateRowShowsTheBadge() {
+        toolRow(cronCreateRow(recurring = false))
+
+        composeTestRule.onNodeWithText("one-shot").assertIsDisplayed()
+    }
+
+    /** The expansion carries the full prompt and the verbatim result — the wire
+     * shape is `key: value` prose, not JSON (the live capture, docs/server-api.md),
+     * so no summary line exists. */
+    @Test
+    fun cronCreateRowExpandsToFullPromptAndVerbatimResult() {
+        val output = "id: 01KYXPV7A4HPX4GNZAAGTSRSMH\ncron: 15 7 1 8 *\nhumanSchedule: at 07:15 on day 1 of August\n" +
+            "recurring: false\nnextFireAt: 2026-08-01T07:15:00.000+00:00"
+        toolRow(cronCreateRow(prompt = "Run the blocked robo test\nand report back", recurring = false, output = output))
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+
+        composeTestRule.onNodeWithText("Run the blocked robo test\nand report back").assertIsDisplayed()
+        composeTestRule.onNodeWithText(output).assertIsDisplayed()
+        // The generic key/value table is replaced: no arg labels, no JSON braces.
+        composeTestRule.onNodeWithText("prompt").assertDoesNotExist()
+        composeTestRule.onNodeWithText("{").assertDoesNotExist()
+    }
+
+    @Test
+    fun cronDeleteRowShowsClockIconIdPreviewAndGenericExpansion() {
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "CronDelete",
+                ToolStatus.Done,
+                preview = "01KYXPV7A4HPX4GNZAAGTSRSMH",
+                args = buildJsonObject { put("id", "01KYXPV7A4HPX4GNZAAGTSRSMH") },
+                payload = ToolPayload.CronDelete("01KYXPV7A4HPX4GNZAAGTSRSMH"),
+                output = "Deleted cron job 01KYXPV7A4HPX4GNZAAGTSRSMH.",
+            ),
+        )
+
+        composeTestRule.onNodeWithTag("toolIconCron", useUnmergedTree = true).assertIsDisplayed()
+        // The row's preview is the job id.
+        composeTestRule.onAllNodesWithText("01KYXPV7A4HPX4GNZAAGTSRSMH").assertCountEquals(1)
+
+        // The lean row keeps the generic expansion: the args table + verbatim output.
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+        composeTestRule.onNodeWithText("id").assertIsDisplayed()
+        // …the id now shown twice — the row's preview and the table's value.
+        composeTestRule.onAllNodesWithText("01KYXPV7A4HPX4GNZAAGTSRSMH").assertCountEquals(2)
+        composeTestRule.onNodeWithText("Deleted cron job 01KYXPV7A4HPX4GNZAAGTSRSMH.").assertIsDisplayed()
+    }
+
+    @Test
+    fun cronListRowShowsClockIconLabelPreviewAndVerbatimOutput() {
+        val output = "cron_jobs: 1\n" +
+            "id: 01KYXPV7A4HPX4GNZAAGTSRSMH\ncron: 15 7 1 8 *\nhumanSchedule: at 07:15 on day 1 of August\n" +
+            "prompt: \"Run the blocked robo test\"\nnextFireAt: 2026-08-01T07:15:00.000+00:00\n" +
+            "recurring: false\nageDays: 0.00\nstale: false"
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "CronList",
+                ToolStatus.Done,
+                args = buildJsonObject { },
+                output = output,
+            ),
+        )
+
+        composeTestRule.onNodeWithTag("toolIconCron", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithText("list schedules").assertIsDisplayed()
+
+        // The multi-record prose stays verbatim — no parser by design (out of scope).
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+        composeTestRule.onNodeWithText(output).assertIsDisplayed()
+    }
+
+    // --- Ticket 124: task-control rows --------------------------------------------------
+
+    /** A parsed task-control row, args/payload kept in sync like the live derivation
+     * (the preview is ToolPreview's compact-JSON fallback — no identifying key). */
+    private fun taskControlRow(
+        name: String,
+        taskId: String?,
+        output: String = "task output",
+    ): ChatItem.ToolActivity {
+        val args = buildJsonObject {
+            when (name) {
+                "TaskList" -> {
+                    put("active_only", true)
+                    put("limit", 20)
+                }
+                else -> {
+                    taskId?.let { put("task_id", it) }
+                    if (name == "WaitFor") put("timeout", 300)
+                }
+            }
+        }
+        return ChatItem.ToolActivity(
+            "tool_1",
+            name,
+            ToolStatus.Done,
+            preview = ToolPreview.of(name, args),
+            args = args,
+            payload = when (name) {
+                "TaskOutput" -> taskId?.let { ToolPayload.TaskOutput(it) }
+                "TaskStop" -> taskId?.let { ToolPayload.TaskStop(it) }
+                "WaitFor" -> ToolPayload.WaitFor(taskId)
+                "TaskList" -> ToolPayload.TaskList(activeOnly = true, limit = 20)
+                else -> null
+            },
+            output = output,
+        )
+    }
+
+    /** A TaskOutput row linked by its task_id behaves like a background-linked Bash
+     * row (ticket 096): no inline expansion, the tap navigates to the job screen. */
+    @Test
+    fun taskOutputRowNeverExpandsAndNavigatesOnRowTap() {
+        var opened: String? = null
+        composeTestRule.setContent {
+            KimiTheme {
+                ToolRow(
+                    taskControlRow("TaskOutput", "bash-1"),
+                    onOpenJob = { opened = it },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").assertDoesNotExist()
+        composeTestRule.onNodeWithContentDescription("Open job").assertIsDisplayed()
+
+        composeTestRule.onNodeWithText("TaskOutput").performClick()
+        composeTestRule.onNodeWithText("task output").assertDoesNotExist()
+        assertEquals("bash-1", opened)
+    }
+
+    @Test
+    fun taskStopRowOpensJobFromTrailingButton() {
+        var opened: String? = null
+        composeTestRule.setContent {
+            KimiTheme {
+                ToolRow(
+                    taskControlRow("TaskStop", "bash-2"),
+                    onOpenJob = { opened = it },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithContentDescription("Open job").performClick()
+        assertEquals("bash-2", opened)
+    }
+
+    @Test
+    fun waitForRowWithTaskIdGetsTheChevron() {
+        var opened: String? = null
+        composeTestRule.setContent {
+            KimiTheme {
+                ToolRow(
+                    taskControlRow("WaitFor", "bash-3"),
+                    onOpenJob = { opened = it },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").assertDoesNotExist()
+        composeTestRule.onNodeWithContentDescription("Open job").performClick()
+        assertEquals("bash-3", opened)
+    }
+
+    /** A wait-any WaitFor (no task_id) keeps the generic expansion — no chevron. */
+    @Test
+    fun waitForRowWithoutTaskIdKeepsGenericExpansion() {
+        var opened: String? = null
+        composeTestRule.setContent {
+            KimiTheme {
+                ToolRow(
+                    taskControlRow("WaitFor", null),
+                    onOpenJob = { opened = it },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithContentDescription("Open job").assertDoesNotExist()
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+        composeTestRule.onNodeWithText("timeout").assertIsDisplayed()
+        composeTestRule.onNodeWithText("300").assertIsDisplayed()
+    }
+
+    /** TaskList carries no task_id: generic expansion, no chevron. */
+    @Test
+    fun taskListRowKeepsGenericExpansion() {
+        toolRow(taskControlRow("TaskList", null))
+
+        composeTestRule.onNodeWithContentDescription("Open job").assertDoesNotExist()
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+        composeTestRule.onNodeWithText("active_only").assertIsDisplayed()
+        composeTestRule.onNodeWithText("task output").assertIsDisplayed()
     }
 }

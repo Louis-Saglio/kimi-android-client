@@ -109,6 +109,31 @@ class ToolPreviewTest {
         assertEquals("foo|bar", ToolPreview.of("Grep", input))
     }
 
+    // Ticket 124: the cron tools identify by their scheduling argument.
+
+    @Test
+    fun `a cron create call previews the cron expression`() {
+        val input = buildJsonObject {
+            put("cron", "15 7 1 8 *")
+            put("prompt", "Run the blocked robo test")
+        }
+
+        assertEquals("15 7 1 8 *", ToolPreview.of("CronCreate", input))
+    }
+
+    @Test
+    fun `a cron delete call previews the job id`() {
+        val input = buildJsonObject { put("id", "01KYXPV7A4HPX4GNZAAGTSRSMH") }
+
+        assertEquals("01KYXPV7A4HPX4GNZAAGTSRSMH", ToolPreview.of("CronDelete", input))
+    }
+
+    @Test
+    fun `a cron list call previews nothing — the row owns the label`() {
+        assertEquals("", ToolPreview.of("CronList", buildJsonObject { }))
+        assertEquals("", ToolPreview.of("CronList", null))
+    }
+
     @Test
     fun `no input previews nothing`() {
         assertEquals("", ToolPreview.of("Bash", null))

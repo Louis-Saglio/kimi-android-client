@@ -19,7 +19,14 @@ import kotlinx.serialization.json.intOrNull
  * keep the inline expansion like [Bash], with the result rendered per tool (counted
  * path list, markdown, verbatim content) instead of the generic args table;
  * for [Grep] (ticket 123), the same inline expansion with the result parsed per
- * `output_mode` ([GrepResultParser]).
+ * `output_mode` ([GrepResultParser]);
+ * for the cron/task-control calls (ticket 124): [CronCreate] keeps the inline
+ * expansion (the scheduled prompt in full — the result is `key: value` prose on
+ * the wire, not JSON, so it renders verbatim; docs/server-api.md), [CronDelete]
+ * stays a lean generic row, and [TaskOutput]/[TaskStop]/[WaitFor] link their row
+ * to the job screen via the carried `task_id` (the background-Bash treatment —
+ * linked rows never expand inline); [TaskList] and a task-less [WaitFor] keep the
+ * generic expansion.
  */
 sealed interface ToolPayload {
 
@@ -142,6 +149,41 @@ sealed interface ToolPayload {
         val hasNonDefaultKnobs: Boolean
             get() = caseInsensitive || contextChips.isNotEmpty() || multiline || includeIgnored || type != null
     }
+
+    /** The CronCreate call's inputs (ticket 124). [cron] is the 5-field expression
+     * (the row's monospace preview); [prompt] the scheduled prompt, shown in full on
+     * expansion. [recurring] is the wire flag — true by default, so a `false`
+     * one-shot earns the row's "one-shot" badge. The call's RESULT stays unparsed:
+     * it is `key: value` prose on the wire (verified live 2026-09-01,
+     * docs/server-api.md), not the JSON the ticket allowed for. */
+    data class CronCreate(
+        val cron: String,
+        val prompt: String,
+        val recurring: Boolean,
+    ) : ToolPayload
+
+    /** The CronDelete call's input (ticket 124) — [id] is the row's preview; the
+     * row keeps the generic expansion. */
+    data class CronDelete(val id: String) : ToolPayload
+
+    /** The TaskOutput call's input (ticket 124): [taskId] links the row to the job
+     * screen — the background-Bash row treatment (trailing chevron, no inline
+     * expansion). */
+    data class TaskOutput(val taskId: String) : ToolPayload
+
+    /** The TaskStop call's input (ticket 124) — the same job-screen link as
+     * [TaskOutput]. */
+    data class TaskStop(val taskId: String) : ToolPayload
+
+    /** The WaitFor call's input (ticket 124): [taskId] is null for a wait-any call —
+     * only a task-linked row gets the job-screen chevron; a wait-any row keeps the
+     * generic expansion. */
+    data class WaitFor(val taskId: String?) : ToolPayload
+
+    /** The TaskList call's inputs (ticket 124), with the wire defaults
+     * (`active_only` true, no limit) — parsed for completeness; the row keeps the
+     * generic expansion. */
+    data class TaskList(val activeOnly: Boolean, val limit: Int?) : ToolPayload
 }
 
 /** The payload parser: one variant per known tool, null for anything else —
@@ -157,6 +199,12 @@ object ToolPayloads {
     private const val WEB_SEARCH_TOOL_NAME = "WebSearch"
     private const val FETCH_URL_TOOL_NAME = "FetchURL"
     private const val GREP_TOOL_NAME = "Grep"
+    private const val CRON_CREATE_TOOL_NAME = "CronCreate"
+    private const val CRON_DELETE_TOOL_NAME = "CronDelete"
+    private const val TASK_OUTPUT_TOOL_NAME = "TaskOutput"
+    private const val TASK_STOP_TOOL_NAME = "TaskStop"
+    private const val WAIT_FOR_TOOL_NAME = "WaitFor"
+    private const val TASK_LIST_TOOL_NAME = "TaskList"
 
     fun of(toolName: String, args: JsonObject?): ToolPayload? = when (toolName) {
         EDIT_TOOL_NAME -> editOf(args)
@@ -167,6 +215,12 @@ object ToolPayloads {
         WEB_SEARCH_TOOL_NAME -> webSearchOf(args)
         FETCH_URL_TOOL_NAME -> fetchUrlOf(args)
         GREP_TOOL_NAME -> grepOf(args)
+        CRON_CREATE_TOOL_NAME -> cronCreateOf(args)
+        CRON_DELETE_TOOL_NAME -> cronDeleteOf(args)
+        TASK_OUTPUT_TOOL_NAME -> taskOutputOf(args)
+        TASK_STOP_TOOL_NAME -> taskStopOf(args)
+        WAIT_FOR_TOOL_NAME -> waitForOf(args)
+        TASK_LIST_TOOL_NAME -> taskListOf(args)
         else -> null
     }
 
@@ -251,6 +305,45 @@ object ToolPayloads {
         return ToolPayload.FetchUrl(url)
     }
 
+    private fun cronCreateOf(args: JsonObject?): ToolPayload.CronCreate? {
+        if (args == null) return null
+        val cron = args.stringOf("cron") ?: return null
+        val prompt = args.stringOf("prompt") ?: return null
+        return ToolPayload.CronCreate(cron, prompt, recurring = args.trueByDefaultFlagOf("recurring"))
+    }
+
+    private fun cronDeleteOf(args: JsonObject?): ToolPayload.CronDelete? {
+        if (args == null) return null
+        val id = args.stringOf("id") ?: return null
+        return ToolPayload.CronDelete(id)
+    }
+
+    private fun taskOutputOf(args: JsonObject?): ToolPayload.TaskOutput? {
+        if (args == null) return null
+        val taskId = args.stringOf("task_id") ?: return null
+        return ToolPayload.TaskOutput(taskId)
+    }
+
+    private fun taskStopOf(args: JsonObject?): ToolPayload.TaskStop? {
+        if (args == null) return null
+        val taskId = args.stringOf("task_id") ?: return null
+        return ToolPayload.TaskStop(taskId)
+    }
+
+    private fun waitForOf(args: JsonObject?): ToolPayload.WaitFor? {
+        if (args == null) return null
+        // A wait-any call (no task_id) still parses — the row decides on the id.
+        return ToolPayload.WaitFor(args.stringOf("task_id"))
+    }
+
+    private fun taskListOf(args: JsonObject?): ToolPayload.TaskList? {
+        if (args == null) return null
+        return ToolPayload.TaskList(
+            activeOnly = args.trueByDefaultFlagOf("active_only"),
+            limit = args.intOf("limit"),
+        )
+    }
+
     private fun JsonObject.stringOf(key: String): String? =
         (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
 
@@ -261,4 +354,9 @@ object ToolPayloads {
      * `replace_all` rule). */
     private fun JsonObject.flagOf(key: String): Boolean =
         (this[key] as? JsonPrimitive)?.takeIf { !it.isString }?.booleanOrNull ?: false
+
+    /** The ticket-124 flags whose wire default is TRUE (`recurring`,
+     * `active_only`): absent means true, a string "false" is not the flag. */
+    private fun JsonObject.trueByDefaultFlagOf(key: String): Boolean =
+        (this[key] as? JsonPrimitive)?.takeIf { !it.isString }?.booleanOrNull ?: true
 }

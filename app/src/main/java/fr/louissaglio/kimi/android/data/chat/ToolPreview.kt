@@ -20,6 +20,10 @@ import kotlinx.serialization.json.contentOrNull
  * `pattern`, WebSearch's `query`, FetchURL's `url` (the raw URL — the row's
  * host-first reformatting of it lives in ToolRow, not here). Grep (ticket 123)
  * identifies by `pattern` too; the row renders it slash-delimited.
+ *
+ * The cron tools (ticket 124) identify by their scheduling argument:
+ * CronCreate's `cron` expression, CronDelete's job `id`. CronList carries no
+ * arguments at all — its "list schedules" preview is the row's own label.
  */
 object ToolPreview {
 
@@ -30,6 +34,8 @@ object ToolPreview {
     private val WEB_SEARCH_IDENTIFYING_KEYS = listOf("query")
     private val FETCH_URL_IDENTIFYING_KEYS = listOf("url")
     private val GREP_IDENTIFYING_KEYS = listOf("pattern")
+    private val CRON_CREATE_IDENTIFYING_KEYS = listOf("cron")
+    private val CRON_DELETE_IDENTIFYING_KEYS = listOf("id")
     private val WHITESPACE = Regex("\\s+")
 
     fun of(toolName: String?, input: JsonObject?): String {
@@ -41,6 +47,8 @@ object ToolPreview {
             "WebSearch" -> WEB_SEARCH_IDENTIFYING_KEYS
             "FetchURL" -> FETCH_URL_IDENTIFYING_KEYS
             "Grep" -> GREP_IDENTIFYING_KEYS
+            "CronCreate" -> CRON_CREATE_IDENTIFYING_KEYS
+            "CronDelete" -> CRON_DELETE_IDENTIFYING_KEYS
             else -> IDENTIFYING_KEYS
         }
         for (key in keys) {
