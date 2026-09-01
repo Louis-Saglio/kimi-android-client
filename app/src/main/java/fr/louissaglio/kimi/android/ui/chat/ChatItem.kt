@@ -39,7 +39,8 @@ sealed interface ChatItem {
      * typed, per-tool parse (ticket 119 — ToolPayloads, derived wherever args is set,
      * first-writer-wins like it): a parsed payload switches the row to its rich
      * treatment (an Edit row opens the diff screen, a Read/Write row the file content
-     * screen — ticket 120 — instead of expanding inline).
+     * screen — ticket 120 — instead of expanding inline; a foreground Bash row keeps
+     * expanding inline but renders the terminal-styled detail block — ticket 121).
      * [output] is the result
      * text; either may be blank while the call is still running.
      * While running, [output] accumulates the volatile tool.progress chunks (ticket 025)

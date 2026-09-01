@@ -3,6 +3,7 @@ package fr.louissaglio.kimi.android.data.chat
 import java.time.Instant
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
@@ -136,15 +137,19 @@ private fun bashArgsOf(toolName: String, argsJson: String): JsonObject? {
     return runCatching { bashArgsJson.parseToJsonElement(argsJson).jsonObject }.getOrNull()
 }
 
+/** The timeout knobs of an already-parsed Bash input object — the ONE derivation
+ * behind both the string-input [bashTimeoutOf] (the row's budget fields, ticket 097)
+ * and the typed payload (`ToolPayload.Bash`, ticket 121). Non-primitive knobs parse
+ * as absent rather than throwing. */
+fun bashTimeoutOf(args: JsonObject): BashTimeout = BashTimeout(
+    seconds = (args["timeout"] as? JsonPrimitive)?.intOrNull,
+    disabled = (args["disable_timeout"] as? JsonPrimitive)?.booleanOrNull == true,
+)
+
 /** Parses [argsJson] (a Bash call's input) into its [BashTimeout]; null for non-Bash
  * calls and blank/unparseable input (the row then carries no budget information). */
-fun bashTimeoutOf(toolName: String, argsJson: String): BashTimeout? {
-    val args = bashArgsOf(toolName, argsJson) ?: return null
-    return BashTimeout(
-        seconds = args["timeout"]?.jsonPrimitive?.intOrNull,
-        disabled = args["disable_timeout"]?.jsonPrimitive?.booleanOrNull == true,
-    )
-}
+fun bashTimeoutOf(toolName: String, argsJson: String): BashTimeout? =
+    bashArgsOf(toolName, argsJson)?.let(::bashTimeoutOf)
 
 /** The agent-set `description` of a Bash call's input; null when absent or blank —
  * the job screen's title then falls back to the task-store description. */

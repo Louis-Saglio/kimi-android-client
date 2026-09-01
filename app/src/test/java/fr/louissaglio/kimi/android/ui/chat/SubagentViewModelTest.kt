@@ -7,6 +7,7 @@ import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.TaskInfo
 import fr.louissaglio.kimi.android.data.chat.Todo
+import fr.louissaglio.kimi.android.data.chat.ToolPayload
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
 import fr.louissaglio.kimi.android.navigation.Subagent
@@ -235,6 +236,8 @@ class SubagentViewModelTest {
                             "tool_MxYFRM8czboqPL4FXxWD4rC1", "Bash", ToolStatus.Done,
                             "ls -la /tmp/spike", "{\n    \"command\": \"ls -la /tmp/spike\"\n}", "total 0\n",
                             args = buildJsonObject { put("command", "ls -la /tmp/spike") },
+                            // Ticket 121: a parseable Bash call carries its typed payload.
+                            payload = ToolPayload.Bash("ls -la /tmp/spike", null, null, null, false),
                         ),
                     ),
                 ),

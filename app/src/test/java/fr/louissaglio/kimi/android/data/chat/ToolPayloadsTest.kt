@@ -193,26 +193,79 @@ class ToolPayloadsTest {
         assertEquals(false, (ToolPayloads.of("Write", argsWithMode("overwrite")) as ToolPayload.Write).append)
     }
 
+    // --- Ticket 121: Bash payloads -------------------------------------------
+
     @Test
-    fun `a Write call may carry empty content but not missing or non-string content`() {
-        val empty = buildJsonObject {
-            put("path", "/tmp/spike/a.txt")
-            put("content", "")
+    fun `a bare Bash call parses with defaults`() {
+        val args = buildJsonObject { put("command", "./gradlew build") }
+
+        assertEquals(
+            ToolPayload.Bash(
+                "./gradlew build",
+                description = null,
+                cwd = null,
+                timeoutSeconds = null,
+                timeoutDisabled = false,
+            ),
+            ToolPayloads.of("Bash", args),
+        )
+    }
+
+    @Test
+    fun `a Bash call parses its explicit knobs`() {
+        val args = buildJsonObject {
+            put("command", "make test")
+            put("description", "Run the test suite")
+            put("cwd", "/tmp/spike")
+            put("timeout", 30)
+            put("disable_timeout", true)
+        }
+
+        // The payload carries the raw knobs (bashTimeoutOf's derivation) — the
+        // explicit-seconds-wins budget rule lives in BashTimeout.
+        assertEquals(
+            ToolPayload.Bash("make test", "Run the test suite", "/tmp/spike", 30, timeoutDisabled = true),
+            ToolPayloads.of("Bash", args),
+        )
+    }
+
+    @Test
+    fun `a blank description or cwd parses as absent`() {
+        val args = buildJsonObject {
+            put("command", "ls")
+            put("description", "  ")
+            put("cwd", "")
         }
 
         assertEquals(
-            ToolPayload.Write("/tmp/spike/a.txt", "", append = false),
-            ToolPayloads.of("Write", empty),
+            ToolPayload.Bash("ls", description = null, cwd = null, timeoutSeconds = null, timeoutDisabled = false),
+            ToolPayloads.of("Bash", args),
         )
-        assertNull(ToolPayloads.of("Write", buildJsonObject { put("path", "/tmp/spike/a.txt") }))
-        assertNull(
-            ToolPayloads.of(
-                "Write",
-                buildJsonObject {
-                    put("path", "/tmp/spike/a.txt")
-                    put("content", 42)
-                },
-            ),
+    }
+
+    @Test
+    fun `non-primitive timeout knobs parse as absent rather than rejecting the payload`() {
+        val args = buildJsonObject {
+            put("command", "ls")
+            put("timeout", buildJsonObject { })
+        }
+
+        assertEquals(
+            ToolPayload.Bash("ls", description = null, cwd = null, timeoutSeconds = null, timeoutDisabled = false),
+            ToolPayloads.of("Bash", args),
         )
+    }
+
+    @Test
+    fun `a Bash call without a string command is rejected`() {
+        assertNull(ToolPayloads.of("Bash", null))
+        assertNull(ToolPayloads.of("Bash", buildJsonObject { }))
+        assertNull(ToolPayloads.of("Bash", buildJsonObject { put("description", "x") }))
+        assertNull(ToolPayloads.of("Bash", buildJsonObject { put("command", 42) }))
+    }
+
+    @Test
+    fun `another tool never parses as a Bash payload`() {
+        assertNull(ToolPayloads.of("Glob", buildJsonObject { put("command", "ls") }))
     }
 }

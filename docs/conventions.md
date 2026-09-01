@@ -21,9 +21,13 @@
   the expanded row's generic key/value args table, ticket 118, `ToolPayloads`
   for the typed per-tool payload parse (ticket 119 — `ToolPayload.Edit` first;
   ticket 120 adds `Read`/`Write`, the payload carrying the row chip derivations:
-  Read's `lines a–b` range label, Write's line/byte counts), `ReadOutputs` (the
+  Read's `lines a–b` range label, Write's line/byte counts; ticket 121 adds `Bash` —
+  the first payload that re-skins the row's INLINE expansion (terminal detail block)
+  instead of navigating away, the precedent for 122–125), `ReadOutputs` (the
   Read output's trailing `<system>…</system>` status block lifted into the file
-  screen's caption chip — end-anchored, tolerant fallback) and
+  screen's caption chip — end-anchored, tolerant fallback; `BashOutputs` does the
+  same for the Bash output's `Command failed with exit code: N` trailer — ticket
+  121's `exit N` chip) and
   `EditDiffs` for the unified line-diff model (java-diff-utils Myers on the Edit
   call's old/new strings; rows plus the `+a −b` delta-type counts)), and
   `SessionActivityStore` (`data/sessions/` — process-lifetime

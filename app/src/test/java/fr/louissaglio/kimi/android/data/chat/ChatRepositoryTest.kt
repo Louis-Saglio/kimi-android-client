@@ -450,6 +450,8 @@ class ChatRepositoryTest {
                         input = "{\n    \"command\": \"./gradlew test\"\n}",
                         output = "FAIL 3 tests\n",
                         args = buildJsonObject { put("command", "./gradlew test") },
+                        // Ticket 121: a parseable Bash call carries its typed payload.
+                        payload = ToolPayload.Bash("./gradlew test", null, null, null, false),
                     ),
                 ),
             ),
@@ -488,6 +490,8 @@ class ChatRepositoryTest {
                         "echo doc-verify",
                         input = "{\n    \"command\": \"echo doc-verify\"\n}",
                         args = buildJsonObject { put("command", "echo doc-verify") },
+                        // Ticket 121: a parseable Bash call carries its typed payload.
+                        payload = ToolPayload.Bash("echo doc-verify", null, null, null, false),
                     ),
                 ),
             ),

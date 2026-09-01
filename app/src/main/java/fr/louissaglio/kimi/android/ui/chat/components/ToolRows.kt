@@ -42,12 +42,14 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import fr.louissaglio.kimi.android.data.chat.BashOutputs
 import fr.louissaglio.kimi.android.data.chat.EditDiffs
 import fr.louissaglio.kimi.android.data.chat.ToolDetailFields
 import fr.louissaglio.kimi.android.data.chat.ToolPayload
 import fr.louissaglio.kimi.android.ui.common.formatFileSize
 import fr.louissaglio.kimi.android.ui.common.icons.DocumentIcon
 import fr.louissaglio.kimi.android.ui.common.icons.EditIcon
+import fr.louissaglio.kimi.android.ui.common.icons.WorkspaceIcon
 import fr.louissaglio.kimi.android.ui.theme.successColor
 
 /** Tool-status glyph for the group header and the rows (tickets 022/037): spinner
@@ -170,7 +172,14 @@ internal fun ToolGroupCard(
  * the read) or a Write's `N lines · size` chip (and an "append" badge for
  * `mode: append`), and the tap — row or trailing open button — navigates to the
  * file content screen with the call's output as the snapshot. An unparseable
- * Read/Write call keeps the generic expansion. */
+ * Read/Write call keeps the generic expansion.
+ *
+ * A `Bash` row with a parsed payload (ticket 121) KEEPS its inline expansion — the
+ * first payload-typed expanded row — but the generic key/value table is replaced by
+ * a terminal-styled layout: the call's `description` as a caption, the command in a
+ * `$ `-prompted block, and a chips row (cwd, timeout) that only shows non-default
+ * knobs. An output ending with the harness's `Command failed with exit code: N`
+ * trailer renders stripped, the code lifted into an `exit N` error chip. */
 @Composable
 internal fun ToolRow(
     activity: ChatItem.ToolActivity,
@@ -188,9 +197,15 @@ internal fun ToolRow(
     val readPayload = activity.payload as? ToolPayload.Read
     val writePayload = activity.payload as? ToolPayload.Write
     val filePayload: ToolPayload? = readPayload ?: writePayload
+    val bashPayload = activity.payload as? ToolPayload.Bash
     // The chip counts come from the diff itself (delta types), not a line split.
     val editDiff = remember(editPayload) { editPayload?.let { EditDiffs.of(it.oldString, it.newString) } }
     val detailFields = remember(activity.args) { ToolDetailFields.of(activity.args) }
+    // Ticket 121: a parsed Bash row's output with the harness's exit-code trailer
+    // lifted out (null for every other row — their output renders verbatim).
+    val bashOutput = remember(bashPayload, activity.output) {
+        if (bashPayload != null) BashOutputs.of(activity.output) else null
+    }
     val expandable = !isQuestionRow && editPayload == null && filePayload == null && linkedSubagentId == null &&
         linkedBashTaskId == null &&
         (detailFields.isNotEmpty() || activity.input.isNotBlank() || activity.output.isNotBlank())
@@ -379,16 +394,28 @@ internal fun ToolRow(
                 modifier = Modifier.padding(bottom = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                // The args table replaces the pretty-printed input JSON (ticket 118);
-                // the string only remains for calls that carried no object args.
-                if (detailFields.isNotEmpty()) {
+                if (bashPayload != null) {
+                    // Ticket 121's terminal layout replaces the generic args table.
+                    bashPayload.description?.let { description ->
+                        Text(
+                            text = description,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = detailColor,
+                        )
+                    }
+                    BashCommandBlock(bashPayload.command)
+                    BashChipsRow(bashPayload, activity)
+                } else if (detailFields.isNotEmpty()) {
+                    // The args table replaces the pretty-printed input JSON (ticket
+                    // 118); the string only remains for calls that carried no object
+                    // args.
                     ToolArgsTable(detailFields)
                 } else if (activity.input.isNotBlank()) {
                     ToolDetailBlock(text = activity.input, color = MaterialTheme.colorScheme.surfaceVariant)
                 }
                 if (activity.output.isNotBlank()) {
                     ToolDetailBlock(
-                        text = activity.output,
+                        text = bashOutput?.output ?: activity.output,
                         color = if (activity.status == ToolStatus.Error) {
                             MaterialTheme.colorScheme.errorContainer
                         } else {
@@ -397,6 +424,19 @@ internal fun ToolRow(
                         // Live tool.progress chunks (ticket 025): keep the tail in view.
                         pinnedToBottom = activity.status == ToolStatus.Running,
                     )
+                    bashOutput?.exitCode?.let { code ->
+                        // The lifted trailer (ticket 121): the status glyph already
+                        // turned red via is_error, the chip adds the code.
+                        Surface(color = MaterialTheme.colorScheme.error, shape = MaterialTheme.shapes.small) {
+                            Text(
+                                text = "exit $code",
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                style = MaterialTheme.typography.labelMedium,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onError,
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -426,6 +466,88 @@ private fun ToolDetailBlock(text: String, color: Color, pinnedToBottom: Boolean 
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
             )
+        }
+    }
+}
+
+/** The Bash command's terminal block (ticket 121): the dimmed `$ ` prompt prefix and
+ * the command, monospace, on a `surfaceContainerHigh` surface — the [ToolDetailBlock]
+ * recipe (capped height, internal scroll). */
+@Composable
+private fun BashCommandBlock(command: String) {
+    Surface(color = MaterialTheme.colorScheme.surfaceContainerHigh, shape = MaterialTheme.shapes.small) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(max = 240.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+        ) {
+            Text(
+                text = "\$ ",
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = command,
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+    }
+}
+
+/** The Bash row's non-default knobs (ticket 121): cwd (folder glyph + path,
+ * monospace) and the timeout chip — `⏱ Ns` for an explicit timeout, "no timeout" for
+ * `disable_timeout`, the row's own budget fields (ticket 097) so the chips always
+ * agree with the job screen's budget display. Nothing renders when everything is
+ * default. */
+@Composable
+private fun BashChipsRow(payload: ToolPayload.Bash, activity: ChatItem.ToolActivity) {
+    val timeoutSeconds = activity.timeoutSeconds
+    val timeoutDisabled = activity.timeoutDisabled
+    if (payload.cwd == null && timeoutSeconds == null && !timeoutDisabled) return
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        payload.cwd?.let { cwd ->
+            // Bounded (weight, no fill): a long path ellipsizes instead of pushing
+            // the timeout chip out of the row.
+            Surface(
+                color = MaterialTheme.colorScheme.secondaryContainer,
+                shape = MaterialTheme.shapes.small,
+                modifier = Modifier.weight(1f, fill = false),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Icon(
+                        imageVector = WorkspaceIcon,
+                        contentDescription = null,
+                        modifier = Modifier.size(12.dp),
+                    )
+                    Text(
+                        text = cwd,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+        if (timeoutSeconds != null || timeoutDisabled) {
+            Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.small) {
+                Text(
+                    // An explicit timeout wins over disable_timeout — the
+                    // BashTimeout.effectiveSeconds ordering.
+                    text = if (timeoutSeconds != null) "⏱ ${timeoutSeconds}s" else "no timeout",
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
         }
     }
 }

@@ -12,7 +12,9 @@ import kotlinx.serialization.json.intOrNull
  * itself). The generic key/value table (ToolDetailFields) stays the fallback for
  * everything without a typed payload; a row whose payload parsed gets the rich
  * treatment instead — for [Edit], the `+a −b` stat chip and the diff screen; for
- * [Read]/[Write] (ticket 120), the range/size chips and the file content screen.
+ * [Read]/[Write] (ticket 120), the range/size chips and the file content screen;
+ * for [Bash] (ticket 121), the terminal-styled inline expansion (the first
+ * payload-typed expanded row — the others navigate away).
  */
 sealed interface ToolPayload {
 
@@ -61,6 +63,20 @@ sealed interface ToolPayload {
         /** The row chip's byte size — UTF-8, the wire's encoding. */
         val byteSize: Long get() = content.toByteArray().size.toLong()
     }
+
+    /** The Bash call's inputs (ticket 121). [command] is required — a call without
+     * one keeps the generic expansion. [description]/[cwd] are null when unset or
+     * blank (neither earns UI space then). [timeoutSeconds]/[timeoutDisabled] are the
+     * input's timeout knobs, the same [bashTimeoutOf] derivation as the row's budget
+     * fields (ticket 097) — the payload carries them for completeness; the expanded
+     * row's chips read the row's fields. */
+    data class Bash(
+        val command: String,
+        val description: String?,
+        val cwd: String?,
+        val timeoutSeconds: Int?,
+        val timeoutDisabled: Boolean,
+    ) : ToolPayload
 }
 
 /** The payload parser: one variant per known tool, null for anything else —
@@ -71,11 +87,13 @@ object ToolPayloads {
     private const val EDIT_TOOL_NAME = "Edit"
     private const val READ_TOOL_NAME = "Read"
     private const val WRITE_TOOL_NAME = "Write"
+    private const val BASH_TOOL_NAME = "Bash"
 
     fun of(toolName: String, args: JsonObject?): ToolPayload? = when (toolName) {
         EDIT_TOOL_NAME -> editOf(args)
         READ_TOOL_NAME -> readOf(args)
         WRITE_TOOL_NAME -> writeOf(args)
+        BASH_TOOL_NAME -> bashOf(args)
         else -> null
     }
 
@@ -106,6 +124,19 @@ object ToolPayloads {
         val content = args.stringOf("content") ?: return null
         val append = (args["mode"] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull == "append"
         return ToolPayload.Write(path, content, append)
+    }
+
+    private fun bashOf(args: JsonObject?): ToolPayload.Bash? {
+        if (args == null) return null
+        val command = args.stringOf("command") ?: return null
+        val timeout = bashTimeoutOf(args)
+        return ToolPayload.Bash(
+            command,
+            description = args.stringOf("description")?.takeIf { it.isNotBlank() },
+            cwd = args.stringOf("cwd")?.takeIf { it.isNotBlank() },
+            timeoutSeconds = timeout.seconds,
+            timeoutDisabled = timeout.disabled,
+        )
     }
 
     private fun JsonObject.stringOf(key: String): String? =
