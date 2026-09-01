@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -37,6 +38,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
@@ -44,11 +46,17 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import fr.louissaglio.kimi.android.data.chat.BashOutputs
 import fr.louissaglio.kimi.android.data.chat.EditDiffs
+import fr.louissaglio.kimi.android.data.chat.FetchUrlOutputs
+import fr.louissaglio.kimi.android.data.chat.GlobOutputs
 import fr.louissaglio.kimi.android.data.chat.ToolDetailFields
 import fr.louissaglio.kimi.android.data.chat.ToolPayload
+import fr.louissaglio.kimi.android.data.chat.ToolPreview
 import fr.louissaglio.kimi.android.ui.common.formatFileSize
 import fr.louissaglio.kimi.android.ui.common.icons.DocumentIcon
 import fr.louissaglio.kimi.android.ui.common.icons.EditIcon
+import fr.louissaglio.kimi.android.ui.common.icons.GlobeIcon
+import fr.louissaglio.kimi.android.ui.common.icons.LinkIcon
+import fr.louissaglio.kimi.android.ui.common.icons.SearchIcon
 import fr.louissaglio.kimi.android.ui.common.icons.WorkspaceIcon
 import fr.louissaglio.kimi.android.ui.theme.successColor
 
@@ -179,7 +187,17 @@ internal fun ToolGroupCard(
  * a terminal-styled layout: the call's `description` as a caption, the command in a
  * `$ `-prompted block, and a chips row (cwd, timeout) that only shows non-default
  * knobs. An output ending with the harness's `Command failed with exit code: N`
- * trailer renders stripped, the code lifted into an `exit N` error chip. */
+ * trailer renders stripped, the code lifted into an `exit N` error chip.
+ *
+ * The read-only lookup rows (ticket 122) keep the inline expansion too:
+ * `Glob` (magnifier glyph, monospace `pattern` preview) expands to its scope chips
+ * (path, include_ignored — non-default only) and a "N matches" header over the
+ * path list, the server's truncation marker lifted into a chip ([GlobOutputs]);
+ * `WebSearch` (globe glyph, prose `query` preview) expands to the result text
+ * through the chat markdown renderer; `FetchURL` (link glyph, host-first shortened
+ * URL preview — [hostFirstUrl]) expands to the full selectable URL, the fetch note
+ * as a caption when it parses ([FetchUrlOutputs]) and the content verbatim. An
+ * unparseable call of any of the three keeps the generic expansion. */
 @Composable
 internal fun ToolRow(
     activity: ChatItem.ToolActivity,
@@ -198,6 +216,10 @@ internal fun ToolRow(
     val writePayload = activity.payload as? ToolPayload.Write
     val filePayload: ToolPayload? = readPayload ?: writePayload
     val bashPayload = activity.payload as? ToolPayload.Bash
+    val globPayload = activity.payload as? ToolPayload.Glob
+    val webSearchPayload = activity.payload as? ToolPayload.WebSearch
+    val fetchUrlPayload = activity.payload as? ToolPayload.FetchUrl
+    val lookupPayload = globPayload ?: webSearchPayload ?: fetchUrlPayload
     // The chip counts come from the diff itself (delta types), not a line split.
     val editDiff = remember(editPayload) { editPayload?.let { EditDiffs.of(it.oldString, it.newString) } }
     val detailFields = remember(activity.args) { ToolDetailFields.of(activity.args) }
@@ -206,9 +228,27 @@ internal fun ToolRow(
     val bashOutput = remember(bashPayload, activity.output) {
         if (bashPayload != null) BashOutputs.of(activity.output) else null
     }
+    // Ticket 122: the lookup rows' parsed outputs. Glob's rich list is success-only
+    // (an error output is a status sentence — it renders verbatim on the error
+    // surface); null parses mean "render verbatim".
+    val globOutput = remember(globPayload, activity.output, activity.status) {
+        if (globPayload != null && activity.status != ToolStatus.Error) GlobOutputs.of(activity.output) else null
+    }
+    val fetchUrlOutput = remember(fetchUrlPayload, activity.output) {
+        if (fetchUrlPayload != null) FetchUrlOutputs.of(activity.output) else null
+    }
+    // A parsed lookup row's details no longer include the generic args table, so the
+    // row is expandable only when its rich expansion has something to show.
+    val lookupExpandable = when {
+        fetchUrlPayload != null -> true // the full URL always renders
+        globPayload != null -> activity.output.isNotBlank() || globPayload.path != null || globPayload.includeIgnored
+        webSearchPayload != null -> activity.output.isNotBlank()
+        else -> false
+    }
     val expandable = !isQuestionRow && editPayload == null && filePayload == null && linkedSubagentId == null &&
         linkedBashTaskId == null &&
-        (detailFields.isNotEmpty() || activity.input.isNotBlank() || activity.output.isNotBlank())
+        (lookupExpandable || (lookupPayload == null &&
+            (detailFields.isNotEmpty() || activity.input.isNotBlank() || activity.output.isNotBlank())))
     var expanded by rememberSaveable { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth()) {
         Row(
@@ -232,7 +272,9 @@ internal fun ToolRow(
         ) {
             // Terminal glyph for shell calls (material-icons-core has no terminal icon),
             // a pencil for parsed Edit calls (ticket 119), a document for parsed
-            // Read/Write calls (ticket 120), a generic tool icon otherwise.
+            // Read/Write calls (ticket 120), the lookup glyphs for parsed
+            // Glob/WebSearch/FetchURL calls (ticket 122), a generic tool icon
+            // otherwise. The tags mark the lookup glyphs for the row tests.
             if (activity.name == "Bash") {
                 Text(
                     text = ">_",
@@ -245,24 +287,41 @@ internal fun ToolRow(
                     imageVector = when {
                         editPayload != null -> EditIcon
                         filePayload != null -> DocumentIcon
+                        globPayload != null -> SearchIcon
+                        webSearchPayload != null -> GlobeIcon
+                        fetchUrlPayload != null -> LinkIcon
                         else -> Icons.Filled.Build
                     },
                     contentDescription = null,
-                    modifier = Modifier.size(14.dp),
+                    modifier = Modifier
+                        .size(14.dp)
+                        .then(
+                            when {
+                                globPayload != null -> Modifier.testTag("toolIconGlob")
+                                webSearchPayload != null -> Modifier.testTag("toolIconWebSearch")
+                                fetchUrlPayload != null -> Modifier.testTag("toolIconFetchUrl")
+                                else -> Modifier
+                            },
+                        ),
                     tint = detailColor,
                 )
             }
+            // A parsed FetchURL row leads with the host (ticket 122): the URL's
+            // identifying part on a narrow row; the full URL is the expansion's.
+            val rowPreview = if (fetchUrlPayload != null) hostFirstUrl(fetchUrlPayload.url) else activity.preview
             Text(
                 text = activity.name.ifBlank { "tool" },
                 style = MaterialTheme.typography.labelMedium,
                 color = detailColor,
             )
-            if (activity.preview.isNotBlank()) {
+            if (rowPreview.isNotBlank()) {
                 Text(
-                    text = activity.preview,
+                    text = rowPreview,
                     modifier = Modifier.weight(1f),
                     style = MaterialTheme.typography.labelMedium,
-                    fontFamily = FontFamily.Monospace,
+                    // The WebSearch query is prose (ticket 122) — every other preview
+                    // is a machine string and stays monospace.
+                    fontFamily = if (webSearchPayload != null) null else FontFamily.Monospace,
                     color = detailColor,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -394,47 +453,83 @@ internal fun ToolRow(
                 modifier = Modifier.padding(bottom = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                if (bashPayload != null) {
-                    // Ticket 121's terminal layout replaces the generic args table.
-                    bashPayload.description?.let { description ->
-                        Text(
-                            text = description,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = detailColor,
-                        )
+                when {
+                    bashPayload != null -> {
+                        // Ticket 121's terminal layout replaces the generic args table.
+                        bashPayload.description?.let { description ->
+                            Text(
+                                text = description,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = detailColor,
+                            )
+                        }
+                        BashCommandBlock(bashPayload.command)
+                        BashChipsRow(bashPayload, activity)
                     }
-                    BashCommandBlock(bashPayload.command)
-                    BashChipsRow(bashPayload, activity)
-                } else if (detailFields.isNotEmpty()) {
-                    // The args table replaces the pretty-printed input JSON (ticket
-                    // 118); the string only remains for calls that carried no object
-                    // args.
-                    ToolArgsTable(detailFields)
-                } else if (activity.input.isNotBlank()) {
-                    ToolDetailBlock(text = activity.input, color = MaterialTheme.colorScheme.surfaceVariant)
+                    globPayload != null -> GlobChipsRow(globPayload)
+                    fetchUrlPayload != null -> {
+                        // The full URL (the row shows it host-first, ticket 122).
+                        SelectionContainer {
+                            Text(
+                                text = fetchUrlPayload.url,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                        }
+                    }
+                    // WebSearch: nothing to add — the query already leads the row.
+                    webSearchPayload != null -> Unit
+                    detailFields.isNotEmpty() -> {
+                        // The args table replaces the pretty-printed input JSON (ticket
+                        // 118); the string only remains for calls that carried no object
+                        // args.
+                        ToolArgsTable(detailFields)
+                    }
+                    activity.input.isNotBlank() ->
+                        ToolDetailBlock(text = activity.input, color = MaterialTheme.colorScheme.surfaceVariant)
                 }
                 if (activity.output.isNotBlank()) {
-                    ToolDetailBlock(
-                        text = bashOutput?.output ?: activity.output,
-                        color = if (activity.status == ToolStatus.Error) {
-                            MaterialTheme.colorScheme.errorContainer
-                        } else {
-                            MaterialTheme.colorScheme.secondaryContainer
-                        },
-                        // Live tool.progress chunks (ticket 025): keep the tail in view.
-                        pinnedToBottom = activity.status == ToolStatus.Running,
-                    )
-                    bashOutput?.exitCode?.let { code ->
-                        // The lifted trailer (ticket 121): the status glyph already
-                        // turned red via is_error, the chip adds the code.
-                        Surface(color = MaterialTheme.colorScheme.error, shape = MaterialTheme.shapes.small) {
-                            Text(
-                                text = "exit $code",
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                style = MaterialTheme.typography.labelMedium,
-                                fontFamily = FontFamily.Monospace,
-                                color = MaterialTheme.colorScheme.onError,
+                    val outputColor = if (activity.status == ToolStatus.Error) {
+                        MaterialTheme.colorScheme.errorContainer
+                    } else {
+                        MaterialTheme.colorScheme.secondaryContainer
+                    }
+                    when {
+                        globOutput != null -> {
+                            GlobResultHeader(globOutput)
+                            ToolDetailBlock(text = globOutput.lines.joinToString("\n"), color = outputColor)
+                        }
+                        webSearchPayload != null -> WebSearchResultBlock(activity.output, color = outputColor)
+                        fetchUrlOutput != null -> {
+                            fetchUrlOutput.note?.let { note ->
+                                Text(
+                                    text = note,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = detailColor,
+                                )
+                            }
+                            ToolDetailBlock(text = fetchUrlOutput.content, color = outputColor)
+                        }
+                        else -> {
+                            ToolDetailBlock(
+                                text = bashOutput?.output ?: activity.output,
+                                color = outputColor,
+                                // Live tool.progress chunks (ticket 025): keep the tail in view.
+                                pinnedToBottom = activity.status == ToolStatus.Running,
                             )
+                            bashOutput?.exitCode?.let { code ->
+                                // The lifted trailer (ticket 121): the status glyph already
+                                // turned red via is_error, the chip adds the code.
+                                Surface(color = MaterialTheme.colorScheme.error, shape = MaterialTheme.shapes.small) {
+                                    Text(
+                                        text = "exit $code",
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = MaterialTheme.colorScheme.onError,
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -583,4 +678,110 @@ private fun ToolArgsTable(fields: List<ToolDetailFields.Field>) {
             }
         }
     }
+}
+
+/** The Glob row's non-default scope knobs (ticket 122): the `path` override (folder
+ * glyph + path, monospace, the Bash cwd chip's recipe) and an "including ignored"
+ * chip for `include_ignored: true`. Nothing renders when everything is default. */
+@Composable
+private fun GlobChipsRow(payload: ToolPayload.Glob) {
+    if (payload.path == null && !payload.includeIgnored) return
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        payload.path?.let { path ->
+            // Bounded (weight, no fill): a long path ellipsizes instead of pushing
+            // the ignored chip out of the row.
+            Surface(
+                color = MaterialTheme.colorScheme.secondaryContainer,
+                shape = MaterialTheme.shapes.small,
+                modifier = Modifier.weight(1f, fill = false),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Icon(
+                        imageVector = WorkspaceIcon,
+                        contentDescription = null,
+                        modifier = Modifier.size(12.dp),
+                    )
+                    Text(
+                        text = path,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+        if (payload.includeIgnored) {
+            Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.small) {
+                Text(
+                    text = "including ignored",
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
+        }
+    }
+}
+
+/** The Glob expansion's result header (ticket 122): the match count (the listed
+ * lines, blanks dropped) plus the "truncated" chip when the server capped the
+ * results ([GlobOutputs] stripped the marker). */
+@Composable
+private fun GlobResultHeader(output: GlobOutputs.Lifted) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            text = if (output.lines.size == 1) "1 match" else "${output.lines.size} matches",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (output.truncatedCount != null) {
+            Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.small) {
+                Text(
+                    text = "truncated",
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
+        }
+    }
+}
+
+/** The WebSearch expansion (ticket 122): the result text through the chat markdown
+ * renderer (read-only — the assistant bubble's component), in the [ToolDetailBlock]
+ * recipe (capped height, internal scroll) so a long result never tunnels the
+ * timeline. */
+@Composable
+private fun WebSearchResultBlock(output: String, color: Color) {
+    Surface(color = color, shape = MaterialTheme.shapes.small) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(max = 240.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+        ) {
+            MarkdownBody(output)
+        }
+    }
+}
+
+/** The FetchURL row's host-first preview (ticket 122): `host[:port]` plus the
+ * path's first segment, an ellipsis marking the rest — `example.com/docs/…`. The
+ * identifying part of a URL on a narrow row is the host; the full URL lives in the
+ * expansion. A URL without a parseable host renders one-lined as-is. */
+internal fun hostFirstUrl(url: String): String {
+    val trimmed = url.trim()
+    val uri = runCatching { java.net.URI(trimmed) }.getOrNull() ?: return ToolPreview.oneLine(trimmed)
+    val host = uri.host ?: return ToolPreview.oneLine(trimmed)
+    val authority = if (uri.port >= 0) "$host:${uri.port}" else host
+    val path = uri.rawPath?.trim('/')?.takeIf { it.isNotEmpty() } ?: return authority
+    val first = path.substringBefore('/')
+    return if (first.length == path.length) "$authority/$first" else "$authority/$first/…"
 }

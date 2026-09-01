@@ -268,4 +268,92 @@ class ToolPayloadsTest {
     fun `another tool never parses as a Bash payload`() {
         assertNull(ToolPayloads.of("Glob", buildJsonObject { put("command", "ls") }))
     }
+
+    // --- Ticket 122: Glob/WebSearch/FetchURL payloads --------------------------------
+
+    @Test
+    fun `a full Glob call parses all three fields`() {
+        val args = buildJsonObject {
+            put("pattern", "**/*.kt")
+            put("path", "/tmp/spike")
+            put("include_ignored", true)
+        }
+
+        assertEquals(
+            ToolPayload.Glob("**/*.kt", "/tmp/spike", includeIgnored = true),
+            ToolPayloads.of("Glob", args),
+        )
+    }
+
+    @Test
+    fun `a bare Glob call parses with defaults`() {
+        val args = buildJsonObject { put("pattern", "*.kt") }
+
+        assertEquals(
+            ToolPayload.Glob("*.kt", path = null, includeIgnored = false),
+            ToolPayloads.of("Glob", args),
+        )
+    }
+
+    @Test
+    fun `a blank Glob path parses as absent and a string include_ignored is not the flag`() {
+        val args = buildJsonObject {
+            put("pattern", "*.kt")
+            put("path", "  ")
+            put("include_ignored", "true")
+        }
+
+        assertEquals(
+            ToolPayload.Glob("*.kt", path = null, includeIgnored = false),
+            ToolPayloads.of("Glob", args),
+        )
+    }
+
+    @Test
+    fun `a Glob call without a string pattern is rejected`() {
+        assertNull(ToolPayloads.of("Glob", null))
+        assertNull(ToolPayloads.of("Glob", buildJsonObject { }))
+        assertNull(ToolPayloads.of("Glob", buildJsonObject { put("path", "/tmp/spike") }))
+        assertNull(ToolPayloads.of("Glob", buildJsonObject { put("pattern", 42) }))
+    }
+
+    @Test
+    fun `a WebSearch call parses its query`() {
+        val args = buildJsonObject { put("query", "kimi code changelog") }
+
+        assertEquals(ToolPayload.WebSearch("kimi code changelog"), ToolPayloads.of("WebSearch", args))
+    }
+
+    @Test
+    fun `a WebSearch call without a string query is rejected`() {
+        assertNull(ToolPayloads.of("WebSearch", null))
+        assertNull(ToolPayloads.of("WebSearch", buildJsonObject { }))
+        assertNull(ToolPayloads.of("WebSearch", buildJsonObject { put("query", 42) }))
+    }
+
+    @Test
+    fun `a FetchURL call parses its url`() {
+        val args = buildJsonObject { put("url", "https://example.com/docs/guide") }
+
+        assertEquals(ToolPayload.FetchUrl("https://example.com/docs/guide"), ToolPayloads.of("FetchURL", args))
+    }
+
+    @Test
+    fun `a FetchURL call without a string url is rejected`() {
+        assertNull(ToolPayloads.of("FetchURL", null))
+        assertNull(ToolPayloads.of("FetchURL", buildJsonObject { }))
+        assertNull(ToolPayloads.of("FetchURL", buildJsonObject { put("url", 42) }))
+    }
+
+    @Test
+    fun `another tool never parses as a lookup payload`() {
+        val args = buildJsonObject {
+            put("pattern", "*.kt")
+            put("query", "q")
+            put("url", "https://example.com")
+        }
+
+        assertNull(ToolPayloads.of("Grep", args))
+        assertNull(ToolPayloads.of("Read", args))
+    }
 }

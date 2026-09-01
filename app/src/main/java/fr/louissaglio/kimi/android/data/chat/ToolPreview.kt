@@ -15,12 +15,19 @@ import kotlinx.serialization.json.contentOrNull
  * CLI and the jobs widget. Agent/AgentSwarm rows get the same treatment: their
  * `description` is the sub-agent's short label, far more readable on the row than
  * the compact JSON of the whole prompt payload.
+ *
+ * The lookup tools (ticket 122) identify by their one query argument: Glob's
+ * `pattern`, WebSearch's `query`, FetchURL's `url` (the raw URL — the row's
+ * host-first reformatting of it lives in ToolRow, not here).
  */
 object ToolPreview {
 
     private val IDENTIFYING_KEYS = listOf("command", "path")
     private val BASH_IDENTIFYING_KEYS = listOf("description", "command", "path")
     private val AGENT_IDENTIFYING_KEYS = listOf("description")
+    private val GLOB_IDENTIFYING_KEYS = listOf("pattern")
+    private val WEB_SEARCH_IDENTIFYING_KEYS = listOf("query")
+    private val FETCH_URL_IDENTIFYING_KEYS = listOf("url")
     private val WHITESPACE = Regex("\\s+")
 
     fun of(toolName: String?, input: JsonObject?): String {
@@ -28,6 +35,9 @@ object ToolPreview {
         val keys = when (toolName) {
             "Bash" -> BASH_IDENTIFYING_KEYS
             "Agent", "AgentSwarm" -> AGENT_IDENTIFYING_KEYS
+            "Glob" -> GLOB_IDENTIFYING_KEYS
+            "WebSearch" -> WEB_SEARCH_IDENTIFYING_KEYS
+            "FetchURL" -> FETCH_URL_IDENTIFYING_KEYS
             else -> IDENTIFYING_KEYS
         }
         for (key in keys) {

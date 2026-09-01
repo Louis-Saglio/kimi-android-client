@@ -14,7 +14,10 @@ import kotlinx.serialization.json.intOrNull
  * treatment instead — for [Edit], the `+a −b` stat chip and the diff screen; for
  * [Read]/[Write] (ticket 120), the range/size chips and the file content screen;
  * for [Bash] (ticket 121), the terminal-styled inline expansion (the first
- * payload-typed expanded row — the others navigate away).
+ * payload-typed expanded row — the others navigate away);
+ * for [Glob]/[WebSearch]/[FetchUrl] (ticket 122), the read-only lookup rows — they
+ * keep the inline expansion like [Bash], with the result rendered per tool (counted
+ * path list, markdown, verbatim content) instead of the generic args table.
  */
 sealed interface ToolPayload {
 
@@ -77,6 +80,23 @@ sealed interface ToolPayload {
         val timeoutSeconds: Int?,
         val timeoutDisabled: Boolean,
     ) : ToolPayload
+
+    /** The Glob call's inputs (ticket 122). [pattern] is required — a call without
+     * one keeps the generic expansion. [path] (the scope override) is null when unset
+     * or blank; [includeIgnored] is the wire's `include_ignored` flag (default false). */
+    data class Glob(
+        val pattern: String,
+        val path: String?,
+        val includeIgnored: Boolean,
+    ) : ToolPayload
+
+    /** The WebSearch call's input (ticket 122) — the [query] is prose, rendered as
+     * prose on the row (no monospace). */
+    data class WebSearch(val query: String) : ToolPayload
+
+    /** The FetchURL call's input (ticket 122); the row reformats [url] host-first
+     * itself, the expansion shows it in full. */
+    data class FetchUrl(val url: String) : ToolPayload
 }
 
 /** The payload parser: one variant per known tool, null for anything else —
@@ -88,12 +108,18 @@ object ToolPayloads {
     private const val READ_TOOL_NAME = "Read"
     private const val WRITE_TOOL_NAME = "Write"
     private const val BASH_TOOL_NAME = "Bash"
+    private const val GLOB_TOOL_NAME = "Glob"
+    private const val WEB_SEARCH_TOOL_NAME = "WebSearch"
+    private const val FETCH_URL_TOOL_NAME = "FetchURL"
 
     fun of(toolName: String, args: JsonObject?): ToolPayload? = when (toolName) {
         EDIT_TOOL_NAME -> editOf(args)
         READ_TOOL_NAME -> readOf(args)
         WRITE_TOOL_NAME -> writeOf(args)
         BASH_TOOL_NAME -> bashOf(args)
+        GLOB_TOOL_NAME -> globOf(args)
+        WEB_SEARCH_TOOL_NAME -> webSearchOf(args)
+        FETCH_URL_TOOL_NAME -> fetchUrlOf(args)
         else -> null
     }
 
@@ -137,6 +163,31 @@ object ToolPayloads {
             timeoutSeconds = timeout.seconds,
             timeoutDisabled = timeout.disabled,
         )
+    }
+
+    private fun globOf(args: JsonObject?): ToolPayload.Glob? {
+        if (args == null) return null
+        val pattern = args.stringOf("pattern") ?: return null
+        val includeIgnored = (args["include_ignored"] as? JsonPrimitive)
+            ?.takeIf { !it.isString }
+            ?.booleanOrNull ?: false
+        return ToolPayload.Glob(
+            pattern,
+            path = args.stringOf("path")?.takeIf { it.isNotBlank() },
+            includeIgnored = includeIgnored,
+        )
+    }
+
+    private fun webSearchOf(args: JsonObject?): ToolPayload.WebSearch? {
+        if (args == null) return null
+        val query = args.stringOf("query") ?: return null
+        return ToolPayload.WebSearch(query)
+    }
+
+    private fun fetchUrlOf(args: JsonObject?): ToolPayload.FetchUrl? {
+        if (args == null) return null
+        val url = args.stringOf("url") ?: return null
+        return ToolPayload.FetchUrl(url)
     }
 
     private fun JsonObject.stringOf(key: String): String? =

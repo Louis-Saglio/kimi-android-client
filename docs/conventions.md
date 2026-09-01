@@ -23,11 +23,17 @@
   ticket 120 adds `Read`/`Write`, the payload carrying the row chip derivations:
   Read's `lines a–b` range label, Write's line/byte counts; ticket 121 adds `Bash` —
   the first payload that re-skins the row's INLINE expansion (terminal detail block)
-  instead of navigating away, the precedent for 122–125), `ReadOutputs` (the
+  instead of navigating away, the precedent for 122–125; ticket 122 adds
+  `Glob`/`WebSearch`/`FetchUrl` — the read-only lookup payloads, also inline-expanding:
+  the counted path list with its truncation chip, the markdown-rendered result, and
+  the full-URL + note-caption + verbatim content layouts respectively), `ReadOutputs` (the
   Read output's trailing `<system>…</system>` status block lifted into the file
   screen's caption chip — end-anchored, tolerant fallback; `BashOutputs` does the
   same for the Bash output's `Command failed with exit code: N` trailer — ticket
-  121's `exit N` chip) and
+  121's `exit N` chip; `GlobOutputs` lifts the Glob output's head truncation marker
+  into the row's chip and counts the non-blank lines for the "N matches" header,
+  `FetchUrlOutputs` lifts the FetchURL output's head note sentence into the row's
+  caption — both verified against the 0.39.1 tool source, ticket 122) and
   `EditDiffs` for the unified line-diff model (java-diff-utils Myers on the Edit
   call's old/new strings; rows plus the `+a −b` delta-type counts)), and
   `SessionActivityStore` (`data/sessions/` — process-lifetime
@@ -120,7 +126,11 @@
   parsed Read/Write rows on the chat and the sub-agent page alike; those rows never
   expand inline and carry the document glyph
   (`ui/common/icons/DocumentIcon.kt`), Read's range chip / Write's size chip and the
-  mode-append "append" badge. The diff rows' added/removed palettes are the
+  mode-append "append" badge. The ticket-122 lookup rows keep the inline expansion
+  and carry their own glyphs — magnifier `ui/common/icons/SearchIcon.kt` for Glob
+  (generic on purpose: Grep reuses it in 123), globe `GlobeIcon.kt` for WebSearch,
+  link `LinkIcon.kt` for FetchURL — with per-tool previews (pattern monospace,
+  query prose, host-first shortened URL via ToolRows' `hostFirstUrl`). The diff rows' added/removed palettes are the
   `LocalDiffColors` container/content pairs (the `LocalSuccessColor` extension
   pattern), AA-checked in both themes.
 - Chat feature collaborators (the 065 `DeltaCoalescer` pattern, generalized by

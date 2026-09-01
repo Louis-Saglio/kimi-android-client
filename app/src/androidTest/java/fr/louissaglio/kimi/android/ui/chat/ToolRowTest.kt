@@ -6,6 +6,7 @@ import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -99,13 +100,14 @@ class ToolRowTest {
     }
 
     /** Ticket 118: a call with object args expands to the generic key/value table —
-     * labels and values, no raw-JSON braces. */
+     * labels and values, no raw-JSON braces. (An MCP tool: a builtin name with
+     * parseable args — Glob since ticket 122 — would get the rich row instead.) */
     @Test
     fun rowWithObjectArgsExpandsToKeyValueTable() {
         toolRow(
             ChatItem.ToolActivity(
                 "tool_1",
-                "Glob",
+                "mcp__kiln__submit_batch",
                 ToolStatus.Done,
                 preview = "glob the sources",
                 args = buildJsonObject {
@@ -712,5 +714,239 @@ class ToolRowTest {
         composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
         composeTestRule.onNodeWithText("timeout").assertIsDisplayed()
         composeTestRule.onNodeWithText("30").assertIsDisplayed()
+    }
+
+    // --- Ticket 122: parsed lookup rows (Glob / WebSearch / FetchURL) -----------------
+
+    /** A parsed Glob row, args/payload kept in sync like the live derivation. */
+    private fun globRow(
+        pattern: String = "*.kt",
+        path: String? = null,
+        includeIgnored: Boolean = false,
+        status: ToolStatus = ToolStatus.Done,
+        output: String = "",
+    ) = ChatItem.ToolActivity(
+        "tool_1",
+        "Glob",
+        status,
+        preview = pattern,
+        args = buildJsonObject {
+            put("pattern", pattern)
+            path?.let { put("path", it) }
+            if (includeIgnored) put("include_ignored", true)
+        },
+        payload = ToolPayload.Glob(pattern, path, includeIgnored),
+        output = output,
+    )
+
+    @Test
+    fun globRowShowsMagnifierIconAndPatternPreview() {
+        toolRow(globRow(output = "app/a.kt\n"))
+
+        composeTestRule.onNodeWithTag("toolIconGlob", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithText("Glob").assertIsDisplayed()
+        composeTestRule.onNodeWithText("*.kt").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Expand tool details").assertIsDisplayed()
+    }
+
+    @Test
+    fun webSearchRowShowsGlobeIconAndProseQueryPreview() {
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "WebSearch",
+                ToolStatus.Done,
+                preview = "kimi code changelog",
+                args = buildJsonObject { put("query", "kimi code changelog") },
+                payload = ToolPayload.WebSearch("kimi code changelog"),
+                output = "results",
+            ),
+        )
+
+        composeTestRule.onNodeWithTag("toolIconWebSearch", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithText("kimi code changelog").assertIsDisplayed()
+    }
+
+    @Test
+    fun fetchUrlRowShowsLinkIconAndHostFirstPreview() {
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "FetchURL",
+                ToolStatus.Done,
+                preview = "https://example.com/docs/guide/install.html",
+                args = buildJsonObject { put("url", "https://example.com/docs/guide/install.html") },
+                payload = ToolPayload.FetchUrl("https://example.com/docs/guide/install.html"),
+            ),
+        )
+
+        composeTestRule.onNodeWithTag("toolIconFetchUrl", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithText("example.com/docs/…").assertIsDisplayed()
+        // The full URL is the expansion's, not the row's.
+        composeTestRule.onNodeWithText("https://example.com/docs/guide/install.html").assertDoesNotExist()
+    }
+
+    @Test
+    fun globRowExpandsToCountedPathList() {
+        toolRow(globRow(output = "app/a.kt\napp/b.kt\n"))
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+
+        composeTestRule.onNodeWithText("2 matches").assertIsDisplayed()
+        composeTestRule.onNodeWithText("app/a.kt\napp/b.kt").assertIsDisplayed()
+        // The generic key/value table is replaced: no arg labels.
+        composeTestRule.onNodeWithText("pattern").assertDoesNotExist()
+        composeTestRule.onNodeWithText("truncated").assertDoesNotExist()
+    }
+
+    @Test
+    fun truncatedGlobRowShowsChipAndStrippedList() {
+        toolRow(
+            globRow(
+                output = "[Truncated at 100 matches \n use a more specific pattern]\n" +
+                    "Only the first 100 matches are returned.\napp/a.kt\napp/b.kt",
+            ),
+        )
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+
+        composeTestRule.onNodeWithText("2 matches").assertIsDisplayed()
+        composeTestRule.onNodeWithText("truncated").assertIsDisplayed()
+        composeTestRule.onNodeWithText("app/a.kt\napp/b.kt").assertIsDisplayed()
+        composeTestRule.onNode(hasText("Only the first", substring = true)).assertDoesNotExist()
+        composeTestRule.onNode(hasText("Truncated at", substring = true)).assertDoesNotExist()
+    }
+
+    @Test
+    fun globRowWithNonDefaultScopeShowsChips() {
+        toolRow(globRow(path = "/tmp/spike", includeIgnored = true, output = "a.kt\n"))
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+
+        composeTestRule.onNodeWithText("/tmp/spike").assertIsDisplayed()
+        composeTestRule.onNodeWithText("including ignored").assertIsDisplayed()
+    }
+
+    @Test
+    fun globRowWithStatusOnlyOutputRendersVerbatim() {
+        toolRow(globRow(output = "No matches found"))
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+
+        composeTestRule.onNodeWithText("No matches found").assertIsDisplayed()
+        // Not a one-line "list": no counted header.
+        composeTestRule.onNodeWithText("1 match").assertDoesNotExist()
+    }
+
+    @Test
+    fun globErrorRowRendersVerbatim() {
+        toolRow(globRow(status = ToolStatus.Error, output = "/tmp/nope does not exist"))
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+
+        composeTestRule.onNodeWithText("/tmp/nope does not exist").assertIsDisplayed()
+        composeTestRule.onNodeWithText("1 match").assertDoesNotExist()
+    }
+
+    @Test
+    fun webSearchRowExpandsToRenderedMarkdown() {
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "WebSearch",
+                ToolStatus.Done,
+                preview = "kimi code changelog",
+                args = buildJsonObject { put("query", "kimi code changelog") },
+                payload = ToolPayload.WebSearch("kimi code changelog"),
+                output = "Title: Some Page\n\n[Open the guide](https://example.com/guide)",
+            ),
+        )
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+
+        // Rendered markdown: the link text node exists, the raw markdown syntax does not.
+        composeTestRule.onNodeWithText("Some Page", substring = true).assertIsDisplayed()
+        composeTestRule.onNodeWithText("Open the guide").assertIsDisplayed()
+        composeTestRule.onNodeWithText("[Open the guide](https://example.com/guide)").assertDoesNotExist()
+    }
+
+    @Test
+    fun runningWebSearchRowWithoutOutputStaysNonExpandable() {
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "WebSearch",
+                ToolStatus.Running,
+                preview = "kimi code changelog",
+                args = buildJsonObject { put("query", "kimi code changelog") },
+                payload = ToolPayload.WebSearch("kimi code changelog"),
+            ),
+        )
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").assertDoesNotExist()
+    }
+
+    @Test
+    fun fetchUrlRowExpandsToFullUrlNoteCaptionAndVerbatimContent() {
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "FetchURL",
+                ToolStatus.Done,
+                preview = "https://example.com/docs/guide",
+                args = buildJsonObject { put("url", "https://example.com/docs/guide") },
+                payload = ToolPayload.FetchUrl("https://example.com/docs/guide"),
+                output = "The returned content is the main text extracted from the page. " +
+                    "If you use it in your answer, cite this page as a markdown link, e.g. [title](url).\n\n" +
+                    "# Guide\n\nbody text",
+            ),
+        )
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+
+        composeTestRule.onNodeWithText("https://example.com/docs/guide").assertIsDisplayed()
+        composeTestRule.onNodeWithText("The returned content is the main text extracted from the page.").assertIsDisplayed()
+        composeTestRule.onNodeWithText("# Guide\n\nbody text").assertIsDisplayed()
+        // The model-directed citation instruction is stripped with the preamble.
+        composeTestRule.onNode(hasText("cite this page", substring = true)).assertDoesNotExist()
+    }
+
+    @Test
+    fun fetchUrlRowWithDriftedNoteRendersVerbatim() {
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "FetchURL",
+                ToolStatus.Done,
+                preview = "https://example.com/x",
+                args = buildJsonObject { put("url", "https://example.com/x") },
+                payload = ToolPayload.FetchUrl("https://example.com/x"),
+                output = "Just some content, no note.",
+            ),
+        )
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+
+        composeTestRule.onNodeWithText("Just some content, no note.").assertIsDisplayed()
+    }
+
+    /** A Glob call whose args did not parse (no pattern) keeps the generic key/value
+     * expansion. */
+    @Test
+    fun unparseableGlobRowKeepsGenericExpansion() {
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "Glob",
+                ToolStatus.Done,
+                preview = "glob the sources",
+                args = buildJsonObject { put("path", "/tmp/spike") },
+            ),
+        )
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+        composeTestRule.onNodeWithText("path").assertIsDisplayed()
+        composeTestRule.onNodeWithText("/tmp/spike").assertIsDisplayed()
     }
 }

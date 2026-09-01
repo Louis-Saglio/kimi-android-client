@@ -2271,6 +2271,51 @@ invisible here and irrelevant to clients of this endpoint.
 curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/tools
 ```
 
+### Lookup tool output text (Glob / WebSearch / FetchURL)
+
+The `tool.result` `output` text shapes the app's rich rows parse (ticket 122).
+Not wire protocol — tool-generated prose from agent-core, like the Bash
+`Command failed with exit code: N` trailer; verified 2026-09-01 against the
+bundled tool source of the running 0.39.1 server binary
+(`packages/agent-core/src/tools/builtin/fs/glob.ts`, `…/web/fetch-url.ts`,
+`…/web/web-search.ts`), not a live capture.
+
+**Glob** — one path per line (relative to the search root when under the
+workspace, absolute otherwise). Optional head notices precede the paths, in
+order: `Glob timed out after {N}s; partial results returned.`,
+`[stdout truncated at {N} bytes; results may be incomplete \n use a more
+specific pattern]` (two lines), a traversal warning (`Glob completed with
+warnings; some directories could not be read[: {stderr}]`), and — when matches
+exceed the 100 cap — the truncation marker, verbatim:
+
+```
+[Truncated at 100 matches 
+ use a more specific pattern]
+Only the first 100 matches are returned.
+```
+
+(the marker's own line break: trailing space after `matches`, leading space
+before `use`). Optional foot lines follow the paths: `Filtered {N} sensitive
+file(s).` and — only when exactly 100 matches WITHOUT truncation — `Found 100
+matches`. No-match outputs: `No matches found`, `No non-sensitive matches found
+({N} sensitive file(s) filtered).`. Errors (`is_error`): `{root} is not a
+directory`, `{root} does not exist`, `Glob failed[: {stderr}]`, `Glob aborted`.
+
+**WebSearch** — per result: `Title: {t}\n`, optional `Site:`/`Date:` lines,
+`URL: {u}\n`, `Snippet: {s}\n\n`, results separated by `---\n\n`, closed by the
+model-directed line `When you rely on a result in your answer, cite it inline
+as a markdown link, e.g. [title](url).`. Empty: `No search results found.`;
+errors are classified prose (`Search failed (network): …` etc.).
+
+**FetchURL** — a head preamble, then a blank line, then the content verbatim.
+The preamble's first sentence reports the extraction kind —
+`The returned content is the main text extracted from the page.` or
+`The returned content is the full response body, returned verbatim.`
+(passthrough) — followed by the model-directed ` If you use it in your answer,
+cite this page as a markdown link, e.g. [title](url).`. Errors: `Failed to
+fetch URL. Status: {N}. {msg}`, `Failed to fetch URL due to network error:
+{url}. {msg}`, `The response body is empty.`.
+
 ## Sub-agents
 
 How the server exposes the sub-agents the main agent spawns with its `Agent`

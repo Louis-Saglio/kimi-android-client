@@ -65,9 +65,36 @@ class ToolPreviewTest {
 
     @Test
     fun `input without an identifying argument falls back to the compact json`() {
-        val input = buildJsonObject { put("pattern", "*.kt") }
+        val input = buildJsonObject { put("runners", 3) }
 
-        assertEquals("""{"pattern":"*.kt"}""", ToolPreview.of("Glob", input))
+        assertEquals("""{"runners":3}""", ToolPreview.of("mcp__kiln__list_runners", input))
+    }
+
+    // Ticket 122: the lookup tools identify by their query argument.
+
+    @Test
+    fun `a glob call previews the pattern`() {
+        val input = buildJsonObject {
+            put("pattern", "**/*.kt")
+            put("path", "/tmp/spike")
+        }
+
+        assertEquals("**/*.kt", ToolPreview.of("Glob", input))
+    }
+
+    @Test
+    fun `a web search call previews the query`() {
+        val input = buildJsonObject { put("query", "kimi code changelog") }
+
+        assertEquals("kimi code changelog", ToolPreview.of("WebSearch", input))
+    }
+
+    @Test
+    fun `a fetch url call previews the raw url`() {
+        // The host-first shortening lives in the row, not in the preview string.
+        val input = buildJsonObject { put("url", "https://example.com/docs/guide") }
+
+        assertEquals("https://example.com/docs/guide", ToolPreview.of("FetchURL", input))
     }
 
     @Test
