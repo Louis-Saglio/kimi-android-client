@@ -23,13 +23,13 @@ compact at one line.
 
 ## Acceptance criteria
 
-- [ ] Long-press on a row opens the dialog with the full, untruncated name
+- [x] Long-press on a row opens the dialog with the full, untruncated name
   (semantics test: `onLongClick` on the row, dialog text assertion); tap still
   navigates and never triggers the dialog.
-- [ ] A titled session shows its title; an untitled one shows its full cwd.
+- [x] A titled session shows its title; an untitled one shows its full cwd.
 - [ ] On-device: a long server-generated title (e.g. an auto-titled session)
   is fully readable via long-press.
-- [ ] `./gradlew :app:assembleDebug` succeeds with all unit tests green (VPS
+- [x] `./gradlew :app:assembleDebug` succeeds with all unit tests green (VPS
   rules: `flock /tmp/kimi-android-gradle.lock`, `--max-workers=1`,
   `--no-daemon` when parallel).
 

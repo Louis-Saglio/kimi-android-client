@@ -1,7 +1,7 @@
 package fr.louissaglio.kimi.android.ui.sessions
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
@@ -428,6 +429,11 @@ private fun GroupShowMoreFooter(isLoading: Boolean, error: String?, onShowMore: 
 
 @Composable
 internal fun SessionRow(session: Session, workspaceLabel: String?, onClick: () -> Unit) {
+    // The row ellipsizes the name to one line; long-press reveals it whole (ticket 117).
+    var fullNameShown by remember { mutableStateOf(false) }
+    if (fullNameShown) {
+        SessionFullNameDialog(session = session, onDismiss = { fullNameShown = false })
+    }
     ListItem(
         headlineContent = {
             Text(
@@ -459,7 +465,28 @@ internal fun SessionRow(session: Session, workspaceLabel: String?, onClick: () -
                 )
             }
         },
-        modifier = Modifier.clickable(onClick = onClick),
+        modifier = Modifier.combinedClickable(
+            onClick = onClick,
+            onLongClick = { fullNameShown = true },
+        ),
+    )
+}
+
+@Composable
+private fun SessionFullNameDialog(session: Session, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        text = {
+            // Selectable so the name can be copied; no actions beyond dismissal.
+            SelectionContainer {
+                // displayName's fallback minus the basename shortening: the title
+                // when present, otherwise the full cwd path, the id last.
+                Text(session.title?.takeIf { it.isNotBlank() } ?: session.cwd ?: session.id)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("OK") }
+        },
     )
 }
 
