@@ -6,6 +6,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
@@ -18,9 +20,10 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** Semantics tests for the model picker sheet (ticket 108): provider grouping,
- * display-name disambiguation, steady sheet on taps. The fixture mirrors Louis's
- * screenshot: two providers serving models with the same "K3-256k" display name. */
+/** Semantics tests for the model picker sheet (ticket 108): provider grouping and
+ * collapse, display-name disambiguation, steady sheet on taps. The fixture mirrors
+ * Louis's screenshot: two providers serving models with the same "K3-256k" display
+ * name. */
 @RunWith(AndroidJUnit4::class)
 class ModelPickerSheetTest {
 
@@ -63,6 +66,8 @@ class ModelPickerSheetTest {
     @Test
     fun collidingDisplayNamesRenderUnderTheirProviderWithTheModelIdInTheSubtitle() {
         sheet()
+        // The openrouter group starts collapsed — its current model is elsewhere.
+        composeTestRule.onNodeWithText("managed:openrouter").performClick()
 
         composeTestRule.onNodeWithText("managed:kimi-code").assertIsDisplayed()
         composeTestRule.onNodeWithText("managed:openrouter").assertIsDisplayed()
@@ -74,20 +79,43 @@ class ModelPickerSheetTest {
     }
 
     @Test
-    fun modelAndEffortTapsKeepTheSheetOpenWithBothChecksVisible() {
+    fun onlyTheEffectiveModelsGroupStartsExpandedAndHeadersToggleIt() {
+        sheet()
+
+        // Current model is kimi-code/k3-256k: its group shows its rows, the other
+        // provider's rows are not composed.
+        composeTestRule.onNodeWithText("K2.7 Coding").assertIsDisplayed()
+        composeTestRule
+            .onNodeWithText("262.1k context · openrouter/k3-256k")
+            .assertDoesNotExist()
+
+        composeTestRule.onNodeWithText("managed:openrouter").performClick()
+        composeTestRule
+            .onNodeWithText("262.1k context · openrouter/k3-256k")
+            .assertIsDisplayed()
+
+        composeTestRule.onNodeWithText("managed:openrouter").performClick()
+        composeTestRule
+            .onNodeWithText("262.1k context · openrouter/k3-256k")
+            .assertDoesNotExist()
+    }
+
+    @Test
+    fun modelAndEffortTapsKeepTheSheetOpenWithBothSelectionsVisible() {
         var pickedModel: String? = null
         var pickedEffort: String? = null
         sheet(onModelSelected = { pickedModel = it }, onEffortSelected = { pickedEffort = it })
 
+        composeTestRule.onNodeWithText("managed:openrouter").performClick()
         composeTestRule.onNodeWithText("262.1k context · openrouter/k3-256k").performClick()
         assertEquals("openrouter/k3-256k", pickedModel)
-        // The tap did not dismiss: the effort section is still there.
-        composeTestRule.onNodeWithText("Thinking effort").assertIsDisplayed()
+        // The tap did not dismiss: the effort row is still there.
+        composeTestRule.onNodeWithText("Thinking").assertIsDisplayed()
 
-        composeTestRule.onNodeWithText("low").performClick()
+        composeTestRule.onNode(hasText("low") and hasClickAction()).performClick()
         assertEquals("low", pickedEffort)
-        // The picked model row and the picked effort row both carry their check.
-        composeTestRule.onAllNodesWithText("✓").assertCountEquals(2)
-        composeTestRule.onNodeWithText("Thinking effort").assertIsDisplayed()
+        // The picked model row carries the only check; the effort shows as a segment.
+        composeTestRule.onAllNodesWithText("✓").assertCountEquals(1)
+        composeTestRule.onNodeWithText("Thinking").assertIsDisplayed()
     }
 }
