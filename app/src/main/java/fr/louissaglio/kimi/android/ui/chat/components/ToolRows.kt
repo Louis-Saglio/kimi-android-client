@@ -23,7 +23,6 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Surface
@@ -555,61 +554,53 @@ internal fun ToolRow(
                 )
             }
             if (linkedSubagentId != null) {
-                IconButton(
-                    onClick = { onOpenSubagent(linkedSubagentId) },
-                    modifier = Modifier.size(40.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                        contentDescription = "Open sub-agent",
-                        modifier = Modifier.size(16.dp),
-                        tint = detailColor,
-                    )
-                }
+                // Bare clickable Icon, not an IconButton (same for the three open
+                // chevrons below): the button's 40dp touch-target padding would
+                // inset the glyph from the row edge, misaligning it with the
+                // expand chevron. The whole row navigates on tap anyway.
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = "Open sub-agent",
+                    modifier = Modifier
+                        .size(16.dp)
+                        .clickable { onOpenSubagent(linkedSubagentId) },
+                    tint = detailColor,
+                )
             }
             if (editPayload != null) {
                 // Same open affordance as the linked rows above: the row tap already
                 // navigates, this chevron is the explicit target (ticket 119).
-                IconButton(
-                    onClick = { onOpenEditDiff(activity.id, editPayload) },
-                    modifier = Modifier.size(40.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                        contentDescription = "Open diff",
-                        modifier = Modifier.size(16.dp),
-                        tint = detailColor,
-                    )
-                }
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = "Open diff",
+                    modifier = Modifier
+                        .size(16.dp)
+                        .clickable { onOpenEditDiff(activity.id, editPayload) },
+                    tint = detailColor,
+                )
             }
             if (filePayload != null) {
                 // Same open affordance as the Edit row above (ticket 120).
-                IconButton(
-                    onClick = { onOpenFileContent(activity.id, filePayload, activity.output) },
-                    modifier = Modifier.size(40.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                        contentDescription = "Open file",
-                        modifier = Modifier.size(16.dp),
-                        tint = detailColor,
-                    )
-                }
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = "Open file",
+                    modifier = Modifier
+                        .size(16.dp)
+                        .clickable { onOpenFileContent(activity.id, filePayload, activity.output) },
+                    tint = detailColor,
+                )
             }
             if (linkedJobTaskId != null) {
                 // Background-Bash rows (ticket 096) and task-control rows (ticket
                 // 124) share this one "Open job" affordance.
-                IconButton(
-                    onClick = { onOpenJob(linkedJobTaskId) },
-                    modifier = Modifier.size(40.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                        contentDescription = "Open job",
-                        modifier = Modifier.size(16.dp),
-                        tint = detailColor,
-                    )
-                }
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = "Open job",
+                    modifier = Modifier
+                        .size(16.dp)
+                        .clickable { onOpenJob(linkedJobTaskId) },
+                    tint = detailColor,
+                )
             }
         }
         if (expanded && expandable) {
