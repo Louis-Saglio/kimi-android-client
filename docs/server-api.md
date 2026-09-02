@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-08-28
-(server version `0.39.1`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-09-02
+(server version `0.40.1`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
@@ -14,7 +14,8 @@ the workspace list used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `0.39.0`
+**Protocol history:** this document previously described server `0.39.1`
+(verified 2026-08-28; see git history), `0.39.0`
 (verified 2026-08-27; see git history), `0.38.0`
 (verified 2026-08-20; see git history), `0.37.2`
 (verified 2026-08-18; see git history), `0.36.1`
@@ -29,6 +30,96 @@ used are shown with each section. Secrets are redacted (`<token>`).
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
 that, `0.27.0` before that, and `0.23.3` before that.
+
+The drift from 0.39.1 to 0.40.1 is **small and additive for the core loop —
+nothing the app parses broke**. The upstream diff between the two tags (56
+commits, much of it CLI/vscode/web-bundle churn; `packages/protocol` touched
+in exactly one schema line; the `packages/kap-server` diffs are the new
+routes below, the `last_seq` one-liner, and DI-refactor churn) touched the
+client-facing wire in exactly these places:
+
+- **`GET /api/v1/sessions/{id}` reports the real event watermark in
+  `last_seq`** (commit `0f39b2cf`; verified live 2026-09-02): a fresh
+  session's first get already reads `"last_seq": 4`, a session after two
+  turns reads `20` — up to 0.39.1 the field was hardcoded `0` on every read
+  path. The **list endpoint still emits `0`** (the fix wires only the detail
+  path; fork/child responses too). The app never reads `last_seq` (its WS
+  resume cursor comes from the snapshot's `as_of_seq`) — no ticket.
+- **New route `POST /api/v1/workspaces/{id}/add-dir`** (commit `a23ff563`;
+  verified live 2026-09-02 — shapes and all three error paths in the
+  Workspaces section). The app only ever lists workspaces — no ticket.
+- **Transcript prompt-identity additions** (commits `cbe0a77f`/`58b74cfe`;
+  all verified live 2026-09-02 — see Transcript): every turn carries
+  optional **`triggerPromptId`** (the prompt record id that opened the
+  turn); user-role text frames gained optional **`origin`**
+  (`{"kind":"user"}`, schema also allows `skillActivations` provenance —
+  not triggered); `prompts[]` entities gained **`steeredAt`**, and the
+  steered-into prompt's `content` now shows the steered text (steer
+  provenance). Cold replays can additionally mark steps
+  `state:"interrupted"` with `endReason`/`endMessage` (commits `742e1197`/
+  `9e881528` made the step-interrupt and prompt-resolution records durable —
+  schema/projection only, not triggered live). All additive; the app decodes
+  none of these fields.
+- **WS `turn.started` now always carries `promptId`** (same prompt-identity
+  work; verified live 2026-09-02 on a plain prompt with no client-sent
+  `prompt_id`: `"promptId":"msg_01M1HT2N…"` rides next to `origin`/`prompt`).
+  Up to 0.39.1 the field appeared only when the submitter had sent
+  `prompt_id` (and was absent in the 0.38.0 live capture). The app decodes
+  only `agentId` from this payload — no ticket.
+- **File-store "file not found" moved `40406` → `40407`** (verified live
+  2026-09-02): `GET /api/v1/files/{id}` on a deleted file AND the
+  session-media route on an unknown id both answer
+  `{"code":40407,"msg":"file not found"}` (the session-media route keeps its
+  plain-HTTP-404 transport; the legacy route its HTTP-200 envelope; neither
+  carries `stack`). `40406` survives for unknown **tasks**
+  (`"task … does not exist in session …"`, verified live). The app maps the
+  binary 404 without reading the envelope code — no ticket.
+- **`/meta`:** `experimental_flags` gained **`file_history: false`** (the
+  experimental turn-level file-history snapshots, commit `650d12f6` — two
+  flag-gated routes, source-derived shapes in the Files section) and
+  **`secondary-model` flipped to `true`** (graduated out of experimental,
+  commit `971a8b24`; a default, config can still override). `features`
+  gained **`fileHistory`** (18 entries here). All additive; the app reads
+  only `code`/`msg` off `/meta`.
+- **`agent_config` gained optional `tower_base`** (string, min 1 — the
+  release's only `packages/protocol` change, commit `c3bf6f9d` tower-mode
+  rework): accepted and echoed wherever `agent_config` rides (session
+  create/get/list, the agent-config route). Source-derived — not sent or
+  observed live (the `tower` flag is `false` here). The same commit reworded
+  the `SESSION_TOWER_MODE_INVALID` error message (code unchanged).
+- **Behavioral, shapes unchanged:** dangerous bash commands now require
+  approval in **all** permission modes (commit `4b9888b7`; new config key
+  `permission.dangerous_command_guard`, default `true`) — expect
+  `event.approval.requested` in yolo/auto where turns previously ran
+  straight through. The CLI's permission-mode rename to "Always Ask" /
+  "Ask When Needed" / "Never Ask" (commit `08a2fb00`) is **labels-only** —
+  the wire enum stays `manual`/`yolo`/`auto` (verified in the upstream
+  schema; this server's `/status` still reports `"permission":"yolo"`).
+- **Config drift (not shape):** `default_model` reads `kimi-code/k3-256k`
+  (fresh-session `/status` `max_context_tokens` is back to **262144**), and
+  `thinking.effort` is `"max"` — so `thinking_level`, the
+  `agent.status.updated` `thinkingEffort`, and every sub-agent
+  `thinking_effort` field read `"max"` where the 0.39.x captures read
+  `"high"`/`"low"`. Values, not protocol.
+- **Invisible here:** the agent-runtime DI refactor (`15bf5855` — same
+  routes/shapes), session forking without materializing the target
+  (`9c37feb4`), and the remote-control relay env override (`55b422aa` —
+  remote control is out of scope).
+
+Everything else re-verified unchanged live on 0.40.1 (see the verification
+log): auth 401s, meta, models catalog (27 builtins), v1 sessions
+list/create/get, `/status`, the full snapshot (top-level keys, real
+`session.usage`, `in_flight_turn`, pending-approval/question items, running
+roster), messages history, prompts POST + ACK, one full prompt round-trip,
+prompt queueing + steer (WS sequence + transcript projection), `:abort`,
+compact (both bodies, the WS sequence, both `40910`s with `stack`), the
+questions flow end-to-end, the manual-approval round-trip (the 0.39.0 id
+split intact; `tool_call_id` POST still `40404`), files
+upload/download/`Range`/delete + path attachments, foreground + background
+sub-agents, REST `/tasks` list/get/`:cancel`, the TodoList contract, the v2
+grouped session table, `event.config.changed` on a real config write, and
+WS hello/heartbeat/subscribe/ack/cursor-resume (both the replay and the
+refused-cursor paths).
 
 The drift from 0.39.0 to 0.39.1 is **additive for the core loop — the one
 breaking change is on a route the app does not call** (`/api/v1/auth`). The
@@ -708,7 +799,8 @@ Every REST response is JSON wrapped in an envelope:
   Error2 domain-error envelope (verified on `40401`, `40402`, `40910`,
   `50001`), and since 0.33.0 that includes the search route's `40001`-coded
   `GlobalSearchError`s (`pageToken …`); schema-validation `40001`s (Zod,
-  with `details`) and `40406` envelopes still omit it. Ignore it either way.
+  with `details`) and the `40406`/`40407` not-found envelopes still omit it
+  (re-verified 2026-09-02 on 0.40.1). Ignore it either way.
 
 ## Meta
 
@@ -722,14 +814,14 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
 {
   "code": 0, "msg": "success",
   "data": {
-    "server_version": "0.39.1",
+    "server_version": "0.40.1",
     "capabilities": {"websocket": true, "file_upload": true, "fs_query": true, "mcp": true, "tasks": true, "terminal": true},
-    "server_id": "01M14XB21A3KHXMKPFMJ298EEP",
-    "started_at": "2026-08-28T19:25:25.930Z",
+    "server_id": "01M1HS7ZNMFV2EG1HGMS6XM6CM",
+    "started_at": "2026-09-02T19:23:58.516Z",
     "open_in_apps": [],
     "dangerous_bypass_auth": false,
     "backend": "v2",
-    "experimental_flags": {"secondary-model": false, "subagent_fork": false, "auto_session_title": false, "remote-control": false, "wait_for": true, "tower": false, "tool-select": false, "persistence_minidb_readmodel": true, "search_worker": true},
+    "experimental_flags": {"file_history": false, "auto_session_title": false, "remote-control": false, "secondary-model": true, "subagent_fork": false, "wait_for": true, "tower": false, "tool-select": false, "persistence_minidb_readmodel": true, "search_worker": true},
     "features": [
       {"name": "btw", "state": "Active", "meta": {}},
       {"name": "plan", "state": "Active", "meta": {}},
@@ -741,11 +833,13 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
 }
 ```
 
-(`features` trimmed to 4 of 17 entries; the full list here is `skill`,
-`btw`, `dateChange`, `plan`, `externalHooks`, `debugEvents`, `swarm`, `goal`,
-`staleGuard`, `tower`, `usage`, `cron`, `interaction`, `reminder`,
-`tokenCounting`, `sessionInit`, `todo` — all
-`"Active"` with empty `meta`, unchanged from 0.39.0. **0.39.0:** `skill`, `cron`, `interaction` and
+(`features` trimmed to 4 of 18 entries; the full list here is `skill`,
+`btw`, `dateChange`, `plan`, `fileHistory`, `externalHooks`, `debugEvents`,
+`swarm`, `goal`, `staleGuard`, `tower`, `usage`, `cron`, `interaction`,
+`reminder`, `tokenCounting`, `sessionInit`, `todo` — all
+`"Active"` with empty `meta`. **0.40.1:** `fileHistory` is new (the
+experimental file-history feature unit, commit `650d12f6`). **0.39.0:** `skill`,
+`cron`, `interaction` and
 `reminder` are new — the agent-runtime featurization, commit `9a715820`.)
 
 - **`experimental_flags` is new in 0.32.0** (additive): the effective
@@ -763,7 +857,12 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
   in the same release (the `WaitFor` tool's switch; flag values are config,
   not protocol). **0.39.0:** the flags gained `subagent_fork` (the `Agent`
   tool's fork parameter), `remote-control` (the web remote-control tunnel)
-  and `tower` (tower mode) — all `false` here.
+  and `tower` (tower mode) — all `false` here. **0.40.1:** the flags gained
+  **`file_history`** (`false` here — the experimental turn-level
+  file-history snapshot feature, commit `650d12f6`), and
+  **`secondary-model` now defaults to `true`** (the subagent model pool
+  graduated out of experimental, commit `971a8b24` — value drift, the key
+  exists since 0.36.0).
 
 ## Models
 
@@ -906,8 +1005,11 @@ Session object shape (0.31.0, fields truncated for brevity):
   last active 2026-08-25/27 (0.38-era), still cold after the 2026-08-28
   restart to 0.39.1, answered their first `/status` with their persisted
   binding (verified 2026-09-01).
-- `message_count` and `last_seq` are still present but observed stuck at `0`
-  (re-verified 2026-07-23 after several turns) — do not rely on them.
+- `message_count` is still present but observed stuck at `0`
+  (re-verified 2026-07-23 after several turns) — do not rely on it.
+  **`last_seq` on the list path is likewise still `0`** (re-verified
+  2026-09-02 on 0.40.1) — but see Get one: since 0.40.1 the **detail**
+  endpoint serves the real WS event watermark there.
 - The list envelope carries `has_more` for pagination (verified with
   `page_size=2&before_id=<last id of page>`; re-verified 2026-08-05 on
   0.33.0 after the upstream keyset-cursor rewrite — multi-page
@@ -945,7 +1047,14 @@ answers plain HTTP 404 (re-verified 2026-07-23).
 
 ### Get one — `GET /api/v1/sessions/{id}`
 
-Returns the same session object as the list.
+Returns the same session object as the list, with one fix: **0.40.1 — the
+detail path now reports the real event-stream watermark in `last_seq`**
+(upstream commit `0f39b2cf`, "report the real event watermark as last_seq in
+getSession"; verified live 2026-09-02 — `"last_seq": 4` on a fresh session,
+`20` after two turns, matching the snapshot's `as_of_seq`; the create
+response, the list, and fork/child responses still emit `0`). A client could
+seed a WS resume cursor from it together with the snapshot's `epoch` family;
+the Android app keeps using the snapshot's `as_of_seq`.
 
 ### Live status — `GET /api/v1/sessions/{id}/status`
 
@@ -989,8 +1098,9 @@ the session's current config (`"off"`/`"yolo"` observed on a fresh session;
 (upstream schema change — `0` is the engine's "unknown" marker, never a real
 limit); never observed omitted live — a fresh model-less session reports the
 default model's context (262144 on 0.34.0–0.36.1; 1000000 on 0.37.2–0.39.0,
-the `deepseek/deepseek-v4-pro` default; **1048576 since 0.39.1** — the
-default model is `kimi-code/k3` again; config drift, not protocol) and a k3 session 1048576 (re-verified
+the `deepseek/deepseek-v4-pro` default; 1048576 on 0.39.1, the
+`kimi-code/k3` default; **262144 on 0.40.1** — the default model is
+`kimi-code/k3-256k` now; config drift, not protocol) and a k3 session 1048576 (re-verified
 2026-08-18). **0.38.0:** **`context_usage` is now omittable too** (same
 commit `4ff06f17`, same "unknown" rule — upstream schema made it optional;
 still present on this server, `0` on a fresh session, re-verified 2026-08-20).
@@ -1244,6 +1354,30 @@ envelope **leaks a `stack` field** (the first route observed doing so; since
 0.32.0 every Error2 domain-error envelope carries one — see Response
 envelope).
 
+### Add a directory — `POST /api/v1/workspaces/{id}/add-dir`
+
+**New in 0.40.1** (upstream commit `a23ff563`; every behavior below verified
+live 2026-09-02 on 0.40.1). Adds an extra root directory to a workspace.
+Body: `{"path": "<dir>", "persist": <bool, optional>}` — `path` accepts a
+relative path (resolved against the workspace root) and `~`/`~/…`
+(expanded); `persist` defaults to `true` and appends the dir to
+`<root>/.kimi-code/local.toml` (`[workspace] additional_dir = [...]`).
+
+```bash
+curl -s -X POST http://127.0.0.1:58627/api/v1/workspaces/wd_spike_6baf4c130e63/add-dir \
+  -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
+  -d '{"path":"subdir-a"}'
+# {"code":0,"msg":"success","data":{"project_root":"/home/ubuntu/spike",
+#  "config_path":"/home/ubuntu/spike/.kimi-code/local.toml",
+#  "additional_dirs":["/home/ubuntu/spike/subdir-a"],"persisted":true},"request_id":"…"}
+```
+
+Errors (all HTTP-200 envelopes): empty `path` → `40001` with `details`;
+missing/non-directory path → **`40409`** `"path <p> does not exist"` (same
+code as session-create's unknown `cwd`, different message); unknown
+workspace → `40410` (same code as the trust route's). The Android app never
+calls this route.
+
 ## Messages
 
 ### History — `GET /api/v1/sessions/{id}/messages`
@@ -1374,7 +1508,13 @@ the session's **unpaginated global state**, shipped with every page (the
 `{promptId, status, userMessageId, content, createdAt, finishedAt}` for the
 session's turn-opening inputs, including steered-in prompts (status
 `"completed"` once their host turn ends); prompts whose messages were
-compacted away vanish from the list. Also **0.39.0:** `interactions[]`
+compacted away vanish from the list. **0.40.1 (commit `cbe0a77f`, "preserve
+steer provenance"; verified live 2026-09-02):** a prompt that was steered
+into a running turn carries **`steeredAt`**, and the *active* prompt it
+merged into reports the steered text as its `content` (verified: the active
+prompt `msg_…SX` showed the steered `"Also reply with the single word
+steered."` instead of its own submitted text — the turn entity's `prompt`
+still holds the original). Also **0.39.0:** `interactions[]`
 question entries now carry `request` as the full wire question payload
 (stable `q_N`/`opt_N_M` ids, `question_id`, `tool_call_id`, `created_at` —
 commit `b3f08b68`; verified live on a pending question 2026-08-27) instead of
@@ -1409,7 +1549,11 @@ Turn → step → frame structure (verbatim keys, running sub-agent capture):
 
 - Turn: `turnId` (`"t0"`, `"t1"`, …), `ordinal`, `state` (`"running"` /
   `"completed"` / `"cancelled"` / `"failed"` — the terminal two are real since
-  0.31.1, see below), `origin`, `steps`. `origin` is `{"kind":"user"}`
+  0.31.1, see below), `origin`, `steps`. **0.40.1 (additive, commit
+  `58b74cfe` "preserve turn prompt identity"; verified live 2026-09-02 on
+  main and sub-agent turns alike):** every turn carries
+  **`triggerPromptId`** — the prompt record id (`msg_…`) that opened it.
+  `origin` is `{"kind":"user"}`
   for user-prompted turns — those additionally carry a top-level **`prompt`**
   field with the prompt text (seen on main-agent turns) — or
   `{"kind":"other","payload":{"kind":"system_trigger","name":"subagent"}}` for
@@ -1424,6 +1568,10 @@ Turn → step → frame structure (verbatim keys, running sub-agent capture):
   `"assistant"` observed — `text`), and `tool` (`frameId`, `toolCallId`,
   `name`, `state` `"running"`/`"done"`, `input` (args object), `output`).
   A step can hold several frames of the same kind (two `text` frames seen).
+  **0.40.1 (additive, commit `cbe0a77f`; verified live 2026-09-02):**
+  user-role text frames carry an optional **`origin`** — `{"kind":"user"}`
+  observed on a steered-in frame; the schema also allows
+  `skillActivations` provenance there (not triggered live).
   **0.39.0 (commit `5634cb55`): steered-in prompts project as mid-turn
   `{"kind":"text","role":"user","text":…}` frames** in the running turn's
   next step, carrying the new optional **`promptIds`** array (verified live
@@ -1638,11 +1786,31 @@ Session-owned canonical copy of prompt media (images/videos) referenced by a
 `Range` supported (`206`, `accept-ranges: bytes`), `content-disposition` inline
 for image/video/audio. Errors return **HTTP 404** (not the usual HTTP-200
 envelope): unknown session → `40401` "session not found", unknown file →
-`40406` "file not found". For media uploaded through `POST /api/v1/files` the
+**`40407`** "file not found" (**0.40.1 drift** — `40406` up to 0.39.1;
+verified live 2026-09-02. The legacy `GET /api/v1/files/{id}` route moved
+the same way: a deleted file answers the HTTP-200 envelope
+`{"code":40407,"msg":"file not found"}`. `40406` survives for unknown
+**tasks** only). For media uploaded through `POST /api/v1/files` the
 `file_id` is the same `f_…` id, so the legacy `GET /api/v1/files/{id}` still
 serves it (verified live: both returned the same 70 bytes for a 1×1 png); the
 session-media route is the canonical path and the only one that works for media
 that never passed through the daemon upload store.
+
+### Turn file history (experimental — new in 0.40.1, flag off here)
+
+Two routes behind the `file_history` experimental flag (env
+`KIMI_CODE_EXPERIMENTAL_FILE_HISTORY`, default `false` — off on this server,
+so **source-derived only**, from `packages/kap-server/src/protocol/
+rest-file-history.ts`, commit `650d12f6`; untested live):
+
+- `GET /api/v1/sessions/{id}/file-history/changes?turn_id=N` →
+  `{"changes":[{"path","status":"added"|"modified"|"deleted","additions",
+  "deletions","binary"?,"oversize"?}],"enabled":<bool>,"recorded":<bool>}`.
+- `GET /api/v1/sessions/{id}/file-history/content?turn_id=N&path=<p>[&phase=
+  "start"|"end"]` → `{"content":{"version":<n>,"content"?,"binary"?} | null}`.
+
+The only declared error is `SESSION_NOT_FOUND` (`40401`). The Android app
+never calls these.
 
 ## Prompts
 
@@ -2596,7 +2764,11 @@ still surface in the main chat — they are actionable.)
 
 ### Background lifecycle — WS sequence
 
-Spawn half (0.29.2 capture, unchanged on 0.31.0):
+Spawn half (0.29.2 capture, unchanged on 0.31.0; **ordering drift since
+0.38.0** — registration now precedes the spawn events: the 0.40.1 capture
+(2026-09-02) reads `task.started` → `background.task.started` →
+`subagent.spawned` → `subagent.started`, matching the "spawned fires after
+task registration" note in the foreground section):
 
 ```
 seq 46  tool.call.started   name "Agent", args {..., "run_in_background":true}
@@ -3110,7 +3282,8 @@ flow):
 seq 2   agent.status.updated       model/usage variant (now with thinkingEffort)
 seq 3   session.meta.updated       title patch
 seq 4   event.session.work_changed busy=true, main_turn_active=true
-seq 5   turn.started               {"turnId": 0, "origin": {"kind": "user"}, "prompt": "<text>"}
+seq 5   turn.started               {"turnId": 0, "origin": {"kind": "user"}, "prompt": "<text>",
+                                    "promptId": "msg_…" ← always present since 0.40.1}
 seq 6   context.spliced            the new user message, inline
 seq 7   turn.step.started          step 1; thinking.delta, tool.call.delta xN
 seq 8   permission.approval.requested  v2 shape (approval id = toolCallId up to 0.38.0;
@@ -3292,7 +3465,12 @@ a REST `:abort` reports `"user_cancelled"` (verbatim capture in Abort).
 schema-declared — commit `3ded0808`); live, `turn.started` and
 `prompt.completed` also emit a top-level `time` (epoch ms) without a matching
 schema field. `turn.started` also gained optional **`promptId`** (the
-submitter's `prompt_id`). **0.38.0, additive (schema-only):** `turn.started`
+submitter's `prompt_id`). **0.40.1:** `promptId` is now **always
+populated** — the prompt-identity persistence work (commits
+`cbe0a77f`/`58b74cfe`); verified live 2026-09-02 on a plain prompt with no
+client-sent `prompt_id` (`"promptId":"msg_01M1HT2N9FF08KBJYYYQCM6N4V"` —
+the server-minted prompt/user-message id — riding next to
+`origin`/`prompt`). **0.38.0, additive (schema-only):** `turn.started`
 gained optional **`promptAttachments`** — `[{kind:"image"|"video"|"audio",
 fileId}]`, the session-media references carried by the prompt (commit
 `38a5a934`, transcript attachment projection). **Not observed live on
@@ -3516,6 +3694,105 @@ selected option and free text both re-verified 2026-07-23:
 ```
 
 ## Verification log
+
+- 2026-09-02 re-verification on `0.40.1` (server 0.39.1 → 0.40.1; throwaway
+  sessions `session_068cac46-…` / `session_95b95798-…` in
+  `/home/ubuntu/spike`, guided by the upstream 0.39.1→0.40.1 diff — 56
+  commits; the wire-relevant ones are `0f39b2cf` (getSession `last_seq`),
+  `a23ff563` (`/workspaces/{id}/add-dir`), `cbe0a77f`/`58b74cfe`
+  (transcript prompt identity + steer provenance), `742e1197`/`9e881528`
+  (durable step-interrupt / prompt-resolution records), `971a8b24`
+  (`secondary-model` graduated to default-on), `650d12f6` (experimental
+  file-history routes + flag), `c3bf6f9d` (`tower_base` schema line), and
+  `4b9888b7` (dangerous-bash approval in all modes, behavioral).
+  `packages/protocol` otherwise untouched; the CLI permission-mode rename
+  (`08a2fb00`) is labels-only — the wire enum stays `manual`/`yolo`/`auto`).
+  Drift found and documented inline:
+  (a) **get-one `last_seq` is the real watermark now** (fresh session `4`,
+      after two turns `20`; list/create still `0`) — verified live;
+  (b) new route `POST /api/v1/workspaces/{id}/add-dir` — success
+      (`project_root`/`config_path`/`additional_dirs`/`persisted`),
+      relative-path and `~` resolution, `persist:false`, `40001` empty
+      path, `40409` missing path, `40410` unknown workspace — all verified
+      live;
+  (c) transcript: `triggerPromptId` on every turn (main AND sub-agent),
+      `origin` on user text frames (seen on the steered frame), `steeredAt`
+      on `prompts[]` entries, the steered-into prompt's `content` showing
+      the steered text — all verified live;
+  (d) WS `turn.started` carries `promptId` even without a client-sent
+      `prompt_id` — verified live on the round-trip;
+  (e) file-not-found moved `40406` → `40407` on BOTH the legacy files route
+      (after-delete download) and the session-media route (unknown id) —
+      verified live; `40406` still serves unknown tasks;
+  (f) `/meta`: `experimental_flags` +`file_history:false`,
+      `secondary-model` now `true`; `features` +`fileHistory` (18).
+  Config drift (not shape): `default_model` is `kimi-code/k3-256k`
+  (fresh-session `/status` `max_context_tokens` back to 262144),
+  `thinking.effort` is `"max"` (so `thinking_level`/`thinkingEffort`/
+  sub-agent `thinking_effort` all read `"max"` this run).
+  Re-verified unchanged, most byte-for-byte: auth 401s (missing + wrong
+  token), meta otherwise, models catalog (27 builtins incl. `select_tools`
+  + 4 MCP entries), workspaces list, v1 sessions create/get (object shape,
+  `agent_config.model` real after a prompt), `/status` (fresh
+  `thinking_level:""`, all mode flags present), the full snapshot
+  (top-level keys, real `session.usage` omitting `total_cost_usd`/
+  `turn_count`, oldest-first message page, `in_flight_turn` busy capture,
+  `pending_approvals` legacy-shape item, `pending_questions` wire-question
+  item, running foreground roster entry with `model`/`thinking_effort`),
+  messages history (envelope, `metadata.origin`, newest-first, sequential
+  ids), prompts POST ACK (`prompt_id` == `user_message_id`), one full
+  prompt round-trip (`session.meta.updated` → `prompt.submitted` →
+  `turn.started` → `context.spliced` → `prompt.started` →
+  `turn.step.started` → deltas → `tool.call.started`/`tool.progress`/
+  `tool.result` → `turn.step.completed` → `turn.ended` →
+  `prompt.completed`), prompt queueing + steer (`"status":"queued"` ACK,
+  `prompt.queued` with `queueLength`, `prompt.steered` with
+  `activePromptId`/`promptIds`/`content`/`steeredAt`, `{"steered":true}`
+  steer ACK), `:abort` (`{"aborted":true}` ACK, `interrupted` phase,
+  `turn.ended` `reason:"cancelled"` + `interruptReason:"user_cancelled"`,
+  `prompt.aborted`), compact `{}` and `{"instruction":…}` (instant empty
+  ACK, `compaction.started` `trigger:"manual"` + instruction echo →
+  `context.spliced` wholesale rewrite → `compaction.completed` with
+  `result.summary`/`compactedCount`/`tokensBefore`/`tokensAfter`/
+  `keptUserMessageCount`; both `40910`s with `stack` — empty session "No
+  messages to compact…", busy/approval-pending session "Cannot compact
+  while a turn is active…"), the questions flow end-to-end (pending poll
+  with `question_<uuid>` + distinct `tool_call_id` + stable `q_0`/`opt_0_N`
+  ids and `multi_select` omitted when false, `single` answer →
+  `event.question.answered` with the label flattened, dismiss `40909`,
+  re-dismiss `40902`, all three `event.question.*`), the manual-approval
+  round-trip (`permission.approval.requested` + `event.approval.requested`
+  with the dedicated `approval_<uuid>` ≠ `tool_call_id`, the
+  `awaiting_approval` phase carrying both ids, `tool_call_id` decision POST
+  → `40404`, `approved` decision → both resolved frames), files
+  upload/download/`Range` 206/delete, a `path` file attachment (rewrites to
+  the `Attached file "…"` notice naming the original path), foreground +
+  background sub-agents (`agent.created`, `subagent.spawned` with
+  `taskId`/`runInBackground`/`model`/`thinkingEffort`, `subagent.started`,
+  `task.started`/`background.task.started`, `subagent.completed`,
+  `task.terminated`/`background.task.terminated`, `task.notified`), REST
+  `/tasks` list/get (running foreground + terminal background, all the
+  0.39.0 fields) + `:cancel` (`{"cancelled":true}` → status `cancelled`;
+  terminal repeat → `40904` with `details.current_status`), the TodoList
+  `tool.call.started` contract (`{"todos":[{status,title}…]}`), the v2
+  grouped session table (`groups[]` + `activity.model`), WS
+  hello/heartbeat/subscribe/ack/cursor-resume (replay from seq 165
+  re-delivered 166–170 in order before the ack; future-seq cursor →
+  standalone `resync_required` then the ack listing it), and
+  `event.config.changed` on a real config write (a no-op write emits no
+  frame; config restored byte-identical).
+  **App impact: no breakage, no new tickets** — every drifted shape is
+  either additive into payloads the app never decodes (`last_seq`,
+  transcript additions, `turn.started.promptId`, `tower_base`, `/meta`
+  flags/features; the data layer runs `ignoreUnknownKeys` everywhere) or a
+  code path the app never inspects (the file-not-found envelope code — the
+  app maps the binary 404 without reading it; `add-dir` is uncalled). The
+  permission-mode rename never reached the wire. The dangerous-bash guard
+  only means *more* approval requests in yolo/auto — a flow the app already
+  handles. Unit tests (`:app:testDebugUnitTest`) pass unmodified.
+  Tooling note: websocat kept alive by a 6 s `pong` feeder (the 0.35.0
+  heartbeat kills silent listeners after ~20 s — a subscribe-only pipe
+  truncated one capture mid-turn this run before the feeder was added).
 
 - 2026-08-28 re-verification on `0.39.1` (server 0.39.0 → 0.39.1; throwaway
   sessions `session_62714470-…` / `session_9565d62c-…` in
