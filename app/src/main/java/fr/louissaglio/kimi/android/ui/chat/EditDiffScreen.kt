@@ -9,8 +9,10 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -21,6 +23,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -46,6 +49,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import fr.louissaglio.kimi.android.data.chat.EditDiffs
@@ -58,7 +62,8 @@ import fr.louissaglio.kimi.android.ui.theme.successColor
  * filename and the "+a −b" line stats, the full path goes underneath, and the body
  * is the line-level diff of the call's old/new strings — removed lines on an
  * error-tinted container with a "−" gutter, added lines on a success-tinted
- * container with "+", monospace throughout; runs of unchanged context beyond
+ * container with "+", monospace throughout — a line never wraps: past the viewport
+ * width the list scrolls horizontally instead; runs of unchanged context beyond
  * [EditDiffs.COLLAPSE_THRESHOLD] fold into a tappable "N unchanged lines" expander.
  * An edit with identical old/new shows "No changes". The content is staged in the
  * [ToolContentStore] by the navigating row tap — a store miss (process death with
@@ -143,33 +148,42 @@ fun EditDiffScreen(
 private fun DiffContent(diff: EditDiffs.Model) {
     val animationsEnabled = rememberAnimationsEnabled()
     val diffColors = MaterialTheme.diffColors
-    LazyColumn(
-        modifier = Modifier.widthIn(max = 840.dp).fillMaxWidth(),
-        contentPadding = PaddingValues(vertical = 8.dp),
-    ) {
-        // Static content (only the expanders toggle): positional keys are fine, and
-        // each Collapsed row's rememberSaveable rides the item key.
-        items(diff.rows.size) { index ->
-            when (val row = diff.rows[index]) {
-                is EditDiffs.Row.Added ->
-                    DiffLineRow("+", row.text, diffColors.addedContainer, diffColors.addedContent)
-                is EditDiffs.Row.Removed ->
-                    DiffLineRow("−", row.text, diffColors.removedContainer, diffColors.removedContent)
-                is EditDiffs.Row.Context ->
-                    DiffLineRow(" ", row.text, container = null, content = Color.Unspecified)
-                is EditDiffs.Row.Collapsed -> CollapsedContextRow(row, animationsEnabled)
+    // One horizontal scroll for the whole list: lines never wrap, so a line longer
+    // than the viewport widens the scroll range instead. Every row is at least the
+    // viewport wide so a short line's tint still spans the screen.
+    val hScroll = rememberScrollState()
+    BoxWithConstraints(Modifier.widthIn(max = 840.dp).fillMaxWidth()) {
+        val minRowWidth = maxWidth
+        LazyColumn(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(hScroll),
+            contentPadding = PaddingValues(vertical = 8.dp),
+        ) {
+            // Static content (only the expanders toggle): positional keys are fine, and
+            // each Collapsed row's rememberSaveable rides the item key.
+            items(diff.rows.size) { index ->
+                when (val row = diff.rows[index]) {
+                    is EditDiffs.Row.Added ->
+                        DiffLineRow("+", row.text, diffColors.addedContainer, diffColors.addedContent, minRowWidth)
+                    is EditDiffs.Row.Removed ->
+                        DiffLineRow("−", row.text, diffColors.removedContainer, diffColors.removedContent, minRowWidth)
+                    is EditDiffs.Row.Context ->
+                        DiffLineRow(" ", row.text, container = null, content = Color.Unspecified, minWidth = minRowWidth)
+                    is EditDiffs.Row.Collapsed -> CollapsedContextRow(row, animationsEnabled, minRowWidth)
+                }
             }
         }
     }
 }
 
 /** One diff line: a fixed-width gutter glyph (−/+/blank) ahead of the monospace
- * content, the removed/added rows tinted by their [container]. */
+ * content, the removed/added rows tinted by their [container]. The content never
+ * wraps — the list's shared horizontal scroll takes over past the viewport; [minWidth]
+ * keeps a short line's tint spanning the screen. */
 @Composable
-private fun DiffLineRow(gutter: String, text: String, container: Color?, content: Color) {
+private fun DiffLineRow(gutter: String, text: String, container: Color?, content: Color, minWidth: Dp) {
     Row(
         Modifier
-            .fillMaxWidth()
+            .widthIn(min = minWidth)
             .then(if (container != null) Modifier.background(container) else Modifier)
             .padding(horizontal = 8.dp, vertical = 1.dp),
     ) {
@@ -186,6 +200,7 @@ private fun DiffLineRow(gutter: String, text: String, container: Color?, content
             style = MaterialTheme.typography.bodySmall,
             fontFamily = FontFamily.Monospace,
             color = content,
+            softWrap = false,
         )
     }
 }
@@ -195,12 +210,12 @@ private fun DiffLineRow(gutter: String, text: String, container: Color?, content
  * the state survives scroll-out and recomposition). The reveal animation honors
  * the system's reduced-motion setting. */
 @Composable
-private fun CollapsedContextRow(row: EditDiffs.Row.Collapsed, animationsEnabled: Boolean) {
+private fun CollapsedContextRow(row: EditDiffs.Row.Collapsed, animationsEnabled: Boolean, minWidth: Dp) {
     var expanded by rememberSaveable { mutableStateOf(false) }
-    Column(Modifier.fillMaxWidth()) {
+    Column(Modifier.widthIn(min = minWidth)) {
         Row(
             Modifier
-                .fillMaxWidth()
+                .widthIn(min = minWidth)
                 .clickable { expanded = !expanded }
                 .padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -229,10 +244,10 @@ private fun CollapsedContextRow(row: EditDiffs.Row.Collapsed, animationsEnabled:
         }
         if (animationsEnabled) {
             AnimatedVisibility(visible = expanded, enter = expandVertically(), exit = shrinkVertically()) {
-                Column { row.lines.forEach { DiffLineRow(" ", it, container = null, content = Color.Unspecified) } }
+                Column { row.lines.forEach { DiffLineRow(" ", it, container = null, content = Color.Unspecified, minWidth) } }
             }
         } else if (expanded) {
-            Column { row.lines.forEach { DiffLineRow(" ", it, container = null, content = Color.Unspecified) } }
+            Column { row.lines.forEach { DiffLineRow(" ", it, container = null, content = Color.Unspecified, minWidth) } }
         }
     }
 }

@@ -1,5 +1,6 @@
 package fr.louissaglio.kimi.android.ui.chat
 
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -71,9 +72,10 @@ fun FileContentRoute(
 
 /** The shared body (ticket 120's note — parameterized by the caller): the [path]'s
  * basename and full path in the top bar, the [content] verbatim monospace in a
- * vertically scrollable, selectable block, and the optional [caption] (a Read
- * output's lifted status block) as a chip above it. The scroll position is the
- * screen's only UI state (saveable via rememberScrollState). */
+ * selectable block scrollable on both axes — a line never wraps: past the viewport
+ * it scrolls horizontally instead — and the optional [caption] (a Read output's
+ * lifted status block) as a chip above it. The scroll positions are the screen's
+ * only UI state (saveable via rememberScrollState). */
 @Composable
 fun FileContentScreen(
     path: String,
@@ -106,6 +108,7 @@ fun FileContentScreen(
                         Modifier
                             .fillMaxSize()
                             .verticalScroll(rememberScrollState())
+                            .horizontalScroll(rememberScrollState())
                             .padding(horizontal = 10.dp, vertical = 8.dp),
                     ) {
                         SelectionContainer {
@@ -113,6 +116,7 @@ fun FileContentScreen(
                                 text = content,
                                 style = MaterialTheme.typography.bodySmall,
                                 fontFamily = FontFamily.Monospace,
+                                softWrap = false,
                             )
                         }
                     }

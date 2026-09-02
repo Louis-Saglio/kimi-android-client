@@ -1,9 +1,12 @@
 package fr.louissaglio.kimi.android.ui.chat
 
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import fr.louissaglio.kimi.android.data.chat.ToolPayload
@@ -84,6 +87,22 @@ class FileContentScreenTest {
         // The path title still renders.
         composeTestRule.onNodeWithText("a.txt").assertIsDisplayed()
         composeTestRule.onNodeWithText("/tmp/spike/a.txt").assertIsDisplayed()
+    }
+
+    @Test
+    fun longLinesScrollHorizontallyInsteadOfWrapping() {
+        val content = "short\n${"x".repeat(400)}"
+        fileContent(ToolContentStore.Entry(ToolPayload.Write("/tmp/spike/a.txt", content, append = false)))
+
+        // The line is not wrapped: the content node is wider than the screen.
+        val bodyWidth = composeTestRule.onNodeWithText(content).fetchSemanticsNode().size.width
+        assertTrue(bodyWidth > composeTestRule.onRoot().fetchSemanticsNode().size.width)
+
+        // The block's horizontal scroll range covers the overflow.
+        val range = composeTestRule
+            .onNode(SemanticsMatcher.keyIsDefined(SemanticsProperties.HorizontalScrollAxisRange))
+            .fetchSemanticsNode().config[SemanticsProperties.HorizontalScrollAxisRange]
+        assertTrue(range.maxValue() > 0f)
     }
 
     @Test

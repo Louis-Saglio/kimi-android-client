@@ -1,8 +1,11 @@
 package fr.louissaglio.kimi.android.ui.chat
 
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import fr.louissaglio.kimi.android.data.chat.ToolPayload
@@ -81,6 +84,34 @@ class EditDiffScreenTest {
     }
 
     @Test
+    fun longLinesScrollHorizontallyInsteadOfWrapping() {
+        val longLine = "x".repeat(400)
+        editDiffScreen(
+            ToolPayload.Edit("/tmp/spike/a.txt", "short\n$longLine", "short\nchanged", replaceAll = false),
+        )
+
+        // Unwrapped: the line's node is wider than the screen…
+        val lineWidth = composeTestRule.onNodeWithText(longLine).fetchSemanticsNode().size.width
+        assertTrue(lineWidth > composeTestRule.onRoot().fetchSemanticsNode().size.width)
+
+        // …and the list exposes a horizontal scroll range to reach the overflow.
+        val range = composeTestRule
+            .onNode(SemanticsMatcher.keyIsDefined(SemanticsProperties.HorizontalScrollAxisRange))
+            .fetchSemanticsNode().config[SemanticsProperties.HorizontalScrollAxisRange]
+        assertTrue(range.maxValue() > 0f)
+    }
+
+    @Test
+    fun shortLinesFitTheViewportWithoutHorizontalScrollRange() {
+        editDiffScreen(ToolPayload.Edit("/tmp/spike/a.txt", "one\ntwo", "one\nTWO", replaceAll = false))
+
+        val range = composeTestRule
+            .onNode(SemanticsMatcher.keyIsDefined(SemanticsProperties.HorizontalScrollAxisRange))
+            .fetchSemanticsNode().config[SemanticsProperties.HorizontalScrollAxisRange]
+        assertTrue(range.maxValue() == 0f)
+    }
+
+    @Test
     fun missingStoreEntryShowsTheErrorStateAndBackNavigates() {
         var backed = false
         editDiffScreen(null, onNavigateBack = { backed = true })
@@ -93,3 +124,4 @@ class EditDiffScreenTest {
         assertTrue(backed)
     }
 }
+
