@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-09-02
-(server version `0.40.1`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-09-04
+(server version `0.41.0`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
@@ -14,7 +14,8 @@ the workspace list used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `0.39.1`
+**Protocol history:** this document previously described server `0.40.1`
+(verified 2026-09-02; see git history), `0.39.1`
 (verified 2026-08-28; see git history), `0.39.0`
 (verified 2026-08-27; see git history), `0.38.0`
 (verified 2026-08-20; see git history), `0.37.2`
@@ -30,6 +31,78 @@ used are shown with each section. Secrets are redacted (`<token>`).
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
 that, `0.27.0` before that, and `0.23.3` before that.
+
+The drift from 0.40.1 to 0.41.0 is **small for the core loop — nothing the
+app parses broke**. The upstream diff between the two tags (30 commits, most
+of it telemetry/CLI/TUI/web-bundle churn; `packages/protocol` untouched, the
+`packages/kap-server` diffs are one line dropping the file-history
+experimental gate plus a logger/boot fix) touched the client-facing wire in
+exactly these places:
+
+- **`/meta`:** `experimental_flags` **dropped `file_history`** (the feature
+  graduated — commit `eba23edb` removed the gate) and `features` reads 19
+  entries: **`staleGuard` is gone** (feature removed, commit `a0209469`),
+  **`contextBudget` is new** (commit `b199e332` — the model gets a
+  context-budget reminder; no wire-visible event observed, the context was
+  nowhere near the limit this run). Verified live 2026-09-04. The app reads only
+  `code`/`msg` off `/meta` — no ticket.
+- **The turn file-history routes are live now** (same commit `eba23edb`;
+  verified live 2026-09-04 — see the Files section): no flag, and the
+  current response schema has **no `enabled` field** — `{changes[],
+  recorded}` only. The Android app never calls these routes.
+- **Background questions survive turn end** (commit `523d35b5`; verified
+  live 2026-09-04 — see Questions): an `AskUserQuestion` call with
+  `background: true` stays pending after its turn ends (up to 0.40.1 it was
+  cancelled at turn end), the session reads `busy: true` /
+  `main_turn_active: false` / `pending_interaction: "question"` while it
+  waits, and the answer is delivered as a **task-origin notification turn**
+  (`task.terminated` with core kind `question`, `task.notified`
+  "Background question answered", `turn.started` origin
+  `{"kind":"task","taskId":"question-…",…}`) — the full background-task
+  delivery path. REST `/tasks` lists it with wire kind **`tool`**. The
+  background-question tool-result text shrank to
+  `task_id:`/`status:`/`next_step:` lines (prose, not protocol).
+- **Repeat-breaker settle reasons on sub-agent tasks** (commit `b6b9b374`;
+  schema-level, not triggered live): a sub-agent stopped by the
+  repeat breaker settles `completed` with a `stopReason` ("stopped by the
+  repeat breaker after issuing the same tool call repeatedly; its output is
+  a handoff, not a finished result") on `task.terminated`'s `info` — the app
+  already decodes optional `stopReason` there. The upstream wire manifest
+  also gained optional **`stopReason` on `turn.ended`** (forced stops only —
+  every live `turn.ended` this run, completed and cancelled alike, omitted
+  it), and the engine tracks a `stopCode` per sub-agent task that **no
+  kap-server projection serves** (checked the 0.41.0 REST/snapshot/task
+  sources — engine-internal state only).
+- **Transcript: `triggerPromptId` is gone from sub-agent internal turns**
+  (verified live 2026-09-04 — a regression from the 0.40.1 projection,
+  presumably the `runAgentTurn` rewrite in `b6b9b374`): main-agent user
+  turns still carry it, `system_trigger/subagent` turns no longer do. The
+  app decodes the field nowhere — no ticket.
+- **Behavioral, shapes unchanged:** the dangerous-command guard no longer
+  applies in **auto** permission mode (commit `b184b314` — the policy
+  returns early when the mode is `auto`; dangerous/unanalyzable commands run
+  ungated there). Manual and yolo keep the 0.40.1 ask behavior. Expect
+  *fewer* `event.approval.requested` frames in auto — the app already
+  handles both.
+- **Config drift (not shape):** the models catalog gained two
+  `Kimi Platform/*` entries (10 total: 4 `kimi-code/*`, 2 `Kimi Platform/*`,
+  4 `deepseek/*`) — provider-side content, not protocol.
+
+Everything else re-verified unchanged live on 0.41.0 (see the verification
+log): auth 401s, meta otherwise, v1 sessions list/create/get (`last_seq`
+real on the detail path — a fresh session reads `1` now, `20` after turns;
+the list still emits `0`), `/status`, the full snapshot (top-level keys,
+real `session.usage`, `in_flight_turn` busy capture, running roster entry),
+messages history, prompts POST + ACK, one full prompt round-trip, prompt
+queueing + steer (`steeredAt` provenance + `promptIds` text frames intact),
+`:abort`, compact (both bodies, the WS sequence, both `40910`s with
+`stack`), the questions flow end-to-end (foreground surface/poll/answer/
+dismiss + the background lifecycle above), the manual-approval round-trip
+(the `approval_<uuid>` split intact; `tool_call_id` POST still `40404`),
+files upload/download/`Range`/delete + path attachments, foreground +
+background sub-agents, REST `/tasks` list/get, the TodoList contract, the v2
+grouped session table, and WS hello/heartbeat/subscribe/ack/cursor-resume
+(both the replay and the refused-cursor paths).
 
 The drift from 0.39.1 to 0.40.1 is **small and additive for the core loop —
 nothing the app parses broke**. The upstream diff between the two tags (56
@@ -91,7 +164,11 @@ client-facing wire in exactly these places:
   approval in **all** permission modes (commit `4b9888b7`; new config key
   `permission.dangerous_command_guard`, default `true`) — expect
   `event.approval.requested` in yolo/auto where turns previously ran
-  straight through. The CLI's permission-mode rename to "Always Ask" /
+  straight through. (**0.41.0 amendment, commit `b184b314`:** the guard no
+  longer applies in **auto** mode — the policy returns early there, so
+  dangerous/unanalyzable commands run ungated; manual and yolo keep the ask
+  behavior. Verified in the upstream source.) The CLI's permission-mode
+  rename to "Always Ask" /
   "Ask When Needed" / "Never Ask" (commit `08a2fb00`) is **labels-only** —
   the wire enum stays `manual`/`yolo`/`auto` (verified in the upstream
   schema; this server's `/status` still reports `"permission":"yolo"`).
@@ -814,14 +891,14 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
 {
   "code": 0, "msg": "success",
   "data": {
-    "server_version": "0.40.1",
+    "server_version": "0.41.0",
     "capabilities": {"websocket": true, "file_upload": true, "fs_query": true, "mcp": true, "tasks": true, "terminal": true},
-    "server_id": "01M1HS7ZNMFV2EG1HGMS6XM6CM",
-    "started_at": "2026-09-02T19:23:58.516Z",
+    "server_id": "01M1PY1GAGQ9WAXVJSE1MHDH6X",
+    "started_at": "2026-09-04T19:24:01.232Z",
     "open_in_apps": [],
     "dangerous_bypass_auth": false,
     "backend": "v2",
-    "experimental_flags": {"file_history": false, "auto_session_title": false, "remote-control": false, "secondary-model": true, "subagent_fork": false, "wait_for": true, "tower": false, "tool-select": false, "persistence_minidb_readmodel": true, "search_worker": true},
+    "experimental_flags": {"auto_session_title": false, "remote-control": false, "secondary-model": true, "subagent_fork": false, "wait_for": true, "tower": false, "tool-select": false, "persistence_minidb_readmodel": true, "search_worker": true},
     "features": [
       {"name": "btw", "state": "Active", "meta": {}},
       {"name": "plan", "state": "Active", "meta": {}},
@@ -829,16 +906,19 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
       {"name": "todo", "state": "Active", "meta": {}}
     ]
   },
-  "request_id": "01M14XBTRNYKBCPA06WKV05THZ"
+  "request_id": "01M1PY2HQ3HNH09W60ANQETHJC"
 }
 ```
 
-(`features` trimmed to 4 of 18 entries; the full list here is `skill`,
+(`features` trimmed to 4 of 19 entries; the full list here is `skill`,
 `btw`, `dateChange`, `plan`, `fileHistory`, `externalHooks`, `debugEvents`,
-`swarm`, `goal`, `staleGuard`, `tower`, `usage`, `cron`, `interaction`,
-`reminder`, `tokenCounting`, `sessionInit`, `todo` — all
-`"Active"` with empty `meta`. **0.40.1:** `fileHistory` is new (the
-experimental file-history feature unit, commit `650d12f6`). **0.39.0:** `skill`,
+`swarm`, `goal`, `tower`, `usage`, `cron`, `interaction`,
+`reminder`, `tokenCounting`, `contextBudget`, `sessionInit`, `todo` — all
+`"Active"` with empty `meta`. **0.41.0:** `staleGuard` is **gone** (the
+feature was removed, commit `a0209469`) and `contextBudget` is new (the
+context-budget reminder unit, commit `b199e332`). **0.40.1:** `fileHistory`
+is new (the experimental file-history feature unit, commit `650d12f6`).
+**0.39.0:** `skill`,
 `cron`, `interaction` and
 `reminder` are new — the agent-runtime featurization, commit `9a715820`.)
 
@@ -862,7 +942,9 @@ experimental file-history feature unit, commit `650d12f6`). **0.39.0:** `skill`,
   file-history snapshot feature, commit `650d12f6`), and
   **`secondary-model` now defaults to `true`** (the subagent model pool
   graduated out of experimental, commit `971a8b24` — value drift, the key
-  exists since 0.36.0).
+  exists since 0.36.0). **0.41.0:** **`file_history` is gone again** — the
+  feature graduated and the gate was dropped (commit `eba23edb`), so the
+  routes are always on (see the Files section).
 
 ## Models
 
@@ -918,6 +1000,10 @@ unchanged from 0.29.2):
   is the 0.31.0 capture; **0.37.2 adds four `deepseek/*` entries**
   (`deepseek/deepseek-v4-flash`, `-pro`, `-chat`, `-reasoner`; all
   `max_context_size: 1000000`, no `support_efforts`) — additive.
+  **0.41.0 (verified live 2026-09-04):** the catalog reads **10 entries** —
+  two new `Kimi Platform/*` ones (`Kimi Platform/k3-256k`,
+  `Kimi Platform/kimi-k3`) ride alongside the 4 `kimi-code/*` and 4
+  `deepseek/*`. Provider-side content drift, not protocol.
 - `GET`/`POST /api/v1/config` also carries a **`secondary_model`** field (new
   in 0.31.0, additive): `{}` on this server (2026-07-30). It is writable via
   `POST /api/v1/config`; per upstream, the POST body is snake_case while the
@@ -1052,7 +1138,11 @@ detail path now reports the real event-stream watermark in `last_seq`**
 (upstream commit `0f39b2cf`, "report the real event watermark as last_seq in
 getSession"; verified live 2026-09-02 — `"last_seq": 4` on a fresh session,
 `20` after two turns, matching the snapshot's `as_of_seq`; the create
-response, the list, and fork/child responses still emit `0`). A client could
+response, the list, and fork/child responses still emit `0`). Re-verified
+2026-09-04 on 0.41.0: a fresh session's first get reads `"last_seq": 1` (the
+exact fresh value tracks the session's init records — treat any non-zero
+value as "real"), `20` after several turns, still matching `as_of_seq`. A
+client could
 seed a WS resume cursor from it together with the snapshot's `epoch` family;
 the Android app keeps using the snapshot's `as_of_seq`.
 
@@ -1553,6 +1643,9 @@ Turn → step → frame structure (verbatim keys, running sub-agent capture):
   `58b74cfe` "preserve turn prompt identity"; verified live 2026-09-02 on
   main and sub-agent turns alike):** every turn carries
   **`triggerPromptId`** — the prompt record id (`msg_…`) that opened it.
+  **0.41.0 regression (verified live 2026-09-04):** sub-agent internal turns
+  (origin `system_trigger/subagent`) **no longer carry `triggerPromptId`** —
+  main-agent user turns still do. The app decodes the field nowhere.
   `origin` is `{"kind":"user"}`
   for user-prompted turns — those additionally carry a top-level **`prompt`**
   field with the prompt text (seen on main-agent turns) — or
@@ -1796,18 +1889,24 @@ serves it (verified live: both returned the same 70 bytes for a 1×1 png); the
 session-media route is the canonical path and the only one that works for media
 that never passed through the daemon upload store.
 
-### Turn file history (experimental — new in 0.40.1, flag off here)
+### Turn file history (new in 0.40.1; live since 0.41.0)
 
-Two routes behind the `file_history` experimental flag (env
-`KIMI_CODE_EXPERIMENTAL_FILE_HISTORY`, default `false` — off on this server,
-so **source-derived only**, from `packages/kap-server/src/protocol/
-rest-file-history.ts`, commit `650d12f6`; untested live):
+Two routes that serve per-turn file-change snapshots. Introduced in 0.40.1
+behind the `file_history` experimental flag (commit `650d12f6` — source-derived
+only then, flag off); **0.41.0 dropped the gate** (commit `eba23edb`, "drop the
+experimental gate from turn-level file history" — the flag is gone from
+`/meta`), so they answer on this server now (verified live 2026-09-04):
 
 - `GET /api/v1/sessions/{id}/file-history/changes?turn_id=N` →
   `{"changes":[{"path","status":"added"|"modified"|"deleted","additions",
-  "deletions","binary"?,"oversize"?}],"enabled":<bool>,"recorded":<bool>}`.
+  "deletions","binary"?,"oversize"?}],"recorded":<bool>}` — a turn with
+  nothing recorded answers `{"changes":[],"recorded":false}` (verified).
+  **The 0.40.1 source-derived shape also carried `enabled` — the shipped
+  schema (`packages/kap-server/src/protocol/rest-file-history.ts` at
+  0.41.0) has only `changes` and `recorded`.**
 - `GET /api/v1/sessions/{id}/file-history/content?turn_id=N&path=<p>[&phase=
-  "start"|"end"]` → `{"content":{"version":<n>,"content"?,"binary"?} | null}`.
+  "start"|"end"]` → `{"content":{"version":<n>,"content"?,"binary"?} | null}`
+  (schema-verified at 0.41.0; not exercised live).
 
 The only declared error is `SESSION_NOT_FOUND` (`40401`). The Android app
 never calls these.
@@ -2136,7 +2235,7 @@ from the 0.31.0 capture):
 
 The spliced summary text is prefixed with model-facing instructions that are
 **not** persisted — history stores the bare summary (verified, see below).
-The prefix (verbatim):
+The prefix (verbatim, re-verified byte-identical 2026-09-04 on 0.41.0):
 
 > The conversation so far has been compacted to free up context. What
 > follows is your own working summary of this task — use it to continue
@@ -2146,6 +2245,12 @@ The prefix (verbatim):
 > this context are preserved verbatim from the compacted conversation;
 > where a system-reminder note among them marks an omitted middle section,
 > the user messages it replaced are covered by this summary.
+
+**0.41.0 content drift (not shape):** the summarizer now works from a new
+instruction file (commit `b199e332`), so the generated summary typically
+opens with "Handoff note to myself:" — the `result.summary` and the persisted
+`compaction_summary` message both carry the new style (verified live
+2026-09-04). All shapes above are unchanged.
 
 ### Effect on history and status
 
@@ -2348,6 +2453,34 @@ envelope code `40909`** — do not gate success on `code == 0` here; check
 `tool.result` with output
 `{"answers":{},"note":"User dismissed the question without answering."}` → the
 turn continues.
+
+**Background questions (`background: true`) — 0.41.0 fix (commit `523d35b5`,
+verified live 2026-09-04):** a background `AskUserQuestion` call no longer
+dies with its turn (up to 0.40.1 it was cancelled at turn end). The
+lifecycle matches a background task's:
+
+- The question surfaces with the usual `event.question.requested` +
+  `pending_interaction: "question"`, then the turn can end **without**
+  resolving it. While it waits the session reads `busy: true` with
+  `main_turn_active: false` and `pending_interaction: "question"` — a state
+  combination earlier versions never produced (previously `busy` tracked
+  `main_turn_active` outside compactions).
+- The question registers in the main agent's task store: REST `/tasks`
+  lists it with wire kind **`tool`** (`{"id":"question-agfe3d68",…,
+  "kind":"tool","description":"<the question text>","run_in_background":true}`),
+  and `task.started`/`background.task.started` ride the WS when it opens.
+- Answering (the ordinary REST route, same `question_<uuid>` id) emits
+  `event.question.answered` → `task.terminated` (core kind `question`) →
+  `background.task.terminated` → a **task-origin notification turn** on the
+  main agent: `turn.started` origin
+  `{"kind":"task","taskId":"question-…","status":"completed","notificationId":"task:question-…:completed"}`,
+  `task.notified` with `notificationType:"task.completed"` and title
+  "Background question answered", and a `context.spliced` `<notification>`
+  message that inlines the answer text (up to 0.40.1 the answer was saved
+  to an output file for the agent to read).
+- The background tool result text shrank to `task_id:` / `status:` /
+  `next_step:` lines (the `description:`/`automatic_notification:` lines are
+  gone) — tool prose, not wire shape.
 
 ## Todos
 
@@ -2841,6 +2974,17 @@ their `background.task.*` legacy aliases alike (verbatim 0.34.0
 `info.status` uses the **core** vocabulary (`running` | `completed` |
 `failed` | `timed_out` | `killed` | `lost`), not the REST wire one (mapping
 below); `kind:"agent"` marks a sub-agent (`process` = background bash).
+**0.41.0 (commit `b6b9b374`; schema-level, not triggered live):** a sub-agent
+stopped by the repeat breaker now settles `completed` **with** a
+`stopReason` on this `info` ("stopped by the repeat breaker after issuing the
+same tool call repeatedly; its output is a handoff, not a finished result") —
+before, `stopReason` appeared only on failed/killed tasks. The engine also
+tracks a per-task `stopCode`, but **no kap-server projection serves it** (the
+0.41.0 REST/snapshot/task sources never reference it — engine-internal only),
+and the upstream wire manifest gained an optional **`stopReason` on
+`turn.ended`** (forced stops; every live `turn.ended` captured on 0.41.0 —
+completed and cancelled alike — omits it). The Android app already decodes
+the optional `stopReason` on task `info`.
 `task.notified` (verbatim shape): `{"notificationType":"task.completed" |
 "task.killed","title":"...","body":"...","severity":"info" | "warning",
 "sourceKind":"background_task","sourceId":"<taskId>"}`.
@@ -3461,6 +3605,10 @@ the prompt text. **0.31.1, additive:** `turn.ended` gained an optional
 `interruptReason` (`"user_cancelled"` / `"aborted"` / `"max_steps"` /
 `"error"` / `"filtered"` / `"blocked"`), present when a turn stops early —
 a REST `:abort` reports `"user_cancelled"` (verbatim capture in Abort).
+**0.41.0, additive (upstream wire manifest, commit `b6b9b374`; never
+observed live):** `turn.ended` gained an optional **`stopReason`** string for
+forced stops (e.g. the repeat breaker) — every 0.41.0 live capture,
+completed and cancelled alike, omits it.
 **0.37.2, additive:** `turn.ended` gained optional **`time`** (epoch ms,
 schema-declared — commit `3ded0808`); live, `turn.started` and
 `prompt.completed` also emit a top-level `time` (epoch ms) without a matching
@@ -3694,6 +3842,94 @@ selected option and free text both re-verified 2026-07-23:
 ```
 
 ## Verification log
+
+- 2026-09-04 re-verification on `0.41.0` (server 0.40.1 → 0.41.0; throwaway
+  sessions `session_40856c6d-…` / `session_00747c46-…` in
+  `/home/ubuntu/spike`, guided by the upstream 0.40.1→0.41.0 diff — 30
+  commits; the wire-relevant ones are `eba23edb` (file-history experimental
+  gate dropped), `523d35b5` (background questions survive turn end + inline
+  answers), `b6b9b374` (handoff step after forced stops + sub-agent stop
+  reasons), `b184b314` (dangerous-command guard dropped in auto mode),
+  `a0209469` (staleGuard feature removed) and `b199e332` (contextBudget
+  feature + new compaction instruction). `packages/protocol` untouched; the
+  rest is telemetry/CLI/TUI/web-bundle churn).
+  Drift found and documented inline:
+  (a) **`/meta`:** `experimental_flags` dropped `file_history`; `features`
+      reads 19 entries — `staleGuard` gone, `contextBudget` new — verified
+      live;
+  (b) **file-history routes live now** — `GET …/file-history/changes`
+      answers `{"changes":[],"recorded":false}` on an unrecorded turn; the
+      shipped schema has no `enabled` field — verified live;
+  (c) **background questions survive turn end** — pending question outlived
+      `main_turn_active:false` (session `busy:true` +
+      `pending_interaction:"question"`), the answer came back as a
+      task-origin notification turn (`task.terminated` core kind `question`,
+      `task.notified` "Background question answered", `turn.started` origin
+      `{"kind":"task","taskId":"question-…"}`), REST `/tasks` lists it as
+      kind `tool` — all verified live end-to-end;
+  (d) **transcript `triggerPromptId` gone from sub-agent internal turns**
+      (main user turns keep it) — verified live on three sub-agent
+      transcripts;
+  (e) `turn.ended` omits the new optional `stopReason` on completed AND
+      cancelled turns (forced-stop-only field); repeat-breaker
+      `stopReason` on completed sub-agent tasks and the engine `stopCode`
+      are source-derived only — verified live that neither appears on
+      normal completions;
+  (f) behavioral: dangerous-command guard skipped in auto mode
+      (source-verified); compaction summaries now open with "Handoff note
+      to myself:" (new instruction file — content drift; the splice prefix
+      is byte-identical).
+  Config drift (not shape): the models catalog reads 10 entries (two new
+  `Kimi Platform/*` providers).
+  Re-verified unchanged, most byte-for-byte: auth 401s (missing + wrong
+  token), public healthz, config shape (`default_model` `kimi-code/k3-256k`,
+  `thinking.effort` `"max"`), workspaces list, v1 sessions create/get/list
+  (`last_seq` real on the detail path — fresh reads `1`, after turns `20`;
+  list still `0`), `/status` (fresh `thinking_level:""`, all mode flags),
+  the full snapshot (top-level keys, real `session.usage` omitting
+  `total_cost_usd`/`turn_count`, oldest-first message page,
+  `in_flight_turn` busy capture with `running_tools`, running foreground
+  roster entry with `model`/`thinking_effort`), messages history, prompts
+  POST ACK, one full prompt round-trip (`prompt.submitted` → `turn.started`
+  with always-on `promptId` → `context.spliced` → `prompt.started` →
+  steps/deltas → `tool.call.started`/`tool.progress`/`tool.result` →
+  `turn.ended` → `prompt.completed`), prompt queueing + steer
+  (`prompt.queued` `queueLength`, `prompt.steered` provenance, transcript
+  `prompts[]` `steeredAt` + steered-content rewrite + `promptIds` text
+  frame), `:abort` (`turn.step.interrupted` → `turn.ended`
+  `cancelled`/`user_cancelled` → interruption-reminder splice →
+  `prompt.aborted`), compact `{}` and `{"instruction":…}` (instant empty
+  ACK, instruction echo in `compaction.started`, wholesale
+  `context.spliced` — summary message still without an `id` key —,
+  `compaction.completed` with the full `result` block,
+  `tokensAfter`==post-compaction `context_tokens`; both `40910`s with
+  `stack`), the foreground questions flow end-to-end (pending poll with
+  `question_<uuid>` + distinct `tool_call_id`, `single` answer, dismiss
+  `40909`, re-answer/re-dismiss `40902`), the manual-approval round-trip
+  (`approval_<uuid>` ≠ `tool_call_id` on all three surfaces, `tool_call_id`
+  POST → `40404`, `approved` → both resolved frames), files
+  upload/download/`Range` 206/delete + `40407` on both not-found routes + a
+  `path` file attachment (notice wording and `origin.attachments`
+  byte-identical), foreground + background sub-agents (full lifecycles,
+  spawn order `task.started` → `background.task.started` →
+  `subagent.spawned` → `subagent.started`, `model`/`thinkingEffort`
+  everywhere), REST `/tasks` list/get + `40406`, the TodoList
+  `tool.call.started` contract, the v2 grouped session table, the tools
+  catalog (27 builtins + 9 MCP), and WS hello/heartbeat/subscribe/ack/
+  cursor-resume (replay from seq 150 re-delivered 151+ in order before the
+  ack; future-seq cursor → standalone `resync_required` then the ack
+  listing it).
+  **App impact: no breakage, no new tickets** — every drifted shape is
+  either additive into payloads the app never decodes (file-history routes,
+  `/meta` flags/features, `turn.ended.stopReason`) or ignored by the app's
+  `ignoreUnknownKeys` parsing; the app already decodes the optional task
+  `stopReason`; the background-question states and events reuse flows the
+  app already handles (pending-question surfacing, task-origin notification
+  turns). Tooling note: websocat kept alive by a 6 s `pong` feeder, as
+  introduced in the 0.40.1 run. Watch item: a prompt-level
+  `permission_mode:"manual"` bound the throwaway session to manual for its
+  remaining turns (later plain `echo` calls awaited approval) — the
+  per-prompt override is sticky, as documented in Prompts.
 
 - 2026-09-02 re-verification on `0.40.1` (server 0.39.1 → 0.40.1; throwaway
   sessions `session_068cac46-…` / `session_95b95798-…` in
