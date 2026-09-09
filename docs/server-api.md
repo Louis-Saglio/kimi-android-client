@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-09-04
-(server version `0.41.0`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-09-09
+(server version `0.42.0`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
@@ -14,7 +14,8 @@ the workspace list used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `0.40.1`
+**Protocol history:** this document previously described server `0.41.0`
+(verified 2026-09-04; see git history), `0.40.1`
 (verified 2026-09-02; see git history), `0.39.1`
 (verified 2026-08-28; see git history), `0.39.0`
 (verified 2026-08-27; see git history), `0.38.0`
@@ -31,6 +32,97 @@ used are shown with each section. Secrets are redacted (`<token>`).
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
 that, `0.27.0` before that, and `0.23.3` before that.
+
+The drift from 0.41.0 to 0.42.0 is **small for the core loop — one new
+capability (session deletion), one new global WS event, additive fields
+elsewhere**. The upstream diff between the two tags (55 commits, much of it
+the agent-core-v2 human-layer absorption (`485594f6`), the legacy
+agent-core v1 removal (`bb16383a`), and web-bundle churn; the
+`packages/protocol` package itself was **deleted** — `9188d03c` relocated
+its wire types into `packages/agent-core-v2`, so that folder is the
+ground-truth reference from 0.42.0 onward) touched the client-facing wire
+in exactly these places:
+
+- **Session deletion is exposed now** (commit `fa87d040`; verified live
+  2026-09-09 — see Sessions → Delete): `POST /api/v1/sessions/{id}:delete`
+  answers `{"code":0,...,"data":{"deleted":true}}`; unknown session →
+  `40401` (with `stack`); the bare `DELETE` HTTP method still answers plain
+  404. A **new global WS event `event.session.deleted`** rides the
+  `__global__` envelope exactly like `event.session.archived` — payload
+  `{workspace_id, agentId, sessionId}` with the real id camelCase
+  (verbatim capture in WebSocket → Global events). Deleted sessions drop
+  off the list and answer `40401` on get. **The Android app's session-list
+  socket handles `event.session.archived` (ticket 105) but not the deleted
+  sibling — a row deleted from another client lingers until refresh —
+  ticket 126.**
+- **Media attachment names are preserved** (commit `baf17a8f`; verified
+  live 2026-09-09): image/video content parts in the prompt ACK echo AND
+  `GET .../messages` history now carry an optional **`name`** — verbatim
+  live capture: `{"type":"image","source":{"kind":"session_media","file_id":"f_…"},"name":"one.png"}`
+  (both surfaces). Additive; the app decodes with `ignoreUnknownKeys` and
+  does not display attachment names — no ticket.
+- **HEIC/HEIF/BMP acceptance is not reachable via the upload flow**
+  (commit `80480c01`, engine-side for Kimi models; verified live
+  2026-09-09): the upload sniffer still returns
+  `application/octet-stream` for a BMP, so an `image` part referencing the
+  upload is rejected up front with `40001` (`file f_… is
+  application/octet-stream, not an image`) — the same caveat as video
+  since 0.29.0. No wire shape change. `ReadMediaFile` is **back in the
+  tools catalog** on this server (28 builtins now — see Tools).
+- **`/meta` flags graduated and features churned** (commits `f0434f2d`,
+  `e831fd1e`, `55685c58`; verified live 2026-09-09): `experimental_flags`
+  reads only 6 entries — `remote-control`, `persistence_minidb_readmodel`,
+  `search_worker` and `secondary-model` are **gone** (graduated/removed),
+  `notify_user` is **new** (`false` here — gates the new `NotifyUser`
+  tool, which is therefore NOT advertised in the tools catalog).
+  `features` reads 17 entries — **`contextBudget` is gone** (the context
+  budget reminders were removed, `55685c58`) and **`notify` is new**.
+  The app reads only `code`/`msg` off `/meta` — no ticket.
+- **Compaction** (commit `f12d59e0`; verified live 2026-09-09): the splice
+  prefix gained a final sentence — "**The summary records which earlier
+  requests were already addressed.**" (full verbatim capture in Compact);
+  the summarizer instruction file was reworded (note → summary, the
+  first-person handoff framing dropped — content, not wire); compaction
+  resumption is anchored on the latest user message (behavioral). All
+  shapes and the WS sequence unchanged.
+- **Behavioral, shapes unchanged:** deduplication of repeated tool-call
+  ids in the loop (`00265b09`/`ccf3d5d6`), text-delta merging across empty
+  reasoning parts (`73ff2bf6`), event-journal writes stop after server
+  close (`c1cac343`), skill-root watching (`fb0353a8`). The huge
+  human-layer/loop-facade refactor (`485594f6`) is invisible on the wire —
+  the full round-trip skeleton fired in the documented order.
+- **Invisible here / out of scope:** the remote-control runtime toggle API
+  (`48f5dc97` — remote control is out of scope), the legacy agent-core v1
+  removal (`bb16383a`), the v2-turn-boundary SDK fix (`f1e91527`), the
+  updater zstd manifest (`f8c606e7`).
+- **Config drift (not shape):** `default_model` reads
+  `kimi-code/kimi-for-coding` again (was `kimi-code/k3-256k` on 0.40.1) —
+  a fresh model-less session's `/status` `max_context_tokens` is back to
+  **262144**; `thinking.effort` is still `"max"`; the models catalog still
+  reads 10 entries. A new `database` config section appeared (the minidb
+  graduation, `f0434f2d`) — the app consumes none of it.
+
+Everything else re-verified unchanged live on 0.42.0 (see the verification
+log): auth 401s (missing + wrong token) and `40401` envelopes with
+`stack`, v1 sessions create/get/list (`last_seq` real on the detail path —
+`147` after this run's turns, list still `0`), `/status`, the full
+snapshot (top-level keys, real `session.usage` omitting
+`total_cost_usd`/`turn_count`, busy `in_flight_turn` capture, empty
+pending/roster lists), messages history (incl. the new media `name`),
+prompts POST + ACK, prompt queueing + steer (`{"steered":true}`,
+`prompt.steered` frame), `:abort` (`{"aborted":true}` + `prompt.aborted`),
+compact (both bodies, the WS sequence, the empty-session `40910` with
+`stack`), the questions flow end-to-end (`question_<uuid>` + distinct
+`tool_call_id`, pending poll, `single` answer), the manual-approval
+round-trip (the `approval_<uuid>` split intact, `tool_call_id` POST still
+`40404`, both resolved frames), files upload/download/`Range` 206/delete +
+`40407`, foreground + background sub-agents (full lifecycles,
+`model`/`thinking_effort` `"max"` throughout), REST `/tasks` list/get, the
+TodoList contract (`{"todos":[{status,title}…]}` verbatim), the v2
+grouped session table, the tools catalog, and WS
+hello/heartbeat/subscribe/ack/cursor-resume (replay re-delivered 58–132 in
+order before the ack; future-seq cursor → standalone `resync_required`
+then the ack).
 
 The drift from 0.40.1 to 0.41.0 is **small for the core loop — nothing the
 app parses broke**. The upstream diff between the two tags (30 commits, most
@@ -891,31 +983,35 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
 {
   "code": 0, "msg": "success",
   "data": {
-    "server_version": "0.41.0",
+    "server_version": "0.42.0",
     "capabilities": {"websocket": true, "file_upload": true, "fs_query": true, "mcp": true, "tasks": true, "terminal": true},
-    "server_id": "01M1PY1GAGQ9WAXVJSE1MHDH6X",
-    "started_at": "2026-09-04T19:24:01.232Z",
+    "server_id": "01M23T4GZCKTV589W5T2SCD7K4",
+    "started_at": "2026-09-09T19:25:53.516Z",
     "open_in_apps": [],
     "dangerous_bypass_auth": false,
     "backend": "v2",
-    "experimental_flags": {"auto_session_title": false, "remote-control": false, "secondary-model": true, "subagent_fork": false, "wait_for": true, "tower": false, "tool-select": false, "persistence_minidb_readmodel": true, "search_worker": true},
+    "experimental_flags": {"notify_user": false, "auto_session_title": false, "subagent_fork": false, "wait_for": true, "tower": false, "tool-select": false},
     "features": [
+      {"name": "skill", "state": "Active", "meta": {}},
       {"name": "btw", "state": "Active", "meta": {}},
       {"name": "plan", "state": "Active", "meta": {}},
-      {"name": "goal", "state": "Active", "meta": {}},
       {"name": "todo", "state": "Active", "meta": {}}
     ]
   },
-  "request_id": "01M1PY2HQ3HNH09W60ANQETHJC"
+  "request_id": "01M23T5B3XDEYB4ZS8CKWSR8D3"
 }
 ```
 
-(`features` trimmed to 4 of 19 entries; the full list here is `skill`,
+(`features` trimmed to 4 of 17 entries; the full list here is `skill`,
 `btw`, `dateChange`, `plan`, `fileHistory`, `externalHooks`, `debugEvents`,
-`swarm`, `goal`, `tower`, `usage`, `cron`, `interaction`,
-`reminder`, `tokenCounting`, `contextBudget`, `sessionInit`, `todo` — all
-`"Active"` with empty `meta`. **0.41.0:** `staleGuard` is **gone** (the
-feature was removed, commit `a0209469`) and `contextBudget` is new (the
+`swarm`, `goal`, `tower`, `usage`, `cron`,
+`reminder`, `tokenCounting`, `sessionInit`, `todo`, `notify` — all
+`"Active"` with empty `meta`. **0.42.0:** `contextBudget` AND
+`interaction` are **gone** (the context-budget reminders were removed
+upstream, commit `55685c58`; `interaction` folded away in the human-layer
+absorption, `485594f6`-era churn) and **`notify`** (the `NotifyUser` tool
+feature, commit `f6a9c39e`) is new — 17 entries. **0.41.0:** `staleGuard` is **gone** (the
+feature was removed, commit `a0209469`) and `contextBudget` was new (the
 context-budget reminder unit, commit `b199e332`). **0.40.1:** `fileHistory`
 is new (the experimental file-history feature unit, commit `650d12f6`).
 **0.39.0:** `skill`,
@@ -926,7 +1022,12 @@ is new (the experimental file-history feature unit, commit `650d12f6`).
   server-side experiment switches. Flag *values* are config, not protocol —
   on 0.37.2 (2026-08-18) `persistence_minidb_readmodel` and `search_worker`
   read `true`, and `auto_session_title` (`false` here) gates server-side
-  session-title generation. Treat every flag as optional.
+  session-title generation. Treat every flag as optional. **0.42.0
+  (verified live 2026-09-09): the set shrank to 6 entries** — the
+  graduated `remote-control`, `persistence_minidb_readmodel`,
+  `search_worker` and `secondary-model` keys are **gone**, and
+  **`notify_user` is new** (`false` here — it gates the new `NotifyUser`
+  tool, which is absent from the tools catalog while the flag is off).
 - **`web_title` is new in 0.37.2** (additive): the instance's `--web-title`
   browser-tab label, present only when the server was started with that flag;
   omitted here (verified live 2026-08-18). Treat it as an optional instance
@@ -996,7 +1097,10 @@ unchanged from 0.29.2):
   protocol: it read `kimi-code/kimi-for-coding` on 0.29.1 (2026-07-25),
   `kimi-code/k3` on 0.29.2 (2026-07-27), `kimi-code/k3-256k` on 0.31.0
   (2026-07-30), and **`deepseek/deepseek-v4-pro` on 0.37.2** (2026-08-18) —
-  the server may change it independently of protocol drift. The catalog above
+  the server may change it independently of protocol drift. **0.42.0
+  (verified live 2026-09-09): it reads `kimi-code/kimi-for-coding` again**
+  (was `kimi-code/k3-256k` on 0.40.1), so a fresh model-less session's
+  `/status` `max_context_tokens` is back to 262144. The catalog above
   is the 0.31.0 capture; **0.37.2 adds four `deepseek/*` entries**
   (`deepseek/deepseek-v4-flash`, `-pro`, `-chat`, `-reasoner`; all
   `max_context_size: 1000000`, no `support_efforts`) — additive.
@@ -1128,8 +1232,10 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions \
 
 Returns the session object above. Fresh sessions created without a `title`
 come back with `"title": ""` — clients should fall back to their own
-placeholder. There is no delete endpoint: `DELETE /api/v1/sessions/{id}`
-answers plain HTTP 404 (re-verified 2026-07-23).
+placeholder. **0.42.0: sessions CAN be deleted now** (commit `fa87d040` —
+see Delete below); the bare `DELETE /api/v1/sessions/{id}` HTTP method
+still answers plain HTTP 404 (re-verified 2026-09-09) — deletion is a
+`:delete` action.
 
 ### Get one — `GET /api/v1/sessions/{id}`
 
@@ -1145,6 +1251,21 @@ value as "real"), `20` after several turns, still matching `as_of_seq`. A
 client could
 seed a WS resume cursor from it together with the snapshot's `epoch` family;
 the Android app keeps using the snapshot's `as_of_seq`.
+
+### Delete — `POST /api/v1/sessions/{id}:delete`
+
+**New in 0.42.0** (commit `fa87d040`, "expose session deletion with
+serialized cleanup"; every behavior below verified live 2026-09-09). Body
+`{}` (or empty). Answers
+`{"code":0,"msg":"success","data":{"deleted":true},"request_id":"…"}`.
+After the delete: `GET /api/v1/sessions/{id}` answers
+`{"code":40401,"msg":"session … does not exist",…}` (with `stack`), the
+session drops off the list, and — like archiving — a **global WS event
+`event.session.deleted`** fires on every live connection (see WebSocket →
+Global events). Unknown id → `40401` "session … does not exist". The
+cleanup is serialized server-side (the session's background work is
+drained first). **The Android app has no delete UI and ignores the event
+today — ticket 126 covers handling it.**
 
 ### Live status — `GET /api/v1/sessions/{id}/status`
 
@@ -1859,6 +1980,11 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/files \
   but not video: even a valid ffmpeg-generated mp4 and a WebM upload come back
   as `application/octet-stream` (verified 2026-07-24), which makes the video
   prompt path unreachable via upload in this version (see Prompts).
+  **0.42.0 (verified live 2026-09-09): BMP is likewise unrecognized** — a
+  1×1 BMP upload comes back `application/octet-stream`, so the HEIC/HEIF/BMP
+  acceptance the engine gained for Kimi models (upstream `80480c01`) is
+  **not reachable through the upload flow** (an `image` part referencing such
+  an upload is rejected `40001` "not an image", exactly like the video case).
 - The server advertises this as `capabilities.file_upload: true` in
   `GET /api/v1/meta`.
 
@@ -1940,8 +2066,11 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../promp
 - `prompt_id` equals `user_message_id` (the ULID `msg_...` id of the user
   message).
 - `content` is a typed union, not just text. For user prompts the client may
-  send (text/image/file items verified live 2026-07-24; the schema is
-  `packages/protocol/src/message.ts`):
+  send (text/image/file items verified live 2026-07-24; the schema lived in
+  `packages/protocol/src/message.ts` up to 0.41.0 — **0.42.0 deleted the
+  `packages/protocol` package** (commit `9188d03c) and relocated its wire
+  types into `packages/agent-core-v2`, which is the ground-truth reference
+  from 0.42.0 onward):
   - `{"type":"text","text":"…"}`
   - `{"type":"image","source":{"kind":"file","file_id":"f_…"}}` — for uploaded
     `image/*` files. (`url` and `base64` source kinds also exist in the
@@ -1988,6 +2117,10 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../promp
     `GET /api/v1/sessions/{id}/media/{file_id}` (see Files). The pre-0.37.2
     shapes — ACK `{"kind":"base64","media_type","data"}`, history
     `{"kind":"url","url":"data:<mime>;base64,…"}` — no longer occur.
+    **0.42.0 (additive, commit `baf17a8f`; verified live 2026-09-09):** the
+    projected part carries the original file's **`name`** —
+    `{"type":"image","source":{"kind":"session_media","file_id":"f_…"},"name":"one.png"}`
+    verbatim on BOTH the ACK echo and history (`video` parts alike).
   - Large images are compressed before enqueueing (verified: a 14.1 MB
     2600×1900 png was downscaled to 1000×731; a 3.2 MB one passed through
     untouched). A compression then prepends a separate **text part** wrapped in
@@ -2235,7 +2368,9 @@ from the 0.31.0 capture):
 
 The spliced summary text is prefixed with model-facing instructions that are
 **not** persisted — history stores the bare summary (verified, see below).
-The prefix (verbatim, re-verified byte-identical 2026-09-04 on 0.41.0):
+The prefix (verbatim, re-verified byte-identical 2026-09-04 on 0.41.0;
+**0.42.0 amendment (commit `f12d59e0`, verified live 2026-09-09): a final
+sentence was appended**, shown in bold):
 
 > The conversation so far has been compacted to free up context. What
 > follows is your own working summary of this task — use it to continue
@@ -2244,7 +2379,15 @@ The prefix (verbatim, re-verified byte-identical 2026-09-04 on 0.41.0):
 > verify that yourself before relying on it. Any user messages earlier in
 > this context are preserved verbatim from the compacted conversation;
 > where a system-reminder note among them marks an omitted middle section,
-> the user messages it replaced are covered by this summary.
+> the user messages it replaced are covered by this summary. **The summary
+> records which earlier requests were already addressed.**
+
+The same 0.42.0 commit reworded the summarizer instruction file (handoff
+"note" → "summary", the first-person framing dropped) and anchored
+compaction resumption on the latest user message (behavioral) — the
+`result` block, the WS sequence, and the persisted `compaction_summary`
+shape are all unchanged (verified live 2026-09-09, both `{}` and
+`{"instruction":…}` bodies).
 
 **0.41.0 content drift (not shape):** the summarizer now works from a new
 instruction file (commit `b199e332`), so the generated summary typically
@@ -2551,7 +2694,15 @@ entries — the 27 builtins plus 9 MCP tools from its two configured servers.
 MCP entries carry `source: "mcp"` and an extra **`mcp_server_id`** field
 (`{"name":"mcp__kiln__get_batch_status","description":"…","input_schema":null,"source":"mcp","active":true,"mcp_server_id":"kiln"}`).
 The total count is now server-config-dependent on top of
-session-state-dependent. Two MCP routes ride along (both verified live
+session-state-dependent. **0.42.0 (verified live 2026-09-09): 37 entries —
+28 builtins plus the same 9 MCP tools.** The 28th builtin is
+**`ReadMediaFile`, back in the catalog** on this server (it was withheld
+from non-multimodal models on 0.38.0); the new **`NotifyUser` tool is NOT
+advertised** — it is gated behind the `notify_user` experimental flag
+(`false` here, commit `f6a9c39e`). Also re-observed this run: the 0.31.1
+liveness caveat below still holds verbatim — right after session create,
+before any prompt ran, the catalog answered `{"tools":[]}`; it resolved to
+the 37 entries only once a session had run a turn. Two MCP routes ride along (both verified live
 2026-08-27):
 
 - `GET /api/v1/mcp/servers` →
@@ -3405,6 +3556,24 @@ fully silent socket received nothing in three attempts. The Android app's
 sockets always subscribe, so they qualify; a listen-only client should send a
 `client_hello` after connect to be safe.)
 
+### Global events — `event.session.deleted` (new in 0.42.0)
+
+Fires when a session is **deleted** (`POST /api/v1/sessions/{id}:delete` —
+see Sessions → Delete). Global exactly like `event.session.archived`: no
+subscribe needed, `session_id: "__global__"`, the real session id camelCase
+in the payload alongside snake_case `workspace_id`. Verbatim capture
+(2026-09-09 on 0.42.0):
+
+```json
+{"type":"event.session.deleted","seq":276,"session_id":"__global__","timestamp":"2026-09-09T19:33:22.675Z",
+ "payload":{"type":"event.session.deleted","workspace_id":"wd_spike_6baf4c130e63",
+  "agentId":"main","sessionId":"session_0e2d9419-353f-4e08-bb59-dbfdacac1467"},
+ "epoch":"ep_01KX01QDWWRZFHBCEEQ8A5SZ8T"}
+```
+
+The Android app does not handle it — a deleted session's row lingers in
+the list until the next refresh (ticket 126); the app has no delete UI.
+
 The sibling workspace lifecycle events `event.workspace.created` / `updated`
 (full wire workspace object) and `event.workspace.deleted`
 (`{workspace_id, root}`) are global too — all out of the app's scope.
@@ -3842,6 +4011,83 @@ selected option and free text both re-verified 2026-07-23:
 ```
 
 ## Verification log
+
+- 2026-09-09 re-verification on `0.42.0` (server 0.41.0 → 0.42.0; throwaway
+  sessions `session_1082c900-…` / `session_0e2d9419-…` /
+  `session_fee8aac1-…` in `/home/ubuntu/spike`, guided by the upstream
+  0.41.0→0.42.0 diff — 55 commits; the wire-relevant ones are `fa87d040`
+  (session deletion + `event.session.deleted`), `baf17a8f` (media
+  attachment names), `80480c01` (HEIC/HEIF/BMP engine acceptance),
+  `f0434f2d`/`e831fd1e` (experimental-flag graduation), `55685c58`
+  (context-budget removal), `f12d59e0` (compaction resumption anchor +
+  prefix sentence), `f6a9c39e` (`NotifyUser` tool behind the `notify_user`
+  flag) and `9188d03c` (`packages/protocol` deleted, types moved into
+  `agent-core-v2`; the huge `485594f6` human-layer/loop-facade refactor is
+  wire-invisible). Drift found and documented inline:
+  (a) **`POST /api/v1/sessions/{id}:delete` is live** —
+      `{"deleted":true}`, unknown id `40401` (with `stack`), bare `DELETE`
+      method still plain 404, deleted session drops off the list and get →
+      `40401`;
+  (b) **new global `event.session.deleted`** — verbatim capture (payload
+      `workspace_id` + camelCase `sessionId` on the `__global__`
+      envelope); **the app's session-list socket ignores it — ticket
+      126**;
+  (c) **image/video content parts carry optional `name`** in the prompt ACK
+      echo AND history (`"name":"one.png"` verbatim, both surfaces);
+  (d) **`/meta`:** `experimental_flags` down to 6 keys
+      (`remote-control`/`persistence_minidb_readmodel`/`search_worker`/
+      `secondary-model` gone, `notify_user` new), `features` down to 17
+      (`contextBudget` and `interaction` gone, `notify` new);
+  (e) **compaction splice prefix gained** "The summary records which
+      earlier requests were already addressed." (verbatim capture);
+      summarizer instruction reworded — shapes/sequence unchanged;
+  (f) **tools catalog: 37 entries** (28 builtins — `ReadMediaFile` back —
+      plus 9 MCP); `NotifyUser` NOT advertised (flag off); the 0.31.1
+      empty-catalog liveness caveat re-observed right after session
+      create;
+  (g) BMP uploads still sniff as `application/octet-stream`, so the new
+      BMP/HEIC acceptance is unreachable via the upload flow (image part →
+      `40001` "not an image", same as video).
+  Config drift (not shape): `default_model` is `kimi-code/kimi-for-coding`
+  again (fresh-session `max_context_tokens` 262144), `thinking.effort`
+  still `"max"`, models catalog still 10 entries, new `database` config
+  section.
+  Re-verified unchanged, most byte-for-byte: auth 401s and `40401`+
+  `stack` envelopes, v1 sessions create/get/list (`last_seq` real on the
+  detail path — `147` after this run's turns; list still `0`),
+  `message_count` still stuck at 0, the full snapshot (top-level keys,
+  real `session.usage` omitting `total_cost_usd`/`turn_count`, busy
+  `in_flight_turn` with `running_tools`, empty pending/roster lists at the
+  watermark), messages history (newest-first; media parts with `name`),
+  prompts POST + ACK (`prompt_id` == `user_message_id`), prompt queueing +
+  steer (`"status":"queued"` ACK, `{"steered":true}`, one `prompt.steered`
+  frame), `:abort` (`{"aborted":true}`, `prompt.aborted`, the
+  interruption-reminder path visible in the replay), compact `{}` and
+  `{"instruction":…}` (instant empty ACKs, instruction echo in
+  `compaction.started`, `compaction.completed` `result` block, the
+  empty-session `40910` with `stack`), the questions flow end-to-end
+  (`question_<uuid>` + distinct `tool_call_id`, `q_0`/`opt_0_N` ids,
+  pending poll, `single` answer → `{"resolved":true}`), the
+  manual-approval round-trip (`approval_<uuid>` ≠ `tool_call_id` on the
+  legacy frame, `tool_call_id` POST → `40404`, `approved` → both resolved
+  frames), files upload (sniffed `media_type`)/download/`Range` 206/
+  delete/`40407` after delete, foreground + background sub-agents (full
+  lifecycles: `subagent.spawned`/`started`/`completed`, `task.started` →
+  `background.task.started` → `task.terminated` → `background.task.terminated`,
+  `task.notified`, the task-origin notification turn; `model`/
+  `thinking_effort` `"max"` throughout), REST `/tasks` list (terminal
+  background sub-agent with all 0.39.0/0.36.1 fields; the completed
+  foreground one dropped), the TodoList contract (verbatim
+  `{"todos":[{status,title}…]}`, 14 frames), the v2 grouped session table,
+  and WS hello/heartbeat/subscribe/ack/cursor-resume (replay from seq 57
+  re-delivered 58–132 in order before the ack; future-seq cursor →
+  standalone `resync_required` then the ack listing it).
+  **App impact: one gap — ticket 126** (`event.session.deleted` handling);
+  everything else is additive into `ignoreUnknownKeys` territory
+  (`name`, flags/features) or uncalled routes (`:delete`). Unit tests
+  (`:app:testDebugUnitTest --rerun`): **753 tests, 0 failures**.
+  Tooling note: websocat kept alive by a 6 s `pong` feeder, as since the
+  0.40.1 run.
 
 - 2026-09-04 re-verification on `0.41.0` (server 0.40.1 → 0.41.0; throwaway
   sessions `session_40856c6d-…` / `session_00747c46-…` in
