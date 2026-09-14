@@ -1,5 +1,6 @@
 package fr.louissaglio.kimi.android.data.sessions
 
+import java.time.Instant
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
@@ -27,6 +28,18 @@ data class SessionDto(
 @Serializable
 data class SessionMetadataDto(
     val cwd: String? = null,
+)
+
+// Package-level (not on SessionsRepository) so OkHttpSessionListSocket maps the
+// event.session.created payload's session — the same wire shape — without a second
+// mapping (ticket 129).
+internal fun SessionDto.toDomain(): Session = Session(
+    id = id,
+    title = title?.takeIf { it.isNotBlank() },
+    cwd = metadata?.cwd,
+    updatedAt = runCatching { Instant.parse(updatedAt) }.getOrDefault(Instant.EPOCH),
+    isRunning = busy,
+    isAwaitingInteraction = isAwaitingInteraction(pendingInteraction),
 )
 
 // DTOs for GET /api/v2/sessions?view=by_workspace (docs/server-api.md — ticket 115).
@@ -125,4 +138,14 @@ data class SessionMetaUpdatedPayload(
 @Serializable
 data class SessionArchivedPayload(
     val sessionId: String,
+)
+
+/** `event.session.created` (verified on 0.42.0 — ticket 129): broadcast on the new
+ * session's own stream (the envelope `session_id` is the created session, NOT the
+ * `__global__` watermark). The nested session rides in the snake_case REST shape, so
+ * the plain [SessionDto] parses it. No default: a payload without it fails to decode
+ * and is dropped. */
+@Serializable
+data class SessionCreatedPayload(
+    val session: SessionDto,
 )

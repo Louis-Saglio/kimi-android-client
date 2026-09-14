@@ -79,7 +79,9 @@
   `BackgroundTask`/`TaskInfo` in `data/chat/Tasks.kt` — kind `tool` (question
   flows) is filtered out at the mapping boundary.
 - `data/sessions/` — `SessionsRepository` (list/get/create/fork REST facade), the 087
-  `SessionListSocket` (its global-frame path also surfaces
+  `SessionListSocket` (its global-frame path also surfaces `event.session.created` —
+  ticket 129, the carried session upserted by the ViewModel at its `updated_at`
+  position; only plain creates arrive, fork frames being dropped server-side — and
   `event.config.changed`/`event.model_catalog.changed` — 0.39.1, ticket 110 —
   which the session-list ViewModel turns into a `ModelsRepository` cache
   invalidation, so the next models/config read refetches), the 086
@@ -115,8 +117,8 @@
   toggle persists in
   `SettingsRepository` (flat default, re-read on every screen start); the live
   socket machinery patches rows by id inside their group (groups never reorder),
-  and the activity bump / create-insert / fork-insert / archive-drop are mode-aware
-  in the ViewModel; the fork inherits the source's `updated_at` (ticket 127), so
+  and the activity bump / create-insert / fork-insert / created-upsert (ticket 129) /
+  archive-drop are mode-aware in the ViewModel; the fork inherits the source's `updated_at` (ticket 127), so
   its insert (ticket 128, from the long-press row dialog) lands at the sorted
   position next to the source, not at the top like create.
 - `data/attachments/` — `AttachmentStore` owns all platform file I/O (content

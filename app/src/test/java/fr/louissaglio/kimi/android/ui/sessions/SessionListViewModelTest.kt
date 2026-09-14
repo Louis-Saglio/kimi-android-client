@@ -782,6 +782,58 @@ class SessionListViewModelTest {
         assertEquals(1, server.requestCount)
     }
 
+    @Test
+    fun `a session created event inserts the row live at its updated_at position`() = runBlocking {
+        server.enqueue(
+            MockResponse(body = pageBodyWithStamps(
+                "session_1" to "2026-07-17T03:48:31.606Z",
+                "session_2" to "2026-07-16T03:48:31.606Z",
+            )),
+        )
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+
+        // A create from another client (ticket 129): the frame carries the full
+        // session, so the row lands at its sorted position, between the two loaded
+        // rows here — not at the top.
+        fakeSocket.events.tryEmit(SessionListEvent.SessionCreated(createdSession()))
+
+        awaitState(viewModel.uiState) {
+            it.sessions?.map { s -> s.id } == listOf("session_1", "session_new", "session_2")
+        }
+        // Pure WebSocket insert: no REST call beyond the initial load.
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun `a session created event for an already listed session does not duplicate it`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1", "session_2")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+
+        // The echo of the app's own create/fork (008/128): the frame is broadcast to
+        // every connection, including the originator's — the upsert must not add a
+        // second row.
+        fakeSocket.events.tryEmit(
+            SessionListEvent.SessionCreated(
+                Session(
+                    id = "session_2",
+                    title = "Title session_2",
+                    cwd = "/tmp/session_2",
+                    updatedAt = Instant.parse("2026-07-17T03:48:31.606Z"),
+                    isRunning = false,
+                    isAwaitingInteraction = false,
+                ),
+            ),
+        )
+
+        delay(200) // let any (wrong) duplicate land
+        assertEquals(listOf("session_1", "session_2"), viewModel.uiState.value.sessions!!.map { it.id })
+        assertEquals(1, server.requestCount)
+    }
+
     // --- Global config/model-catalog events (ticket 110) ---
 
     @Test
@@ -999,6 +1051,48 @@ class SessionListViewModelTest {
 
         awaitState(viewModel.uiState) { it.groups!![0].sessions.map { s -> s.id } == listOf("session_2") }
         assertEquals(listOf("session_3"), viewModel.uiState.value.groups!![1].sessions.map { it.id })
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun `a session created event inserts the row into the matching group at its updated_at position`() = runBlocking {
+        enterGroupedMode(
+            groupsBodyWithStamps(
+                "/tmp/a" to listOf("session_1" to 1784260111606L),
+                "/tmp/b" to listOf("session_2" to 1784173711606L),
+            ),
+        )
+
+        // Newer than session_2 (1784173711606 == 2026-07-16T03:48:31.606Z): the row
+        // lands ahead of it in its own group, matched by cwd like create/fork.
+        fakeSocket.events.tryEmit(
+            SessionListEvent.SessionCreated(
+                createdSession(cwd = "/tmp/b", updatedAt = Instant.parse("2026-07-17T00:00:00.000Z")),
+            ),
+        )
+
+        awaitState(viewModel.uiState) { state ->
+            state.groups!!.first { it.cwd == "/tmp/b" }.sessions.map { it.id } == listOf("session_new", "session_2")
+        }
+        val groups = viewModel.uiState.value.groups!!
+        // The other group is untouched, and the never-loaded flat list stays null —
+        // a one-row list would clobber the disk cache (same rule as create/fork).
+        assertEquals(listOf("session_1"), groups.first { it.cwd == "/tmp/a" }.sessions.map { it.id })
+        assertNull(viewModel.uiState.value.sessions)
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun `a session created event for a workspace with no group on screen is left out`() = runBlocking {
+        enterGroupedMode(groupsBody("/tmp/a" to listOf("session_1")))
+
+        fakeSocket.events.tryEmit(SessionListEvent.SessionCreated(createdSession(cwd = "/tmp/unknown")))
+
+        delay(200) // let any (wrong) insert land
+        // The row joins no group (same as create/fork: the next grouped load
+        // reconciles) and the never-loaded flat list stays null.
+        assertEquals(listOf("session_1"), viewModel.uiState.value.groups!!.single().sessions.map { it.id })
+        assertNull(viewModel.uiState.value.sessions)
         assertEquals(1, server.requestCount)
     }
 
@@ -1485,6 +1579,21 @@ class SessionListViewModelTest {
         """{"code":0,"msg":"success","data":{"id":"session_fork","title":"Fork: Title session_1",""" +
             """"updated_at":"2026-07-17T03:48:31.606Z","busy":false,""" +
             """"metadata":{"cwd":"$cwd"}},"request_id":"r"}"""
+
+    /** The session an `event.session.created` frame carries (ticket 129); the default
+     * [updatedAt] lands it between pageBodyWithStamps' two rows. */
+    private fun createdSession(
+        id: String = "session_new",
+        cwd: String = "/tmp/session_new",
+        updatedAt: Instant = Instant.parse("2026-07-16T12:00:00.000Z"),
+    ): Session = Session(
+        id = id,
+        title = "Created elsewhere",
+        cwd = cwd,
+        updatedAt = updatedAt,
+        isRunning = false,
+        isAwaitingInteraction = false,
+    )
 
     private fun configBody(effort: String): String =
         """{"code":0,"msg":"success","data":{"default_model":"kimi-code/k3",""" +

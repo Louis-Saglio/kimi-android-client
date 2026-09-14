@@ -3,6 +3,7 @@ package fr.louissaglio.kimi.android.data.sessions
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.webSocketUpgradeResponse
+import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -258,6 +259,49 @@ class OkHttpSessionListSocketTest {
     }
 
     @Test
+    fun `the session created event is delivered with the payload session`() = runBlocking {
+        // Verified on 0.42.0 (docs/server-api.md, Global events — ticket 129): the
+        // frame below is the verbatim capture. Its envelope session_id is the NEW
+        // session's own id — never in the subscribed set — so it must be parsed ahead
+        // of the foreign-frame filter, and the payload's nested session is the
+        // snake_case REST shape.
+        sessionIds.value = linkedSetOf("session_1")
+        val events = CopyOnWriteArrayList<SessionListEvent>()
+        server.enqueue(
+            webSocketUpgradeResponse(
+                recordingListener(
+                    CopyOnWriteArrayList(),
+                    onClientFrame = { webSocket -> webSocket.send(sessionCreatedFrame) },
+                ),
+            ),
+        )
+        coroutineScope {
+            val job = launch { socket.observe(settings(), sessionIds).collect { events += it } }
+            try {
+                awaitCondition { events.isNotEmpty() }
+            } finally {
+                job.cancel()
+            }
+        }
+
+        assertEquals(
+            listOf(
+                SessionListEvent.SessionCreated(
+                    Session(
+                        id = "session_0fb965a3-733b-41a3-b863-05dc44881de5",
+                        title = "ticket-129-capture-source-2",
+                        cwd = "/home/ubuntu/spike",
+                        updatedAt = Instant.parse("2026-09-14T10:18:49.118Z"),
+                        isRunning = false,
+                        isAwaitingInteraction = false,
+                    ),
+                ),
+            ),
+            events,
+        )
+    }
+
+    @Test
     fun `the global config and model catalog changed events are delivered`() = runBlocking {
         // 0.39.1 (docs/server-api.md, Global events — ticket 110): configChangedFrame
         // is the trimmed verbatim capture; model_catalog.changed was never triggered
@@ -371,6 +415,22 @@ class OkHttpSessionListSocketTest {
             """"timestamp":"2026-08-20T19:31:40.052Z","payload":{"type":"event.session.archived",""" +
             """"workspace_id":"wd_spike_6baf4c130e63","agentId":"main",""" +
             """"sessionId":"session_a57d4784-4fe8-4268-bbe1-b5f3e23b37ba"},"epoch":"ep_01KX01QDWWRZFHBCEEQ8A5SZ8T"}"""
+
+    // Verbatim 0.42.0 capture (docs/server-api.md, "Global events — event.session.created"):
+    // note the envelope session_id is the created session itself, not __global__.
+    private val sessionCreatedFrame =
+        """{"type":"event.session.created","seq":1,"session_id":"session_0fb965a3-733b-41a3-b863-05dc44881de5",""" +
+            """"timestamp":"2026-09-14T10:18:49.155Z","payload":{"type":"event.session.created",""" +
+            """"session":{"id":"session_0fb965a3-733b-41a3-b863-05dc44881de5",""" +
+            """"workspace_id":"wd_spike_6baf4c130e63","title":"ticket-129-capture-source-2",""" +
+            """"created_at":"2026-09-14T10:18:49.118Z","updated_at":"2026-09-14T10:18:49.118Z",""" +
+            """"busy":false,"main_turn_active":false,"pending_interaction":"none","archived":false,""" +
+            """"metadata":{"cwd":"/home/ubuntu/spike"},"agent_config":{"model":""},""" +
+            """"usage":{"input_tokens":0,"output_tokens":0,"cache_read_tokens":0,""" +
+            """"cache_creation_tokens":0,"total_cost_usd":0,"context_tokens":0,"context_limit":0,""" +
+            """"turn_count":0},"permission_rules":[],"message_count":0,"last_seq":0},""" +
+            """"agentId":"main","sessionId":"session_0fb965a3-733b-41a3-b863-05dc44881de5"},""" +
+            """"epoch":"ep_01M2FPTCY3629JDWB3V096PW34"}"""
 
     // Trimmed verbatim 0.39.1 capture (docs/server-api.md, "Global events —
     // event.config.changed"): the full redacted config projection rides in

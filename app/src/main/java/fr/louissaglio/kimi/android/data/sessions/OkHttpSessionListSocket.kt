@@ -41,7 +41,8 @@ import okhttp3.WebSocketListener
  * channel, reconnect loop with 1 s → 30 s exponential backoff) copies
  * [fr.louissaglio.kimi.android.data.chat.SessionSocket]'s shape; the frame parsing is
  * the list's own: exactly `event.session.work_changed`, `session.meta.updated`, the
- * global `event.session.archived` (0.38.0 — ticket 105) and the global
+ * global `event.session.archived` (0.38.0 — ticket 105), the broadcast
+ * `event.session.created` (ticket 129) and the global
  * `event.config.changed`/`event.model_catalog.changed` (0.39.1 — ticket 110), and the
  * subscribe ack.
  * SessionSocket stays single-session/chat-specific — patching it for multi-session
@@ -206,6 +207,17 @@ class OkHttpSessionListSocket @Inject constructor(
         if (frame.type == "event.session.archived") {
             frame.decodePayload<SessionArchivedPayload>()?.let { payload ->
                 onEvent(SessionListEvent.SessionArchived(payload.sessionId))
+            }
+            return
+        }
+        // Verified on 0.42.0 (docs/server-api.md — ticket 129): a create from any
+        // client. Same ahead-of-the-filter placement as the archived frame, for a
+        // different reason: the frame is broadcast on the NEW session's own stream,
+        // so the envelope session_id is the created session — never __global__ and
+        // never a subscribed id. The payload session is the snake_case REST shape.
+        if (frame.type == "event.session.created") {
+            frame.decodePayload<SessionCreatedPayload>()?.let { payload ->
+                onEvent(SessionListEvent.SessionCreated(payload.session.toDomain()))
             }
             return
         }

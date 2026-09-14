@@ -184,7 +184,8 @@ class SessionListViewModel @Inject constructor(
     /**
      * Collects the sessions-list socket for the life of the screen (ticket 087): rows
      * patch in place on work_changed / meta.updated, the archived row drops out on the
-     * global event.session.archived (0.38.0 — ticket 105), the global
+     * global event.session.archived (0.38.0 — ticket 105), a session created from any
+     * client is upserted on event.session.created (ticket 129), the global
      * config/model-catalog changed events drop the ModelsRepository caches (0.39.1 —
      * ticket 110), a reconnect heals via one silent refresh. The loaded ids ride a
      * derived flow, so page loads while connected re-subscribe on their own.
@@ -238,6 +239,31 @@ class SessionListViewModel @Inject constructor(
                         groups!!.map { group -> group.copy(sessions = group.sessions.filterNot { it.id == event.sessionId }) }
                     } else {
                         groups
+                    },
+                )
+            }
+            // Created from any client (verified on 0.42.0 — ticket 129): upsert by id
+            // at the row's updated_at position, in the flat list and in the group
+            // matching its cwd — the create/fork placement rule, so the app's own
+            // create echo is a no-op (insertSorted replaces by id, never duplicates).
+            // A workspace with no group on screen is left out, same as create; the
+            // next grouped load reconciles.
+            is SessionListEvent.SessionCreated -> uiState.update { state ->
+                val session = event.session
+                state.copy(
+                    // Same guard as create/fork: in grouped mode a never-loaded flat
+                    // list stays null — growing it to one row would clobber the cache.
+                    sessions = if (state.groupedView && state.sessions == null) {
+                        null
+                    } else {
+                        state.sessions?.insertSorted(session)
+                    },
+                    groups = state.groups?.map { group ->
+                        if (group.cwd == session.cwd) {
+                            group.copy(sessions = group.sessions.insertSorted(session))
+                        } else {
+                            group
+                        }
                     },
                 )
             }
@@ -604,10 +630,11 @@ class SessionListViewModel @Inject constructor(
     }
 
     /**
-     * Sorted insert for the fork (ticket 128): the lists are updated_at-descending
-     * and the fork inherits the source's `updated_at`, so landing it behind the rows
-     * at least as recent puts it right next to its source — not at the top like
-     * create. An id already present is replaced, not duplicated.
+     * Sorted insert shared by the fork (ticket 128) and the event.session.created
+     * upsert (ticket 129): the lists are updated_at-descending and the fork inherits
+     * the source's `updated_at`, so landing it behind the rows at least as recent puts
+     * it right next to its source — not at the top like create. An id already present
+     * is replaced, not duplicated — the app's own create echo is thereby a no-op.
      */
     private fun List<Session>.insertSorted(session: Session): List<Session> {
         val rest = filter { it.id != session.id }

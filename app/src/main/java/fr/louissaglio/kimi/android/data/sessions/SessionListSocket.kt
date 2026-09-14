@@ -29,8 +29,9 @@ interface SessionListSocket {
     fun observe(settings: ServerSettings, sessionIds: Flow<Set<String>>): Flow<SessionListEvent>
 }
 
-/** One list-screen event: a live patch for one row, a row removal, a global
- * cache-invalidation signal (ticket 110), or the reconnect-heal signal. */
+/** One list-screen event: a live patch for one row, a row insertion (ticket 129) or
+ * removal, a global cache-invalidation signal (ticket 110), or the reconnect-heal
+ * signal. */
 sealed interface SessionListEvent {
 
     /**
@@ -61,6 +62,18 @@ sealed interface SessionListEvent {
      * `session_id` is `__global__`, so [sessionId] comes from the payload.
      */
     data class SessionArchived(val sessionId: String) : SessionListEvent
+
+    /**
+     * `event.session.created` (verified on 0.42.0, docs/server-api.md — ticket 129):
+     * a session was created from any client, and [session] is the full REST-shaped
+     * object. Not a `__global__` frame: it is broadcast on the new session's own
+     * stream, so the envelope `session_id` is the created session — an id this
+     * connection is by definition not subscribed to. Fires on plain creates only:
+     * a `:fork`'s frame is dropped server-side (the fork is never loaded), so a fork
+     * made elsewhere appears on the next refresh — the app's own fork inserts the
+     * row itself (ticket 128).
+     */
+    data class SessionCreated(val session: Session) : SessionListEvent
 
     /**
      * `event.config.changed` (delivered since 0.39.1, docs/server-api.md): a config

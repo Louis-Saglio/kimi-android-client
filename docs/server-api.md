@@ -1298,9 +1298,13 @@ capture, trimmed:
 - Quirk: the fork's `updated_at` is inherited from the source, so it can
   predate its own `created_at` (as in the capture) — in a recency-sorted
   list the fork lands next to its origin, not at the top.
-- The server publishes a global `event.session.created` WS frame with the
-  full session object, forks and plain creates alike. **The Android app's
-  session-list socket ignores it today — ticket 129.**
+- A plain `POST /api/v1/sessions` (any client) broadcasts an
+  `event.session.created` WS frame carrying the full session object — see
+  WebSocket → Global events for the verbatim capture and its non-`__global__`
+  envelope. The fork's own such frame never reaches the wire (dropped
+  server-side: the forked session is not loaded), so a fork made from ANOTHER
+  client appears in the app only on the next refresh. The Android app handles
+  the create frame since ticket 129; its own forks insert the row locally.
 - Errors: unknown id → `40401` "session … does not exist" (with `stack`);
   a turn running on the source → `40901`, verbatim
   `{"code":40901,"msg":"Session \"session_…\" cannot be forked while a turn is running","data":null,…}`
@@ -3616,6 +3620,52 @@ the list until the next refresh (ticket 126); the app has no delete UI.
 The sibling workspace lifecycle events `event.workspace.created` / `updated`
 (full wire workspace object) and `event.workspace.deleted`
 (`{workspace_id, root}`) are global too — all out of the app's scope.
+
+### Global events — `event.session.created`
+
+Fires when a session is **created** from any client (`POST /api/v1/sessions`
+— see Sessions → Create). Pushed to every established connection with no
+subscribe needed, like the other `event.session.*` lifecycle frames — but
+unlike them the envelope is NOT `__global__`: the frame is dispatched on the
+new session's own event stream, so the envelope `session_id` IS the created
+session's id and `seq`/`epoch` are that session's own (`seq` 1 below — fresh
+journal). The payload carries the **full session object in the snake_case
+REST shape** (identical to `GET /api/v1/sessions` items) under `session`,
+plus the usual camelCase `agentId`/`sessionId`. Verbatim capture (2026-09-14
+on 0.42.0):
+
+```json
+{"type":"event.session.created","seq":1,"session_id":"session_0fb965a3-733b-41a3-b863-05dc44881de5",
+ "timestamp":"2026-09-14T10:18:49.155Z",
+ "payload":{"type":"event.session.created","session":{"id":"session_0fb965a3-733b-41a3-b863-05dc44881de5",
+  "workspace_id":"wd_spike_6baf4c130e63","title":"ticket-129-capture-source-2",
+  "created_at":"2026-09-14T10:18:49.118Z","updated_at":"2026-09-14T10:18:49.118Z",
+  "busy":false,"main_turn_active":false,"pending_interaction":"none","archived":false,
+  "metadata":{"cwd":"/home/ubuntu/spike"},"agent_config":{"model":""},
+  "usage":{"input_tokens":0,"output_tokens":0,"cache_read_tokens":0,"cache_creation_tokens":0,
+   "total_cost_usd":0,"context_tokens":0,"context_limit":0,"turn_count":0},
+  "permission_rules":[],"message_count":0,"last_seq":0},
+  "agentId":"main","sessionId":"session_0fb965a3-733b-41a3-b863-05dc44881de5"},
+ "epoch":"ep_01M2FPTCY3629JDWB3V096PW34"}
+```
+
+**`:fork` puts nothing on the wire** (verified live 2026-09-14 on 0.42.0:
+three `:fork` calls with a subscribed listener produced zero frames, while a
+plain create in the same window produced the capture above). The fork route
+publishes the same core event (`packages/kap-server/src/routes/sessions.ts`),
+but the v1 broadcaster dispatches `event.session.created` through the
+per-session path (`sessionEventBroadcaster.ts`: `dispatchSessionEvent` →
+`getLiveSessionById`), which requires a loaded session — and `fork()` never
+materializes its result, so the frame is dropped server-side before reaching
+any connection. `POST /sessions/{id}/children` (sub-agent children) is
+dropped the same way, so child sessions never enter the session list through
+this event. A session forked from ANOTHER client therefore still appears only
+on the next refresh; the app's own forks insert the row locally (ticket 128).
+
+The Android app handles the frame since ticket 129: parsed ahead of the
+foreign-session filter (the new session's id is by definition never in the
+subscribed set), the carried session upserted into the list at its
+`updated_at` position.
 
 ### Captured round-trips
 

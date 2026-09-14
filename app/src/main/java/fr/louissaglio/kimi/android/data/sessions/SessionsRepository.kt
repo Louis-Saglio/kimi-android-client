@@ -115,15 +115,6 @@ class SessionsRepository @Inject constructor(
             }
         }
 
-    private fun SessionDto.toDomain(): Session = Session(
-        id = id,
-        title = title?.takeIf { it.isNotBlank() },
-        cwd = metadata?.cwd,
-        updatedAt = runCatching { Instant.parse(updatedAt) }.getOrDefault(Instant.EPOCH),
-        isRunning = busy,
-        isAwaitingInteraction = isAwaitingInteraction(pendingInteraction),
-    )
-
     private fun SessionGroupDto.toDomain(): SessionGroup = SessionGroup(
         workspaceId = workspace.id,
         cwd = workspace.cwd,
