@@ -78,7 +78,10 @@
   REST-cancellable — docs/server-api.md, Background lifecycle). Domain:
   `BackgroundTask`/`TaskInfo` in `data/chat/Tasks.kt` — kind `tool` (question
   flows) is filtered out at the mapping boundary.
-- `data/sessions/` — `SessionsRepository` (list/get/create/fork REST facade), the 087
+- `data/sessions/` — `SessionsRepository` (list/get/create/fork/archive/restore REST
+  facade; ticket 132 adds `listArchivedSessions` — the v1 list with
+  `archived_only=true&exclude_empty=true` and the same `before_id` cursor, rows
+  carrying the `archived_at` the live-list mapping drops), the 087
   `SessionListSocket` (its global-frame path also surfaces `event.session.created` —
   ticket 129, the carried session upserted by the ViewModel at its `updated_at`
   position; only plain creates arrive, fork frames being dropped server-side — and
@@ -93,8 +96,13 @@
   collection covering every mutation path. A corrupt file is deleted and treated
   as absent. The list never refreshes itself (ticket 112): ON_START with rows on
   screen only re-opens the socket — refresh is pull-to-refresh, the error state's
-  Retry, the visible initial load when the cache is empty, or one silent re-sync
-  on socket reconnect. `WorkspaceLabels` (ticket 114) is the pure cwd →
+  Retry, the visible initial load when the cache is empty, one silent re-sync on
+  socket reconnect, or the archived screen's nav-result flag after a restore
+  (ticket 132: restore pushes no WS event, and the ON_STOP/ON_START cycle alone
+  would not heal it — a fresh socket collection's first connect emits no
+  Reconnected, only a drop within one collection does). The archived screen itself
+  (ui/sessions, read-only rows + per-row Restore) mirrors the flat list's
+  paging/footer/state idioms; tapping an archived row does nothing. `WorkspaceLabels` (ticket 114) is the pure cwd →
   disambiguated-label function (last path segment, parent segments prepended
   while another cwd labels the same); the flat rows' supporting lines consume it
   via `SessionListViewModel.UiState.workspaceLabels`, the 115 group headers reuse

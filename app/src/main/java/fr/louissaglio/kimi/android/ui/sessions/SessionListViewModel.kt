@@ -768,8 +768,18 @@ class SessionListViewModel @Inject constructor(
     }
 
     /**
-     * Silent re-sync, called only from the socket-reconnect heal (the ON_START call
-     * went away with ticket 112): never sets [UiState.isLoading]/[UiState.isRefreshing];
+     * Return-from-archived heal (ticket 132): the archived screen restored at least one
+     * session (signalled by the nav-result flag). Restore pushes no WS event, and the
+     * ON_STOP/ON_START socket cycle does not cover it — a fresh collection's first
+     * connect emits no Reconnected (only a drop within one collection does) — so the
+     * flag turns into the same silent re-sync a real reconnect runs.
+     */
+    fun onRestoreFromArchived() = silentRefresh()
+
+    /**
+     * Silent re-sync, called from the socket-reconnect heal (the ON_START call went
+     * away with ticket 112) and the archived-restore nav flag (ticket 132): never sets
+     * [UiState.isLoading]/[UiState.isRefreshing];
      * on success replaces the active mode's list (115); on failure the old list stays
      * and no [Effect.RefreshFailed] is emitted — no snackbar from a reconnect while
      * offline. Pull-to-refresh keeps the visible behavior via [reload].

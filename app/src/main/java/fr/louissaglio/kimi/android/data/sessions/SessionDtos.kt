@@ -53,6 +53,17 @@ internal fun SessionDto.toDomain(): Session = Session(
     isAwaitingInteraction = isAwaitingInteraction(pendingInteraction),
 )
 
+// The archived screen's mapping (ticket 132): same title/cwd rules as [toDomain], plus
+// the archive stamp the live list drops. A malformed archived_at reads as absent (the
+// row falls back to updated_at), like the updated_at parse's EPOCH fallback.
+internal fun SessionDto.toArchivedDomain(): ArchivedSession = ArchivedSession(
+    id = id,
+    title = title?.takeIf { it.isNotBlank() },
+    cwd = metadata?.cwd,
+    archivedAt = archivedAt?.let { runCatching { Instant.parse(it) }.getOrNull() },
+    updatedAt = runCatching { Instant.parse(updatedAt) }.getOrDefault(Instant.EPOCH),
+)
+
 // DTOs for GET /api/v2/sessions?view=by_workspace (docs/server-api.md — ticket 115).
 // v2 differs from v1 wire-wise: epoch-ms timestamps and present-but-null unset fields,
 // so these are deliberately not shared with the v1 DTOs above.

@@ -39,6 +39,40 @@ data class SessionPage(
 )
 
 /**
+ * One archived session row (ticket 132): unlike the live-list [Session] this keeps the
+ * server's archive stamp — the archived screen's rows display it. The live state flags
+ * are dropped: an archived session is never running or awaiting interaction.
+ */
+data class ArchivedSession(
+    val id: String,
+    /** Null when the server sent no usable title; the UI falls back to [cwd]. */
+    val title: String?,
+    val cwd: String?,
+    /** Server `archived_at`; null when absent — the row then falls back to [updatedAt]. */
+    val archivedAt: Instant?,
+    /** `updated_at`, untouched by archiving — a stale session archived today sorts low. */
+    val updatedAt: Instant,
+) {
+    /** The archive time the row displays. */
+    val archiveTime: Instant get() = archivedAt ?: updatedAt
+}
+
+/** Label for one archived session: the same title → cwd basename → id fallback as the main list. */
+val ArchivedSession.displayName: String
+    get() = displayNameFor(id, title, cwd)
+
+/** Workspace folder basename for the row's supporting line (ticket 132): the main
+ * list's cwd-shortening rule, without the 114 cross-row disambiguation. */
+val ArchivedSession.workspaceFolder: String?
+    get() = cwd?.trimEnd('/')?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+
+/** One page of the archived session list (ticket 132); [hasMore] mirrors `has_more`. */
+data class ArchivedSessionPage(
+    val items: List<ArchivedSession>,
+    val hasMore: Boolean,
+)
+
+/**
  * One workspace group of the grouped session list (ticket 115). [sessions] holds only
  * the group's first page (5 per workspace); [total] is the workspace's full matching
  * count server-side, shown in the group header.

@@ -924,6 +924,26 @@ class SessionListViewModelTest {
     }
 
     @Test
+    fun `the archived-restore flag fires exactly one silent refresh`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+
+        // Back from the archived screen after a restore (ticket 132): restore pushed
+        // no WS event, so the nav-result flag is what picks the restored row up.
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1", "session_restored")))
+        viewModel.onRestoreFromArchived()
+
+        assertEquals("/api/v1/sessions", server.takeRequest(5, TimeUnit.SECONDS)!!.target)
+        awaitState(viewModel.uiState) { it.sessions?.map { s -> s.id } == listOf("session_1", "session_restored") }
+        // Same silent semantics as the reconnect heal: no spinner flags, one request.
+        assertFalse(viewModel.uiState.value.isLoading)
+        assertFalse(viewModel.uiState.value.isRefreshing)
+        assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
     fun `the socket collection starts on ON_START and stops on ON_STOP`() = runBlocking {
         server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1")))
         viewModel.onScreenStarted()

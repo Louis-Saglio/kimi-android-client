@@ -51,6 +51,36 @@ class SessionsRepository @Inject constructor(
     }
 
     /**
+     * Fetches one page of the ARCHIVED session list (ticket 132): the v1 list filtered
+     * by `archived_only=true`, combined with `exclude_empty=true` so prompt-less
+     * sessions stay hidden (web parity — docs/server-api.md, Sessions → List).
+     * [beforeId] is the same `before_id` cursor as [listSessions]; the order is the
+     * server's default (`updated_at` desc), which archiving does not bump. The rows
+     * keep the `archived_at` stamp the live-list mapping drops. No disk cache — the
+     * list is transient. Same error-boundary contract as [listSessions].
+     */
+    suspend fun listArchivedSessions(
+        settings: ServerSettings,
+        beforeId: String? = null,
+        pageSize: Int? = null,
+    ): Result<ArchivedSessionPage> {
+        val params = listOfNotNull(
+            "archived_only=true",
+            "exclude_empty=true",
+            pageSize?.let { "page_size=$it" },
+            beforeId?.let { "before_id=$it" },
+        )
+        return api.get(settings, "/api/v1/sessions?${params.joinToString("&")}") { body ->
+            json.decodeFromString<Envelope<SessionListData>>(body).toResult().map { data ->
+                ArchivedSessionPage(
+                    items = data.items.map { it.toArchivedDomain() },
+                    hasMore = data.hasMore,
+                )
+            }
+        }
+    }
+
+    /**
      * Fetches the workspace-grouped session list from
      * `GET /api/v2/sessions?view=by_workspace&group.page_size=5` (docs/server-api.md —
      * ticket 115): each workspace group carries its 5 most recent sessions and its full

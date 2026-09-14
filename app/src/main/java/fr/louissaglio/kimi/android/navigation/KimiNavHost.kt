@@ -1,7 +1,9 @@
 package fr.louissaglio.kimi.android.navigation
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -12,6 +14,7 @@ import fr.louissaglio.kimi.android.ui.chat.FileContentRoute
 import fr.louissaglio.kimi.android.ui.chat.JobDetailScreen
 import fr.louissaglio.kimi.android.ui.chat.SubagentScreen
 import fr.louissaglio.kimi.android.ui.chat.ToolContentStore
+import fr.louissaglio.kimi.android.ui.sessions.ArchivedSessionsScreen
 import fr.louissaglio.kimi.android.ui.sessions.SessionsScreen
 import fr.louissaglio.kimi.android.ui.settings.SettingsScreen
 import kotlinx.serialization.Serializable
@@ -25,6 +28,11 @@ object Sessions
 
 @Serializable
 object Settings
+
+/** Read-only archived-session list with per-row Restore (ticket 132); entry from the
+ * session list's overflow menu. */
+@Serializable
+object Archived
 
 /** title/cwd ride along as optional query args so the chat top bar can show the
  * label the session list already had, before the session fetch lands. */
@@ -78,9 +86,21 @@ data class FileContent(val toolCallId: String)
 fun KimiNavHost(toolContentStore: ToolContentStore) {
     val navController = rememberNavController()
     NavHost(navController = navController, startDestination = Sessions) {
-        composable<Sessions> {
+        composable<Sessions> { entry ->
+            // The nav-result flag the archived screen sets when a restore succeeds
+            // (ticket 132): rides the list entry's SavedStateHandle, so it survives
+            // until the list is back on top, where the screen consumes it into the
+            // heal refresh.
+            val restoredFromArchive by entry.savedStateHandle
+                .getStateFlow(KEY_RESTORED_FROM_ARCHIVE, false)
+                .collectAsStateWithLifecycle()
             SessionsScreen(
                 onNavigateToSettings = { navController.navigate(Settings) },
+                onNavigateToArchived = { navController.navigate(Archived) },
+                restoredFromArchive = restoredFromArchive,
+                onRestoredFromArchiveConsumed = {
+                    entry.savedStateHandle[KEY_RESTORED_FROM_ARCHIVE] = false
+                },
                 // launchSingleTop: a fast double-tap must not stack the destination (071).
                 onNavigateToChat = { session ->
                     navController.navigate(Chat(session.id, session.title, session.cwd)) {
@@ -91,6 +111,16 @@ fun KimiNavHost(toolContentStore: ToolContentStore) {
         }
         composable<Settings> {
             SettingsScreen(onNavigateBack = { navController.popBackStack() })
+        }
+        composable<Archived> {
+            ArchivedSessionsScreen(
+                onNavigateBack = { navController.popBackStack() },
+                onSessionRestored = {
+                    navController.previousBackStackEntry
+                        ?.savedStateHandle
+                        ?.set(KEY_RESTORED_FROM_ARCHIVE, true)
+                },
+            )
         }
         // sessionId/title/cwd reach the ViewModel through its SavedStateHandle;
         // the screen itself needs nothing from the route.
@@ -190,3 +220,7 @@ fun KimiNavHost(toolContentStore: ToolContentStore) {
         }
     }
 }
+
+/** Nav-result flag for the archived screen's restores (ticket 132), keyed on the
+ * session list entry's SavedStateHandle. */
+private const val KEY_RESTORED_FROM_ARCHIVE = "restored_from_archive"

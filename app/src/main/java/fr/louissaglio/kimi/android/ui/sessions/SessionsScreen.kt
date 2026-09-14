@@ -23,10 +23,12 @@ import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuAnchorType
@@ -85,10 +87,25 @@ import java.time.Instant
 fun SessionsScreen(
     onNavigateToSettings: () -> Unit = {},
     onNavigateToChat: (Session) -> Unit = {},
+    onNavigateToArchived: () -> Unit = {},
+    /** Nav-result flag (ticket 132): true when a restore on the archived screen is
+     * pending the main list's heal refresh. Consumed into a silentRefresh, then reset. */
+    restoredFromArchive: Boolean = false,
+    onRestoredFromArchiveConsumed: () -> Unit = {},
     viewModel: SessionListViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
+    // The archived screen's restore pushes no WS event, and the socket's
+    // ON_STOP/ON_START cycle does not heal it (a fresh collection's first connect
+    // emits no Reconnected), so the nav-result flag turns into the same silent
+    // re-sync a real reconnect runs.
+    LaunchedEffect(restoredFromArchive) {
+        if (restoredFromArchive) {
+            viewModel.onRestoreFromArchived()
+            onRestoredFromArchiveConsumed()
+        }
+    }
     LaunchedEffect(Unit) {
         viewModel.effects.collect { effect ->
             when (effect) {
@@ -133,6 +150,7 @@ fun SessionsScreen(
         uiState = uiState,
         snackbarHostState = snackbarHostState,
         onNavigateToSettings = onNavigateToSettings,
+        onNavigateToArchived = onNavigateToArchived,
         onSessionClick = onNavigateToChat,
         onRetry = viewModel::onRetry,
         onPullToRefresh = viewModel::onPullToRefresh,
@@ -157,6 +175,7 @@ private fun SessionsContent(
     uiState: SessionListViewModel.UiState,
     snackbarHostState: SnackbarHostState,
     onNavigateToSettings: () -> Unit,
+    onNavigateToArchived: () -> Unit,
     onSessionClick: (Session) -> Unit,
     onRetry: () -> Unit,
     onPullToRefresh: () -> Unit,
@@ -191,6 +210,27 @@ private fun SessionsContent(
                     }
                     IconButton(onClick = onNavigateToSettings) {
                         Icon(Icons.Filled.Settings, contentDescription = "Settings")
+                    }
+                    // Session management lives next to the session list (ticket 132):
+                    // the overflow hosts the archived sessions entry; Settings stays
+                    // about connection and server config. The chat overflow's idiom.
+                    var menuExpanded by remember { mutableStateOf(false) }
+                    Box {
+                        IconButton(onClick = { menuExpanded = true }) {
+                            Icon(Icons.Filled.MoreVert, contentDescription = "More options")
+                        }
+                        DropdownMenu(
+                            expanded = menuExpanded,
+                            onDismissRequest = { menuExpanded = false },
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Archived sessions") },
+                                onClick = {
+                                    menuExpanded = false
+                                    onNavigateToArchived()
+                                },
+                            )
+                        }
                     }
                 },
             )
@@ -489,7 +529,7 @@ private fun GroupHeader(
 }
 
 @Composable
-private fun LoadMoreFooter(error: String?, onRetry: () -> Unit) {
+internal fun LoadMoreFooter(error: String?, onRetry: () -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(16.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
@@ -685,7 +725,7 @@ private fun NeedsAttentionBadge() {
 }
 
 /** How close (in rows) to the list end the scroll must get before the next page loads. */
-private const val LOAD_MORE_THRESHOLD = 3
+internal const val LOAD_MORE_THRESHOLD = 3
 
 @Preview
 @Composable
@@ -700,6 +740,7 @@ private fun SessionsContentPreview() {
             ),
             snackbarHostState = remember { SnackbarHostState() },
             onNavigateToSettings = {},
+            onNavigateToArchived = {},
             onSessionClick = {},
             onRetry = {},
             onPullToRefresh = {},

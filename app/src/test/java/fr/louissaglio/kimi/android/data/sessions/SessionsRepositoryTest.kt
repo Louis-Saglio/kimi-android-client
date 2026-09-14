@@ -331,6 +331,75 @@ class SessionsRepositoryTest {
     }
 
     @Test
+    fun `archived list sends archived_only and exclude_empty and parses archived_at`() = runBlocking {
+        // Wire shape verified live on 0.42.0 (2026-09-14 — ticket 132): archived rows
+        // carry archived:true and an ISO archived_at.
+        server.enqueue(
+            MockResponse(body =
+                """
+                {"code":0,"msg":"success","data":{"items":[
+                  {"id":"session_arch_1","title":"Old experiment","updated_at":"2026-09-10T08:00:00.000Z",
+                   "busy":false,"archived":true,"archived_at":"2026-09-14T09:00:00.000Z",
+                   "metadata":{"cwd":"/home/ubuntu/spike"}},
+                  {"id":"session_arch_2","title":"","updated_at":"2026-09-01T08:00:00.000Z",
+                   "busy":false,"archived":true,
+                   "metadata":{"cwd":"/tmp/old"}}
+                ],"has_more":true},"request_id":"01KX"}
+                """.trimIndent(),
+            ),
+        )
+
+        val result = repository.listArchivedSessions(settings())
+
+        val page = result.getOrThrow()
+        // First page: the two filters ride along, no cursor.
+        assertEquals("/api/v1/sessions?archived_only=true&exclude_empty=true", server.takeRequest().target)
+        assertTrue(page.hasMore)
+        assertEquals(
+            ArchivedSession(
+                id = "session_arch_1",
+                title = "Old experiment",
+                cwd = "/home/ubuntu/spike",
+                archivedAt = Instant.parse("2026-09-14T09:00:00.000Z"),
+                updatedAt = Instant.parse("2026-09-10T08:00:00.000Z"),
+            ),
+            page.items[0],
+        )
+        // Blank title maps to null (the UI falls back to the cwd basename); an absent
+        // archived_at maps to null (the row falls back to updated_at).
+        val second = page.items[1]
+        assertNull(second.title)
+        assertNull(second.archivedAt)
+        assertEquals(second.updatedAt, second.archiveTime)
+    }
+
+    @Test
+    fun `archived list next page sends the cursor alongside the filters`() = runBlocking {
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"items":[],"has_more":false},"request_id":"01KX"}""",
+            ),
+        )
+
+        val result = repository.listArchivedSessions(settings(), beforeId = "session_arch_9")
+
+        assertEquals(
+            "/api/v1/sessions?archived_only=true&exclude_empty=true&before_id=session_arch_9",
+            server.takeRequest().target,
+        )
+        assertFalse(result.getOrThrow().hasMore)
+    }
+
+    @Test
+    fun `archived list surfaces a non-zero envelope code as Api error`() = runBlocking {
+        server.enqueue(
+            MockResponse(body = """{"code":50001,"msg":"boom","data":null,"request_id":"01KX"}"""),
+        )
+
+        assertEquals(DataError.Api(50001, "boom"), repository.listArchivedSessions(settings()).exceptionOrNull())
+    }
+
+    @Test
     fun `grouped fetch hits the v2 by_workspace endpoint and maps groups onto domain sessions`() = runBlocking {
         server.enqueue(MockResponse(body = GROUPS_BODY))
 
