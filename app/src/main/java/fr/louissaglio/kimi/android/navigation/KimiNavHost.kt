@@ -121,7 +121,7 @@ fun KimiNavHost(toolContentStore: ToolContentStore) {
                         launchSingleTop = true
                     }
                 },
-                // Ticket 127/130: the fork opens as a new Chat on top — back returns
+                // Ticket 127/133: the fork opens as a new Chat on top — back returns
                 // to the source session. Never launchSingleTop here: Chat→Chat is a
                 // same-destination navigation, so singleTop would recreate the top
                 // entry with the SAME id, retain the old ChatViewModel, and keep
