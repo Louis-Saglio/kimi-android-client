@@ -92,6 +92,18 @@ class SessionsRepository @Inject constructor(
     }
 
     /**
+     * Forks a session via `POST /api/v1/sessions/{id}:fork` (docs/server-api.md —
+     * ticket 127): the fork inherits the workspace, the cwd and the full history, and
+     * the server defaults the title to "Fork: <source title>", so the body is always
+     * the empty object (web parity). A turn running on the source is refused with
+     * envelope 40901. Same error-boundary contract as [listSessions].
+     */
+    suspend fun forkSession(settings: ServerSettings, sessionId: String): Result<Session> =
+        api.post(settings, "/api/v1/sessions/$sessionId:fork", api.jsonBody {}) { responseBody ->
+            json.decodeFromString<Envelope<SessionDto>>(responseBody).toResult().map { it.toDomain() }
+        }
+
+    /**
      * Fetches the known workspaces via `GET /api/v1/workspaces` (docs/server-api.md),
      * sorted by `last_opened_at` descending — the server order is not relied upon.
      * Same error-boundary contract as [listSessions].

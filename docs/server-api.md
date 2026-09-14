@@ -1267,6 +1267,45 @@ cleanup is serialized server-side (the session's background work is
 drained first). **The Android app has no delete UI and ignores the event
 today — ticket 126 covers handling it.**
 
+### Fork — `POST /api/v1/sessions/{id}:fork`
+
+Forking copies a session — workspace, cwd and full message history — into a
+new session (upstream `9c37feb4`, added in 0.40.1; the web client exposes it
+in the sidebar row menu, the chat header overflow and the `/fork` slash
+command, all posting `{}`; every behavior below verified live 2026-09-14 on
+0.42.0, ticket 127). Body `{"title"?, "metadata"?}` — both optional; `{}`
+works.
+
+```bash
+curl -s -X POST 'http://127.0.0.1:58627/api/v1/sessions/session_d6c12410-...:fork' \
+  -H "Authorization: Bearer <token>" \
+  -H 'Content-Type: application/json; charset=utf-8' -d '{}'
+```
+
+Answers the standard session envelope (same shape as create/get) — verbatim
+capture, trimmed:
+
+```json
+{"code":0,"msg":"success","data":{"id":"session_4536c55c-...","workspace_id":"wd_spike_6baf4c130e63","title":"Fork: Fork source","created_at":"2026-09-14T09:27:49.767Z","updated_at":"2026-09-14T09:27:37.222Z","busy":false,"archived":false,"metadata":{"cwd":"/home/ubuntu/spike"},"agent_config":{"model":""},"usage":{…},"permission_rules":[],"message_count":0,"last_seq":0},"request_id":"01M2FKX17KGY62AT5CXNJYMRJH"}
+```
+
+- Default title when none is passed: `Fork: <source title>`.
+- The fork inherits the source's `workspace_id` and `metadata.cwd` and
+  carries a full copy of the conversation — `GET .../messages` on the fork
+  returns the source history verbatim (verified 7/7 messages, same
+  roles/order; the sequential `msg_<session>_NNNNNN` ids are re-issued under
+  the fork's id, the ULID-style ones are kept).
+- Quirk: the fork's `updated_at` is inherited from the source, so it can
+  predate its own `created_at` (as in the capture) — in a recency-sorted
+  list the fork lands next to its origin, not at the top.
+- The server publishes a global `event.session.created` WS frame with the
+  full session object, forks and plain creates alike. **The Android app's
+  session-list socket ignores it today — ticket 129.**
+- Errors: unknown id → `40401` "session … does not exist" (with `stack`);
+  a turn running on the source → `40901`, verbatim
+  `{"code":40901,"msg":"Session \"session_…\" cannot be forked while a turn is running","data":null,…}`
+  (with `stack`).
+
 ### Live status — `GET /api/v1/sessions/{id}/status`
 
 Lightweight runtime state:
@@ -4011,6 +4050,15 @@ selected option and free text both re-verified 2026-07-23:
 ```
 
 ## Verification log
+
+- 2026-09-14 spot verification on `0.42.0` (ticket 127; throwaway sessions
+  `session_d6c12410-…` + its forks in `/home/ubuntu/spike`, all deleted
+  after): `POST /api/v1/sessions/{id}:fork` verified end-to-end — `{}` body,
+  the standard session envelope, the `Fork: ` default title, workspace/cwd
+  inheritance, the full history copy (7/7 messages on the fork), the
+  inherited-`updated_at` quirk (predating `created_at`), `40401` on an
+  unknown id and the `40901` busy error (verbatim captures in Sessions →
+  Fork).
 
 - 2026-09-09 re-verification on `0.42.0` (server 0.41.0 → 0.42.0; throwaway
   sessions `session_1082c900-…` / `session_0e2d9419-…` /

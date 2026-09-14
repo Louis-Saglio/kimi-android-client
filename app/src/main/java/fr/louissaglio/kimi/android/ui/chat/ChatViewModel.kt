@@ -23,6 +23,7 @@ import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.TodoParser
 import fr.louissaglio.kimi.android.data.chat.agentTaskIdOf
 import fr.louissaglio.kimi.android.data.chat.isSubagentScoped
+import fr.louissaglio.kimi.android.data.sessions.Session
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
 import fr.louissaglio.kimi.android.data.sessions.displayName
 import fr.louissaglio.kimi.android.data.sessions.displayNameFor
@@ -270,6 +271,16 @@ class ChatViewModel internal constructor(
         /** The task-cancel POST failed (ticket 092): the optimistic flip was reverted,
          * the job is still running. */
         data class JobCancelFailed(override val message: String) : Effect
+
+        /** The fork POST failed (ticket 127 — unknown id 40401, busy source 40901):
+         * the server's own message; the user stays on the source session. */
+        data class ForkFailed(override val message: String) : Effect
+
+        /** Fork succeeded (ticket 127): the collector navigates to the fork's chat. */
+        data class SessionForked(val session: Session) : Effect {
+            // Never shown: the collector's SessionForked branch navigates instead.
+            override val message: String get() = session.displayName
+        }
     }
 
     val uiState: StateFlow<UiState>
@@ -733,6 +744,22 @@ class ChatViewModel internal constructor(
             chatRepository.compact(settingsRepository.current(), sessionId)
                 .onSuccess { uiState.update { it.copy(isCompacting = true) } }
                 .onFailure { error -> _effects.send(Effect.CompactionFailed(error.toUserMessage())) }
+        }
+    }
+
+    /**
+     * POSTs `:fork` (ticket 127) and reports the fork through [Effect.SessionForked]
+     * for the screen to navigate to. No-ops while a turn runs — the server rejects a
+     * busy fork with 40901, so the guard (and the disabled menu item) is the only
+     * feedback. A failure surfaces the server's own message; the user stays on the
+     * source session.
+     */
+    fun onFork() {
+        if (uiState.value.isWorking) return
+        viewModelScope.launch {
+            sessionsRepository.forkSession(settingsRepository.current(), sessionId)
+                .onSuccess { fork -> _effects.send(Effect.SessionForked(fork)) }
+                .onFailure { error -> _effects.send(Effect.ForkFailed(error.toUserMessage())) }
         }
     }
 

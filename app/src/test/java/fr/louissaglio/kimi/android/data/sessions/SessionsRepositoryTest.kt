@@ -206,6 +206,62 @@ class SessionsRepositoryTest {
     }
 
     @Test
+    fun `fork posts an empty body and maps the forked session`() = runBlocking {
+        server.enqueue(MockResponse(body = FORKED_SESSION_BODY))
+
+        val result = repository.forkSession(settings(), "session_d6c12410")
+
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/sessions/session_d6c12410:fork", request.target)
+        assertEquals("{}", request.body!!.utf8())
+        assertEquals(
+            Session(
+                id = "session_4536c55c",
+                title = "Fork: Fork source",
+                cwd = "/home/ubuntu/spike",
+                // Inherited from the source — it predates the fork's created_at.
+                updatedAt = Instant.parse("2026-09-14T09:27:37.222Z"),
+                isRunning = false,
+                isAwaitingInteraction = false,
+            ),
+            result.getOrThrow(),
+        )
+    }
+
+    @Test
+    fun `fork surfaces the unknown-session envelope as Api error`() = runBlocking {
+        // Verified live 2026-09-14 on 0.42.0 (docs/server-api.md; the stack is omitted).
+        server.enqueue(
+            MockResponse(body =
+                """{"code":40401,"msg":"session session_nope does not exist","data":null,"request_id":"01KX"}""",
+            ),
+        )
+
+        val error = repository.forkSession(settings(), "session_nope").exceptionOrNull()
+
+        assertEquals(DataError.Api(40401, "session session_nope does not exist"), error)
+    }
+
+    @Test
+    fun `fork surfaces the busy-source envelope as Api error`() = runBlocking {
+        // Verbatim 0.42.0 capture (verified live 2026-09-14, docs/server-api.md).
+        server.enqueue(
+            MockResponse(body =
+                """{"code":40901,"msg":"Session \"session_d6c12410\" cannot be forked while a turn is running",""" +
+                    """"data":null,"request_id":"01KX"}""",
+            ),
+        )
+
+        val error = repository.forkSession(settings(), "session_d6c12410").exceptionOrNull()
+
+        assertEquals(
+            DataError.Api(40901, "Session \"session_d6c12410\" cannot be forked while a turn is running"),
+            error,
+        )
+    }
+
+    @Test
     fun `grouped fetch hits the v2 by_workspace endpoint and maps groups onto domain sessions`() = runBlocking {
         server.enqueue(MockResponse(body = GROUPS_BODY))
 
@@ -319,6 +375,18 @@ class SessionsRepositoryTest {
              "metadata":{"cwd":"/tmp/spike-008"},"agent_config":{"model":""},
              "usage":{"input_tokens":0},"permission_rules":[],"message_count":0,"last_seq":0},
              "request_id":"01KX"}
+        """
+
+        // Verbatim 0.42.0 fork capture (docs/server-api.md, verified live 2026-09-14),
+        // ids shortened: the fork inherits the source's workspace/cwd, and its
+        // updated_at predates its own created_at (copied from the source).
+        const val FORKED_SESSION_BODY = """
+            {"code":0,"msg":"success","data":{"id":"session_4536c55c","workspace_id":"wd_spike_6baf4c130e63",
+             "title":"Fork: Fork source","created_at":"2026-09-14T09:27:49.767Z",
+             "updated_at":"2026-09-14T09:27:37.222Z","busy":false,"archived":false,
+             "metadata":{"cwd":"/home/ubuntu/spike"},"agent_config":{"model":""},
+             "usage":{"input_tokens":0},"permission_rules":[],"message_count":0,"last_seq":0},
+             "request_id":"01M2FKX17KGY62AT5CXNJYMRJH"}
         """
 
         // v2 wire shape (docs/server-api.md): epoch-ms timestamps, present-but-null

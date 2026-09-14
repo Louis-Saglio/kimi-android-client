@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import fr.louissaglio.kimi.android.data.chat.BackgroundTask
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
 import fr.louissaglio.kimi.android.data.chat.ServerModel
+import fr.louissaglio.kimi.android.data.sessions.Session
 import fr.louissaglio.kimi.android.navigation.Chat
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.awaitState
@@ -1472,6 +1473,83 @@ class ChatViewModelTest : ChatViewModelTestBase() {
                 )
             }
             assertFalse(viewModel.uiState.value.isCompacting)
+        }
+    }
+
+    // --- Fork session (ticket 127) ------------------------------------------------------
+
+    @Test
+    fun `onFork posts to the fork endpoint and emits the navigation effect`() = runBlocking {
+        val effects = CopyOnWriteArrayList<ChatViewModel.Effect>()
+        val effectJob = launch { viewModel.effects.collect { effects += it } }
+        try {
+            viewModel.onScreenStarted()
+            awaitState(viewModel.uiState) { it.items != null }
+            while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+            viewModel.onFork()
+
+            val request = awaitRequest(":fork")
+            assertEquals("POST", request.method)
+            assertEquals("/api/v1/sessions/session_1:fork", request.target)
+            assertEquals("{}", request.body!!.utf8())
+            awaitCondition { effects.isNotEmpty() }
+            assertEquals(
+                ChatViewModel.Effect.SessionForked(
+                    Session(
+                        id = "session_fork",
+                        title = "Fork: Fix the bug",
+                        cwd = "/home/ubuntu/kimi-android-client",
+                        updatedAt = Instant.parse("2026-09-14T09:27:37.222Z"),
+                        isRunning = false,
+                        isAwaitingInteraction = false,
+                    ),
+                ),
+                effects.single(),
+            )
+        } finally {
+            effectJob.cancel()
+        }
+    }
+
+    @Test
+    fun `onFork is a no-op while a turn runs`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        // A running turn disables fork (the server would 40901 it anyway) — the same
+        // rule disables the overflow menu item.
+        socket.send(turnStartedFrame())
+        awaitState(viewModel.uiState) { it.isWorking }
+
+        viewModel.onFork()
+
+        assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun `a fork POST failure surfaces the server's 40901 message`() = runBlocking {
+        // Forking a busy session: the snackbar shows the server's own sentence and the
+        // user stays on the source session (no navigation effect).
+        forksSucceed = false
+        val effects = CopyOnWriteArrayList<ChatViewModel.Effect>()
+        val effectJob = launch { viewModel.effects.collect { effects += it } }
+        try {
+            viewModel.onScreenStarted()
+            awaitState(viewModel.uiState) { it.items != null }
+            while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+            viewModel.onFork()
+
+            awaitCondition { effects.isNotEmpty() }
+            assertEquals(
+                ChatViewModel.Effect.ForkFailed("Session \"session_1\" cannot be forked while a turn is running"),
+                effects.single(),
+            )
+        } finally {
+            effectJob.cancel()
         }
     }
 

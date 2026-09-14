@@ -78,7 +78,7 @@
   REST-cancellable — docs/server-api.md, Background lifecycle). Domain:
   `BackgroundTask`/`TaskInfo` in `data/chat/Tasks.kt` — kind `tool` (question
   flows) is filtered out at the mapping boundary.
-- `data/sessions/` — `SessionsRepository` (list/get/create REST facade), the 087
+- `data/sessions/` — `SessionsRepository` (list/get/create/fork REST facade), the 087
   `SessionListSocket` (its global-frame path also surfaces
   `event.config.changed`/`event.model_catalog.changed` — 0.39.1, ticket 110 —
   which the session-list ViewModel turns into a `ModelsRepository` cache

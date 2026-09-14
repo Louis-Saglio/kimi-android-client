@@ -99,6 +99,9 @@ abstract class ChatViewModelTestBase {
     protected var compactsSucceed = true
 
     @Volatile
+    protected var forksSucceed = true
+
+    @Volatile
     protected var questionsBody =
         """{"code":0,"msg":"success","data":{"items":[]},"request_id":"r"}"""
 
@@ -293,6 +296,25 @@ abstract class ChatViewModelTestBase {
                         } else {
                             MockResponse(body = 
                                 """{"code":40910,"msg":"No messages to compact in current history.",""" +
+                                    """"data":null,"request_id":"r"}""",
+                            )
+                        }
+                    // Ticket 127: the success body mirrors the verbatim 0.42.0 capture
+                    // (docs/server-api.md) — "Fork: " default title, inherited cwd.
+                    path == "/api/v1/sessions/session_1:fork" ->
+                        if (forksSucceed) {
+                            MockResponse(body =
+                                """{"code":0,"msg":"success","data":{"id":"session_fork",""" +
+                                    """"workspace_id":"wd_spike_6baf4c130e63","title":"Fork: Fix the bug",""" +
+                                    """"created_at":"2026-09-14T09:27:49.767Z",""" +
+                                    """"updated_at":"2026-09-14T09:27:37.222Z","busy":false,"archived":false,""" +
+                                    """"metadata":{"cwd":"/home/ubuntu/kimi-android-client"},""" +
+                                    """"agent_config":{"model":""},"usage":{"input_tokens":0},""" +
+                                    """"permission_rules":[],"message_count":0,"last_seq":0},"request_id":"r"}""",
+                            )
+                        } else {
+                            MockResponse(body =
+                                """{"code":40901,"msg":"Session \"session_1\" cannot be forked while a turn is running",""" +
                                     """"data":null,"request_id":"r"}""",
                             )
                         }

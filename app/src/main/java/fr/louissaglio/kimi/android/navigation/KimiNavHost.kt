@@ -121,6 +121,13 @@ fun KimiNavHost(toolContentStore: ToolContentStore) {
                         launchSingleTop = true
                     }
                 },
+                // Ticket 127: the fork opens as a new Chat on top — back returns to
+                // the source session (same argument hand-off as the session list).
+                onNavigateToChat = { session ->
+                    navController.navigate(Chat(session.id, session.title, session.cwd)) {
+                        launchSingleTop = true
+                    }
+                },
             )
         }
         composable<Subagent> { entry ->

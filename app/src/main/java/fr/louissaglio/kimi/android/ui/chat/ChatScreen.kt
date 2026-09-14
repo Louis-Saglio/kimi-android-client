@@ -55,6 +55,7 @@ import fr.louissaglio.kimi.android.data.chat.ToolPayload
 import fr.louissaglio.kimi.android.data.chat.asCardModel
 import fr.louissaglio.kimi.android.data.chat.bashCommandOf
 import fr.louissaglio.kimi.android.data.chat.bashDescriptionOf
+import fr.louissaglio.kimi.android.data.sessions.Session
 import fr.louissaglio.kimi.android.ui.common.EmptyState
 import fr.louissaglio.kimi.android.ui.common.ErrorState
 import fr.louissaglio.kimi.android.ui.common.LoadingState
@@ -80,6 +81,9 @@ fun ChatScreen(
     /** Ticket 120: a parsed `Read`/`Write` row opens the file content screen — the
      * payload and the call's output snapshot ride along for the hand-off. */
     onNavigateToFileContent: (toolCallId: String, payload: ToolPayload, output: String) -> Unit = { _, _, _ -> },
+    /** Ticket 127: a successful fork opens the forked session's chat (same
+     * argument hand-off as the session list's navigation). */
+    onNavigateToChat: (session: Session) -> Unit = {},
     viewModel: ChatViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -108,6 +112,8 @@ fun ChatScreen(
                     if (!openWithOtherApp(context, effect.contentUri, effect.mimeType)) {
                         viewModel.onOpenAttachmentFailed(effect.name)
                     }
+                // A fork opens the forked session's chat (ticket 127).
+                is ChatViewModel.Effect.SessionForked -> onNavigateToChat(effect.session)
                 // Every other effect is a plain message snackbar (ticket 071).
                 else -> snackbarHostState.showSnackbar(effect.message)
             }
@@ -206,6 +212,7 @@ fun ChatScreen(
         onOpenFileContent = onNavigateToFileContent,
         onHistoryTopReached = onHistoryTopReached,
         onCompact = viewModel::onCompact,
+        onFork = viewModel::onFork,
         onCancelJob = viewModel::onCancelJob,
     )
     fullScreenImage?.let { image ->
@@ -283,6 +290,7 @@ private fun ChatContent(
     onOpenFileContent: (toolCallId: String, payload: ToolPayload, output: String) -> Unit = { _, _, _ -> },
     onHistoryTopReached: () -> Unit = {},
     onCompact: () -> Unit = {},
+    onFork: () -> Unit = {},
     onCancelJob: (String) -> Unit = {},
 ) {
     var showModelPicker by rememberSaveable { mutableStateOf(false) }
@@ -325,8 +333,8 @@ private fun ChatContent(
                 },
                 actions = {
                     // Session-level actions (ticket 056): the overflow menu hosts
-                    // infrequent session management — "Compact session" first, built
-                    // to grow (rename/delete/export… later). The context ring, working
+                    // infrequent session management — "Compact session" first,
+                    // "Fork session" (ticket 127) below it. The context ring, working
                     // spinner and stop button stay in the composer (ticket 053).
                     var menuExpanded by remember { mutableStateOf(false) }
                     Box {
@@ -343,6 +351,16 @@ private fun ChatContent(
                                 onClick = {
                                     menuExpanded = false
                                     onCompact()
+                                },
+                            )
+                            // Ticket 127: forking a running session always fails
+                            // server-side (40901), so the item pre-disables.
+                            DropdownMenuItem(
+                                text = { Text("Fork session") },
+                                enabled = !uiState.isWorking,
+                                onClick = {
+                                    menuExpanded = false
+                                    onFork()
                                 },
                             )
                         }
