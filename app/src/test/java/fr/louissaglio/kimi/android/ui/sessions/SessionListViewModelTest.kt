@@ -1507,6 +1507,184 @@ class SessionListViewModelTest {
         }
     }
 
+    // --- Archiving from the list (ticket 131) ---
+
+    @Test
+    fun `archive success removes the row from the flat list and its group and emits the undo effect`() = runBlocking {
+        // Both modes loaded at once (ticket 115): the flat page holds session_1 and
+        // session_2, the grouped fetch's workspace /tmp/a holds session_1 and session_3.
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1", "session_2")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+        server.enqueue(MockResponse(body = groupsBody("/tmp/a" to listOf("session_1", "session_3"))))
+        viewModel.onViewModeToggle()
+        awaitState(viewModel.uiState) { it.groups != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+
+        server.enqueue(MockResponse(body = ARCHIVE_BODY))
+        val effects = CopyOnWriteArrayList<SessionListViewModel.Effect>()
+        val effectJob = launch { viewModel.effects.collect { effects += it } }
+        try {
+            viewModel.onArchiveSession("session_1")
+
+            awaitState(viewModel.uiState) { state ->
+                state.sessions?.map { it.id } == listOf("session_2") &&
+                    state.groups?.single()?.sessions?.map { it.id } == listOf("session_3")
+            }
+            awaitCondition { effects.isNotEmpty() }
+            assertEquals(SessionListViewModel.Effect.SessionArchived("session_1"), effects.single())
+            val request = server.takeRequest(5, TimeUnit.SECONDS)!!
+            assertEquals("POST", request.method)
+            assertEquals("/api/v1/sessions/session_1:archive", request.target)
+            // The archive POST is the only extra traffic: no refresh follows.
+            assertEquals(3, server.requestCount)
+        } finally {
+            effectJob.cancel()
+        }
+    }
+
+    @Test
+    fun `a failed archive keeps the row and emits ArchiveFailed with the server message`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+        server.enqueue(
+            MockResponse(body =
+                """{"code":40401,"msg":"session session_1 does not exist","data":null,"request_id":"r"}""",
+            ),
+        )
+        val effects = CopyOnWriteArrayList<SessionListViewModel.Effect>()
+        val effectJob = launch { viewModel.effects.collect { effects += it } }
+        try {
+            viewModel.onArchiveSession("session_1")
+
+            awaitCondition { effects.isNotEmpty() }
+            assertEquals(
+                SessionListViewModel.Effect.ArchiveFailed("session session_1 does not exist"),
+                effects.single(),
+            )
+            assertEquals(listOf("session_1"), viewModel.uiState.value.sessions!!.map { it.id })
+            assertEquals("POST", server.takeRequest(5, TimeUnit.SECONDS)!!.method)
+        } finally {
+            effectJob.cancel()
+        }
+    }
+
+    @Test
+    fun `undo reinserts the archived row at its remembered positions in both lists`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1", "session_2")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+        server.enqueue(MockResponse(body = groupsBody("/tmp/a" to listOf("session_1", "session_3"))))
+        viewModel.onViewModeToggle()
+        awaitState(viewModel.uiState) { it.groups != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+        server.enqueue(MockResponse(body = ARCHIVE_BODY))
+        viewModel.onArchiveSession("session_1")
+        awaitState(viewModel.uiState) { it.sessions?.map { s -> s.id } == listOf("session_2") }
+        server.takeRequest(5, TimeUnit.SECONDS)
+
+        // Restore pushes no WS event (verified live 2026-09-14 on 0.42.0), so the
+        // remembered row goes back at its remembered positions — updated_at is stable
+        // across archive/restore, keeping those the sorted ones.
+        server.enqueue(MockResponse(body = restoreBody("session_1")))
+        viewModel.onUndoArchive("session_1")
+
+        awaitState(viewModel.uiState) { state ->
+            state.sessions?.map { it.id } == listOf("session_1", "session_2") &&
+                state.groups?.single()?.sessions?.map { it.id } == listOf("session_1", "session_3")
+        }
+        assertEquals("/api/v1/sessions/session_1:restore", server.takeRequest(5, TimeUnit.SECONDS)!!.target)
+        assertEquals(4, server.requestCount)
+    }
+
+    @Test
+    fun `undo does not duplicate the row when the socket re-added it first`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1", "session_2")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+        server.enqueue(MockResponse(body = ARCHIVE_BODY))
+        viewModel.onArchiveSession("session_1")
+        awaitState(viewModel.uiState) { it.sessions?.map { s -> s.id } == listOf("session_2") }
+        server.takeRequest(5, TimeUnit.SECONDS)
+
+        // A create event for the same id beats the undo (ticket 129's upsert): the
+        // row is back before the restore lands — the reinsert must skip, not add a
+        // second row.
+        fakeSocket.events.tryEmit(
+            SessionListEvent.SessionCreated(createdSession(id = "session_1", cwd = "/tmp/session_1")),
+        )
+        awaitState(viewModel.uiState) { it.sessions?.map { s -> s.id } == listOf("session_2", "session_1") }
+
+        server.enqueue(MockResponse(body = restoreBody("session_1")))
+        viewModel.onUndoArchive("session_1")
+
+        server.takeRequest(5, TimeUnit.SECONDS) // the restore POST
+        delay(300) // let any (wrong) duplicate land
+        assertEquals(listOf("session_2", "session_1"), viewModel.uiState.value.sessions!!.map { it.id })
+    }
+
+    @Test
+    fun `a failed restore emits RestoreFailed and leaves the session archived`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1", "session_2")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+        server.enqueue(MockResponse(body = ARCHIVE_BODY))
+        viewModel.onArchiveSession("session_1")
+        awaitState(viewModel.uiState) { it.sessions?.map { s -> s.id } == listOf("session_2") }
+        server.takeRequest(5, TimeUnit.SECONDS)
+
+        server.enqueue(
+            MockResponse(body =
+                """{"code":40401,"msg":"session session_1 does not exist","data":null,"request_id":"r"}""",
+            ),
+        )
+        val effects = CopyOnWriteArrayList<SessionListViewModel.Effect>()
+        val effectJob = launch { viewModel.effects.collect { effects += it } }
+        try {
+            viewModel.onUndoArchive("session_1")
+
+            awaitCondition { effects.size == 2 }
+            assertEquals(SessionListViewModel.Effect.SessionArchived("session_1"), effects[0])
+            assertEquals(
+                SessionListViewModel.Effect.RestoreFailed("session session_1 does not exist"),
+                effects[1],
+            )
+            // The row stays out — the session is still archived server-side.
+            assertEquals(listOf("session_2"), viewModel.uiState.value.sessions!!.map { it.id })
+            assertEquals("/api/v1/sessions/session_1:restore", server.takeRequest(5, TimeUnit.SECONDS)!!.target)
+        } finally {
+            effectJob.cancel()
+        }
+    }
+
+    @Test
+    fun `a stale undo for a superseded archive is a no-op`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1", "session_2")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+        // Two archives in a row: the second takes the single undo slot, so the first
+        // snackbar's Undo must not restore the wrong session.
+        server.enqueue(MockResponse(body = ARCHIVE_BODY))
+        viewModel.onArchiveSession("session_1")
+        awaitState(viewModel.uiState) { it.sessions?.map { s -> s.id } == listOf("session_2") }
+        server.enqueue(MockResponse(body = ARCHIVE_BODY))
+        viewModel.onArchiveSession("session_2")
+        awaitState(viewModel.uiState) { it.sessions?.isEmpty() == true }
+
+        viewModel.onUndoArchive("session_1")
+
+        // No restore POST fires for the superseded id: only the two archive calls.
+        assertEquals(3, server.requestCount)
+        assertTrue(viewModel.uiState.value.sessions!!.isEmpty())
+    }
+
     /**
      * Puts the screen in grouped mode with [body] answered to the grouped fetch,
      * drains that request, and runs ON_START — with groups on screen it fires no
@@ -1580,6 +1758,14 @@ class SessionListViewModelTest {
             """"updated_at":"2026-07-17T03:48:31.606Z","busy":false,""" +
             """"metadata":{"cwd":"$cwd"}},"request_id":"r"}"""
 
+    /** The `:restore` success envelope (ticket 131): the standard v1 session object
+     * with archived:false — the ViewModel reinserts its remembered row, so only the
+     * zero code matters here. */
+    private fun restoreBody(id: String): String =
+        """{"code":0,"msg":"success","data":{"id":"$id","title":"Title $id",""" +
+            """"updated_at":"2026-07-17T03:48:31.606Z","busy":false,"archived":false,""" +
+            """"metadata":{"cwd":"/tmp/$id"}},"request_id":"r"}"""
+
     /** The session an `event.session.created` frame carries (ticket 129); the default
      * [updatedAt] lands it between pageBodyWithStamps' two rows. */
     private fun createdSession(
@@ -1617,6 +1803,9 @@ class SessionListViewModelTest {
             ]},"request_id":"r"}
         """
         const val GROUPED_TARGET = "/api/v2/sessions?view=by_workspace&group.page_size=5"
+
+        /** The `:archive` success envelope (verified live 2026-09-14 on 0.42.0 — ticket 131). */
+        const val ARCHIVE_BODY = """{"code":0,"msg":"success","data":{"archived":true},"request_id":"r"}"""
 
         const val WORKSPACES_BODY = """
             {"code":0,"msg":"success","data":{"items":[

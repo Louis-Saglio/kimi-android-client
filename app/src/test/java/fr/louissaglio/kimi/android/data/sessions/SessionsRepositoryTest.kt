@@ -262,6 +262,75 @@ class SessionsRepositoryTest {
     }
 
     @Test
+    fun `archive posts to the archive endpoint and maps the archived flag`() = runBlocking {
+        // Verbatim 0.42.0 capture (docs/server-api.md, verified live 2026-09-14).
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"archived":true},"request_id":"01M2FSTW4QJCB0KY2JQ5ZNTH7Z"}""",
+            ),
+        )
+
+        val result = repository.archiveSession(settings(), "session_bfc5feb1")
+
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/sessions/session_bfc5feb1:archive", request.target)
+        assertEquals("{}", request.body!!.utf8())
+        assertTrue(result.getOrThrow())
+    }
+
+    @Test
+    fun `archive surfaces a non-zero envelope code as Api error`() = runBlocking {
+        server.enqueue(
+            MockResponse(body =
+                """{"code":40401,"msg":"session session_nope does not exist","data":null,"request_id":"01KX"}""",
+            ),
+        )
+
+        val error = repository.archiveSession(settings(), "session_nope").exceptionOrNull()
+
+        assertEquals(DataError.Api(40401, "session session_nope does not exist"), error)
+    }
+
+    @Test
+    fun `restore posts and decodes the full session envelope`() = runBlocking {
+        server.enqueue(MockResponse(body = RESTORED_SESSION_BODY))
+
+        val result = repository.restoreSession(settings(), "session_bfc5feb1")
+
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/sessions/session_bfc5feb1:restore", request.target)
+        assertEquals("{}", request.body!!.utf8())
+        assertEquals(
+            Session(
+                id = "session_bfc5feb1",
+                title = "ticket-131-archive-capture",
+                cwd = "/home/ubuntu/spike",
+                // Archiving never bumps updated_at: the restored session keeps its
+                // pre-archive stamp, so an undo reinsert lands at the old position.
+                updatedAt = Instant.parse("2026-09-14T11:11:17.099Z"),
+                isRunning = false,
+                isAwaitingInteraction = false,
+            ),
+            result.getOrThrow(),
+        )
+    }
+
+    @Test
+    fun `restore surfaces a non-zero envelope code as Api error`() = runBlocking {
+        server.enqueue(
+            MockResponse(body =
+                """{"code":40401,"msg":"session session_nope does not exist","data":null,"request_id":"01KX"}""",
+            ),
+        )
+
+        val error = repository.restoreSession(settings(), "session_nope").exceptionOrNull()
+
+        assertEquals(DataError.Api(40401, "session session_nope does not exist"), error)
+    }
+
+    @Test
     fun `grouped fetch hits the v2 by_workspace endpoint and maps groups onto domain sessions`() = runBlocking {
         server.enqueue(MockResponse(body = GROUPS_BODY))
 
@@ -387,6 +456,19 @@ class SessionsRepositoryTest {
              "metadata":{"cwd":"/home/ubuntu/spike"},"agent_config":{"model":""},
              "usage":{"input_tokens":0},"permission_rules":[],"message_count":0,"last_seq":0},
              "request_id":"01M2FKX17KGY62AT5CXNJYMRJH"}
+        """
+
+        // Verbatim 0.42.0 restore capture (docs/server-api.md, verified live
+        // 2026-09-14), id shortened: the restored session answers the standard v1
+        // session envelope with archived:false and its pre-archive updated_at
+        // (archiving never bumps it).
+        const val RESTORED_SESSION_BODY = """
+            {"code":0,"msg":"success","data":{"id":"session_bfc5feb1","workspace_id":"wd_spike_6baf4c130e63",
+             "title":"ticket-131-archive-capture","created_at":"2026-09-14T11:11:17.099Z",
+             "updated_at":"2026-09-14T11:11:17.099Z","busy":false,"archived":false,
+             "metadata":{"cwd":"/home/ubuntu/spike"},"agent_config":{"model":""},
+             "usage":{"input_tokens":0},"permission_rules":[],"message_count":0,"last_seq":0},
+             "request_id":"01M2FSTWB0RDBAP9YH9J6BGEXW"}
         """
 
         // v2 wire shape (docs/server-api.md): epoch-ms timestamps, present-but-null

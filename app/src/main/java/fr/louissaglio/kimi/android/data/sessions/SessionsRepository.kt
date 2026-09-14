@@ -104,6 +104,30 @@ class SessionsRepository @Inject constructor(
         }
 
     /**
+     * Archives a session via `POST /api/v1/sessions/{id}:archive` (docs/server-api.md —
+     * ticket 131). Unlike fork there is no busy guard server-side: a running session
+     * archives fine (verified live 2026-09-14 on 0.42.0). Archiving never bumps
+     * `updated_at`, so the row keeps its recency position for the undo reinsert.
+     * Same error-boundary contract as [listSessions].
+     */
+    suspend fun archiveSession(settings: ServerSettings, sessionId: String): Result<Boolean> =
+        api.post(settings, "/api/v1/sessions/$sessionId:archive", api.jsonBody {}) { responseBody ->
+            json.decodeFromString<Envelope<SessionArchiveData>>(responseBody).toResult().map { it.archived }
+        }
+
+    /**
+     * Restores an archived session via `POST /api/v1/sessions/{id}:restore`
+     * (docs/server-api.md — ticket 131): answers the full session envelope
+     * (`archived:false`). Restore pushes no WS event, so the list-undo path
+     * reinserts its remembered row rather than waiting for a frame. Same
+     * error-boundary contract as [listSessions].
+     */
+    suspend fun restoreSession(settings: ServerSettings, sessionId: String): Result<Session> =
+        api.post(settings, "/api/v1/sessions/$sessionId:restore", api.jsonBody {}) { responseBody ->
+            json.decodeFromString<Envelope<SessionDto>>(responseBody).toResult().map { it.toDomain() }
+        }
+
+    /**
      * Fetches the known workspaces via `GET /api/v1/workspaces` (docs/server-api.md),
      * sorted by `last_opened_at` descending — the server order is not relied upon.
      * Same error-boundary contract as [listSessions].

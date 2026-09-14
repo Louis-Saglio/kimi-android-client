@@ -36,11 +36,14 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -55,6 +58,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -71,6 +75,8 @@ import fr.louissaglio.kimi.android.ui.common.EmptyState
 import fr.louissaglio.kimi.android.ui.common.ErrorState
 import fr.louissaglio.kimi.android.ui.common.LoadingState
 import fr.louissaglio.kimi.android.ui.common.formatTimestamp
+import fr.louissaglio.kimi.android.ui.common.icons.ArchiveIcon
+import fr.louissaglio.kimi.android.ui.common.icons.ForkIcon
 import fr.louissaglio.kimi.android.ui.common.icons.WorkspaceIcon
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 import java.time.Instant
@@ -97,6 +103,22 @@ fun SessionsScreen(
                 is SessionListViewModel.Effect.SessionForked ->
                     snackbarHostState.showSnackbar("Session forked")
                 is SessionListViewModel.Effect.ForkFailed ->
+                    snackbarHostState.showSnackbar(effect.message)
+                // Ticket 131: no confirmation dialog on archive — the row is already
+                // gone; the undo snackbar is the safety net (the app's first undo
+                // precedent). An action snackbar gets the Long duration so the Undo
+                // tap stays reachable.
+                is SessionListViewModel.Effect.SessionArchived -> {
+                    val result = snackbarHostState.showSnackbar(
+                        message = "Session archived",
+                        actionLabel = "Undo",
+                        duration = SnackbarDuration.Long,
+                    )
+                    if (result == SnackbarResult.ActionPerformed) viewModel.onUndoArchive(effect.sessionId)
+                }
+                is SessionListViewModel.Effect.ArchiveFailed ->
+                    snackbarHostState.showSnackbar(effect.message)
+                is SessionListViewModel.Effect.RestoreFailed ->
                     snackbarHostState.showSnackbar(effect.message)
             }
         }
@@ -125,6 +147,7 @@ fun SessionsScreen(
         onCreateDialogDismiss = viewModel::onCreateDialogDismiss,
         onCreateSessionConfirm = viewModel::onCreateSessionConfirm,
         onForkSession = viewModel::onForkSession,
+        onArchiveSession = viewModel::onArchiveSession,
     )
 }
 
@@ -148,6 +171,7 @@ private fun SessionsContent(
     onCreateDialogDismiss: () -> Unit,
     onCreateSessionConfirm: () -> Unit,
     onForkSession: (Session) -> Unit,
+    onArchiveSession: (String) -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -207,8 +231,9 @@ private fun SessionsContent(
                     onGroupFoldToggle,
                     onNewSessionClick,
                     onForkSession,
+                    onArchiveSession,
                 )
-                else -> SessionList(uiState, onSessionClick, onEndReached, onForkSession)
+                else -> SessionList(uiState, onSessionClick, onEndReached, onForkSession, onArchiveSession)
             }
         }
         if (uiState.showCreateDialog) {
@@ -325,6 +350,7 @@ private fun SessionList(
     onSessionClick: (Session) -> Unit,
     onEndReached: () -> Unit,
     onForkSession: (Session) -> Unit,
+    onArchiveSession: (String) -> Unit,
 ) {
     val sessions = uiState.sessions.orEmpty()
     val listState = rememberLazyListState()
@@ -345,6 +371,7 @@ private fun SessionList(
                 workspaceLabel = session.cwd?.let(uiState.workspaceLabels::get),
                 onClick = { onSessionClick(session) },
                 onFork = { onForkSession(session) },
+                onArchive = { onArchiveSession(session.id) },
             )
         }
         if (uiState.isLoadingMore || uiState.loadMoreError != null) {
@@ -372,6 +399,7 @@ private fun GroupedSessionList(
     onGroupFoldToggle: (String) -> Unit,
     onNewSessionClick: (String?) -> Unit,
     onForkSession: (Session) -> Unit,
+    onArchiveSession: (String) -> Unit,
 ) {
     LazyColumn(modifier = Modifier.fillMaxSize()) {
         uiState.groups.orEmpty().forEach { group ->
@@ -393,6 +421,7 @@ private fun GroupedSessionList(
                         workspaceLabel = null,
                         onClick = { onSessionClick(session) },
                         onFork = { onForkSession(session) },
+                        onArchive = { onArchiveSession(session.id) },
                         modifier = Modifier.padding(start = 16.dp),
                     )
                 }
@@ -523,15 +552,17 @@ internal fun SessionRow(
     workspaceLabel: String?,
     onClick: () -> Unit,
     onFork: () -> Unit,
+    onArchive: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // The row ellipsizes the name to one line; long-press reveals it whole (ticket
-    // 117) and offers the fork action (ticket 128).
+    // 117) and offers the fork (ticket 128) and archive (ticket 131) actions.
     var fullNameShown by remember { mutableStateOf(false) }
     if (fullNameShown) {
         SessionFullNameDialog(
             session = session,
             onFork = onFork,
+            onArchive = onArchive,
             onDismiss = { fullNameShown = false },
         )
     }
@@ -573,33 +604,77 @@ internal fun SessionRow(
     )
 }
 
+/**
+ * The long-press row dialog (ticket 117): the full selectable name, then one action
+ * row per session action — Fork (ticket 128), Archive (ticket 131, the undo
+ * snackbar's entry point). Actions dismiss the dialog before firing.
+ */
 @Composable
-private fun SessionFullNameDialog(session: Session, onFork: () -> Unit, onDismiss: () -> Unit) {
+private fun SessionFullNameDialog(
+    session: Session,
+    onFork: () -> Unit,
+    onArchive: () -> Unit,
+    onDismiss: () -> Unit,
+) {
     AlertDialog(
         onDismissRequest = onDismiss,
         text = {
-            // Selectable so the name can be copied.
-            SelectionContainer {
-                // displayName's fallback minus the basename shortening: the title
-                // when present, otherwise the full cwd path, the id last.
-                Text(session.title?.takeIf { it.isNotBlank() } ?: session.cwd ?: session.id)
+            Column {
+                // Selectable so the name can be copied.
+                SelectionContainer {
+                    // displayName's fallback minus the basename shortening: the title
+                    // when present, otherwise the full cwd path, the id last.
+                    Text(session.title?.takeIf { it.isNotBlank() } ?: session.cwd ?: session.id)
+                }
+                // Forking a running session always fails server-side (40901 — ticket
+                // 127), so the action pre-disables, like the chat overflow item.
+                // Archive stays enabled: the server has no busy guard (verified live
+                // 2026-09-14 on 0.42.0 — ticket 131).
+                DialogActionRow(
+                    icon = ForkIcon,
+                    label = "Fork session",
+                    enabled = !session.isRunning,
+                    onClick = {
+                        onDismiss()
+                        onFork()
+                    },
+                )
+                DialogActionRow(
+                    icon = ArchiveIcon,
+                    label = "Archive",
+                    onClick = {
+                        onDismiss()
+                        onArchive()
+                    },
+                )
             }
         },
         confirmButton = {
-            // Forking a running session always fails server-side (40901 — ticket
-            // 127), so the action pre-disables, like the chat overflow item.
-            TextButton(
-                onClick = {
-                    onDismiss()
-                    onFork()
-                },
-                enabled = !session.isRunning,
-            ) { Text("Fork session") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("OK") }
+            TextButton(onClick = onDismiss) { Text("Close") }
         },
     )
+}
+
+@Composable
+private fun DialogActionRow(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+) {
+    // onSurface at 38% is the M3 disabled content color.
+    val color = if (enabled) LocalContentColor.current else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(vertical = 14.dp),
+    ) {
+        Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(20.dp))
+        Text(label, color = color)
+    }
 }
 
 @Composable
@@ -639,6 +714,7 @@ private fun SessionsContentPreview() {
             onCreateDialogDismiss = {},
             onCreateSessionConfirm = {},
             onForkSession = {},
+            onArchiveSession = {},
         )
     }
 }

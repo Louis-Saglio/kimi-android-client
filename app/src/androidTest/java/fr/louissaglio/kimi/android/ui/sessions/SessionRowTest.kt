@@ -37,6 +37,7 @@ class SessionRowTest {
         updatedAt: Instant = Instant.now(),
         onClick: () -> Unit = {},
         onFork: () -> Unit = {},
+        onArchive: () -> Unit = {},
     ) {
         composeTestRule.setContent {
             KimiTheme {
@@ -52,6 +53,7 @@ class SessionRowTest {
                     workspaceLabel = workspaceLabel,
                     onClick = onClick,
                     onFork = onFork,
+                    onArchive = onArchive,
                 )
             }
         }

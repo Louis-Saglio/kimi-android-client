@@ -104,6 +104,17 @@ class SessionListViewModel @Inject constructor(
 
         /** Fork succeeded (ticket 128): the row is already inserted; the collector shows a confirmation snackbar. */
         data class SessionForked(val session: Session) : Effect
+
+        /** Archive succeeded (ticket 131): the row is already removed; the collector
+         * shows the snackbar with an Undo action — the session id rides along so the
+         * undo restores THIS session even after a later archive overwrote the slot. */
+        data class SessionArchived(val sessionId: String) : Effect
+
+        /** The archive POST failed: the row stays, the server's message shows. */
+        data class ArchiveFailed(val message: String) : Effect
+
+        /** The undo's restore POST failed: the session stays archived, the server's message shows. */
+        data class RestoreFailed(val message: String) : Effect
     }
 
     val uiState: StateFlow<UiState>
@@ -116,6 +127,21 @@ class SessionListViewModel @Inject constructor(
     private var loadMoreJob: Job? = null
     private var socketJob: Job? = null
     private val groupLoadJobs = mutableMapOf<String, Job>()
+
+    /** The one undo slot (ticket 131): the last archived row and its positions. A
+     * later archive overwrites it — the snackbar carries the session id, so a stale
+     * undo no-ops instead of restoring the wrong session. */
+    private var pendingArchive: RemovedRow? = null
+
+    /** What [removeRow] dropped: the row and its positions for the undo reinsert
+     * (-1 / null where the list didn't hold it — grouped mode can leave the flat
+     * list unloaded). */
+    private data class RemovedRow(
+        val session: Session,
+        val flatIndex: Int,
+        val groupWorkspaceId: String?,
+        val groupIndex: Int,
+    )
 
     init {
         // Cold start renders the last-known list from disk before any network traffic
@@ -225,23 +251,11 @@ class SessionListViewModel @Inject constructor(
                 // Same blank-title rule as the REST mapping: fall back to the cwd.
                 it.copy(title = event.title?.takeIf(String::isNotBlank))
             }
-            // Archived from any client (0.38.0): the row leaves the list. An unknown
-            // id is ignored, like in patchRow; the next refresh reconciles.
-            is SessionListEvent.SessionArchived -> uiState.update { state ->
-                val sessions = state.sessions
-                val groups = state.groups
-                val inFlat = sessions?.any { it.id == event.sessionId } == true
-                val inGroups = groups?.any { group -> group.sessions.any { it.id == event.sessionId } } == true
-                if (!inFlat && !inGroups) return@update state
-                state.copy(
-                    sessions = if (inFlat) sessions!!.filterNot { it.id == event.sessionId } else sessions,
-                    groups = if (inGroups) {
-                        groups!!.map { group -> group.copy(sessions = group.sessions.filterNot { it.id == event.sessionId }) }
-                    } else {
-                        groups
-                    },
-                )
-            }
+            // Archived from any client (0.38.0): the row leaves the list — the same
+            // dual-mode removal as the app's own archive (ticket 131), whose undo
+            // bookkeeping this path ignores. An unknown id is ignored, like in
+            // patchRow; the next refresh reconciles.
+            is SessionListEvent.SessionArchived -> removeRow(event.sessionId)
             // Created from any client (verified on 0.42.0 — ticket 129): upsert by id
             // at the row's updated_at position, in the flat list and in the group
             // matching its cwd — the create/fork placement rule, so the app's own
@@ -304,6 +318,37 @@ class SessionListViewModel @Inject constructor(
                 },
             )
         }
+    }
+
+    /**
+     * Drops [sessionId]'s row from the flat list AND its workspace group (ticket 115
+     * made both loaded at once), returning what was removed — the archive undo
+     * (ticket 131) reinserts it at these positions; the socket's SessionArchived
+     * path ignores the return. An unknown id is a no-op, like in [patchRow].
+     */
+    private fun removeRow(sessionId: String): RemovedRow? {
+        val state = uiState.value
+        val flatIndex = state.sessions?.indexOfFirst { it.id == sessionId } ?: -1
+        val group = state.groups?.firstOrNull { g -> g.sessions.any { it.id == sessionId } }
+        if (flatIndex < 0 && group == null) return null
+        val session = if (flatIndex >= 0) state.sessions!![flatIndex] else group!!.sessions.first { it.id == sessionId }
+        uiState.update { current ->
+            current.copy(
+                sessions = if (flatIndex >= 0) current.sessions?.filterNot { it.id == sessionId } else current.sessions,
+                groups = if (group != null) {
+                    current.groups?.map { g ->
+                        if (g.sessions.none { it.id == sessionId }) {
+                            g
+                        } else {
+                            g.copy(sessions = g.sessions.filterNot { it.id == sessionId })
+                        }
+                    }
+                } else {
+                    current.groups
+                },
+            )
+        }
+        return RemovedRow(session, flatIndex, group?.workspaceId, group?.sessions?.indexOfFirst { it.id == sessionId } ?: -1)
     }
 
     fun onRetry() = reload()
@@ -640,6 +685,86 @@ class SessionListViewModel @Inject constructor(
         val rest = filter { it.id != session.id }
         val index = rest.indexOfFirst { it.updatedAt < session.updatedAt }.takeIf { it >= 0 } ?: rest.size
         return rest.subList(0, index) + session + rest.subList(index, rest.size)
+    }
+
+    /**
+     * Archives [sessionId] from the long-press row dialog (ticket 131). On success the
+     * row drops out of the flat list and its workspace group (the same dual-mode
+     * removal the SessionArchived socket event runs) and the undo snackbar is emitted
+     * with the removed row stashed in [pendingArchive]. On failure the list is
+     * untouched and the server's message shows. No busy guard: the server accepts
+     * archive in every state (verified live 2026-09-14 on 0.42.0) — unlike fork's
+     * 40901 rule, the action stays enabled on running sessions.
+     */
+    fun onArchiveSession(sessionId: String) {
+        viewModelScope.launch {
+            sessionsRepository.archiveSession(settingsRepository.current(), sessionId)
+                .onSuccess {
+                    val removed = removeRow(sessionId) ?: return@onSuccess
+                    pendingArchive = removed
+                    _effects.send(Effect.SessionArchived(sessionId))
+                }
+                .onFailure { error ->
+                    _effects.send(Effect.ArchiveFailed(error.toUserMessage()))
+                }
+        }
+    }
+
+    /**
+     * The undo snackbar's action (ticket 131): restores the session server-side, then
+     * reinserts the remembered row at its remembered positions. `updated_at` is stable
+     * across archive/restore, so the positions are still the sorted ones. Restore
+     * pushes no WS event, so nothing else brings the row back. A stale snackbar (a
+     * later archive took the slot) no-ops rather than restoring the wrong session.
+     */
+    fun onUndoArchive(sessionId: String) {
+        val removed = pendingArchive
+        if (removed == null || removed.session.id != sessionId) return
+        viewModelScope.launch {
+            sessionsRepository.restoreSession(settingsRepository.current(), sessionId)
+                .onSuccess {
+                    pendingArchive = null
+                    reinsertRow(removed)
+                }
+                .onFailure { error ->
+                    // The slot is kept: the session stays archived and a later undo
+                    // for it can still retry.
+                    _effects.send(Effect.RestoreFailed(error.toUserMessage()))
+                }
+        }
+    }
+
+    /**
+     * Puts the archived row back where [removeRow] took it (indices clamped to the
+     * current sizes — the list may have shifted since). Skipped entirely when the id
+     * is already on screen: the socket or a refresh beat the undo, and a second row
+     * would duplicate it.
+     */
+    private fun reinsertRow(removed: RemovedRow) {
+        uiState.update { state ->
+            val alreadyListed = state.sessions?.any { it.id == removed.session.id } == true ||
+                state.groups?.any { group -> group.sessions.any { it.id == removed.session.id } } == true
+            if (alreadyListed) return@update state
+            state.copy(
+                sessions = if (removed.flatIndex >= 0) {
+                    state.sessions?.insertAt(removed.flatIndex, removed.session)
+                } else {
+                    state.sessions
+                },
+                groups = state.groups?.map { group ->
+                    if (group.workspaceId == removed.groupWorkspaceId && removed.groupIndex >= 0) {
+                        group.copy(sessions = group.sessions.insertAt(removed.groupIndex, removed.session))
+                    } else {
+                        group
+                    }
+                },
+            )
+        }
+    }
+
+    private fun List<Session>.insertAt(index: Int, session: Session): List<Session> {
+        val clamped = index.coerceIn(0, size)
+        return subList(0, clamped) + session + subList(clamped, size)
     }
 
     /**

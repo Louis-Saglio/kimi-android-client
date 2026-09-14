@@ -22,7 +22,18 @@ data class SessionDto(
     val busy: Boolean = false,
     /** Server runtime state: "none" | "approval" | "question" (docs/server-api.md). */
     @SerialName("pending_interaction") val pendingInteraction: String = "none",
+    val archived: Boolean = false,
+    /** Set while archived, cleared on restore; absent on never-archived sessions
+     * (docs/server-api.md). Declared for ticket 132's archived-sessions screen; the
+     * domain Session drops it — the list only ever shows live rows. */
+    @SerialName("archived_at") val archivedAt: String? = null,
     val metadata: SessionMetadataDto? = null,
+)
+
+/** `POST /api/v1/sessions/{id}:archive` answer (docs/server-api.md — ticket 131). */
+@Serializable
+data class SessionArchiveData(
+    val archived: Boolean = false,
 )
 
 @Serializable

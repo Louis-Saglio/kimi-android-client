@@ -1310,6 +1310,48 @@ capture, trimmed:
   `{"code":40901,"msg":"Session \"session_…\" cannot be forked while a turn is running","data":null,…}`
   (with `stack`).
 
+### Archive / Restore — `POST /api/v1/sessions/{id}:archive` / `:restore`
+
+Single-session archive and restore (the v2 batch variants are under Session
+table (v2) below; the 0.42.0 web bundle's row "Archive" action and its toast's
+Undo call these). Body `{}`. Every behavior below verified live 2026-09-14 on
+0.42.0 (ticket 131).
+
+```bash
+curl -s -X POST 'http://127.0.0.1:58627/api/v1/sessions/session_bfc5feb1-...:archive' \
+  -H "Authorization: Bearer <token>" \
+  -H 'Content-Type: application/json; charset=utf-8' -d '{}'
+```
+
+Archive answers a bare flag — verbatim capture:
+
+```json
+{"code":0,"msg":"success","data":{"archived":true},"request_id":"01M2FSTW4QJCB0KY2JQ5ZNTH7Z"}
+```
+
+Restore answers the standard v1 session envelope (same shape as create/get)
+with `archived:false` — verbatim capture, trimmed:
+
+```json
+{"code":0,"msg":"success","data":{"id":"session_bfc5feb1-...","workspace_id":"wd_spike_6baf4c130e63","title":"ticket-131-archive-capture","created_at":"2026-09-14T11:11:17.099Z","updated_at":"2026-09-14T11:11:17.099Z","busy":false,"archived":false,"metadata":{"cwd":"/home/ubuntu/spike"},"agent_config":{"model":""},"usage":{…},"permission_rules":[],"message_count":0,"last_seq":0},"request_id":"01M2FSTWB0RDBAP9YH9J6BGEXW"}
+```
+
+- Archive pushes the global `event.session.archived` WS frame (WebSocket →
+  Global events); **restore pushes no WS event at all** — no
+  `event.session.restored`, no `event.session.updated`. Other clients learn
+  about restores by refetching.
+- Archiving never bumps `updated_at` (upstream commit `43c68f58`): the capture
+  above keeps the pre-archive stamp after archive+restore, so a client-side
+  undo can reinsert the row at its old recency position.
+- While archived the session object carries `archived:true` plus the 0.36.0
+  `archived_at` timestamp; restore clears it back to `archived:false` with the
+  `archived_at` key absent again — a restored session is indistinguishable
+  from a never-archived one (both in the capture).
+- No busy guard: archive is accepted in every probed state (idle,
+  just-prompted) — unlike fork's `40901`, a running session archives fine.
+- Errors: unknown id → `40401` "session … does not exist" (with `stack`), on
+  both actions.
+
 ### Live status — `GET /api/v1/sessions/{id}/status`
 
 Lightweight runtime state:
@@ -3598,6 +3640,12 @@ had sent at least one inbound frame (`client_hello` or a `subscribe`), while a
 fully silent socket received nothing in three attempts. The Android app's
 sockets always subscribe, so they qualify; a listen-only client should send a
 `client_hello` after connect to be safe.)
+
+**Restore fires no event at all** (verified 2026-09-14 on 0.42.0 — ticket
+131): archiving a session pushes this frame, but `POST .../sessions/{id}:restore`
+pushes nothing — no `event.session.restored`, no `event.session.updated`.
+Other clients learn about restores by refetching (see Sessions → Archive /
+Restore).
 
 ### Global events — `event.session.deleted` (new in 0.42.0)
 
