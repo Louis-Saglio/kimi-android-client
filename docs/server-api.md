@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-09-09
-(server version `0.42.0`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-09-14
+(server version `0.43.0`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
@@ -14,7 +14,8 @@ the workspace list used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `0.41.0`
+**Protocol history:** this document previously described server `0.42.0`
+(verified 2026-09-09; see git history), `0.41.0`
 (verified 2026-09-04; see git history), `0.40.1`
 (verified 2026-09-02; see git history), `0.39.1`
 (verified 2026-08-28; see git history), `0.39.0`
@@ -32,6 +33,160 @@ used are shown with each section. Secrets are redacted (`<token>`).
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
 that, `0.27.0` before that, and `0.23.3` before that.
+
+The drift from 0.42.0 to 0.43.0 is **small for the core loop — one removed WS
+phase kind (`streaming`), one removed error code (`40903`), one new event type
+(`turn.steer`), and an additive opt-in v3 protocol** the app does not use. The
+upstream diff between the two tags (38 commits, much of it agent-core-v2
+loop/LLM-pipeline refactoring and web-bundle churn; `packages/kap-server`
+gained the v3 transport + history service (`64505e36`) and the
+prompt-queue/error-surface rework (`46233953`)) touched the client-facing
+wire in exactly these places:
+
+- **New opt-in v3 protocol** (commit `64505e36`; verified live 2026-09-14 —
+  see WebSocket → The v3 protocol): a separate flat-entity WS endpoint
+  `WS /api/v3/ws` (hello `{"type":"hello","protocol_version":"3",...}` —
+  note the string version and the `hello` frame type) and a new history
+  route `GET /api/v1/sessions/{id}/history` serving the same flat entity
+  messages (`{messages, has_more, in_flight?}`). **Fully additive: the
+  `/api/v1/ws` v2 protocol is untouched** (`server_hello` still
+  `protocol_version: 2`; subscribe/ack/cursor-resume re-verified
+  byte-identical). The app uses neither — no ticket; it is a potential
+  future migration target (the flat entities match the app's consumption
+  style better than v1's nested events).
+- **`agent.status.updated` lost the `streaming` phase kind** (commit
+  `56ed9549`, "remove AgentActivityView and project v1 agent phase at
+  kap-server edge"; verified live 2026-09-14 — zero `streaming` phases
+  across this run's full round-trips, deltas streaming throughout; the
+  phase stays `running` while tokens stream): the phase is now projected
+  at the kap-server edge from domain events (`LegacyActivityTracker`, with
+  dedup); the remaining kinds are `idle`/`running`/`tool_call`/`retrying`/
+  `awaiting_approval`/`interrupted`/`ended`. **The app only consumes the
+  model/usage variant (token counts, ticket 041) and never modeled the
+  phase kinds — no ticket.**
+- **`:abort` on an idle session no longer errors** (commit `46233953`;
+  verified live 2026-09-14): the `40903` `prompt.already_completed` code
+  is removed from the error enum and both prompt routes — aborting an
+  idle session (or an already-completed prompt) now answers
+  `{"code":0,"data":{"aborted":true}}` instead of
+  `{"code":40903,"data":{"aborted":false}}`. The same commit **removed the
+  prompt-POST auth prechecks**: `AUTH_PROVISIONING_REQUIRED`,
+  `AUTH_TOKEN_MISSING`, `AUTH_TOKEN_UNAUTHORIZED` and
+  `AUTH_MODEL_NOT_RESOLVED` are no longer returned at submit time — auth
+  failures surface inside the turn stream instead. The app references none
+  of these codes — no ticket.
+- **New WS event `turn.steer`** (first live capture 2026-09-14 — the type
+  sat in the v1 broadcaster's forward list since 0.42.0 but was never
+  observed on the wire before; the engine now emits it when a steer is
+  applied to the turn, from the prompt-queue fold `46233953`): fires right
+  before `prompt.steered`, carrying `{input: [<content parts>], origin:
+  {"kind":"user"}}` (see Steer). The rest of the steer sequence is
+  unchanged. Additive; the app ignores unknown frames — no ticket.
+- **`GET .../messages` omits hidden thinking summaries** (commits
+  `2d4d799a`/`cd0d4a1d`; verified live 2026-09-14 that kimi-code/k3
+  thinking parts project exactly as before): the v1 history fold now
+  filters `think` content parts flagged `hidden` — the OpenAI-compat
+  `reasoning_details` summary duplicates that rode next to
+  `reasoning_content`. The app treats thinking parts as optional — no
+  ticket.
+- **AI session titles graduated** (commit `6126472c`): the
+  `auto_session_title` experimental flag is **gone from `/meta`** (5 flags
+  now — see Meta) and title generation is always on; no new WS event (the
+  existing `session.meta.updated` broadcast is reused). No live title
+  rewrite observed this run — both throwaway sessions kept their
+  first-prompt titles with `isCustomTitle:false`. The app already handles
+  `session.meta.updated` — no ticket.
+- **`40401` envelopes dropped `stack`** (verified live 2026-09-14 on both
+  a deleted-session get and a never-existed-session get; the `40910`
+  compact errors still carry `stack` — the error transport is unchanged,
+  the session-not-found error instance simply no longer has one captured).
+  The app maps envelope codes and never reads `stack` — no ticket.
+- **New injection origin variant `date_change`** (verified live
+  2026-09-14): the date-change reminder is a whole-message
+  `<system-reminder>` user injection carrying
+  `origin: {"kind":"injection","variant":"date_change","disclosure":
+  {"kind":"date","renderGeneration":1,"localDate":"2026-09-14","timeZone":"UTC"}}`
+  — spliced live on the session's first turn of the day and persisted in
+  history (verbatim capture in Messages). The app's tag-based envelope
+  stripper covers it — no ticket.
+- **Foreground Agent tool-result prose gained lines** (verified live
+  2026-09-14): a `stop_reason: completed` line after `status:` and a
+  trailing `resume_hint:` block (the background result's `task_id:`-first
+  text is byte-similar to 0.42.0). Tool prose, not wire shape — the app
+  links background tasks from the tool-call args, not the result text.
+  No ticket.
+- **Behavioral, shapes unchanged:** steer now interrupts a pending
+  `WaitFor` tool wait early (`5e452fc2` — the WaitFor `tool.result`
+  arrives immediately on steer, then the normal steer flow); `rm -rf`
+  whose operands all sit under `/tmp`/`/temp` no longer triggers the
+  dangerous-command approval (`565093f7`); turn/step id generation was
+  centralized (`68f8984a` — same id formats in the same payload
+  locations); the model-catalog runtime rewire (`27b7349e`) and the
+  event-sourced human-agent/wire-persistence rework (`aad4a7df`/
+  `7d7e8de8`) are wire-invisible; task notifications are suppressed before
+  loop quiescence on remove (`221d112f`) and late task settlement stays
+  silent after teardown (`c250a31d`). The loopback-only debug xstate
+  stream `WS /api/v1/debug/ws` (`6299cfda`) is **not registered on this
+  deployment** (verified live — handshake refused).
+- **Config drift (not shape):** `default_model` reads `kimi-code/k3-256k`
+  again (was `kimi-code/kimi-for-coding` on 0.42.0) — a fresh model-less
+  session's `/status` `max_context_tokens` stays **262144**;
+  `thinking.effort` is still `"max"`. `loop_control` may now carry
+  `compaction_max_attempts` (int ≥1, default 5 — commit `775a6c35`;
+  absent here). The models catalog still reads 10 entries, with content
+  churn: `kimi-code/kimi-for-coding` is now "K2.8 Preview" with
+  `max_context_size: 1048576` and gained `support_efforts`/
+  `default_effort: "max"` (see Models); the new `dynamically_loaded_tools`
+  capability string (commit `9296e687`) rides on `kimi-for-coding`, `k3` and
+  `k3-256k` here, and MCP server configs may gain an optional `deferred`
+  flag (not observed here).
+
+Everything else re-verified unchanged live on 0.43.0 (see the verification
+log): auth 401s (missing + wrong token), `40401` envelopes (sans `stack`
+now, above), v1 sessions create/get/list (`last_seq` real on the detail
+path — `1` fresh, `217` after this run's turns; list still `0`),
+`/status`, the full snapshot (top-level keys, real `session.usage`
+omitting `total_cost_usd`/`turn_count`, busy `in_flight_turn` capture,
+oldest-first message page, empty pending/roster lists), messages history
+(newest-first; media parts with `name`; the `date_change` injection),
+prompts POST + ACK (`prompt_id` == `user_message_id`), one full prompt
+round-trip (`session.meta.updated` → `prompt.submitted` → `turn.started`
+with always-on `promptId` → `context.spliced` → `prompt.started` →
+steps/deltas → `tool.call.started`/`tool.progress`/`tool.result` →
+`turn.ended` → `prompt.completed` — no `streaming` phase anywhere),
+prompt queueing + steer (`prompt.queued` `queueLength`, the new
+`turn.steer`, `prompt.steered`, fresh-ULID splice, `prompt.completed` with
+the original id), `:abort` (`{"aborted":true}`, `turn.step.interrupted` →
+`turn.ended` `cancelled`/`user_cancelled` → interruption-reminder splice →
+`prompt.aborted`), compact with `{"instruction":…}` (instant empty ACK,
+instruction echo in `compaction.started`, wholesale `context.spliced` —
+summary message still without an `id` key, the 0.42.0 prefix sentence
+intact —, `compaction.completed` with the full `result` block,
+`tokensAfter` == post-compaction `context_tokens`; both `40910`s with
+`stack`), the questions flow end-to-end (`question_<uuid>` + distinct
+`tool_call_id`, pending poll, `single` answer → `{"resolved":true}`,
+dismiss `40909`, re-answer/re-dismiss `40902`, all three
+`event.question.*`), the manual-approval round-trip (`approval_<uuid>` ≠
+`tool_call_id` on all three surfaces, `tool_call_id` POST → `40404`,
+`approved` → both resolved frames, snapshot `pending_approvals` item),
+files upload (sniffed `media_type`)/download/`Range` 206/delete/`40407`
+after delete, the image `session_media` projection with `name` in the ACK
+echo AND history plus the byte-identical session-media route, foreground +
+background sub-agents (full lifecycles: `subagent.spawned` with
+`taskId`/`model`/`thinkingEffort:"max"`, `subagent.started`/`completed`,
+`task.started` → `background.task.started` → `task.terminated` →
+`background.task.terminated`, `task.notified`, the mid-turn notification
+splice AND the idle-path task-origin notification turn — both captured),
+REST `/tasks` list/get `with_output` (all the 0.39.0/0.36.1 fields;
+a running foreground sub-agent listed with `run_in_background:false`),
+the TodoList contract (`{"todos":[{status,title}…]}` verbatim), the v2
+grouped session table (`groups[]`, `activity.model`), the tools catalog
+(37 entries — 28 builtins + 9 MCP, `NotifyUser` still gated off), the
+session lifecycle events (`event.session.created` on the new session's own
+stream, `:delete` → `{"deleted":true}` + global `event.session.deleted`),
+and WS hello/heartbeat/subscribe/ack/cursor-resume (replay from seq 212
+re-delivered 213–217 in order before the ack; future-seq cursor →
+standalone `resync_required` then the ack listing it).
 
 The drift from 0.41.0 to 0.42.0 is **small for the core loop — one new
 capability (session deletion), one new global WS event, additive fields
@@ -969,7 +1124,10 @@ Every REST response is JSON wrapped in an envelope:
   `50001`), and since 0.33.0 that includes the search route's `40001`-coded
   `GlobalSearchError`s (`pageToken …`); schema-validation `40001`s (Zod,
   with `details`) and the `40406`/`40407` not-found envelopes still omit it
-  (re-verified 2026-09-02 on 0.40.1). Ignore it either way.
+  (re-verified 2026-09-02 on 0.40.1). **0.43.0 (verified live 2026-09-14):**
+  `40401` envelopes no longer carry `stack` (the session-not-found error
+  instance simply has none captured — the transport is unchanged; `40910`
+  still carries it). Ignore it either way.
 
 ## Meta
 
@@ -983,14 +1141,14 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
 {
   "code": 0, "msg": "success",
   "data": {
-    "server_version": "0.42.0",
+    "server_version": "0.43.0",
     "capabilities": {"websocket": true, "file_upload": true, "fs_query": true, "mcp": true, "tasks": true, "terminal": true},
-    "server_id": "01M23T4GZCKTV589W5T2SCD7K4",
-    "started_at": "2026-09-09T19:25:53.516Z",
+    "server_id": "01M2GP32AY8TH41WNEHWR31TXB",
+    "started_at": "2026-09-14T19:25:19.070Z",
     "open_in_apps": [],
     "dangerous_bypass_auth": false,
     "backend": "v2",
-    "experimental_flags": {"notify_user": false, "auto_session_title": false, "subagent_fork": false, "wait_for": true, "tower": false, "tool-select": false},
+    "experimental_flags": {"notify_user": false, "subagent_fork": false, "wait_for": true, "tower": false, "tool-select": false},
     "features": [
       {"name": "skill", "state": "Active", "meta": {}},
       {"name": "btw", "state": "Active", "meta": {}},
@@ -998,7 +1156,7 @@ curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
       {"name": "todo", "state": "Active", "meta": {}}
     ]
   },
-  "request_id": "01M23T5B3XDEYB4ZS8CKWSR8D3"
+  "request_id": "01M2GRZ4C1ABTTVHSH21D1JY3X"
 }
 ```
 
@@ -1028,6 +1186,9 @@ is new (the experimental file-history feature unit, commit `650d12f6`).
   `search_worker` and `secondary-model` keys are **gone**, and
   **`notify_user` is new** (`false` here — it gates the new `NotifyUser`
   tool, which is absent from the tools catalog while the flag is off).
+  **0.43.0 (verified live 2026-09-14): the set shrank to 5 entries** —
+  `auto_session_title` is gone: AI session-title generation graduated out
+  of the flag and is always on (commit `6126472c`).
 - **`web_title` is new in 0.37.2** (additive): the instance's `--web-title`
   browser-tab label, present only when the server was started with that flag;
   omitted here (verified live 2026-08-18). Treat it as an optional instance
@@ -1108,6 +1269,17 @@ unchanged from 0.29.2):
   two new `Kimi Platform/*` ones (`Kimi Platform/k3-256k`,
   `Kimi Platform/kimi-k3`) ride alongside the 4 `kimi-code/*` and 4
   `deepseek/*`. Provider-side content drift, not protocol.
+  **0.43.0 (verified live 2026-09-14):** still 10 entries, but
+  `kimi-code/kimi-for-coding` now displays **"K2.8 Preview"** with
+  `max_context_size: 1048576` (was 262144) and gained
+  `support_efforts: ["low","high","max"]` + `default_effort: "max"`; the
+  highspeed entry renamed to "K2.7 Code Highspeed"; `kimi-for-coding`,
+  `k3` and `k3-256k` gained a **`dynamically_loaded_tools`** capability
+  string (commit `9296e687`); and the deepseek v4-flash/v4-pro and
+  `Kimi Platform/kimi-k3` entries gained `support_efforts` arrays. The
+  server-wide default model reads **`kimi-code/k3-256k` again** (was
+  `kimi-code/kimi-for-coding` on 0.42.0). All content drift, not
+  protocol — the item shape is unchanged.
 - `GET`/`POST /api/v1/config` also carries a **`secondary_model`** field (new
   in 0.31.0, additive): `{}` on this server (2026-07-30). It is writable via
   `POST /api/v1/config`; per upstream, the POST body is snake_case while the
@@ -1259,7 +1431,8 @@ serialized cleanup"; every behavior below verified live 2026-09-09). Body
 `{}` (or empty). Answers
 `{"code":0,"msg":"success","data":{"deleted":true},"request_id":"…"}`.
 After the delete: `GET /api/v1/sessions/{id}` answers
-`{"code":40401,"msg":"session … does not exist",…}` (with `stack`), the
+`{"code":40401,"msg":"session … does not exist",…}` (**0.43.0:** without
+`stack` — see Response envelope), the
 session drops off the list, and — like archiving — a **global WS event
 `event.session.deleted`** fires on every live connection (see WebSocket →
 Global events). Unknown id → `40401` "session … does not exist". The
@@ -1305,7 +1478,8 @@ capture, trimmed:
   server-side: the forked session is not loaded), so a fork made from ANOTHER
   client appears in the app only on the next refresh. The Android app handles
   the create frame since ticket 129; its own forks insert the row locally.
-- Errors: unknown id → `40401` "session … does not exist" (with `stack`);
+- Errors: unknown id → `40401` "session … does not exist" (**0.43.0:**
+  without `stack` — see Response envelope);
   a turn running on the source → `40901`, verbatim
   `{"code":40901,"msg":"Session \"session_…\" cannot be forked while a turn is running","data":null,…}`
   (with `stack`).
@@ -1349,7 +1523,8 @@ with `archived:false` — verbatim capture, trimmed:
   from a never-archived one (both in the capture).
 - No busy guard: archive is accepted in every probed state (idle,
   just-prompted) — unlike fork's `40901`, a running session archives fine.
-- Errors: unknown id → `40401` "session … does not exist" (with `stack`), on
+- Errors: unknown id → `40401` "session … does not exist" (**0.43.0:**
+  without `stack` — see Response envelope), on
   both actions.
 
 ### Live status — `GET /api/v1/sessions/{id}/status`
@@ -1763,6 +1938,14 @@ cancelled turn and persists in history. Sibling variant observed on **0.34.0**
 (2026-08-06): `{"kind":"injection","variant":"permission_mode"}` — a
 `<system-reminder>` user message injected when a turn runs under auto
 permission mode (additive; the same envelope-stripping rule covers it).
+Sibling variant observed on **0.43.0** (2026-09-14):
+`{"kind":"injection","variant":"date_change","disclosure":{"kind":"date",
+"renderGeneration":1,"localDate":"2026-09-14","timeZone":"UTC"}}` — a
+whole-message `<system-reminder>` user injection the server splices when a
+turn starts under a calendar date different from the previous turn's (it
+fired on the throwaway session's first turn of the day), persisted in
+history like the others (additive; the same envelope-stripping rule covers
+it).
 
 ## Transcript
 
@@ -2301,8 +2484,11 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../promp
   `{"code":40001,"msg":"prompt_ids: Too small: expected array to have >=1 items",...}`
   (re-verified 2026-07-23).
 - WS sequence when the steer lands mid-turn (verbatim capture in the WS
-  section): `prompt.steered` → the current step runs to `turn.step.completed`
-  → the steered user message arrives via `context.spliced` → a new
+  section): **0.43.0 adds a `turn.steer` frame first** (engine-side steer
+  application, carrying `{input: [<the steered prompt's content parts>],
+  origin: {"kind":"user"}}` — verified live 2026-09-14) → `prompt.steered`
+  → the current step runs to `turn.step.completed` → the steered user
+  message arrives via `context.spliced` → a new
   `turn.step.started` **in the same turn** (no new `turn.started`) →
   `turn.ended` `"completed"` → a single `prompt.completed` carrying the
   **original** active prompt id. The agent then follows the steered
@@ -2337,6 +2523,12 @@ Messages) lands between `turn.ended` and the idle `work_changed`. Verbatim
 {"type":"turn.ended","turnId":1,"reason":"cancelled","durationMs":5030,
  "interruptReason":"user_cancelled","agentId":"main","sessionId":"session_..."}
 ```
+
+**0.43.0 (verified live 2026-09-14):** an idle `:abort` (nothing running,
+or the prompt already completed) no longer errors — it answers
+`{"code":0,"data":{"aborted":true}}`. The `40903`
+`prompt.already_completed` rejection was removed (commit `46233953`); the
+abort sequence above is unchanged when a turn IS running.
 
 ## Compact
 
@@ -2998,15 +3190,21 @@ the `TaskOutput` tool lost its `block`/`timeout` input params and is now
 always non-blocking — tool input schemas are not observable on this wire
 (`GET /api/v1/tools` returns `input_schema: null`; see the Tools section).
 
-The tool result is plain text. Foreground (waits for completion):
+The tool result is plain text. Foreground (waits for completion) —
+**0.43.0 (verified live 2026-09-14) adds the `stop_reason:` line and the
+trailing `resume_hint:` block** (pre-0.43.0 the foreground result stopped
+after the `[summary]` block):
 
 ```
-agent_id: agent-12
+agent_id: agent-71
 actual_subagent_type: explore
 status: completed
+stop_reason: completed
 
 [summary]
 <the sub-agent's result summary>
+
+resume_hint: Continue with Agent(resume="agent-71", prompt="..."). Use agent_id only; do not set subagent_type. The subagent retains its prior context; redo any unfinished tool call if its result was lost.
 ```
 
 Background (returns immediately). The head of the contract
@@ -3967,7 +4165,14 @@ from the pre-split era); and there is a **new phase kind `tool_call`**
 `ended` (with `at` instead of `since`), and — observed on **0.34.0**
 (2026-08-06, during a REST `:abort`; possibly older) — **`interrupted`**:
 `{"kind":"interrupted","turnId":2,"step":1,"reason":"aborted","at":...}` (with
-`at`, like `ended`). **0.31.0, additive:** the model/usage
+`at`, like `ended`). **0.43.0, REMOVED:** the **`streaming` phase kind is
+gone** (commit `56ed9549` — the phase is now projected at the kap-server
+edge from domain events, `LegacyActivityTracker`; verified live
+2026-09-14: zero `streaming` phases across this run's full round-trips,
+deltas streaming throughout — the phase stays `running` while tokens
+stream). The remaining kinds are `idle`/`running`/`tool_call`/`retrying`/
+`awaiting_approval`/`interrupted`/`ended`; the `streaming` capture below
+is historical. **0.31.0, additive:** the model/usage
 variant's `usage` can be a **nested** object — per-model buckets plus
 `total`/`currentTurn` aggregates:
 
@@ -4147,8 +4352,125 @@ selected option and free text both re-verified 2026-07-23:
             "dismissed_at":"2026-07-23T03:37:06.177Z","agentId":"main","sessionId":"session_..."}}
 ```
 
+### The v3 protocol (new in 0.43.0, additive — unused by the app)
+
+0.43.0 (commit `64505e36`) adds a **second, opt-in wire protocol** next to
+the v2 one this document describes. The client picks the protocol by
+picking the URL — there is no version negotiation, and **the v2 endpoint
+is byte-for-byte untouched** (`transport/ws/v1/*` identical between the
+tags; `server_hello` still numeric `protocol_version: 2`, subscribe/ack/
+cursor-resume re-verified live 2026-09-14). The Android app uses none of
+this; it is documented here once as a potential future migration target
+(its flat entities match the app's consumption style better than v2's
+nested events). Verified live 2026-09-14.
+
+**WS endpoint — `WS /api/v3/ws`** (same bearer-token subprotocol auth as
+v2). On connect the server immediately sends a `hello` frame (note the
+frame type and the **string** protocol version):
+
+```json
+{"type":"hello","protocol_version":"3","server_id":"01M2GP2YK8BQKH1QAEPCRWG0KJ","capabilities":["step_replay_v1"]}
+```
+
+Client → server frames are only `subscribe` / `unsubscribe`:
+
+```json
+{"type":"subscribe","id":1,"session_id":"...","agent_ids":["..."],"omit":["thinking.delta"]}
+{"type":"unsubscribe","id":2,"session_id":"..."}
+```
+
+**No `since_seq` / cursor** — catch-up is done over REST (`after_step`,
+below), not over the socket. Server control frames:
+`{"type":"ack","id":1,"code":0,"msg?":"..."}` and
+`{"type":"error","code":N,"msg":"..."}`; new error code
+`WS_SLOW_CONSUMER: 42903` (closes with 1008 on outbound overflow).
+Heartbeat is WS-level ping/pong (10 s interval, terminated after 2
+misses). On subscribe the server sends `ack`, then **recovery messages**
+(a replay of the session's current projection state), then live traffic.
+
+Server → client traffic is **flat entity messages** — no envelope; each
+carries `session_id` / `agent_id` / `timestamp` (epoch ms) plus its own
+fields. Families: `turn`, `step`, `user`, `assistant` (+ `assistant.delta`),
+`thinking` (+ `thinking.delta`), `tool_call` (+ `tool_call.delta` +
+`tool.progress`), `system` (compaction/undo/clear/plan/swarm/hook/
+interruption markers), `interaction` (approvals and questions in one
+shape, with `status` lifecycle), `task`, `todo`, `agent.state`,
+`session.state`, and session-less globals (`session`/`workspace`/`config`/
+`config.warning`/`model_catalog`/`plugin`/`capability`).
+
+**History route — `GET /api/v1/sessions/{id}/history`** (mounted under
+the existing v1 prefix, standard envelope) serves the same flat entities
+cold-rebuilt from persisted wire records. Query params: `before_turn`
+(page older) / `after_step` (catch up newer; mutually exclusive),
+`page_size` (default 200, max 500), `agent_id` (defaults to the main
+agent). Response data:
+
+```json
+{"messages":[<entity messages>],"has_more":false,"in_flight":{"turn_id":"...","step_id":"..."}}
+```
+
+(`in_flight` present only while a turn is running; observed live 2026-09-14
+on the throwaway session: `has_more: true`, 37 entity messages on the
+first page, entities `turn`/`user`/`step`/… with `turn_id: "t7"`,
+`step_id: "t7.1"` string ids.) Errors: schema-validation `40001`s, unknown
+session `40401`. The loopback-only debug xstate stream
+`WS /api/v1/debug/ws` (`6299cfda`) is **not registered on this
+deployment** (verified live — handshake refused).
+
 ## Verification log
 
+- 2026-09-14 re-verification on `0.43.0` (server 0.42.0 → 0.43.0;
+  throwaway sessions `session_c0ea7090-…` and `session_85f66878-…` in
+  `/home/ubuntu/spike`, both `:delete`d after; guided by the upstream
+  0.42.0→0.43.0 diff — 38 commits; the wire-relevant ones are `64505e36`
+  (v3 WS + history API), `56ed9549` (`streaming` phase kind removed),
+  `46233953` (prompt-queue fold: `40903` + prompt-POST auth prechecks
+  removed, `turn.steer` emitted), `2d4d799a`/`cd0d4a1d` (hidden `think`
+  summary parts omitted from v1 history), `6126472c` (`auto_session_title`
+  graduated) and `9296e687` (`dynamically_loaded_tools` capability).
+  Drift found and documented inline in the 0.42.0→0.43.0 section above:
+  (a) additive opt-in v3 protocol (`WS /api/v3/ws` hello +
+      `GET .../history`; v2 byte-untouched);
+  (b) `agent.status.updated` `streaming` phase kind gone — zero observed
+      across this run's round-trips;
+  (c) `40903` gone — idle `:abort` answers `{"aborted":true}`;
+  (d) new `turn.steer` frame before `prompt.steered` (`{input, origin}`);
+  (e) `40401` envelopes without `stack` (`40910` still has it);
+  (f) new `date_change` injection origin variant with `disclosure`;
+  (g) foreground Agent tool-result prose gained `stop_reason:` +
+      `resume_hint:` lines.
+  Re-verified unchanged, most byte-for-byte: meta (5 flags now), models
+  catalog shape (10 entries, content churn only), config
+  (`default_model` `kimi-code/k3-256k`), sessions create/get/list/
+  `:delete`/`event.session.deleted`, `/status`, the full snapshot
+  (top-level keys, `session.usage`, busy `in_flight_turn`, empty
+  pending/roster lists), messages history (newest-first, media `name`,
+  hidden-`think` omission not observable with kimi-code/k3), one full
+  prompt round-trip (verbatim WS capture — no `streaming` phase), prompt
+  queueing + steer end-to-end, mid-run `:abort` (full interrupted
+  sequence), compact with `{"instruction":…}` (instant ACK, instruction
+  echo, wholesale splice with the 0.42.0 prefix sentence, summary message
+  without `id`, `tokensAfter` == `context_tokens`, both `40910`s with
+  `stack`), the questions flow end-to-end (`question_<uuid>` ≠
+  `tool_call_id`, pending poll, answer/dismiss, `40909`/`40902`, all
+  three WS events), manual approvals (`approval_<uuid>` ≠ `tool_call_id`,
+  tool_call_id POST → `40404`, both resolved frames, snapshot
+  `pending_approvals`), files upload/download(`Range` 206)/delete
+  (`40407`) plus the image-attachment `session_media` route (ACK and
+  history `name` fields intact), sub-agents foreground + background
+  (full lifecycles, REST `/tasks` all fields, running foreground listed,
+  background notification both mid-turn splice and idle-path task-origin
+  turn), the TodoList write contract verbatim, the tools catalog (37:
+  28 builtin + 9 MCP; `NotifyUser` still gated off), the v2 grouped
+  session table, workspaces + trust, WS hello/heartbeat/subscribe/ack/
+  cursor-resume (replayed 213–217 in order before the ack; refused cursor
+  → standalone `resync_required` then ack). **App impact: no breakage, no
+  new tickets** — the app never decoded `streaming` phases, never
+  referenced `40903`, ignores unknown frames (`turn.steer`), strips
+  `<system-reminder>` envelopes by tag (`date_change`), treats thinking
+  parts as optional, and maps error codes without reading `stack`.
+  `:app:testDebugUnitTest` — 789 tests, 0 failures (4 skipped). Tooling:
+  `websocat` with a fifo pong feeder (`-H` headers after the URL).
 - 2026-09-14 spot verification on `0.42.0` (ticket 127; throwaway sessions
   `session_d6c12410-…` + its forks in `/home/ubuntu/spike`, all deleted
   after): `POST /api/v1/sessions/{id}:fork` verified end-to-end — `{}` body,
