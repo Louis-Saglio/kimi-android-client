@@ -98,6 +98,12 @@ class SessionListViewModel @Inject constructor(
         data class RefreshFailed(val message: String) : Effect
         data class CreateFailed(val message: String) : Effect
         data class SessionCreated(val session: Session) : Effect
+
+        /** The fork POST failed (ticket 128 — stale id 40401, busy source 40901): the server's own message; the list is untouched. */
+        data class ForkFailed(val message: String) : Effect
+
+        /** Fork succeeded (ticket 128): the row is already inserted; the collector shows a confirmation snackbar. */
+        data class SessionForked(val session: Session) : Effect
     }
 
     val uiState: StateFlow<UiState>
@@ -542,6 +548,71 @@ class SessionListViewModel @Inject constructor(
                 _effects.send(Effect.CreateFailed(error.toUserMessage()))
             }
         }
+    }
+
+    /**
+     * Forks [session] from the long-press row dialog (ticket 128). On success the
+     * fork — which inherits the source's workspace, cwd and `updated_at` (ticket
+     * 127) — lands at its sorted position in both the flat list and the matching
+     * workspace group, and a confirmation snackbar is emitted; the user stays in
+     * the list (unlike the chat-screen fork, which navigates into the fork). On
+     * failure the server's message is shown and the list is untouched. No-ops on a
+     * running session: the server rejects a busy fork with 40901, and the dialog
+     * action is disabled anyway.
+     */
+    fun onForkSession(session: Session) {
+        if (session.isRunning) return
+        viewModelScope.launch {
+            sessionsRepository.forkSession(settingsRepository.current(), session.id)
+                .onSuccess { fork ->
+                    // Same guard as create (ticket 086): a stale page landing after
+                    // the insert cannot drop the new row.
+                    loadJob?.cancel()
+                    loadMoreJob?.cancel()
+                    uiState.update { state ->
+                        state.copy(
+                            isLoading = false,
+                            isRefreshing = false,
+                            isLoadingMore = false,
+                            loadMoreError = null,
+                            // In grouped mode a never-loaded flat list stays null:
+                            // growing it to one row would clobber the disk cache.
+                            sessions = if (state.groupedView && state.sessions == null) {
+                                null
+                            } else {
+                                state.sessions?.insertSorted(fork)
+                            },
+                            // The fork lands in the group matching its (inherited) cwd.
+                            // Group totals are server counts and a workspace with no
+                            // group yet is left out — both reconcile on the next
+                            // grouped load, same as create.
+                            groups = state.groups?.map { group ->
+                                if (group.cwd == fork.cwd) {
+                                    group.copy(sessions = group.sessions.insertSorted(fork))
+                                } else {
+                                    group
+                                }
+                            },
+                        )
+                    }
+                    _effects.send(Effect.SessionForked(fork))
+                }
+                .onFailure { error ->
+                    _effects.send(Effect.ForkFailed(error.toUserMessage()))
+                }
+        }
+    }
+
+    /**
+     * Sorted insert for the fork (ticket 128): the lists are updated_at-descending
+     * and the fork inherits the source's `updated_at`, so landing it behind the rows
+     * at least as recent puts it right next to its source — not at the top like
+     * create. An id already present is replaced, not duplicated.
+     */
+    private fun List<Session>.insertSorted(session: Session): List<Session> {
+        val rest = filter { it.id != session.id }
+        val index = rest.indexOfFirst { it.updatedAt < session.updatedAt }.takeIf { it >= 0 } ?: rest.size
+        return rest.subList(0, index) + session + rest.subList(index, rest.size)
     }
 
     /**

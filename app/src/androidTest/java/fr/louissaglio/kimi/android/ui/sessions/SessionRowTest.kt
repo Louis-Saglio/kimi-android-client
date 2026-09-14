@@ -36,6 +36,7 @@ class SessionRowTest {
         workspaceLabel: String? = null,
         updatedAt: Instant = Instant.now(),
         onClick: () -> Unit = {},
+        onFork: () -> Unit = {},
     ) {
         composeTestRule.setContent {
             KimiTheme {
@@ -50,6 +51,7 @@ class SessionRowTest {
                     ),
                     workspaceLabel = workspaceLabel,
                     onClick = onClick,
+                    onFork = onFork,
                 )
             }
         }

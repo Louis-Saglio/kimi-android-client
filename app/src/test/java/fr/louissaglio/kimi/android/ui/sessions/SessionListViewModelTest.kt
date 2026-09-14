@@ -1281,6 +1281,138 @@ class SessionListViewModelTest {
         assertEquals(1, server.requestCount)
     }
 
+    // --- Forking from the list (ticket 128) ---
+
+    @Test
+    fun `fork success inserts the fork at its updated_at position in the flat list`() = runBlocking {
+        server.enqueue(
+            MockResponse(body = pageBodyWithStamps(
+                "session_1" to "2026-07-17T03:48:31.606Z",
+                "session_2" to "2026-07-16T03:48:31.606Z",
+            )),
+        )
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+
+        // The fork inherits the source's updated_at (ticket 127): the sorted insert
+        // lands it right behind the source, not at the top like create.
+        server.enqueue(MockResponse(body = forkBody("/tmp/session_1")))
+        val effects = CopyOnWriteArrayList<SessionListViewModel.Effect>()
+        val effectJob = launch { viewModel.effects.collect { effects += it } }
+        try {
+            viewModel.onForkSession(viewModel.uiState.value.sessions!!.first { it.id == "session_1" })
+
+            awaitState(viewModel.uiState) { it.sessions?.any { s -> s.id == "session_fork" } == true }
+            assertEquals(
+                listOf("session_1", "session_fork", "session_2"),
+                viewModel.uiState.value.sessions!!.map { it.id },
+            )
+            awaitCondition { effects.isNotEmpty() }
+            val forked = effects.single() as SessionListViewModel.Effect.SessionForked
+            assertEquals("session_fork", forked.session.id)
+            val request = server.takeRequest(5, TimeUnit.SECONDS)!!
+            assertEquals("POST", request.method)
+            assertEquals("/api/v1/sessions/session_1:fork", request.target)
+        } finally {
+            effectJob.cancel()
+        }
+    }
+
+    @Test
+    fun `fork success inserts the fork into the matching group at its updated_at position`() = runBlocking {
+        enterGroupedMode(
+            groupsBodyWithStamps(
+                "/tmp/a" to listOf("session_1" to 1784260111606L, "session_2" to 1784173711606L),
+                "/tmp/b" to listOf("session_3" to 1784260111606L),
+            ),
+        )
+
+        server.enqueue(MockResponse(body = forkBody("/tmp/a")))
+        val source = viewModel.uiState.value.groups!!.first { it.cwd == "/tmp/a" }.sessions.first()
+        viewModel.onForkSession(source)
+
+        awaitState(viewModel.uiState) { state ->
+            state.groups!!.first { it.cwd == "/tmp/a" }.sessions.any { it.id == "session_fork" }
+        }
+        val groups = viewModel.uiState.value.groups!!
+        // Same instant as session_1 (1784260111606 == 2026-07-17T03:48:31.606Z): the
+        // fork lands right behind it, ahead of the older session_2.
+        assertEquals(
+            listOf("session_1", "session_fork", "session_2"),
+            groups.first { it.cwd == "/tmp/a" }.sessions.map { it.id },
+        )
+        // The other group is untouched, and the never-loaded flat list stays null —
+        // a one-row list would clobber the disk cache (same rule as create).
+        assertEquals(listOf("session_3"), groups.first { it.cwd == "/tmp/b" }.sessions.map { it.id })
+        assertNull(viewModel.uiState.value.sessions)
+        assertEquals("/api/v1/sessions/session_1:fork", server.takeRequest(5, TimeUnit.SECONDS)!!.target)
+    }
+
+    @Test
+    fun `forking a running session is a no-op`() = runBlocking {
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"items":[
+                  {"id":"session_1","title":"Busy","updated_at":"2026-07-17T03:48:31.606Z",
+                   "busy":true,"metadata":{"cwd":"/tmp/a"}}
+                ],"has_more":false},"request_id":"r"}""",
+            ),
+        )
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+        val loaded = viewModel.uiState.value.sessions
+
+        val effects = CopyOnWriteArrayList<SessionListViewModel.Effect>()
+        val effectJob = launch { viewModel.effects.collect { effects += it } }
+        try {
+            viewModel.onForkSession(loaded!!.single())
+
+            // The server refuses a busy fork with 40901 (ticket 127), so the intent —
+            // like the disabled dialog action — fires nothing: no request, no effect,
+            // not even a state update.
+            delay(300)
+            assertEquals(1, server.requestCount)
+            assertSame(loaded, viewModel.uiState.value.sessions)
+            assertTrue(effects.isEmpty())
+        } finally {
+            effectJob.cancel()
+        }
+    }
+
+    @Test
+    fun `a failed fork emits ForkFailed with the server message and leaves the list untouched`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+        // A turn started server-side between the list load and the tap (127 capture).
+        server.enqueue(
+            MockResponse(body =
+                """{"code":40901,"msg":"Session \"session_1\" cannot be forked while a turn is running",""" +
+                    """"data":null,"request_id":"r"}""",
+            ),
+        )
+        val effects = CopyOnWriteArrayList<SessionListViewModel.Effect>()
+        val effectJob = launch { viewModel.effects.collect { effects += it } }
+        try {
+            viewModel.onForkSession(viewModel.uiState.value.sessions!!.single())
+
+            awaitCondition { effects.isNotEmpty() }
+            assertEquals(
+                SessionListViewModel.Effect.ForkFailed(
+                    "Session \"session_1\" cannot be forked while a turn is running",
+                ),
+                effects.single(),
+            )
+            assertEquals(listOf("session_1"), viewModel.uiState.value.sessions!!.map { it.id })
+            assertEquals("POST", server.takeRequest(5, TimeUnit.SECONDS)!!.method)
+        } finally {
+            effectJob.cancel()
+        }
+    }
+
     /**
      * Puts the screen in grouped mode with [body] answered to the grouped fetch,
      * drains that request, and runs ON_START — with groups on screen it fires no
@@ -1322,6 +1454,37 @@ class SessionListViewModelTest {
         }
         return """{"code":0,"msg":"success","data":{"items":[$items],"has_more":$hasMore},"request_id":"r"}"""
     }
+
+    /** [pageBody] with explicit per-session ISO updated_at stamps — the fork sorted-insert test needs distinct timestamps (ticket 128). */
+    private fun pageBodyWithStamps(vararg sessions: Pair<String, String>): String {
+        val items = sessions.joinToString(",") { (id, updatedAt) ->
+            """{"id":"$id","title":"Title $id","updated_at":"$updatedAt",""" +
+                """"busy":false,"metadata":{"cwd":"/tmp/$id"}}"""
+        }
+        return """{"code":0,"msg":"success","data":{"items":[$items],"has_more":false},"request_id":"r"}"""
+    }
+
+    /** [groupsBodyWithTotals] with explicit per-session epoch-ms updated_at stamps (ticket 128); total == loaded, so no footer. */
+    private fun groupsBodyWithStamps(vararg groups: Pair<String, List<Pair<String, Long>>>): String {
+        val groupsJson = groups.joinToString(",") { (cwd, sessions) ->
+            val workspaceId = "wd_" + cwd.substringAfterLast('/')
+            val sessionsJson = sessions.joinToString(",") { (id, updatedAt) ->
+                """{"id":"$id","workspace":{"id":"$workspaceId","cwd":"$cwd"},""" +
+                    """"meta":{"title":"Title $id","last_prompt":null,"created_at":$updatedAt,""" +
+                    """"updated_at":$updatedAt,"archived":false,"archived_at":null},""" +
+                    """"activity":{"status":"idle","model":""}}"""
+            }
+            """{"workspace":{"id":"$workspaceId","cwd":"$cwd"},"sessions":[$sessionsJson],"total":${sessions.size}}"""
+        }
+        return """{"code":0,"msg":"success","data":{"groups":[$groupsJson],""" +
+            """"total":${groups.size},"has_more":false,"next_page_token":null},"request_id":"r"}"""
+    }
+
+    /** The `:fork` success envelope (ticket 127 capture): the fork of session_1 inherits its updated_at and carries [cwd]. */
+    private fun forkBody(cwd: String): String =
+        """{"code":0,"msg":"success","data":{"id":"session_fork","title":"Fork: Title session_1",""" +
+            """"updated_at":"2026-07-17T03:48:31.606Z","busy":false,""" +
+            """"metadata":{"cwd":"$cwd"}},"request_id":"r"}"""
 
     private fun configBody(effort: String): String =
         """{"code":0,"msg":"success","data":{"default_model":"kimi-code/k3",""" +

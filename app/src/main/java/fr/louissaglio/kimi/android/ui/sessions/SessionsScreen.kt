@@ -92,6 +92,12 @@ fun SessionsScreen(
                     snackbarHostState.showSnackbar(effect.message)
                 is SessionListViewModel.Effect.SessionCreated ->
                     onNavigateToChat(effect.session)
+                // Ticket 128: the forked row is already inserted; the user stays in
+                // the list and gets a confirmation (failures carry the server's message).
+                is SessionListViewModel.Effect.SessionForked ->
+                    snackbarHostState.showSnackbar("Session forked")
+                is SessionListViewModel.Effect.ForkFailed ->
+                    snackbarHostState.showSnackbar(effect.message)
             }
         }
     }
@@ -118,6 +124,7 @@ fun SessionsScreen(
         onNewSessionTitleChange = viewModel::onNewSessionTitleChange,
         onCreateDialogDismiss = viewModel::onCreateDialogDismiss,
         onCreateSessionConfirm = viewModel::onCreateSessionConfirm,
+        onForkSession = viewModel::onForkSession,
     )
 }
 
@@ -140,6 +147,7 @@ private fun SessionsContent(
     onNewSessionTitleChange: (String) -> Unit,
     onCreateDialogDismiss: () -> Unit,
     onCreateSessionConfirm: () -> Unit,
+    onForkSession: (Session) -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -198,8 +206,9 @@ private fun SessionsContent(
                     onGroupShowLess,
                     onGroupFoldToggle,
                     onNewSessionClick,
+                    onForkSession,
                 )
-                else -> SessionList(uiState, onSessionClick, onEndReached)
+                else -> SessionList(uiState, onSessionClick, onEndReached, onForkSession)
             }
         }
         if (uiState.showCreateDialog) {
@@ -315,6 +324,7 @@ private fun SessionList(
     uiState: SessionListViewModel.UiState,
     onSessionClick: (Session) -> Unit,
     onEndReached: () -> Unit,
+    onForkSession: (Session) -> Unit,
 ) {
     val sessions = uiState.sessions.orEmpty()
     val listState = rememberLazyListState()
@@ -334,6 +344,7 @@ private fun SessionList(
                 session,
                 workspaceLabel = session.cwd?.let(uiState.workspaceLabels::get),
                 onClick = { onSessionClick(session) },
+                onFork = { onForkSession(session) },
             )
         }
         if (uiState.isLoadingMore || uiState.loadMoreError != null) {
@@ -360,6 +371,7 @@ private fun GroupedSessionList(
     onGroupShowLess: (String) -> Unit,
     onGroupFoldToggle: (String) -> Unit,
     onNewSessionClick: (String?) -> Unit,
+    onForkSession: (Session) -> Unit,
 ) {
     LazyColumn(modifier = Modifier.fillMaxSize()) {
         uiState.groups.orEmpty().forEach { group ->
@@ -380,6 +392,7 @@ private fun GroupedSessionList(
                         session,
                         workspaceLabel = null,
                         onClick = { onSessionClick(session) },
+                        onFork = { onForkSession(session) },
                         modifier = Modifier.padding(start = 16.dp),
                     )
                 }
@@ -509,12 +522,18 @@ internal fun SessionRow(
     session: Session,
     workspaceLabel: String?,
     onClick: () -> Unit,
+    onFork: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    // The row ellipsizes the name to one line; long-press reveals it whole (ticket 117).
+    // The row ellipsizes the name to one line; long-press reveals it whole (ticket
+    // 117) and offers the fork action (ticket 128).
     var fullNameShown by remember { mutableStateOf(false) }
     if (fullNameShown) {
-        SessionFullNameDialog(session = session, onDismiss = { fullNameShown = false })
+        SessionFullNameDialog(
+            session = session,
+            onFork = onFork,
+            onDismiss = { fullNameShown = false },
+        )
     }
     ListItem(
         headlineContent = {
@@ -555,11 +574,11 @@ internal fun SessionRow(
 }
 
 @Composable
-private fun SessionFullNameDialog(session: Session, onDismiss: () -> Unit) {
+private fun SessionFullNameDialog(session: Session, onFork: () -> Unit, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         text = {
-            // Selectable so the name can be copied; no actions beyond dismissal.
+            // Selectable so the name can be copied.
             SelectionContainer {
                 // displayName's fallback minus the basename shortening: the title
                 // when present, otherwise the full cwd path, the id last.
@@ -567,6 +586,17 @@ private fun SessionFullNameDialog(session: Session, onDismiss: () -> Unit) {
             }
         },
         confirmButton = {
+            // Forking a running session always fails server-side (40901 — ticket
+            // 127), so the action pre-disables, like the chat overflow item.
+            TextButton(
+                onClick = {
+                    onDismiss()
+                    onFork()
+                },
+                enabled = !session.isRunning,
+            ) { Text("Fork session") }
+        },
+        dismissButton = {
             TextButton(onClick = onDismiss) { Text("OK") }
         },
     )
@@ -608,6 +638,7 @@ private fun SessionsContentPreview() {
             onNewSessionTitleChange = {},
             onCreateDialogDismiss = {},
             onCreateSessionConfirm = {},
+            onForkSession = {},
         )
     }
 }

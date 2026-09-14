@@ -115,8 +115,10 @@
   toggle persists in
   `SettingsRepository` (flat default, re-read on every screen start); the live
   socket machinery patches rows by id inside their group (groups never reorder),
-  and the activity bump / create-insert / archive-drop are mode-aware in the
-  ViewModel.
+  and the activity bump / create-insert / fork-insert / archive-drop are mode-aware
+  in the ViewModel; the fork inherits the source's `updated_at` (ticket 127), so
+  its insert (ticket 128, from the long-press row dialog) lands at the sorted
+  position next to the source, not at the top like create.
 - `data/attachments/` — `AttachmentStore` owns all platform file I/O (content
   resolver reads capped at 256 MiB — a client-side guard; the server removed
   its own upload cap in 0.31.0, see ticket 059; cache writes;
