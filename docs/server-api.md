@@ -415,10 +415,12 @@ client-facing wire in exactly these places:
   longer applies in **auto** mode — the policy returns early there, so
   dangerous/unanalyzable commands run ungated; manual and yolo keep the ask
   behavior. Verified in the upstream source.) The CLI's permission-mode
-  rename to "Always Ask" /
-  "Ask When Needed" / "Never Ask" (commit `08a2fb00`) is **labels-only** —
+  rename (commit `08a2fb00`) is **labels-only** —
   the wire enum stays `manual`/`yolo`/`auto` (verified in the upstream
   schema; this server's `/status` still reports `"permission":"yolo"`).
+  The label mapping, recorded once here and referenced from `/status`:
+  `manual` = "Always Ask", `yolo` = "Ask When Needed", `auto` = "Never Ask"
+  — non-positional (`yolo` is the middle option).
 - **Config drift (not shape):** `default_model` reads `kimi-code/k3-256k`
   (fresh-session `/status` `max_context_tokens` is back to **262144**), and
   `thinking.effort` is `"max"` — so `thinking_level`, the
@@ -1298,6 +1300,15 @@ unchanged from 0.29.2):
   credentials redacted — surfaced read-only in Settings. Every config write
   pushes a global `event.config.changed` frame (see WebSocket, Global events);
   the app drops its models/config caches on it (ticket 110).
+- **`default_permission_mode`** (verified live 2026-09-15 on 0.43.0): the
+  server-wide default permission mode, `"yolo"` here. Writable via
+  `POST /api/v1/config` — a current-value write
+  (`{"default_permission_mode":"yolo"}`) answered `code:0` and the GET
+  read-back was unchanged, so the server default was never moved. A fresh
+  session's `/status` `permission` starts from it (`"yolo"` observed on a
+  never-touched throwaway session); the per-session override is
+  `POST .../sessions/{id}/profile` (see Sessions). The Settings default
+  picker will consume it (ticket 142).
 
 ## Sessions
 
@@ -1527,6 +1538,38 @@ with `archived:false` — verbatim capture, trimmed:
   without `stack` — see Response envelope), on
   both actions.
 
+### Session profile — `POST /api/v1/sessions/{id}/profile`
+
+Writes session-level agent config — the per-session permission-mode override
+the chat permission-mode picker (ticket 141) writes through as
+`agent_config.permission_mode`. Verified live 2026-09-15 on 0.43.0 with a
+throwaway session created and deleted for the probe.
+
+```bash
+curl -s -X POST 'http://127.0.0.1:58627/api/v1/sessions/session_ff2d15fc-.../profile' \
+  -H "Authorization: Bearer <token>" \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  -d '{"agent_config":{"permission_mode":"manual"}}'
+```
+
+Answers the standard session envelope (same shape as create/get) — verbatim
+capture, trimmed:
+
+```json
+{"code":0,"msg":"success","data":{"id":"session_ff2d15fc-...","workspace_id":"wd_spike_6baf4c130e63","title":"ticket-143-profile-capture","created_at":"2026-09-15T16:37:19.540Z","updated_at":"2026-09-15T16:37:19.540Z","busy":false,"main_turn_active":false,"pending_interaction":"none","archived":false,"metadata":{"cwd":"/home/ubuntu/spike"},"agent_config":{"model":""},"usage":{…},"permission_rules":[],"message_count":0,"last_seq":0},"request_id":"01M2JYW67APC4C06A2Y9RXEX96"}
+```
+
+- The write goes through to `/status`: a following GET on the same session
+  reported `"permission":"manual"` (was `"yolo"` before the write — fresh
+  sessions start from the server's `default_permission_mode`, see
+  `GET /api/v1/config` in Models).
+- Quirk: the response's `agent_config` does **not** echo the written
+  `permission_mode` (stays `{"model":""}` in the capture) — `/status`'s
+  `permission` is the read-back, not the session object.
+- The accepted enum is the wire enum `manual`/`yolo`/`auto` (label mapping
+  recorded once at the 0.40.1 drift notes, commit `08a2fb00`; the per-prompt
+  `permission_mode` override in Prompts takes the same values).
+
 ### Live status — `GET /api/v1/sessions/{id}/status`
 
 Lightweight runtime state:
@@ -1564,7 +1607,13 @@ start reports `agent_config.model: ""` on list/get, yet its first `/status`
 call already serves the real `model`/`thinking_level` and warms the session
 (verified 2026-09-01, ticket 107). `thinking_level` and `permission` reflect
 the session's current config (`"off"`/`"yolo"` observed on a fresh session;
-**0.34.0:** a fresh session now reports `thinking_level: ""`). **0.34.0:**
+**0.34.0:** a fresh session now reports `thinking_level: ""`). `permission`
+is the session's effective permission mode (wire enum `manual`/`yolo`/`auto`;
+the CLI label mapping is recorded once at the 0.40.1 drift notes, commit
+`08a2fb00`) — it starts from the server's `default_permission_mode` and is
+overridden per session via `POST .../profile` (see Session profile above).
+The app does not consume it yet; the chat permission-mode picker reads and
+writes it (ticket 141). **0.34.0:**
 `max_context_tokens` is now **omittable when the context limit is unknown**
 (upstream schema change — `0` is the engine's "unknown" marker, never a real
 limit); never observed omitted live — a fresh model-less session reports the
