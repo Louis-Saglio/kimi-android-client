@@ -1297,6 +1297,95 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         assertEquals("max", viewModel.uiState.value.sessionEffort)
     }
 
+    // --- Permission mode (ticket 141) ---------------------------------------------------
+
+    @Test
+    fun `status seed syncs the server-reported permission mode without storing it`() = runBlocking {
+        // Unlike the model binding, /status ALWAYS reports a mode (a fresh session reads
+        // the server default): it feeds the chip but never the per-session store — the
+        // store holds only explicit picks, so an unpicked prompt carries no
+        // permission_mode field (absent = follow the server).
+        statusBody = """{"code":0,"msg":"success","data":{"busy":false,"permission":"manual",""" +
+            """"context_tokens":0,"max_context_tokens":1048576,"context_usage":0.0},"request_id":"r"}"""
+        viewModel.onScreenStarted()
+
+        awaitState(viewModel.uiState) { it.sessionPermission == "manual" }
+        assertEquals(PermissionMode.AlwaysAsk, viewModel.uiState.value.currentPermissionMode)
+        assertNull(dataStore.data.first()[stringPreferencesKey("permission_for_session_session_1")])
+
+        // The seed left the store empty: the next prompt omits permission_mode.
+        viewModel.onInputChange("hi")
+        viewModel.onSend()
+        val body = awaitRequest("/prompts").body!!.utf8()
+        assertFalse(body.contains("permission_mode"))
+    }
+
+    @Test
+    fun `selected permission mode persists, stamps prompts and survives recreation`() = runBlocking {
+        statusBody = """{"code":0,"msg":"success","data":{"busy":false,"permission":"yolo",""" +
+            """"context_tokens":0,"max_context_tokens":1048576,"context_usage":0.0},"request_id":"r"}"""
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessionPermission == "yolo" }
+        // The non-positional mapping: the yolo wire value is the middle "Ask When
+        // Needed" label, never sorted into place.
+        assertEquals(PermissionMode.AskWhenNeeded, viewModel.uiState.value.currentPermissionMode)
+
+        viewModel.onPermissionModeSelected(PermissionMode.AlwaysAsk)
+        awaitState(viewModel.uiState) { it.sessionPermission == "manual" }
+        assertEquals("manual", dataStore.data.first()[stringPreferencesKey("permission_for_session_session_1")])
+
+        viewModel.onInputChange("hi")
+        viewModel.onSend()
+        val body = awaitRequest("/prompts").body!!.utf8()
+        assertTrue(body, body.contains(""""permission_mode":"manual""""))
+        awaitState(viewModel.uiState) { !it.isSending }
+
+        // Recreation over the same DataStore (kill + reopen): the /status seed still
+        // reports the server's yolo, but the stored pick wins and re-stamps.
+        val recreated = ChatViewModel(
+            chatRepository,
+            testSessionsRepository(),
+            settingsRepository,
+            FakeAttachmentStore(),
+            subagentStore,
+            snapshotSync,
+            Chat("session_1"),
+            todoParser = testTodoParser(),
+        )
+        startedViewModels += recreated
+        recreated.onScreenStarted()
+        awaitState(recreated.uiState) { it.sessionPermission == "manual" }
+
+        recreated.onInputChange("hi again")
+        recreated.onSend()
+        val recreatedBody = awaitRequest("/prompts").body!!.utf8()
+        assertTrue(recreatedBody, recreatedBody.contains(""""permission_mode":"manual""""))
+    }
+
+    @Test
+    fun `a pending permission pick is not clobbered by a later status seed`() = runBlocking {
+        statusBody = """{"code":0,"msg":"success","data":{"busy":false,"permission":"yolo",""" +
+            """"context_tokens":0,"max_context_tokens":1048576,"context_usage":0.0},"request_id":"r"}"""
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessionPermission == "yolo" }
+        // Drain the startup burst so the next /status request is the re-seed's.
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        viewModel.onPermissionModeSelected(PermissionMode.AlwaysAsk)
+        awaitState(viewModel.uiState) { it.sessionPermission == "manual" }
+
+        // A later ON_START re-seeds from /status; the server still reports the
+        // previous mode (the pick was never sent) — the unsent pick must win.
+        statusBody = """{"code":0,"msg":"success","data":{"busy":false,"permission":"auto",""" +
+            """"context_tokens":0,"max_context_tokens":1048576,"context_usage":0.0},"request_id":"r"}"""
+        viewModel.onScreenStarted()
+        awaitRequest("/status")
+        delay(200)
+
+        assertEquals("manual", viewModel.uiState.value.sessionPermission)
+        assertEquals("manual", dataStore.data.first()[stringPreferencesKey("permission_for_session_session_1")])
+    }
+
     // --- Compact session (ticket 056) ---------------------------------------------------
 
     @Test

@@ -8,10 +8,11 @@ import kotlinx.coroutines.flow.Flow
 
 /**
  * Thin public facade of the chat data layer: delegates the REST verbs to [ChatApi],
- * the WebSocket stream to [SessionSocket], the per-session model/effort prefs to
+ * the WebSocket stream to [SessionSocket], the per-session model/effort/permission
+ * prefs to
  * [SessionPrefsStore], the models/config fetches to [ModelsRepository] and the
  * user-message activity recording to [SessionActivityStore] (ticket 086), keeping
- * only the send-path glue (model/effort resolution) here. The collaborators come
+ * only the send-path glue (model/effort/permission resolution) here. The collaborators come
  * from the Hilt graph (ticket 067). This is the error boundary: failures come back
  * as [Result.failure] of
  * [fr.louissaglio.kimi.android.data.DataError].
@@ -77,7 +78,15 @@ class ChatRepository @Inject constructor(
         attachments: List<FileMeta> = emptyList(),
     ): Result<Unit> {
         val model = promptModel(settings, sessionId)
-        return chatApi.postPrompt(settings, sessionId, text, attachments, model, promptThinking(settings, sessionId, model))
+        return chatApi.postPrompt(
+            settings,
+            sessionId,
+            text,
+            attachments,
+            model,
+            promptThinking(settings, sessionId, model),
+            promptPermissionMode(sessionId),
+        )
             .map { }
             .onSuccess { activity.record(sessionId) }
     }
@@ -96,7 +105,15 @@ class ChatRepository @Inject constructor(
         attachments: List<FileMeta> = emptyList(),
     ): Result<Unit> {
         val model = promptModel(settings, sessionId)
-        val promptId = chatApi.postPrompt(settings, sessionId, text, attachments, model, promptThinking(settings, sessionId, model))
+        val promptId = chatApi.postPrompt(
+            settings,
+            sessionId,
+            text,
+            attachments,
+            model,
+            promptThinking(settings, sessionId, model),
+            promptPermissionMode(sessionId),
+        )
             .getOrElse { return Result.failure(it) }
         return chatApi.postSteer(settings, sessionId, promptId)
             .onSuccess { activity.record(sessionId) }
@@ -124,6 +141,17 @@ class ChatRepository @Inject constructor(
         return effort.takeIf { it in supportEfforts }
     }
 
+    /**
+     * The permission mode stamped on every prompt (ticket 141): the session's stored
+     * pick, else no `permission_mode` field at all — unlike [promptModel] there is no
+     * server-side fallback to resolve here (absent = follow the server). The per-prompt
+     * stamp binds the session for its remaining turns, so a stored pick self-heals on
+     * every send. This resolution feeds [ChatApi.postPrompt], the single choke point
+     * both [sendPrompt] and [steer] go through.
+     */
+    private suspend fun promptPermissionMode(sessionId: String): String? =
+        prefs.permission(sessionId)
+
     /** The session's stored model choice, null when the session follows the server default. */
     suspend fun getSessionModel(sessionId: String): String? = prefs.model(sessionId)
 
@@ -135,6 +163,14 @@ class ChatRepository @Inject constructor(
 
     /** Persists the session's effort choice; subsequent prompts carry it (see [promptThinking]). */
     suspend fun setSessionEffort(sessionId: String, effort: String) = prefs.setEffort(sessionId, effort)
+
+    /** The session's stored permission-mode pick (ticket 141), null when the session
+     * follows the server. */
+    suspend fun getSessionPermission(sessionId: String): String? = prefs.permission(sessionId)
+
+    /** Persists the session's permission-mode pick; subsequent prompts carry it (see
+     * [promptPermissionMode]). */
+    suspend fun setSessionPermission(sessionId: String, permission: String) = prefs.setPermission(sessionId, permission)
 
     /** The models the server offers (`GET /api/v1/models`), for the chat screen's model
      * picker. Cached per server URL; fetch failures are not cached. */

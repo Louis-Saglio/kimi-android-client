@@ -197,12 +197,16 @@ data class ContextUsage(
 /** Snapshot of `GET /api/v1/sessions/{id}/status` (ticket 041): [busy] is the mid-turn
  * flag; [contextUsage] is null only when the success envelope carried no data object.
  * [model]/[thinkingLevel] are the session's server-side binding (ticket 107) — null
- * when the server reported none (unbound session, or a blank `thinking_level`). */
+ * when the server reported none (unbound session, or a blank `thinking_level`).
+ * [permission] is the session's permission mode (ticket 141, manual/yolo/auto) —
+ * always reported (a fresh session reads the server default), null only on a
+ * data-less envelope or a blank value. */
 data class SessionStatus(
     val busy: Boolean,
     val contextUsage: ContextUsage?,
     val model: String? = null,
     val thinkingLevel: String? = null,
+    val permission: String? = null,
 )
 
 /** What the socket reports to the collector: connection lifecycle + session events. */

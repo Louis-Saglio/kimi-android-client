@@ -87,6 +87,9 @@ data class SessionStatusData(
     // unbound, `thinking_level` reads "" on a fresh never-prompted session.
     val model: String? = null,
     @SerialName("thinking_level") val thinkingLevel: String? = null,
+    // The session's permission mode (ticket 141): manual/yolo/auto. Unlike `model` it
+    // is ALWAYS reported — a fresh session reads the server default.
+    val permission: String? = null,
 )
 
 /**

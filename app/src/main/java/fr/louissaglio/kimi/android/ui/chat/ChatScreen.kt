@@ -201,6 +201,7 @@ fun ChatScreen(
         onQuestionRowTapped = onQuestionRowTapped,
         onModelSelected = viewModel::onModelSelected,
         onEffortSelected = viewModel::onEffortSelected,
+        onPermissionModeSelected = viewModel::onPermissionModeSelected,
         onAttach = onAttach,
         onAttachmentRemoved = viewModel::onAttachmentRemoved,
         onImageClick = onImageClick,
@@ -279,6 +280,7 @@ private fun ChatContent(
     onQuestionRowTapped: (toolCallId: String, input: String, output: String) -> Unit,
     onModelSelected: (String) -> Unit,
     onEffortSelected: (String) -> Unit,
+    onPermissionModeSelected: (PermissionMode) -> Unit,
     onAttach: () -> Unit,
     onAttachmentRemoved: (String) -> Unit,
     onImageClick: (ChatMessage.Part.Image) -> Unit,
@@ -294,6 +296,7 @@ private fun ChatContent(
     onCancelJob: (String) -> Unit = {},
 ) {
     var showModelPicker by rememberSaveable { mutableStateOf(false) }
+    var showPermissionPicker by rememberSaveable { mutableStateOf(false) }
     // Ticket 089: system back closes the read-only resolved view before navigating.
     BackHandler(enabled = uiState.resolvedQuestionView != null) { onCloseResolvedQuestion() }
     // Explicit "go to the newest" intent (ticket 051): the send wrapper below
@@ -452,10 +455,14 @@ private fun ChatContent(
                     // default); both hidden until the models fetch lands.
                     modelLabel = uiState.currentModelLabel,
                     modelEffort = uiState.effectiveEffort,
+                    // The permission chip (ticket 141): the session's effective mode,
+                    // hidden until the /status seed or a stored pick lands.
+                    permissionMode = uiState.currentPermissionMode,
                     contextUsage = uiState.contextUsage,
                     compactEnabled = canCompact,
                     onCompact = onCompact,
                     onModelClick = { showModelPicker = true },
+                    onPermissionClick = { showPermissionPicker = true },
                     onTextChange = onInputChange,
                     // Send/Steer both funnel here; bump first so the jump rides
                     // the same recomposition as the ViewModel's echo append.
@@ -520,6 +527,16 @@ private fun ChatContent(
             onModelSelected = onModelSelected,
             onEffortSelected = onEffortSelected,
             onDismiss = { showModelPicker = false },
+        )
+    }
+    if (showPermissionPicker) {
+        PermissionPickerSheet(
+            current = uiState.currentPermissionMode,
+            onSelected = { mode ->
+                onPermissionModeSelected(mode)
+                showPermissionPicker = false
+            },
+            onDismiss = { showPermissionPicker = false },
         )
     }
 }
@@ -644,6 +661,7 @@ private fun ChatContentPreview() {
                 modelsAvailable = true,
                 serverDefaultModel = "kimi-code/k3",
                 sessionEffort = "low",
+                sessionPermission = "yolo",
             ),
             snackbarHostState = remember { SnackbarHostState() },
             onNavigateBack = {},
@@ -667,6 +685,7 @@ private fun ChatContentPreview() {
             onQuestionRowTapped = { _, _, _ -> },
             onModelSelected = {},
             onEffortSelected = {},
+            onPermissionModeSelected = {},
             onAttach = {},
             onAttachmentRemoved = {},
             onImageClick = {},

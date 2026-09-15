@@ -163,6 +163,10 @@ class ChatViewModel internal constructor(
         val sessionModel: String? = null,
         /** The thinking effort chosen for this session; null = follow the server default. */
         val sessionEffort: String? = null,
+        /** The session's permission mode wire value (manual/yolo/auto — ticket 141):
+         * the local pick (persisted), else the /status-seeded server report; null until
+         * either lands — the composer's permission chip stays hidden meanwhile. */
+        val sessionPermission: String? = null,
         /** Context window fill for the composer's ring (041, moved into the composer
          * in 053); null until the first read carrying a real fill arrives — the
          * snapshot (real usage since 0.38.0), the /status seed, or a live
@@ -225,6 +229,11 @@ class ChatViewModel internal constructor(
          * effort-less models — the chip then shows the plain model name. */
         val effectiveEffort: String?
             get() = if (supportedEfforts.isEmpty()) null else selectedEffort ?: defaultEffort
+
+        /** The permission mode the composer chip shows (ticket 141); an unknown wire
+         * value (or none yet) hides the chip. */
+        val currentPermissionMode: PermissionMode?
+            get() = PermissionMode.fromWire(sessionPermission)
     }
 
     sealed interface Effect {
@@ -700,10 +709,11 @@ class ChatViewModel internal constructor(
             }
             result
                 .onSuccess {
-                    // The server bound the session to the sent model/effort: its
-                    // reports describe the pick from here on and may sync again.
+                    // The server bound the session to the sent model/effort/permission
+                    // mode: its reports describe the pick from here on and may sync again.
                     pendingModelPick = false
                     pendingEffortPick = false
+                    pendingPermissionPick = false
                     // No local echo: the user message arrives inline in the socket's
                     // context.spliced frame (docs/server-api.md), the reply via the
                     // streaming events.
@@ -1084,6 +1094,12 @@ class ChatViewModel internal constructor(
     private var pendingModelPick = false
     private var pendingEffortPick = false
 
+    /** Same lifecycle as [pendingModelPick], for the permission mode (ticket 141). The
+     * seed sync additionally checks the store itself (see [syncServerSessionPermission])
+     * because the server always reports a mode — unlike the model binding, a fresh
+     * session's report would otherwise clobber an unsent pick after a recreation. */
+    private var pendingPermissionPick = false
+
     /**
      * Loads the model picker's data (ticket 031): the server's model list, its default,
      * and this session's stored choice. Lazy — first chat-screen open, cached in the
@@ -1127,6 +1143,14 @@ class ChatViewModel internal constructor(
         viewModelScope.launch { chatRepository.setSessionEffort(sessionId, effort) }
     }
 
+    /** Persists the picked permission mode for this session (ticket 141); subsequent
+     * prompts carry the `permission_mode` stamp. */
+    fun onPermissionModeSelected(mode: PermissionMode) {
+        pendingPermissionPick = true
+        uiState.update { it.copy(sessionPermission = mode.wire) }
+        viewModelScope.launch { chatRepository.setSessionPermission(sessionId, mode.wire) }
+    }
+
     /**
      * The server owns the session's model/effort binding (ticket 107): what /status and
      * agent.status.updated report is written through to the per-session store, so the
@@ -1142,6 +1166,24 @@ class ChatViewModel internal constructor(
         if (effort != null && !pendingEffortPick) {
             uiState.update { it.copy(sessionEffort = effort) }
             viewModelScope.launch { chatRepository.setSessionEffort(sessionId, effort) }
+        }
+    }
+
+    /**
+     * The /status permission-mode seed (ticket 141): the report feeds the chip but is
+     * NEVER written through to the per-session store — unlike the model binding the
+     * server always reports a mode (a fresh session reads the server default), and a
+     * stored value stamps `permission_mode` on every prompt, so write-through would
+     * turn "follow the server" sessions into stamped ones and pin the first value ever
+     * seen. A local pick wins over the report: [pendingPermissionPick] covers the
+     * in-flight window, [storedPick] (read by the seed ahead of the GET) the
+     * recreation case, where the in-memory flag was lost. The pick is sticky by design
+     * — per-prompt stamping re-asserts it on every send (the session-profile endpoint
+     * stays unused, see ticket 141).
+     */
+    private fun syncServerSessionPermission(permission: String?, storedPick: String?) {
+        if (permission != null && !pendingPermissionPick && storedPick == null) {
+            uiState.update { it.copy(sessionPermission = permission) }
         }
     }
 
@@ -1169,9 +1211,18 @@ class ChatViewModel internal constructor(
         val turnEventsAtSeed = turnSeedGuard.capture()
         val contextEventsAtSeed = contextUsageSeedGuard.capture()
         viewModelScope.launch {
+            // The stored permission pick seeds the chip ahead of the GET (it shows
+            // even when the /status read fails) and shields the server report from
+            // clobbering an unsent pick — pendingPermissionPick is per-instance, the
+            // store is the record that survives recreation (ticket 141).
+            val storedPermissionPick = chatRepository.getSessionPermission(sessionId)
+            if (storedPermissionPick != null) {
+                uiState.update { it.copy(sessionPermission = storedPermissionPick) }
+            }
             chatRepository.getSessionStatus(settingsRepository.current(), sessionId)
                 .onSuccess { status ->
                     syncServerSessionModel(status.model, status.thinkingLevel)
+                    syncServerSessionPermission(status.permission, storedPermissionPick)
                     uiState.update {
                         it.copy(
                             isWorking = if (!turnSeedGuard.isStale(turnEventsAtSeed)) status.busy else it.isWorking,

@@ -49,6 +49,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
 import fr.louissaglio.kimi.android.ui.common.formatFileSize
+import fr.louissaglio.kimi.android.ui.common.icons.ShieldIcon
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -61,10 +62,14 @@ internal fun ChatInputBar(
     modelLabel: String?,
     /** The chip's effective effort (ticket 108); null on effort-less models. */
     modelEffort: String?,
+    /** The session's effective permission mode (ticket 141); null hides the chip
+     * until the /status seed or a stored pick lands. */
+    permissionMode: PermissionMode?,
     contextUsage: ContextUsage?,
     compactEnabled: Boolean,
     onCompact: () -> Unit,
     onModelClick: () -> Unit,
+    onPermissionClick: () -> Unit,
     onTextChange: (String) -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
@@ -93,7 +98,8 @@ internal fun ChatInputBar(
             }
             // One rounded container echoes the web composer pill (ticket 038): the field
             // spans the full width on top, an action row below holds attach, the model
-            // chip, the context ring and stop/send (ticket 053). The field carries no
+            // chip, the permission chip (ticket 141), the context ring and stop/send
+            // (ticket 053). The field carries no
             // outline or fill of its own — the container is the boundary.
             Surface(
                 shape = MaterialTheme.shapes.extraLarge,
@@ -134,6 +140,7 @@ internal fun ChatInputBar(
                             Icon(Icons.Filled.Add, contentDescription = null)
                         }
                         modelLabel?.let { label -> ModelChip(model = label, effort = modelEffort, onClick = onModelClick) }
+                        permissionMode?.let { PermissionModeChip(mode = it, onClick = onPermissionClick) }
                         // Context usage right of the model chip (ticket 053): model-scoped
                         // info next to the model it belongs to; hidden until known. The
                         // ring's dialog carries the compact affordance at ≥80% (057).
@@ -219,6 +226,45 @@ private fun ModelChip(model: String, effort: String?, onClick: () -> Unit) {
             contentDescription = null,
             modifier = Modifier.size(16.dp),
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** Permission-mode selector next to the model chip (ticket 141): a shield glyph, the
+ * mode's short label and a chevron, opening the PermissionPickerSheet. The mode's
+ * risk tint colors the whole chip — Never Ask is the error-tinted one. Same 48dp
+ * touch-target idiom as the model chip. */
+@Composable
+private fun PermissionModeChip(mode: PermissionMode, onClick: () -> Unit) {
+    val tint = mode.tint
+    Row(
+        modifier = Modifier
+            .heightIn(min = 48.dp)
+            .clip(MaterialTheme.shapes.large)
+            .clickable(onClick = onClick)
+            .semantics { contentDescription = "Permission mode: ${mode.label}" }
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Icon(
+            imageVector = ShieldIcon,
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+            tint = tint,
+        )
+        Text(
+            text = mode.label,
+            style = MaterialTheme.typography.labelMedium,
+            color = tint,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Icon(
+            imageVector = Icons.Filled.KeyboardArrowDown,
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+            tint = tint,
         )
     }
 }

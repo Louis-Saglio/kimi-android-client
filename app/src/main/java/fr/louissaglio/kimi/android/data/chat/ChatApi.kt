@@ -132,7 +132,10 @@ class ChatApi @Inject constructor(
 
     /** POSTs the prompt and returns its id (queued while busy, running otherwise).
      * [thinking] is the verified per-prompt effort override (a plain string,
-     * docs/server-api.md); null leaves the field out. [attachments] become content items
+     * docs/server-api.md); null leaves the field out. [permissionMode] is the
+     * per-prompt permission-mode stamp (ticket 141, manual/yolo/auto): it binds the
+     * session for its remaining turns; null leaves the field out (the session follows
+     * the server). [attachments] become content items
      * before the text item (ticket 033): an `image` part for image MIME types, a `file`
      * part otherwise (docs/server-api.md, Prompts). A blank [text] adds no text item — the
      * caller guarantees text and attachments are not both empty. */
@@ -143,6 +146,7 @@ class ChatApi @Inject constructor(
         attachments: List<FileMeta>,
         model: String?,
         thinking: String?,
+        permissionMode: String?,
     ): Result<String> {
         val body = api.jsonBody {
             putJsonArray("content") {
@@ -174,6 +178,7 @@ class ChatApi @Inject constructor(
             }
             if (model != null) put("model", model)
             if (thinking != null) put("thinking", thinking)
+            if (permissionMode != null) put("permission_mode", permissionMode)
         }
         return api.post(settings, "/api/v1/sessions/$sessionId/prompts", body) { responseBody ->
             api.json.decodeFromString<Envelope<PromptData>>(responseBody).toResult().map { it.promptId }
@@ -345,6 +350,9 @@ class ChatApi @Inject constructor(
                     // fresh session's "none", never a value to store.
                     model = data?.model?.takeIf { it.isNotBlank() },
                     thinkingLevel = data?.thinkingLevel?.takeIf { it.isNotBlank() },
+                    // Permission mode (ticket 141): always reported (a fresh session
+                    // reads the server default) — same blank guard regardless.
+                    permission = data?.permission?.takeIf { it.isNotBlank() },
                 )
             }
         }

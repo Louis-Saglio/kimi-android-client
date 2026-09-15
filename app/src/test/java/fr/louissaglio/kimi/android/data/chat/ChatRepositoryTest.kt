@@ -1000,6 +1000,66 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun `sendPrompt sends the session's stored permission mode in the prompt body`() = runBlocking {
+        // Ticket 141: the per-prompt permission_mode stamp binds the session for its
+        // remaining turns (docs/server-api.md, Prompts).
+        repository.setSessionPermission("session_1", "manual")
+        enqueueConfigWithoutDefaultModel()
+        enqueuePromptAck()
+
+        val result = repository.sendPrompt(settings(), "session_1", "hello")
+
+        assertTrue(result.isSuccess)
+        assertEquals("/api/v1/config", server.takeRequest().target)
+        val prompt = server.takeRequest()
+        assertEquals("/api/v1/sessions/session_1/prompts", prompt.target)
+        assertEquals(
+            """{"content":[{"type":"text","text":"hello"}],"permission_mode":"manual"}""",
+            prompt.body!!.utf8(),
+        )
+    }
+
+    @Test
+    fun `steer stamps the session's stored permission mode too`() = runBlocking {
+        repository.setSessionPermission("session_1", "yolo")
+        enqueueConfigWithoutDefaultModel()
+        enqueuePromptAck()
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"steered":true,"prompt_ids":["msg_1"]},"request_id":"01KX"}""",
+            ),
+        )
+
+        val result = repository.steer(settings(), "session_1", "Stop counting")
+
+        assertTrue(result.isSuccess)
+        assertEquals("/api/v1/config", server.takeRequest().target)
+        val prompt = server.takeRequest()
+        assertEquals(
+            """{"content":[{"type":"text","text":"Stop counting"}],"permission_mode":"yolo"}""",
+            prompt.body!!.utf8(),
+        )
+        assertEquals("/api/v1/sessions/session_1/prompts:steer", server.takeRequest().target)
+    }
+
+    @Test
+    fun `no stored permission mode leaves the field out of the prompt body`() = runBlocking {
+        // Ticket 141: absent store value = follow the server — the prompt carries no
+        // permission_mode field at all (web parity; the stamp self-heals once picked).
+        enqueueConfigWithoutDefaultModel()
+        enqueuePromptAck()
+
+        val result = repository.sendPrompt(settings(), "session_1", "hello")
+
+        assertTrue(result.isSuccess)
+        assertEquals("/api/v1/config", server.takeRequest().target)
+        assertEquals(
+            """{"content":[{"type":"text","text":"hello"}]}""",
+            server.takeRequest().body!!.utf8(),
+        )
+    }
+
+    @Test
     fun `abortPrompt posts an empty body to the abort endpoint`() = runBlocking {
         server.enqueue(
             MockResponse(body = """{"code":0,"msg":"success","data":{"aborted":true},"request_id":"01KX"}"""),
@@ -1110,6 +1170,23 @@ class ChatRepositoryTest {
         val status = repository.getSessionStatus(settings(), "session_1").getOrThrow()
         assertNull(status.model)
         assertNull(status.thinkingLevel)
+    }
+
+    @Test
+    fun `getSessionStatus maps the permission mode`() = runBlocking {
+        // Ticket 141: /status always reports the session's mode (a fresh session reads
+        // the server default — "yolo" on Louis's server).
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"busy":false,"permission":"manual",""" +
+                    """"context_tokens":100,"max_context_tokens":1048576,"context_usage":0.0},"request_id":"01KX"}""",
+            ),
+        )
+
+        assertEquals(
+            SessionStatus(busy = false, contextUsage = ContextUsage(100, 1048576), permission = "manual"),
+            repository.getSessionStatus(settings(), "session_1").getOrThrow(),
+        )
     }
 
     @Test

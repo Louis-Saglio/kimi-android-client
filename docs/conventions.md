@@ -13,7 +13,11 @@
   ticket 107: `/status` seeds and `agent.status.updated` frames write the
   session's bound model/effort through to it, so the chip and the prompt send
   path — both store-fed — follow bindings made from any client; a pick made
-  locally but not yet sent wins over server reports), `ChatMessageMapper`
+  locally but not yet sent wins over server reports — plus the ticket-141
+  permission-mode pick, which is deliberately NOT server-synced: `/status`
+  always reports a mode, so write-through would turn follow-the-server
+  sessions into stamped ones; the stored pick wins over the report and
+  self-heals via the per-prompt `permission_mode` stamp), `ChatMessageMapper`
   (DTO→domain; a tool call's raw `args` JsonObject rides the domain/end-to-end
   models — `tool_use` parts, `tool.call.started` events, transcript tool frames,
   `ChatItem.ToolActivity` — and payload-derived display renderings live in
