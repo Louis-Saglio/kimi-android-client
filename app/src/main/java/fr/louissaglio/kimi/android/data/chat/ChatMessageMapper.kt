@@ -173,12 +173,15 @@ class ChatMessageMapper @Inject constructor(json: Json) {
                     "suspended" -> SubagentRosterPhase.Suspended
                     "completed" -> SubagentRosterPhase.Completed
                     "failed" -> SubagentRosterPhase.Failed
+                    "cancelled" -> SubagentRosterPhase.Cancelled
                     else -> SubagentRosterPhase.Unknown
                 },
                 parentToolCallId = entry.parentToolCallId,
                 runInBackground = entry.runInBackground,
                 outputPreview = entry.outputPreview?.takeIf { it.isNotBlank() },
                 swarmIndex = entry.swarmIndex,
+                model = entry.model?.takeIf { it.isNotBlank() },
+                thinkingEffort = entry.thinkingEffort?.takeIf { it.isNotBlank() },
             )
         },
         inFlightTurn = dto.inFlightTurn?.let { turn ->
@@ -322,6 +325,8 @@ class ChatMessageMapper @Inject constructor(json: Json) {
             command = dto.command,
             outputPreview = dto.outputPreview,
             outputBytes = dto.outputBytes,
+            model = dto.model?.takeIf { it.isNotBlank() },
+            thinkingEffort = dto.thinkingEffort?.takeIf { it.isNotBlank() },
         )
     }
 

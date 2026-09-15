@@ -529,7 +529,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         // the AgentSwarm call's toolCallId, the messages page carries the call itself.
         // The store links every member (the one-to-many registry), the row stays
         // unlinked (the swarm card navigates by the tool call id), and the UiState
-        // publishes the member count the card shows.
+        // publishes the member list the card's aggregate reads (ticket 135).
         snapshotBody = """{"code":0,"msg":"success","data":{"as_of_seq":18,"epoch":"ep_1",""" +
             """"session":{"id":"session_1","busy":true,"usage":{"context_tokens":0,"context_limit":0}},""" +
             """"messages":{"items":[""" +
@@ -550,7 +550,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         awaitCondition {
             subagentStore.linksFor("session_1")["tool_swarm"] == listOf("agent-1", "agent-2", "agent-3")
         }
-        awaitState(viewModel.uiState) { it.swarmMemberCounts["tool_swarm"] == 3 }
+        awaitState(viewModel.uiState) { it.swarmMembers["tool_swarm"]?.size == 3 }
         // The AgentSwarm row itself never gains a subagentId (single-Agent only)...
         val row = viewModel.uiState.value.items.orEmpty()
             .filterIsInstance<ChatItem.ToolGroup>()

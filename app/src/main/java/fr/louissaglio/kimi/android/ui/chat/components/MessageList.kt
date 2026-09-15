@@ -78,9 +78,10 @@ internal fun MessageList(
      * row opens or closes its read-only view. Question rows never expand — the card
      * is the details. */
     onQuestionRowTapped: (toolCallId: String, input: String, output: String) -> Unit = { _, _, _ -> },
-    /** toolCallId → linked member count of the session's `AgentSwarm` calls (ticket
-     * 134); a call with a positive count renders as the swarm card. */
-    swarmMemberCounts: Map<String, Int> = emptyMap(),
+    /** toolCallId → linked member states of the session's `AgentSwarm` calls
+     * (ticket 134; the states themselves since 135 — the card's aggregate reads
+     * them); a call with a non-empty list renders as the swarm card. */
+    swarmMembers: Map<String, List<SubagentStreamStore.SubagentState>> = emptyMap(),
     /** Invoked with the toolCallId when a swarm card is tapped (ticket 134). */
     onOpenSwarm: (String) -> Unit = {},
     /** Top-anchored history pagination (ticket 046 on the sub-agent page; the 043
@@ -187,7 +188,7 @@ internal fun MessageList(
                     is ChatItem.ToolGroup ->
                         ToolGroupCard(
                             item, onOpenSubagent, onOpenJob, onQuestionRowTapped, onOpenEditDiff, onOpenFileContent,
-                            swarmMemberCounts, onOpenSwarm,
+                            swarmMembers, onOpenSwarm,
                         )
                     is ChatItem.CompactionDivider -> CompactionDividerRow(item)
                     // Bare rows are not produced by ChatTimeline anymore (ticket 037) but
@@ -195,7 +196,7 @@ internal fun MessageList(
                     is ChatItem.ToolActivity ->
                         ToolRow(
                             item, onOpenSubagent, onOpenJob, onQuestionRowTapped, onOpenEditDiff, onOpenFileContent,
-                            swarmMemberCounts, onOpenSwarm,
+                            swarmMembers, onOpenSwarm,
                         )
                 }
             }

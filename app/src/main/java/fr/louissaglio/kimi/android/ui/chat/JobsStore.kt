@@ -57,6 +57,13 @@ internal class JobsStore(
     private val state: () -> ChatViewModel.UiState,
     private val updateState: ((ChatViewModel.UiState) -> ChatViewModel.UiState) -> Unit,
     private val sendEffect: suspend (ChatViewModel.Effect) -> Unit,
+    /** Every successful [seed]'s RAW task list (ticket 135), before the jobs filter —
+     * the sub-agent store heals member cancelled states and model/effort pairs from
+     * the subagent-kind entries the widget itself has no use for. Fed even when the
+     * guarded apply goes stale: the store's writes are precedence-gated, so the
+     * live event that made the seed stale (and which the store saw too) stays
+     * authoritative. */
+    private val onTasksSeed: (List<BackgroundTask>) -> Unit = {},
 ) {
 
     /** Bumped on every live task event, so [seed] drops a response a newer
@@ -85,6 +92,7 @@ internal class JobsStore(
         scope().launch {
             chatRepository.getTasks(settingsRepository.current(), sessionId, status = null)
                 .onSuccess { tasks ->
+                    onTasksSeed(tasks)
                     if (seedGuard.isStale(eventsAtSeed)) return@onSuccess
                     updateState { current ->
                         current.copy(

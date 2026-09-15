@@ -41,8 +41,11 @@ import kotlinx.serialization.json.jsonPrimitive
 
 /** Lifecycle of one sub-agent (docs/server-api.md, Sub-agents): Queued between spawned
  * and started, Working while its turn streams (also after a resume), Suspended/Completed/
- * Failed per the matching lifecycle frame. */
-enum class SubagentStatus { Queued, Working, Suspended, Completed, Failed }
+ * Failed per the matching lifecycle frame. Cancelled (ticket 135) is a deliberate stop —
+ * it arrives as `subagent.cancelled` (schema-level), as a live `task.terminated` with
+ * `status:"killed"`, as the roster's `cancelled` phase, or as REST `"cancelled"` on a
+ * cold start — and never counts as failed in the swarm aggregate (web parity). */
+enum class SubagentStatus { Queued, Working, Suspended, Completed, Failed, Cancelled }
 
 /**
  * Session-scoped store of every sub-agent's state (ticket 045, reimplemented in 091),
@@ -132,6 +135,11 @@ class SubagentStreamStore @Inject constructor(
         /** The background-task registration id (0.38.0 spawned frame); null from the
          * snapshot roster, which carries no such field. */
         val taskId: String? = null,
+        /** The run's bound model/effort (ticket 135): the spawned frame (0.34.0) is
+         * the live carrier, the snapshot roster and the REST `/tasks` list the
+         * cold-start ones; the swarm aggregate's shared-model line reads them. */
+        val model: String? = null,
+        val thinkingEffort: String? = null,
     )
 
     /** Which source a record's status came from — the precedence order among status
@@ -173,6 +181,12 @@ class SubagentStreamStore @Inject constructor(
         /** The background-task registration id (first writer wins): only the spawned
          * frame carries it — the roster has no such field. */
         var taskId: String? = null
+
+        /** The run's bound model/effort (ticket 135): the spawned frame overwrites
+         * when it carries them (the highest identity source), the roster and the
+         * REST tasks list fill blanks only. */
+        var model: String? = null
+        var thinkingEffort: String? = null
 
         var status: SubagentStatus = SubagentStatus.Queued
         var statusSource: StatusSource? = null
@@ -316,7 +330,7 @@ class SubagentStreamStore @Inject constructor(
             return SubagentState(
                 id, name, description, runInBackground, status, resultSummary, error,
                 hasMoreTurns, promptBubble + timeline.items(), timeline.todos(), jobs.values.toList(),
-                swarmIndex, taskId,
+                swarmIndex, taskId, model, thinkingEffort,
             )
         }
     }
@@ -373,10 +387,17 @@ class SubagentStreamStore @Inject constructor(
      * spawn-arrival order at the end (sortedBy is stable). Live: re-fires on every
      * publish of the session's records. */
     fun swarmMembers(sessionId: String, toolCallId: String): Flow<List<SubagentState>> =
+        swarmMembersByCall(sessionId).map { it[toolCallId].orEmpty() }.distinctUntilChanged()
+
+    /** toolCallId → member states for every linked call of the session (ticket 135),
+     * each list sorted like [swarmMembers]: the chat's swarm cards read their
+     * aggregate input from here, one ViewModel-side collection covering all cards. */
+    fun swarmMembersByCall(sessionId: String): Flow<Map<String, List<SubagentState>>> =
         states.map { bySession ->
-            links[sessionId]?.get(toolCallId).orEmpty()
-                .mapNotNull { bySession[sessionId]?.get(it) }
-                .sortedBy { it.swarmIndex ?: Int.MAX_VALUE }
+            links[sessionId].orEmpty().mapValues { (_, ids) ->
+                ids.mapNotNull { bySession[sessionId]?.get(it) }
+                    .sortedBy { it.swarmIndex ?: Int.MAX_VALUE }
+            }
         }.distinctUntilChanged()
 
     /** The `AgentSwarm` call's own label (its `description` arg), mined by
@@ -495,6 +516,8 @@ class SubagentStreamStore @Inject constructor(
         }
         if (record.swarmIndex == null) record.swarmIndex = event.swarmIndex
         if (record.taskId == null) record.taskId = event.taskId
+        if (!event.model.isNullOrBlank()) record.model = event.model
+        if (!event.thinkingEffort.isNullOrBlank()) record.thinkingEffort = event.thinkingEffort
         if (event.parentToolCallId.isNotBlank()) registerLink(sessionId, event.parentToolCallId, event.subagentId)
         publish(sessionId)
     }
@@ -520,6 +543,8 @@ class SubagentStreamStore @Inject constructor(
                 record.parentToolCallId = entry.parentToolCallId
             }
             if (record.swarmIndex == null) record.swarmIndex = entry.swarmIndex
+            if (record.model == null) record.model = entry.model
+            if (record.thinkingEffort == null) record.thinkingEffort = entry.thinkingEffort
             if (entry.parentToolCallId.isNotBlank()) registerLink(sessionId, entry.parentToolCallId, entry.id)
             val status = when (entry.phase) {
                 SubagentRosterPhase.Queued -> SubagentStatus.Queued
@@ -527,6 +552,7 @@ class SubagentStreamStore @Inject constructor(
                 SubagentRosterPhase.Suspended -> SubagentStatus.Suspended
                 SubagentRosterPhase.Completed -> SubagentStatus.Completed
                 SubagentRosterPhase.Failed -> SubagentStatus.Failed
+                SubagentRosterPhase.Cancelled -> SubagentStatus.Cancelled
                 // A phase this app predates: no status write — the transcript-derived
                 // status (when it lands) is a better guess than a roster lie.
                 SubagentRosterPhase.Unknown -> null
@@ -705,18 +731,63 @@ class SubagentStreamStore @Inject constructor(
         publish(sessionId)
     }
 
-    /** One sub-agent-owned task.* frame (started/terminated share the upsert): the
-     * record's jobs list is the sub-agent page's jobs widget. Unknown sub-agent (its
-     * spawn predates the subscription): dropped exactly like its transcript frames. */
+    /** One sub-agent-scope task.* frame (started/terminated share the handling):
+     * sub-agent-OWNED tasks (the payload's agentId stamp) upsert the owning record's
+     * jobs list — the sub-agent page's jobs widget; main-owned ones are the chat's
+     * JobsStore business. Independently of the owner, a terminal `killed` frame whose
+     * [TaskInfo.agentId] names a record pins that member Cancelled (ticket 135): a
+     * deliberately stopped member gets NO `subagent.completed`/`failed` frame
+     * (docs/server-api.md), so the live task.terminated is the only live carrier of
+     * the cancelled truth — a main-owned swarm member's frame included. Unknown
+     * sub-agent (its spawn predates the subscription): dropped exactly like its
+     * transcript frames. */
     private fun onTaskEvent(sessionId: String, agentId: String, info: TaskInfo, terminal: Boolean) {
-        if (agentId == MAIN_AGENT_ID) return
-        val record = record(sessionId, agentId)
-        if (record == null) {
-            Log.d(TAG, "Dropping task frame for unknown sub-agent '$agentId' (spawn missed)")
-            return
+        var changed = false
+        if (terminal && info.status == TaskInfo.Status.Killed) {
+            val member = info.agentId?.let { record(sessionId, it) }
+            if (member != null) {
+                member.applyStatus(SubagentStatus.Cancelled, StatusSource.Live)
+                changed = true
+            }
         }
-        record.upsertJob(info.toJob(), terminal)
-        publish(sessionId)
+        if (agentId != MAIN_AGENT_ID) {
+            val record = record(sessionId, agentId)
+            if (record == null) {
+                Log.d(TAG, "Dropping task frame for unknown sub-agent '$agentId' (spawn missed)")
+            } else {
+                record.upsertJob(info.toJob(), terminal)
+                changed = true
+            }
+        }
+        if (changed) publish(sessionId)
+    }
+
+    /** The REST `/tasks` list at a cold start / `resync_required` (ticket 135), fed
+     * by the JobsStore's seed. A main-owned sub-agent task whose `agentId` names a
+     * record heals it the two ways the snapshot roster cannot: a BACKGROUND member
+     * is excluded from the roster (REST serves it — docs/server-api.md), so the
+     * list is its only cold-start carrier of the cancelled truth (wire "cancelled")
+     * and of the model/effort pair. Status writes ride the roster precedence tier:
+     * a live pin (a live lifecycle frame or killed task.terminated) always wins. */
+    fun applyTaskList(sessionId: String, tasks: List<BackgroundTask>) {
+        var changed = false
+        for (task in tasks) {
+            if (task.kind != BackgroundTask.Kind.Subagent) continue
+            val record = record(sessionId, task.agentId ?: continue) ?: continue
+            if (record.model == null && !task.model.isNullOrBlank()) {
+                record.model = task.model
+                changed = true
+            }
+            if (record.thinkingEffort == null && !task.thinkingEffort.isNullOrBlank()) {
+                record.thinkingEffort = task.thinkingEffort
+                changed = true
+            }
+            if (task.status == BackgroundTask.Status.Cancelled) {
+                record.applyStatus(SubagentStatus.Cancelled, StatusSource.Roster)
+                changed = true
+            }
+        }
+        if (changed) publish(sessionId)
     }
 
     /** The ticket-099 cold-open heal: a transcript page's task-completion notification
@@ -767,6 +838,8 @@ class SubagentStreamStore @Inject constructor(
                     StatusSource.Live,
                     error = event.error.ifBlank { null },
                 )
+            is SessionEvent.SubagentCancelled ->
+                record.applyStatus(SubagentStatus.Cancelled, StatusSource.Live)
         }
         publish(sessionId)
     }

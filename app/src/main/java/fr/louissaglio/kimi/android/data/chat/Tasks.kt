@@ -21,7 +21,9 @@ import kotlinx.serialization.json.jsonPrimitive
  * servers whose REST shape does not carry it (it arrives via `task.started` instead).
  * [command] rides on bash-kind tasks; [outputPreview]/[outputBytes] arrive only on a
  * get-with-output read (ticket 096's job screen) — the stored stdout/stderr tail,
- * live while a bash task runs.
+ * live while a bash task runs. [model]/[thinkingEffort] ride on subagent-kind tasks
+ * (0.34.0) — the sub-agent store heals a member's pair from the list on a cold
+ * start (ticket 135).
  */
 data class BackgroundTask(
     val id: String,
@@ -35,6 +37,8 @@ data class BackgroundTask(
     val command: String? = null,
     val outputPreview: String? = null,
     val outputBytes: Int? = null,
+    val model: String? = null,
+    val thinkingEffort: String? = null,
 ) {
     /** REST wire vocabulary (docs/server-api.md): core `agent`→Subagent,
      * `process`→Bash. Question flows (`tool`) never reach the domain — filtered at

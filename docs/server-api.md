@@ -3463,7 +3463,10 @@ Upstream schema only (not captured live): `subagent.spawned` may also carry
 `parentToolCallUuid` and `swarmIndex` (the `AgentSwarm` member index);
 `subagent.started` re-fires when a suspended sub-agent resumes;
 `subagent.suspended` is `{subagentId, reason}` (not terminal);
-`subagent.failed` is `{subagentId, error}`.
+`subagent.failed` is `{subagentId, error}`;
+`subagent.cancelled` is `{subagentId}` (terminal — a deliberate stop; the live
+stream carries the same truth as `task.terminated` with `status:"killed"`, and
+the roster phase `cancelled` matches it — see the snapshot roster).
 
 ### Sub-agent turn frames share the session channel
 
@@ -3776,7 +3779,9 @@ Terminal — both state fields flip and the run's result-summary tail arrives
 ```
 
 - `subagent_phase`: `queued` | `working` | `suspended` | `completed` |
-  `failed`; `suspended_reason` and `swarm_index` optional. The flatter
+  `failed`; `cancelled` joins them schema-level (never captured live — the
+  same truth as `task.terminated` with `status:"killed"`); `suspended_reason`
+  and `swarm_index` optional. The flatter
   `status` mirrors it with the `/tasks` vocabulary (`working` → `running`
   there); `subagent_phase` is the precise one.
 - Background sub-agents are excluded (REST serves them). The roster survives

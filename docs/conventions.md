@@ -49,8 +49,10 @@
   image glyph + `crop W×H` badge — the region parses all-or-nothing, so a
   half-specified one earns none —, UpdateGoal's colored status badge replacing the
   preview, ExitPlanMode's fixed "Plan ready for review" label + option-label chips
-  above the generic args table). Anything still falling back to the plain generic
-  table is by design (unknown/future/MCP tools). `ReadOutputs` (the
+  above the generic args table). Ticket 135 adds `AgentSwarm` — the swarm call's
+  `description` label plus its expected member total (the `items` /
+  `resume_agent_ids` count), feeding the swarm card's aggregate. Anything still
+  falling back to the plain generic table is by design (unknown/future/MCP tools). `ReadOutputs` (the
   Read output's trailing `<system>…</system>` status block lifted into the file
   screen's caption chip — end-anchored, tolerant fallback; `BashOutputs` does the
   same for the Bash output's `Command failed with exit code: N` trailer — ticket
@@ -252,7 +254,14 @@
   stay user bubbles), the snapshot roster via `applyRoster` (re-applicable on every
   entry — a fresh roster heals non-live-pinned statuses), `Agent` calls from any
   carrier (history rows, snapshot messages, `running_tools`) via `applyAgentCall`,
-  transcript pages via `applyTranscriptPage`/`prependTranscriptPage`. The
+  transcript pages via `applyTranscriptPage`/`prependTranscriptPage`. Ticket 135
+  adds the member `Cancelled` status with four carriers — the live
+  `task.terminated` kill (`status` `killed`, keyed on the task's `agentId`,
+  pinning like any live lifecycle write), the schema-level `subagent.cancelled`
+  frame, the roster's `cancelled` phase, and the jobs REST seed
+  (`JobsStore.onTasksSeed` → `applyTaskList`, a background member's only
+  cold-start carrier) — plus the member `model`/`thinkingEffort` pair (the
+  spawned frame overwrites when non-blank, roster and REST blank-fill). The
   `toolCallId → subagentIds` link registry lives in the store (learned from
   spawned/roster/result-marker); ChatViewModel re-drives `store.linksFor` into its
   timeline after every store-affecting apply. One-to-many since 134: an
@@ -262,9 +271,15 @@
   the call's own `description` label (member records stay untouched — 136 owns
   the `<agent_swarm_result>` parse). Timeline row driving stays single-`Agent`:
   a swarm row never carries `subagentId` — it renders as the swarm card
-  (member count from `UiState.swarmMemberCounts`) navigating to `SwarmScreen`
-  by the tool call id; `SwarmScreen`/`SwarmViewModel` mirror the sub-agent
-  page's store access (pageOpened/pageClosed included). The store is fed by
+  navigating to `SwarmScreen` by the tool call id. The card's aggregate (135)
+  is pure derivation (`SwarmProgress`) from the member list
+  `UiState.swarmMembers` carries — one init collection of the store's
+  `swarmMembersByCall(sessionId)`, threaded ChatScreen → MessageList → the
+  rows — and the payload's expected total: the status chip, the done/total
+  count, the per-phase segmented bar, the running/settled subtitle, and a
+  model line when every member agrees; `SwarmScreen` shows the same
+  counts/model strip under its top bar and, with `SwarmViewModel`, mirrors the
+  sub-agent page's store access (pageOpened/pageClosed included). The store is fed by
   exactly ONE session-socket collection at a time (064): the chat's while its
   socket gate holds the session (ChatViewModel signals
   chatCollectionStarted/Stopped), otherwise the store's own keep-alive

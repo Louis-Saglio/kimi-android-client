@@ -2091,10 +2091,11 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun `a swarm member's spawned frame decodes swarmIndex and taskId`() = runBlocking {
+    fun `a swarm member's spawned frame decodes swarmIndex, taskId and the model pair`() = runBlocking {
         // The verbatim 0.38.0 capture (docs/server-api.md:3257) with swarmIndex added:
         // a swarm member's frame carries the member's position and its background-task
-        // registration id next to the shared parentToolCallId (ticket 134).
+        // registration id next to the shared parentToolCallId (ticket 134), plus the
+        // run's bound model/effort (0.34.0, ticket 135).
         val emitted = runSocketEvents(
             """{"type":"subagent.spawned","seq":41,"epoch":"ep_1","session_id":"session_1",""" +
                 """"timestamp":"2026-08-20T10:00:00.000Z","payload":{"type":"subagent.spawned",""" +
@@ -2116,9 +2117,27 @@ class ChatRepositoryTest {
                         runInBackground = false,
                         swarmIndex = 2,
                         taskId = "agent-rhh36xem",
+                        model = "kimi-code/k3",
+                        thinkingEffort = "high",
                     ),
                 ),
             ),
+            emitted.filterIsInstance<SocketEvent.Event>(),
+        )
+    }
+
+    @Test
+    fun `a subagent cancelled frame decodes to the cancelled event`() = runBlocking {
+        // Schema-level upstream (never captured live — docs/server-api.md): the
+        // started-family payload, subagentId only (ticket 135).
+        val emitted = runSocketEvents(
+            """{"type":"subagent.cancelled","seq":36,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-09-12T09:00:00.000Z","payload":{"type":"subagent.cancelled",""" +
+                """"subagentId":"agent-12","agentId":"main","sessionId":"session_1"}}""",
+        )
+
+        assertEquals(
+            listOf(SocketEvent.Event(SessionEvent.SubagentCancelled("agent-12"))),
             emitted.filterIsInstance<SocketEvent.Event>(),
         )
     }

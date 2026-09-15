@@ -48,7 +48,8 @@ data class SnapshotApproval(
  * the member's position inside an `AgentSwarm` call (schema-only upstream — parsed
  * for ordering, never depended on). [taskId] is the background-task registration
  * id: the roster carries no such field (verified upstream, ticket 134), so it is
- * always null here — records heal it from the `subagent.spawned` frame only. */
+ * always null here — records heal it from the `subagent.spawned` frame only.
+ * [model]/[thinkingEffort] are the run's bound model/effort (0.34.0). */
 data class SubagentRosterEntry(
     val id: String,
     val subagentType: String,
@@ -59,12 +60,16 @@ data class SubagentRosterEntry(
     val outputPreview: String?,
     val swarmIndex: Int? = null,
     val taskId: String? = null,
+    val model: String? = null,
+    val thinkingEffort: String? = null,
 )
 
 /** `subagent_phase` of a roster entry; [Unknown] covers anything newer the server
  * adds — the entry still seeds (identity + frame accumulation), its status falls
- * back to the transcript-derived one. */
-enum class SubagentRosterPhase { Queued, Working, Suspended, Completed, Failed, Unknown }
+ * back to the transcript-derived one. [Cancelled] is upstream schema-level (never
+ * captured live): the live carrier of a deliberate stop is `task.terminated` with
+ * `status:"killed"` (ticket 135). */
+enum class SubagentRosterPhase { Queued, Working, Suspended, Completed, Failed, Cancelled, Unknown }
 
 /** The active turn's live tail (verified 0.31.1 shape); decoded, never consumed. */
 data class InFlightTurn(

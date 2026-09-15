@@ -1,11 +1,15 @@
 package fr.louissaglio.kimi.android.ui.chat
 
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -17,7 +21,9 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -31,6 +37,7 @@ import fr.louissaglio.kimi.android.data.chat.bashDescriptionOf
 import fr.louissaglio.kimi.android.ui.common.EmptyState
 import fr.louissaglio.kimi.android.ui.common.ErrorState
 import fr.louissaglio.kimi.android.ui.common.LoadingState
+import fr.louissaglio.kimi.android.ui.theme.warningColor
 
 /**
  * Read-only sub-agent page (ticket 045), transcript-backed since ticket 046: the
@@ -174,20 +181,44 @@ fun SubagentScreen(
     }
 }
 
+/** The lifecycle chip (sub-agent page header, swarm roster rows, swarm card's
+ * aggregate). [label] overrides the status's own label — the swarm card's aggregate
+ * chip says "Running" while reusing the Working style (ticket 135). Suspended reads
+ * as transient (the warning amber, never an error — it means "provider rate limit,
+ * requeued for retry"); Cancelled is grey with a close glyph, a deliberate stop. */
 @Composable
-internal fun SubagentStatusChip(status: SubagentStatus, modifier: Modifier = Modifier) {
-    val (label, color) = when (status) {
-        SubagentStatus.Queued -> "Queued" to MaterialTheme.colorScheme.surfaceVariant
-        SubagentStatus.Working -> "Working" to MaterialTheme.colorScheme.primaryContainer
-        SubagentStatus.Suspended -> "Suspended" to MaterialTheme.colorScheme.tertiaryContainer
-        SubagentStatus.Completed -> "Completed" to MaterialTheme.colorScheme.secondaryContainer
-        SubagentStatus.Failed -> "Failed" to MaterialTheme.colorScheme.errorContainer
+internal fun SubagentStatusChip(status: SubagentStatus, modifier: Modifier = Modifier, label: String? = null) {
+    val (text, color) = when (status) {
+        SubagentStatus.Queued -> (label ?: "Queued") to MaterialTheme.colorScheme.surfaceVariant
+        SubagentStatus.Working -> (label ?: "Working") to MaterialTheme.colorScheme.primaryContainer
+        SubagentStatus.Suspended -> (label ?: "Suspended") to MaterialTheme.colorScheme.surfaceVariant
+        SubagentStatus.Completed -> (label ?: "Completed") to MaterialTheme.colorScheme.secondaryContainer
+        SubagentStatus.Failed -> (label ?: "Failed") to MaterialTheme.colorScheme.errorContainer
+        SubagentStatus.Cancelled -> (label ?: "Cancelled") to MaterialTheme.colorScheme.surfaceVariant
     }
     Surface(color = color, shape = MaterialTheme.shapes.small, modifier = modifier) {
-        Text(
-            text = label,
+        Row(
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-            style = MaterialTheme.typography.labelMedium,
-        )
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            if (status == SubagentStatus.Cancelled) {
+                Icon(
+                    imageVector = Icons.Filled.Close,
+                    contentDescription = null,
+                    modifier = Modifier.size(12.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(
+                text = text,
+                style = MaterialTheme.typography.labelMedium,
+                color = when (status) {
+                    SubagentStatus.Suspended -> MaterialTheme.warningColor
+                    SubagentStatus.Cancelled -> MaterialTheme.colorScheme.onSurfaceVariant
+                    else -> Color.Unspecified
+                },
+            )
+        }
     }
 }

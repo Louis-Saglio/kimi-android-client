@@ -181,10 +181,11 @@ class ChatViewModel internal constructor(
          * pill above the composer counts the Running ones; terminal jobs linger for
          * the sheet. */
         val jobs: List<Job> = emptyList(),
-        /** toolCallId → linked sub-agent count for every linked call of the session
-         * (ticket 134), from the store's link registry; the swarm card reads its own
-         * id and only renders while the count is > 0. */
-        val swarmMemberCounts: Map<String, Int> = emptyMap(),
+        /** toolCallId → linked member states for every linked call of the session
+         * (ticket 134; the member STATES since 135 — the swarm card's aggregate
+         * reads them), live from the store's registry; the swarm card reads its own
+         * id and only renders while the list is non-empty. */
+        val swarmMembers: Map<String, List<SubagentStreamStore.SubagentState>> = emptyMap(),
         /** True while older history exists (scroll-to-top loads it, ticket 043). */
         val hasMoreHistory: Boolean = false,
         /** True while an older history page loads; the list shows a header spinner. */
@@ -339,7 +340,11 @@ class ChatViewModel internal constructor(
     )
 
     /** The jobs widget's store (ticket 092): background-task list (REST seed +
-     * task.* events), task cancellation. Same logic-holder contract as [questions]. */
+     * task.* events), task cancellation. Same logic-holder contract as [questions].
+     * The raw seed also feeds the sub-agent store (ticket 135): a main-owned
+     * subagent-kind entry's cancelled status and model/effort pair heal the member
+     * record — the background member's only cold-start carrier, being excluded
+     * from the snapshot roster. */
     private val jobsStore = JobsStore(
         scope = { viewModelScope },
         chatRepository = chatRepository,
@@ -348,6 +353,7 @@ class ChatViewModel internal constructor(
         state = { uiState.value },
         updateState = { transform -> uiState.update(transform) },
         sendEffect = { effect -> _effects.send(effect) },
+        onTasksSeed = { tasks -> subagentStore.applyTaskList(sessionId, tasks) },
     )
 
     private val timeline = ChatTimeline(todoParser)
@@ -391,6 +397,14 @@ class ChatViewModel internal constructor(
                         }
                     }
                 }
+        }
+        // The swarm cards' aggregate input (ticket 135): the store's per-call member
+        // lists, live — every member status flip republishes them, so the card's bar
+        // and counts advance mid-swarm.
+        viewModelScope.launch {
+            subagentStore.swarmMembersByCall(sessionId).collect { byCall ->
+                uiState.update { it.copy(swarmMembers = byCall) }
+            }
         }
     }
 
@@ -528,20 +542,17 @@ class ChatViewModel internal constructor(
 
     /** Re-drives the store's session link registry (ticket 091 — spawned / roster /
      * result marker, one owner; one-to-many since 134, a swarm's members sharing one
-     * toolCallId) into the timeline's rows, and publishes the per-call member counts
-     * the swarm cards read. Runs after every store-affecting apply: the timeline's
-     * own healing keeps links across refetches, but only the store's registry
-     * survives this ViewModel. Idempotent and cheap. */
+     * toolCallId) into the timeline's rows. Runs after every store-affecting apply:
+     * the timeline's own healing keeps links across refetches, but only the store's
+     * registry survives this ViewModel. The cards' member lists ride the store-flow
+     * collection in init (ticket 135). Idempotent and cheap. */
     private fun applySubagentLinks() {
         val links = subagentStore.linksFor(sessionId)
         links.forEach { (toolCallId, subagentIds) ->
             subagentIds.forEach { subagentId -> timeline.linkSubagentTool(toolCallId, subagentId) }
         }
         uiState.update {
-            it.copy(
-                items = timeline.items(),
-                swarmMemberCounts = links.mapValues { entry -> entry.value.size },
-            )
+            it.copy(items = timeline.items())
         }
     }
 
@@ -999,7 +1010,14 @@ class ChatViewModel internal constructor(
             // Background tasks (ticket 092): the collaborator owns the list, including
             // the core→wire status mapping.
             is SessionEvent.TaskStarted -> jobsStore.onStarted(event.info)
-            is SessionEvent.TaskTerminated -> jobsStore.onTerminated(event.info)
+            is SessionEvent.TaskTerminated -> {
+                jobsStore.onTerminated(event.info)
+                // A main-owned frame still concerns the store when its info.agentId
+                // names a member (ticket 135): a deliberately killed member emits no
+                // terminal subagent.* frame, so this is its only live cancelled
+                // carrier. The funnel no-ops on everything else.
+                subagentStore.apply(sessionId, event)
+            }
             is SessionEvent.ContextUsageUpdated -> {
                 contextUsageSeedGuard.bump()
                 uiState.update { it.copy(contextUsage = event.contextUsage) }

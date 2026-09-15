@@ -32,6 +32,14 @@ val MaterialTheme.successColor: Color
     @Composable
     get() = LocalSuccessColor.current
 
+// Same extension for the transient-warning amber (ticket 135): the swarm card's
+// suspended segment and chip.
+val LocalWarningColor = staticCompositionLocalOf { KimiWarningLight }
+
+val MaterialTheme.warningColor: Color
+    @Composable
+    get() = LocalWarningColor.current
+
 /** The diff row palettes (ticket 119): one container/content pair per direction,
  * same CompositionLocal extension pattern as [LocalSuccessColor]. */
 class DiffColors(
@@ -61,6 +69,7 @@ fun KimiTheme(
 ) {
     CompositionLocalProvider(
         LocalSuccessColor provides if (darkTheme) KimiSuccessDark else KimiSuccessLight,
+        LocalWarningColor provides if (darkTheme) KimiWarningDark else KimiWarningLight,
         LocalDiffColors provides if (darkTheme) {
             DiffColors(
                 KimiDiffAddedDarkContainer,

@@ -2,6 +2,7 @@ package fr.louissaglio.kimi.android.ui.chat
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -20,13 +21,21 @@ class SwarmScreenTest {
     @get:Rule
     val composeTestRule = createComposeRule()
 
-    private fun member(id: String, description: String, status: SubagentStatus) =
+    private fun member(
+        id: String,
+        description: String,
+        status: SubagentStatus,
+        model: String? = null,
+        thinkingEffort: String? = null,
+    ) =
         SubagentStreamStore.SubagentState(
             id = id,
             name = "explore",
             description = description,
             runInBackground = false,
             status = status,
+            model = model,
+            thinkingEffort = thinkingEffort,
         )
 
     @Test
@@ -75,5 +84,59 @@ class SwarmScreenTest {
         }
 
         composeTestRule.onNodeWithText("No members known yet").assertIsDisplayed()
+    }
+
+    /** Ticket 135: the strip under the top bar renders the same aggregate as the
+     * chat's swarm card — the present phases' counts, plus the shared model line
+     * when every member runs the same model/effort. */
+    @Test
+    fun summaryStripShowsTheCountsLineAndTheSharedModelLine() {
+        composeTestRule.setContent {
+            KimiTheme {
+                SwarmContent(
+                    uiState = SwarmViewModel.UiState(
+                        sessionId = "session_1",
+                        toolCallId = "tool_swarm",
+                        members = listOf(
+                            member("agent-1", "Check a", SubagentStatus.Working, "kimi-code/k3", "high"),
+                            member("agent-2", "Check b", SubagentStatus.Working, "kimi-code/k3", "high"),
+                            member("agent-3", "Check c", SubagentStatus.Completed, "kimi-code/k3", "high"),
+                            member("agent-4", "Check d", SubagentStatus.Cancelled, "kimi-code/k3", "high"),
+                        ),
+                    ),
+                    onNavigateBack = {},
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithTag("swarmSummaryStrip").assertIsDisplayed()
+        composeTestRule.onNodeWithText("2 working · 1 completed · 1 cancelled").assertIsDisplayed()
+        composeTestRule.onNodeWithText("kimi-code/k3 · high").assertIsDisplayed()
+        // The cancelled member row shows the cancelled chip, not a failure.
+        composeTestRule.onNodeWithText("Check d").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Cancelled").assertIsDisplayed()
+    }
+
+    /** Ticket 135: a mixed model pair hides the strip's model line. */
+    @Test
+    fun summaryStripHidesTheModelLineWhenMembersDisagree() {
+        composeTestRule.setContent {
+            KimiTheme {
+                SwarmContent(
+                    uiState = SwarmViewModel.UiState(
+                        sessionId = "session_1",
+                        toolCallId = "tool_swarm",
+                        members = listOf(
+                            member("agent-1", "Check a", SubagentStatus.Working, "kimi-code/k3", "high"),
+                            member("agent-2", "Check b", SubagentStatus.Working, "kimi-code/k2", "low"),
+                        ),
+                    ),
+                    onNavigateBack = {},
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("2 working").assertIsDisplayed()
+        composeTestRule.onNodeWithText("kimi-code/k3 · high").assertDoesNotExist()
     }
 }

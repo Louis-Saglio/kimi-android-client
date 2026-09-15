@@ -34,7 +34,9 @@ import kotlinx.serialization.json.intOrNull
  * badge's dimensions, [ExitPlanMode] the expansion's option chips, [CreateGoal]
  * the objective preview, [UpdateGoal] the status badge, [SetGoalBudget] the
  * budget preview. `GetGoal`/`EnterPlanMode` have no payload by design — their
- * rows stay fully generic.
+ * rows stay fully generic. [AgentSwarm] (ticket 135) feeds no row chrome of its
+ * own — its `items`-derived expected total and description serve the swarm
+ * card's aggregate.
  */
 sealed interface ToolPayload {
 
@@ -248,6 +250,13 @@ sealed interface ToolPayload {
      * "[value] [unit]" ("30 minutes" — ToolPreview). The wire's `value` is a
      * positive number, fractional allowed (1.5 hours). */
     data class SetGoalBudget(val value: Double, val unit: String) : ToolPayload
+
+    /** The AgentSwarm call's inputs (ticket 135). [description] is the swarm's own
+     * label (null when unset or blank). [expectedTotal] is the member count the
+     * call will fan out — the `items` array's size, or the `resume_agent_ids`
+     * map's size when only resumes are present — letting the swarm card show
+     * totals before all members have spawned; null when neither key parses. */
+    data class AgentSwarm(val description: String?, val expectedTotal: Int?) : ToolPayload
 }
 
 /** The payload parser: one variant per known tool, null for anything else —
@@ -297,6 +306,7 @@ object ToolPayloads {
         CREATE_GOAL_TOOL_NAME -> createGoalOf(args)
         UPDATE_GOAL_TOOL_NAME -> updateGoalOf(args)
         SET_GOAL_BUDGET_TOOL_NAME -> setGoalBudgetOf(args)
+        AGENT_SWARM_TOOL_NAME -> agentSwarmOf(args)
         else -> null
     }
 
@@ -468,6 +478,16 @@ object ToolPayloads {
         val value = args.doubleOf("value") ?: return null
         val unit = args.stringOf("unit") ?: return null
         return ToolPayload.SetGoalBudget(value, unit)
+    }
+
+    private fun agentSwarmOf(args: JsonObject?): ToolPayload.AgentSwarm? {
+        if (args == null) return null
+        // `items` wins when present; a resumes-only call sizes its map instead.
+        val expectedTotal = (args["items"] as? JsonArray)?.size
+            ?: (args["resume_agent_ids"] as? JsonObject)?.size
+        val description = args.stringOf("description")?.takeIf { it.isNotBlank() }
+        if (expectedTotal == null && description == null) return null
+        return ToolPayload.AgentSwarm(description, expectedTotal)
     }
 
     private fun JsonObject.stringOf(key: String): String? =

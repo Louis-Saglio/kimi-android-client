@@ -110,7 +110,9 @@ sealed interface SessionEvent {
      * [swarmIndex] is the member's position inside an `AgentSwarm` call (schema-only
      * upstream, never captured live — docs/server-api.md:3311): parsed for ordering,
      * never depended on. [taskId] is the member's background-task registration id
-     * (0.38.0). Both are null for a plain `Agent` spawn. */
+     * (0.38.0). Both are null for a plain `Agent` spawn. [model]/[thinkingEffort]
+     * are the run's bound model/effort (0.34.0) — the swarm aggregate's shared-model
+     * line reads them (ticket 135). */
     data class SubagentSpawned(
         override val subagentId: String,
         val name: String,
@@ -119,6 +121,8 @@ sealed interface SessionEvent {
         val runInBackground: Boolean,
         val swarmIndex: Int? = null,
         val taskId: String? = null,
+        val model: String? = null,
+        val thinkingEffort: String? = null,
     ) : SubagentLifecycleEvent
 
     /** `subagent.started`; re-fires when a suspended sub-agent resumes. */
@@ -130,6 +134,12 @@ sealed interface SessionEvent {
 
     /** `subagent.suspended`; not terminal — a later [SubagentStarted] marks the resume. */
     data class SubagentSuspended(override val subagentId: String) : SubagentLifecycleEvent
+
+    /** `subagent.cancelled` (upstream schema-level, never captured live): the run was
+     * stopped on purpose. The LIVE carrier of the same truth is `task.terminated`
+     * with `status:"killed"` (docs/server-api.md) — no `subagent.completed`/`failed`
+     * follows either path, so both map to the store's Cancelled state (ticket 135). */
+    data class SubagentCancelled(override val subagentId: String) : SubagentLifecycleEvent
 
     /** A tool call waits on the user's decision. [summary] is the compact argument
      * preview for the approval card (the command for shell calls, else the action). */

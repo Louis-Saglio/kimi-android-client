@@ -1,5 +1,6 @@
 package fr.louissaglio.kimi.android.ui.chat
 
+import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasText
@@ -1672,6 +1673,21 @@ class ToolRowTest {
         composeTestRule.onNodeWithText("Entered plan mode.").assertIsDisplayed()
     }
 
+    private fun swarmMember(
+        id: String,
+        status: SubagentStatus,
+        model: String? = "kimi-code/k3",
+        thinkingEffort: String? = "high",
+    ) = SubagentStreamStore.SubagentState(
+        id = id,
+        name = "explore",
+        description = "Check $id",
+        runInBackground = false,
+        status = status,
+        model = model,
+        thinkingEffort = thinkingEffort,
+    )
+
     /** Ticket 134: a linked AgentSwarm call renders as the swarm card — sparkles
      * glyph, "Swarm" title, the description arg, the member count — one tap target
      * firing the roster navigation with the tool call id. */
@@ -1692,7 +1708,13 @@ class ToolRowTest {
                         ToolStatus.Running,
                         preview = ToolPreview.of("AgentSwarm", args),
                     ),
-                    swarmMemberCounts = mapOf("tool_1" to 3),
+                    swarmMembers = mapOf(
+                        "tool_1" to listOf(
+                            swarmMember("agent-1", SubagentStatus.Working),
+                            swarmMember("agent-2", SubagentStatus.Working),
+                            swarmMember("agent-3", SubagentStatus.Queued),
+                        ),
+                    ),
                     onOpenSwarm = { opened = it },
                 )
             }
@@ -1728,5 +1750,97 @@ class ToolRowTest {
         composeTestRule.onNodeWithTag("toolIconSwarm", useUnmergedTree = true).assertDoesNotExist()
         composeTestRule.onNodeWithText("AgentSwarm").assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription("Expand tool details").assertIsDisplayed()
+    }
+
+    /** Ticket 135: the running aggregate — the "Running" chip, the done/total count
+     * against the items-derived expected total (covering the not-yet-spawned), one
+     * bar segment per present phase plus the pending remainder, the in-progress
+     * subtitle, and the shared model line when every member agrees. */
+    @Test
+    fun swarmCardShowsTheRunningAggregateOfItsMembers() {
+        composeTestRule.setContent {
+            KimiTheme {
+                ToolRow(
+                    ChatItem.ToolActivity(
+                        "tool_1",
+                        "AgentSwarm",
+                        ToolStatus.Running,
+                        preview = "review the docs",
+                        payload = ToolPayload.AgentSwarm(description = "review the docs", expectedTotal = 10),
+                    ),
+                    swarmMembers = mapOf(
+                        "tool_1" to listOf(
+                            swarmMember("agent-1", SubagentStatus.Working),
+                            swarmMember("agent-2", SubagentStatus.Working),
+                            swarmMember("agent-3", SubagentStatus.Suspended),
+                            swarmMember("agent-4", SubagentStatus.Completed),
+                            swarmMember("agent-5", SubagentStatus.Completed),
+                            swarmMember("agent-6", SubagentStatus.Completed),
+                            swarmMember("agent-7", SubagentStatus.Failed),
+                            swarmMember("agent-8", SubagentStatus.Cancelled),
+                        ),
+                    ),
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("8 members").assertIsDisplayed()
+        // Tags inside the card: the whole card is one clickable, so its semantics
+        // merge — tag lookups go to the unmerged tree (the 134 test's precedent).
+        composeTestRule.onNodeWithTag("swarmAggregateChip", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithText("Running").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("swarmDoneTotal", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithText("5/10").assertIsDisplayed()
+        // One segment per present phase, none for the absent queued, the track for
+        // the 2 not-yet-spawned members; the bar's contentDescription summarizes.
+        composeTestRule.onNodeWithTag("swarmBarSegmentWorking", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("swarmBarSegmentSuspended", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("swarmBarSegmentCompleted", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("swarmBarSegmentFailed", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("swarmBarSegmentCancelled", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("swarmBarSegmentPending", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("swarmBarSegmentQueued", useUnmergedTree = true).assertDoesNotExist()
+        composeTestRule.onNodeWithTag("swarmProgressBar", useUnmergedTree = true)
+            .assertContentDescriptionEquals("2 working · 1 suspended · 3 completed · 1 failed · 1 cancelled")
+        composeTestRule.onNodeWithTag("swarmSubtitle", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithText("3 in progress").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("swarmModelLine", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithText("kimi-code/k3 · high").assertIsDisplayed()
+    }
+
+    /** Ticket 135: the settled aggregate — any failure makes the chip "Failed", the
+     * subtitle counts cancelled separately, and a mixed model pair hides the line. */
+    @Test
+    fun swarmCardShowsTheSettledAggregateOfItsMembers() {
+        composeTestRule.setContent {
+            KimiTheme {
+                ToolRow(
+                    ChatItem.ToolActivity(
+                        "tool_1",
+                        "AgentSwarm",
+                        ToolStatus.Done,
+                        preview = "review the docs",
+                    ),
+                    swarmMembers = mapOf(
+                        "tool_1" to listOf(
+                            swarmMember("agent-4", SubagentStatus.Completed),
+                            swarmMember("agent-5", SubagentStatus.Completed),
+                            swarmMember("agent-6", SubagentStatus.Completed),
+                            swarmMember("agent-7", SubagentStatus.Failed),
+                            swarmMember("agent-8", SubagentStatus.Cancelled, model = "kimi-code/k2"),
+                        ),
+                    ),
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("Failed").assertIsDisplayed()
+        composeTestRule.onNodeWithText("5/5").assertIsDisplayed()
+        composeTestRule.onNodeWithText("3 completed · 1 failed · 1 cancelled").assertIsDisplayed()
+        // The card's clickable merges its semantics: the absent-tag checks only
+        // mean something in the unmerged tree.
+        composeTestRule.onNodeWithTag("swarmBarSegmentPending", useUnmergedTree = true).assertDoesNotExist()
+        composeTestRule.onNodeWithTag("swarmBarSegmentWorking", useUnmergedTree = true).assertDoesNotExist()
+        composeTestRule.onNodeWithTag("swarmModelLine", useUnmergedTree = true).assertDoesNotExist()
     }
 }

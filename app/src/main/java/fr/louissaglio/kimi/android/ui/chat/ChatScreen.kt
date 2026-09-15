@@ -518,7 +518,7 @@ private fun ChatContent(
                     // Tickets 088/089: AskUserQuestion rows never expand — the pending
                     // row toggles the live card, a resolved row opens its read-only view.
                     onQuestionRowTapped = onQuestionRowTapped,
-                    swarmMemberCounts = uiState.swarmMemberCounts,
+                    swarmMembers = uiState.swarmMembers,
                     onOpenSwarm = onOpenSwarm,
                     isLoadingMoreHistory = uiState.isLoadingMoreHistory,
                     onHistoryTopReached = onHistoryTopReached,

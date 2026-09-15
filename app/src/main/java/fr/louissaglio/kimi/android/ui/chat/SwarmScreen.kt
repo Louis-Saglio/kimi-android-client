@@ -26,6 +26,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -168,9 +169,34 @@ internal fun SwarmContent(
                 // about the swarm's members yet.
                 EmptyState("No members known yet")
             } else {
-                LazyColumn(Modifier.fillMaxSize()) {
-                    items(uiState.members, key = { it.id }) { member ->
-                        SwarmMemberRow(member, onClick = { onOpenSubagent(member.id) })
+                val progress = SwarmProgress.of(uiState.members, expectedTotal = null, toolRunning = false)
+                Column(Modifier.fillMaxSize()) {
+                    // The summary strip (ticket 135): the same aggregate input as the
+                    // chat's swarm card — the present phases' counts, plus the shared
+                    // model line when every member runs the same model/effort.
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 6.dp)
+                            .testTag("swarmSummaryStrip"),
+                    ) {
+                        Text(
+                            text = progress.countsLine,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        progress.modelLine?.let { modelLine ->
+                            Text(
+                                text = modelLine,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    LazyColumn(Modifier.fillMaxSize()) {
+                        items(uiState.members, key = { it.id }) { member ->
+                            SwarmMemberRow(member, onClick = { onOpenSubagent(member.id) })
+                        }
                     }
                 }
             }

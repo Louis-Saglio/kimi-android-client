@@ -1,12 +1,15 @@
 package fr.louissaglio.kimi.android.ui.chat
 
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -36,6 +39,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
@@ -65,6 +69,7 @@ import fr.louissaglio.kimi.android.ui.common.icons.SparklesIcon
 import fr.louissaglio.kimi.android.ui.common.icons.WorkspaceIcon
 import fr.louissaglio.kimi.android.ui.theme.diffColors
 import fr.louissaglio.kimi.android.ui.theme.successColor
+import fr.louissaglio.kimi.android.ui.theme.warningColor
 
 /** Tool-status glyph for the group header and the rows (tickets 022/037): spinner
  * while running, green check on success, red cross on error. [runningDescription]
@@ -107,7 +112,7 @@ internal fun ToolGroupCard(
     onQuestionRowTapped: (toolCallId: String, input: String, output: String) -> Unit = { _, _, _ -> },
     onOpenEditDiff: (toolCallId: String, payload: ToolPayload.Edit) -> Unit = { _, _ -> },
     onOpenFileContent: (toolCallId: String, payload: ToolPayload, output: String) -> Unit = { _, _, _ -> },
-    swarmMemberCounts: Map<String, Int> = emptyMap(),
+    swarmMembers: Map<String, List<SubagentStreamStore.SubagentState>> = emptyMap(),
     onOpenSwarm: (String) -> Unit = {},
 ) {
     val status = when {
@@ -144,73 +149,196 @@ internal fun ToolGroupCard(
             group.tools.forEachIndexed { index, tool ->
                 // 1dp outlineVariant hairline between rows, like the web's row separators.
                 if (index > 0) HorizontalDivider()
-                ToolRow(tool, onOpenSubagent, onOpenJob, onQuestionRowTapped, onOpenEditDiff, onOpenFileContent, swarmMemberCounts, onOpenSwarm)
+                ToolRow(tool, onOpenSubagent, onOpenJob, onQuestionRowTapped, onOpenEditDiff, onOpenFileContent, swarmMembers, onOpenSwarm)
             }
         }
     }
 }
 
-/** The swarm card (ticket 134): a linked `AgentSwarm` call's compact affordance,
- * replacing its generic row while at least one member link exists. The group-card
- * idiom (outlined, `surfaceContainerLow`); the description arg on one line
- * (ToolPreview extracts it into the row's preview), the member count trailing.
- * The whole card is one tap target opening the roster screen. */
+/** The swarm card (ticket 134, aggregate visuals 135): a linked `AgentSwarm` call's
+ * compact affordance, replacing its generic row while at least one member link
+ * exists. The group-card idiom (outlined, `surfaceContainerLow`). Below the 134
+ * header row (sparkles glyph, "Swarm", the description arg, the member count,
+ * chevron): the aggregate status chip and "{done}/{total}" count, the segmented
+ * phase bar and the subtitle ("{N} in progress" while running, the settled counts
+ * afterwards), plus the shared model line when every member runs the same
+ * model/effort. A failed member — or the call's own error — tints the border
+ * danger, mirroring the web. The whole card is one tap target opening the roster
+ * screen. */
 @Composable
 private fun SwarmCard(
     activity: ChatItem.ToolActivity,
-    memberCount: Int,
+    members: List<SubagentStreamStore.SubagentState>,
     onOpenSwarm: (String) -> Unit,
 ) {
     val detailColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val payload = activity.payload as? ToolPayload.AgentSwarm
+    val progress = SwarmProgress.of(
+        members,
+        expectedTotal = payload?.expectedTotal,
+        toolRunning = activity.status == ToolStatus.Running,
+    )
+    val (chipStatus, chipLabel) = when (progress.status) {
+        SwarmAggregateStatus.Running -> SubagentStatus.Working to "Running"
+        SwarmAggregateStatus.Failed -> SubagentStatus.Failed to "Failed"
+        SwarmAggregateStatus.Cancelled -> SubagentStatus.Cancelled to "Cancelled"
+        SwarmAggregateStatus.Completed -> SubagentStatus.Completed to "Completed"
+    }
+    // The web tints danger on a tool error or any member failure.
+    val danger = progress.status == SwarmAggregateStatus.Failed || activity.status == ToolStatus.Error
     OutlinedCard(
         modifier = Modifier
             .fillMaxWidth()
             .clickable { onOpenSwarm(activity.id) },
         colors = CardDefaults.outlinedCardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        border = if (danger) {
+            BorderStroke(1.dp, MaterialTheme.colorScheme.error)
+        } else {
+            CardDefaults.outlinedCardBorder()
+        },
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                // M3: the whole card is the tap target, at least 48dp tall.
-                .heightIn(min = 48.dp)
-                .padding(horizontal = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Icon(
-                imageVector = SparklesIcon,
-                contentDescription = null,
+        Column(Modifier.padding(vertical = 4.dp)) {
+            Row(
                 modifier = Modifier
-                    .size(14.dp)
-                    .testTag("toolIconSwarm"),
-                tint = detailColor,
-            )
+                    .fillMaxWidth()
+                    // M3: the whole card is the tap target, at least 48dp tall.
+                    .heightIn(min = 48.dp)
+                    .padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(
+                    imageVector = SparklesIcon,
+                    contentDescription = null,
+                    modifier = Modifier
+                        .size(14.dp)
+                        .testTag("toolIconSwarm"),
+                    tint = detailColor,
+                )
+                Text(
+                    text = "Swarm",
+                    style = MaterialTheme.typography.labelMedium,
+                )
+                Text(
+                    text = activity.preview,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = detailColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = if (members.size == 1) "1 member" else "${members.size} members",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = detailColor,
+                )
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = "Open swarm",
+                    modifier = Modifier.size(16.dp),
+                    tint = detailColor,
+                )
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                SubagentStatusChip(chipStatus, label = chipLabel, modifier = Modifier.testTag("swarmAggregateChip"))
+                Text(
+                    text = "${progress.done}/${progress.total}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = detailColor,
+                    modifier = Modifier.testTag("swarmDoneTotal"),
+                )
+            }
+            SwarmPhaseBar(progress)
             Text(
-                text = "Swarm",
-                style = MaterialTheme.typography.labelMedium,
-            )
-            Text(
-                text = activity.preview,
-                style = MaterialTheme.typography.labelMedium,
+                text = progress.subtitle,
+                style = MaterialTheme.typography.bodySmall,
                 color = detailColor,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp)
+                    .testTag("swarmSubtitle"),
             )
-            Text(
-                text = if (memberCount == 1) "1 member" else "$memberCount members",
-                style = MaterialTheme.typography.labelMedium,
-                color = detailColor,
+            progress.modelLine?.let { modelLine ->
+                Text(
+                    text = modelLine,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = detailColor,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp)
+                        .testTag("swarmModelLine"),
+                )
+            }
+        }
+    }
+}
+
+/** The card's segmented phase bar (ticket 135): one weighted segment per present
+ * phase in phase order (queued grey, working primary, suspended warning amber,
+ * completed success green, failed error, cancelled grey — the web's colors), the
+ * not-yet-spawned remainder as the track so the bar fills as members spawn. One
+ * contentDescription summarizes the counts; each segment carries its testTag. */
+@Composable
+private fun SwarmPhaseBar(progress: SwarmProgress) {
+    val segments = buildList {
+        if (progress.queued > 0) {
+            add(SwarmBarSegment("swarmBarSegmentQueued", MaterialTheme.colorScheme.outlineVariant, progress.queued))
+        }
+        if (progress.working > 0) {
+            add(SwarmBarSegment("swarmBarSegmentWorking", MaterialTheme.colorScheme.primary, progress.working))
+        }
+        if (progress.suspended > 0) {
+            add(SwarmBarSegment("swarmBarSegmentSuspended", MaterialTheme.warningColor, progress.suspended))
+        }
+        if (progress.completed > 0) {
+            add(SwarmBarSegment("swarmBarSegmentCompleted", MaterialTheme.successColor, progress.completed))
+        }
+        if (progress.failed > 0) {
+            add(SwarmBarSegment("swarmBarSegmentFailed", MaterialTheme.colorScheme.error, progress.failed))
+        }
+        if (progress.cancelled > 0) {
+            add(SwarmBarSegment("swarmBarSegmentCancelled", MaterialTheme.colorScheme.outlineVariant, progress.cancelled))
+        }
+    }
+    val remainder = progress.total - progress.members
+    if (segments.isEmpty() && remainder <= 0) return
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 4.dp)
+            .height(4.dp)
+            .clip(MaterialTheme.shapes.small)
+            .semantics { contentDescription = progress.countsLine }
+            .testTag("swarmProgressBar"),
+    ) {
+        segments.forEach { segment ->
+            Box(
+                Modifier
+                    .weight(segment.count.toFloat())
+                    .fillMaxHeight()
+                    .background(segment.color)
+                    .testTag(segment.tag),
             )
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                contentDescription = "Open swarm",
-                modifier = Modifier.size(16.dp),
-                tint = detailColor,
+        }
+        if (remainder > 0) {
+            Box(
+                Modifier
+                    .weight(remainder.toFloat())
+                    .fillMaxHeight()
+                    .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                    .testTag("swarmBarSegmentPending"),
             )
         }
     }
 }
+
+private data class SwarmBarSegment(val tag: String, val color: Color, val count: Int)
 
 /** Web-style compact tool row (ticket 022): leading tool icon, name, one-line
  * monospace preview of the input with end-ellipsis, and the status as a glyph —
@@ -229,8 +357,10 @@ private fun SwarmCard(
  * that page, as does the trailing open button (chevron-right, own tap target).
  *
  * An `AgentSwarm` row with at least one linked member (ticket 134) is replaced
- * wholesale by the swarm card — one tap target opening the roster screen; with zero
- * links (cold history before the mining lands) the generic row below renders.
+ * wholesale by the swarm card — the aggregate visuals (135: status chip,
+ * "{done}/{total}", the segmented phase bar, subtitle) over one tap target opening
+ * the roster screen; with zero links (cold history before the mining lands) the
+ * generic row below renders.
  *
  * A background `Bash` row linked to its job (ticket 096, [ChatItem.ToolActivity.bashTaskId])
  * behaves the same way: its result is only the `task_id:` stub — the command's real
@@ -316,12 +446,12 @@ internal fun ToolRow(
     onQuestionRowTapped: (toolCallId: String, input: String, output: String) -> Unit = { _, _, _ -> },
     onOpenEditDiff: (toolCallId: String, payload: ToolPayload.Edit) -> Unit = { _, _ -> },
     onOpenFileContent: (toolCallId: String, payload: ToolPayload, output: String) -> Unit = { _, _, _ -> },
-    swarmMemberCounts: Map<String, Int> = emptyMap(),
+    swarmMembers: Map<String, List<SubagentStreamStore.SubagentState>> = emptyMap(),
     onOpenSwarm: (String) -> Unit = {},
 ) {
-    val swarmMemberCount = swarmMemberCounts[activity.id] ?: 0
-    if (activity.name == AGENT_SWARM_TOOL_NAME && swarmMemberCount > 0) {
-        SwarmCard(activity, swarmMemberCount, onOpenSwarm)
+    val swarmMemberList = swarmMembers[activity.id].orEmpty()
+    if (activity.name == AGENT_SWARM_TOOL_NAME && swarmMemberList.isNotEmpty()) {
+        SwarmCard(activity, swarmMemberList, onOpenSwarm)
         return
     }
     val detailColor = MaterialTheme.colorScheme.onSurfaceVariant

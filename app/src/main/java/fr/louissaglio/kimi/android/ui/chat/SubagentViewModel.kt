@@ -153,12 +153,15 @@ class SubagentViewModel internal constructor(
     /** A sub-agent reaching a terminal state while the page is watched gets one
      * canonical refetch (ticket 046): the transcript is the committed rendering of the
      * run, the live rows are dropped. Cold opens (the first observed status already
-     * terminal) skip it — the initial load IS the canonical fetch. */
+     * terminal) skip it — the initial load IS the canonical fetch. Cancelled
+     * (ticket 135) is terminal like Completed/Failed. */
     private fun maybeReconcile(status: SubagentStatus?) {
         val previous = lastSeenStatus
         lastSeenStatus = status
-        if (previous == null || previous == SubagentStatus.Completed || previous == SubagentStatus.Failed) return
-        if (status != SubagentStatus.Completed && status != SubagentStatus.Failed) return
+        fun SubagentStatus?.isTerminal() =
+            this == SubagentStatus.Completed || this == SubagentStatus.Failed || this == SubagentStatus.Cancelled
+        if (previous == null || previous.isTerminal()) return
+        if (!status.isTerminal()) return
         historyPager.refresh(keepLive = false)
     }
 

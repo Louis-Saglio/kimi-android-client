@@ -348,7 +348,8 @@ data class TaskListData(
 /** One REST task object; thinner than the WS/snapshot shape (no subagent_type, no
  * parent_tool_call_id, created_at == started_at). Times are ISO-8601 strings.
  * [command] rides on bash-kind tasks; [outputPreview]/[outputBytes] only on a
- * get-with-output read (ticket 096). */
+ * get-with-output read (ticket 096). [model]/[thinkingEffort] ride on subagent-kind
+ * tasks (0.34.0 — the swarm aggregate's shared-model line, ticket 135). */
 @Serializable
 data class TaskDto(
     val id: String = "",
@@ -364,6 +365,8 @@ data class TaskDto(
     val command: String? = null,
     @SerialName("output_preview") val outputPreview: String? = null,
     @SerialName("output_bytes") val outputBytes: Int? = null,
+    val model: String? = null,
+    @SerialName("thinking_effort") val thinkingEffort: String? = null,
 )
 
 /** `data` of `POST .../tasks/{id}:cancel`; a terminal task answers envelope 40904 with
@@ -401,7 +404,8 @@ data class TaskInfoDto(
 
 /** `subagent.spawned` payload (docs/server-api.md, Sub-agents): the only frame carrying
  * a sub-agent's identity metadata. `parentToolCallUuid` exists upstream but is not
- * consumed. The frame itself is tagged `agentId:"main"`. */
+ * consumed. The frame itself is tagged `agentId:"main"`. [model]/[thinkingEffort]
+ * (camelCase) ride the frame since 0.34.0. */
 @Serializable
 data class SubagentSpawnedPayload(
     val subagentId: String = "",
@@ -411,11 +415,13 @@ data class SubagentSpawnedPayload(
     val runInBackground: Boolean = false,
     val swarmIndex: Int? = null,
     val taskId: String? = null,
+    val model: String? = null,
+    val thinkingEffort: String? = null,
 )
 
-/** Shared shape of `subagent.started`/`completed`/`failed`/`suspended`: every variant
- * carries [subagentId], plus only its own extra field (resultSummary, error, reason —
- * the last one not consumed). */
+/** Shared shape of `subagent.started`/`completed`/`failed`/`suspended`/`cancelled`:
+ * every variant carries [subagentId], plus only its own extra field (resultSummary,
+ * error, reason — the last one not consumed). */
 @Serializable
 data class SubagentLifecyclePayload(
     val subagentId: String = "",
@@ -475,6 +481,9 @@ data class SubagentRosterEntryDto(
     @SerialName("swarm_index") val swarmIndex: Int? = null,
     // Present once the run is terminal (the result summary tail).
     @SerialName("output_preview") val outputPreview: String? = null,
+    // The run's bound model/effort (0.34.0, snake_case here — ticket 135).
+    val model: String? = null,
+    @SerialName("thinking_effort") val thinkingEffort: String? = null,
 )
 
 /** The active turn's live tail; decoded for completeness, never consumed (ticket 085,

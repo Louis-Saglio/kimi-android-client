@@ -37,6 +37,8 @@ class SubagentStreamStoreTest {
         toolCallId: String = "tool_1",
         swarmIndex: Int? = null,
         taskId: String? = null,
+        model: String? = null,
+        thinkingEffort: String? = null,
     ) = SessionEvent.SubagentSpawned(
         subagentId = id,
         name = "explore",
@@ -45,6 +47,8 @@ class SubagentStreamStoreTest {
         runInBackground = false,
         swarmIndex = swarmIndex,
         taskId = taskId,
+        model = model,
+        thinkingEffort = thinkingEffort,
     )
 
     private fun userSplice(text: String, agentId: String, id: String = "msg_1") = SessionEvent.ContextSpliced(
@@ -478,6 +482,8 @@ class SubagentStreamStoreTest {
         outputPreview: String? = null,
         parentToolCallId: String = "tool_1",
         swarmIndex: Int? = null,
+        model: String? = null,
+        thinkingEffort: String? = null,
     ) = SubagentRosterEntry(
         id = id,
         subagentType = "explore",
@@ -487,6 +493,8 @@ class SubagentStreamStoreTest {
         runInBackground = false,
         outputPreview = outputPreview,
         swarmIndex = swarmIndex,
+        model = model,
+        thinkingEffort = thinkingEffort,
     )
 
     @Test
@@ -751,6 +759,218 @@ class SubagentStreamStoreTest {
         )
     }
 
+    // --- Cancelled members, model/effort, REST task list (ticket 135) ----------------------
+
+    @Test
+    fun `swarmMembersByCall groups every linked call's sorted members`() = runBlocking {
+        store.apply(SESSION_ID, spawned("agent-1", toolCallId = "tool_swarm", swarmIndex = 1))
+        store.apply(SESSION_ID, spawned("agent-2", toolCallId = "tool_swarm", swarmIndex = 0))
+        store.apply(SESSION_ID, spawned("agent-3", toolCallId = "tool_1"))
+
+        val byCall = store.swarmMembersByCall(SESSION_ID).first()
+
+        assertEquals(listOf("agent-2", "agent-1"), byCall["tool_swarm"]!!.map { it.id })
+        assertEquals(listOf("agent-3"), byCall["tool_1"]!!.map { it.id })
+    }
+
+    @Test
+    fun `a main-owned killed task terminated pins the named member Cancelled`() = runBlocking {
+        // A deliberately stopped member gets no terminal subagent.* frame: the
+        // task.terminated with status killed (main-owned for a swarm member too) is
+        // its only live cancelled carrier.
+        store.apply(SESSION_ID, spawned("agent-12", taskId = "agent-t1"))
+
+        store.apply(
+            SESSION_ID,
+            SessionEvent.TaskTerminated(
+                taskInfo(
+                    "agent-t1", TaskInfo.Status.Killed, kind = TaskInfo.Kind.Agent,
+                    endedAt = Instant.ofEpochMilli(1785210118804), agentId = "agent-12",
+                ),
+            ),
+        )
+
+        assertEquals(SubagentStatus.Cancelled, entry("agent-12")!!.status)
+
+        // The pin is a live one: a later roster Working cannot regress it.
+        store.applyRoster(SESSION_ID, listOf(rosterEntry("agent-12", SubagentRosterPhase.Working)))
+        assertEquals(SubagentStatus.Cancelled, entry("agent-12")!!.status)
+    }
+
+    @Test
+    fun `a main-owned non-killed task terminated leaves the member status alone`() = runBlocking {
+        store.apply(SESSION_ID, spawned("agent-12", taskId = "agent-t1"))
+
+        store.apply(
+            SESSION_ID,
+            SessionEvent.TaskTerminated(
+                taskInfo(
+                    "agent-t1", TaskInfo.Status.Completed, kind = TaskInfo.Kind.Agent,
+                    endedAt = Instant.ofEpochMilli(1785210118804), agentId = "agent-12",
+                ),
+            ),
+        )
+
+        assertEquals(SubagentStatus.Queued, entry("agent-12")!!.status)
+    }
+
+    @Test
+    fun `a killed task terminated naming no record is dropped`() = runBlocking {
+        store.apply(
+            SESSION_ID,
+            SessionEvent.TaskTerminated(
+                taskInfo(
+                    "agent-t9", TaskInfo.Status.Killed, kind = TaskInfo.Kind.Agent,
+                    endedAt = Instant.ofEpochMilli(1785210118804), agentId = "agent-99",
+                ),
+            ),
+        )
+
+        assertNull(store.entry(SESSION_ID, "agent-99").first())
+    }
+
+    @Test
+    fun `the subagent cancelled lifecycle frame pins Cancelled`() = runBlocking {
+        store.apply(SESSION_ID, spawned("agent-12"))
+        store.apply(SESSION_ID, SessionEvent.SubagentStarted("agent-12"))
+
+        store.apply(SESSION_ID, SessionEvent.SubagentCancelled("agent-12"))
+
+        assertEquals(SubagentStatus.Cancelled, entry("agent-12")!!.status)
+    }
+
+    @Test
+    fun `the roster's cancelled phase maps to Cancelled`() = runBlocking {
+        store.applyRoster(SESSION_ID, listOf(rosterEntry("agent-12", SubagentRosterPhase.Cancelled)))
+
+        assertEquals(SubagentStatus.Cancelled, entry("agent-12")!!.status)
+    }
+
+    @Test
+    fun `the spawned frame carries the run's model and effort, a fresh pair overwrites`() = runBlocking {
+        store.apply(SESSION_ID, spawned("agent-12", model = "kimi-code/k3", thinkingEffort = "high"))
+        assertEquals("kimi-code/k3", entry("agent-12")!!.model)
+        assertEquals("high", entry("agent-12")!!.thinkingEffort)
+
+        // A duplicate spawn without the pair keeps the first write...
+        store.apply(SESSION_ID, spawned("agent-12"))
+        assertEquals("kimi-code/k3", entry("agent-12")!!.model)
+
+        // ...and a re-spawn's fresh pair overwrites.
+        store.apply(SESSION_ID, spawned("agent-12", model = "kimi-code/k4", thinkingEffort = "max"))
+        assertEquals("kimi-code/k4", entry("agent-12")!!.model)
+        assertEquals("max", entry("agent-12")!!.thinkingEffort)
+    }
+
+    @Test
+    fun `the roster fills blank model and effort only`() = runBlocking {
+        store.apply(SESSION_ID, spawned("agent-12", model = "kimi-code/k3", thinkingEffort = "high"))
+        store.apply(SESSION_ID, spawned("agent-13", toolCallId = "tool_2"))
+
+        store.applyRoster(
+            SESSION_ID,
+            listOf(
+                rosterEntry("agent-12", SubagentRosterPhase.Working, model = "other/m1", thinkingEffort = "low"),
+                rosterEntry(
+                    "agent-13", SubagentRosterPhase.Working, parentToolCallId = "tool_2",
+                    model = "kimi-code/k3", thinkingEffort = "high",
+                ),
+            ),
+        )
+
+        assertEquals("kimi-code/k3", entry("agent-12")!!.model)
+        assertEquals("high", entry("agent-12")!!.thinkingEffort)
+        assertEquals("kimi-code/k3", entry("agent-13")!!.model)
+        assertEquals("high", entry("agent-13")!!.thinkingEffort)
+    }
+
+    private fun backgroundTask(
+        id: String,
+        status: BackgroundTask.Status,
+        kind: BackgroundTask.Kind = BackgroundTask.Kind.Subagent,
+        agentId: String? = null,
+        model: String? = null,
+        thinkingEffort: String? = null,
+    ) = BackgroundTask(
+        id = id,
+        kind = kind,
+        description = "bg",
+        status = status,
+        createdAt = Instant.ofEpochMilli(1785210101939),
+        startedAt = Instant.ofEpochMilli(1785210101939),
+        agentId = agentId,
+        model = model,
+        thinkingEffort = thinkingEffort,
+    )
+
+    @Test
+    fun `the REST task list heals a member's cancelled status at roster precedence`() = runBlocking {
+        store.apply(SESSION_ID, spawned("agent-12", taskId = "agent-t1"))
+
+        store.applyTaskList(
+            SESSION_ID,
+            listOf(backgroundTask("agent-t1", status = BackgroundTask.Status.Cancelled, agentId = "agent-12")),
+        )
+
+        assertEquals(SubagentStatus.Cancelled, entry("agent-12")!!.status)
+    }
+
+    @Test
+    fun `the REST task list never regresses a live pin`() = runBlocking {
+        store.apply(SESSION_ID, spawned("agent-12", taskId = "agent-t1"))
+        store.apply(SESSION_ID, SessionEvent.SubagentStarted("agent-12"))
+
+        store.applyTaskList(
+            SESSION_ID,
+            listOf(backgroundTask("agent-t1", status = BackgroundTask.Status.Cancelled, agentId = "agent-12")),
+        )
+
+        assertEquals(SubagentStatus.Working, entry("agent-12")!!.status)
+    }
+
+    @Test
+    fun `the REST task list fills blank model and effort without touching a non-cancelled status`() = runBlocking {
+        store.apply(SESSION_ID, spawned("agent-12", taskId = "agent-t1", model = "kimi-code/k3", thinkingEffort = "high"))
+        store.apply(SESSION_ID, spawned("agent-13", toolCallId = "tool_2", taskId = "agent-t2"))
+
+        store.applyTaskList(
+            SESSION_ID,
+            listOf(
+                backgroundTask(
+                    "agent-t1", status = BackgroundTask.Status.Running, agentId = "agent-12",
+                    model = "other/m1", thinkingEffort = "low",
+                ),
+                backgroundTask(
+                    "agent-t2", status = BackgroundTask.Status.Running, agentId = "agent-13",
+                    model = "kimi-code/k3", thinkingEffort = "high",
+                ),
+            ),
+        )
+
+        assertEquals("kimi-code/k3", entry("agent-12")!!.model)
+        assertEquals("high", entry("agent-12")!!.thinkingEffort)
+        assertEquals("kimi-code/k3", entry("agent-13")!!.model)
+        assertEquals("high", entry("agent-13")!!.thinkingEffort)
+        assertEquals(SubagentStatus.Queued, entry("agent-13")!!.status)
+    }
+
+    @Test
+    fun `the REST task list skips bash tasks, id-less and unknown agents`() = runBlocking {
+        store.apply(SESSION_ID, spawned("agent-12"))
+
+        store.applyTaskList(
+            SESSION_ID,
+            listOf(
+                backgroundTask("bash-1", status = BackgroundTask.Status.Cancelled, kind = BackgroundTask.Kind.Bash, agentId = "agent-12"),
+                backgroundTask("agent-t9", status = BackgroundTask.Status.Cancelled, agentId = "agent-99"),
+                backgroundTask("agent-t8", status = BackgroundTask.Status.Cancelled, agentId = null),
+            ),
+        )
+
+        assertEquals(SubagentStatus.Queued, entry("agent-12")!!.status)
+        assertNull(store.entry(SESSION_ID, "agent-99").first())
+    }
+
     // --- Todos & jobs (the sub-agent page's dock) ---------------------------------------
 
     private fun taskInfo(
@@ -758,7 +978,8 @@ class SubagentStreamStoreTest {
         status: TaskInfo.Status,
         kind: TaskInfo.Kind = TaskInfo.Kind.Process,
         endedAt: Instant? = null,
-    ) = TaskInfo(taskId, "nested bg", status, Instant.ofEpochMilli(1785210101939), endedAt, kind = kind)
+        agentId: String? = null,
+    ) = TaskInfo(taskId, "nested bg", status, Instant.ofEpochMilli(1785210101939), endedAt, kind = kind, agentId = agentId)
 
     @Test
     fun `task frames feed the owning sub-agent's jobs list`() = runBlocking {

@@ -19,6 +19,14 @@ internal val KimiBlueDarkOnContainer = Color(0xFFBDD8FF) // 9.9:1 on the contain
 internal val KimiSuccessLight = Color(0xFF0E7A38) // web --ok
 internal val KimiSuccessDark = Color(0xFF3FB950) // web dark --ok
 
+// Warning ambers (ticket 135 — the swarm's suspended segment and chip; suspended
+// means "provider rate limit, requeued for retry", so the treatment must read as
+// transient, never as an error). WCAG-AA: the color doubles as the suspended
+// chip's label text on surfaceVariant (4.6:1 light, 4.8:1 dark) and as the
+// bar's segment on the surfaceContainerLow card (5.4:1 light, 8.8:1 dark).
+internal val KimiWarningLight = Color(0xFF8A5A00)
+internal val KimiWarningDark = Color(0xFFE3B341)
+
 // Diff-screen row palettes (ticket 119): a tinted container per direction with its
 // content color, WCAG-AA-checked (normal text) against it. The contents reuse the
 // success green and the M3 default error red so the rows read like the ✓/✗ glyphs.

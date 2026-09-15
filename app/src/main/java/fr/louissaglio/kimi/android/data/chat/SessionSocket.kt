@@ -339,7 +339,7 @@ class SessionSocket @Inject constructor(
                     onEvent(
                         SessionEvent.SubagentSpawned(
                             it.subagentId, it.subagentName, it.parentToolCallId, it.description, it.runInBackground,
-                            it.swarmIndex, it.taskId,
+                            it.swarmIndex, it.taskId, it.model, it.thinkingEffort,
                         ),
                     )
                 }
@@ -351,6 +351,10 @@ class SessionSocket @Inject constructor(
                 ?.let { onEvent(SessionEvent.SubagentFailed(it.subagentId, it.error.orEmpty())) }
             "subagent.suspended" -> frame.decodePayload<SubagentLifecyclePayload>()
                 ?.let { onEvent(SessionEvent.SubagentSuspended(it.subagentId)) }
+            // Upstream schema-level (never captured live): a deliberate stop. The
+            // live path carries the same truth as task.terminated status "killed".
+            "subagent.cancelled" -> frame.decodePayload<SubagentLifecyclePayload>()
+                ?.let { onEvent(SessionEvent.SubagentCancelled(it.subagentId)) }
             // Background tasks (docs/server-api.md, Background lifecycle — ticket 092):
             // info carries the CORE status vocabulary; an undecodable/unknown info
             // drops the event with a Log.w in the mapper. task.notified and the legacy

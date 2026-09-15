@@ -1,5 +1,6 @@
 package fr.louissaglio.kimi.android.data.chat
 
+import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -883,6 +884,50 @@ class ToolPayloadsTest {
     fun `GetGoal and EnterPlanMode have no payload`() {
         assertNull(ToolPayloads.of("GetGoal", buildJsonObject { }))
         assertNull(ToolPayloads.of("EnterPlanMode", buildJsonObject { }))
+    }
+
+    @Test
+    fun `an AgentSwarm call sizes its expected total from the items array`() {
+        val args = buildJsonObject {
+            put("description", "review the docs")
+            put("prompt_template", "Check {{item}}")
+            put("items", buildJsonArray { add("a"); add("b"); add("c") })
+        }
+
+        assertEquals(
+            ToolPayload.AgentSwarm(description = "review the docs", expectedTotal = 3),
+            ToolPayloads.of("AgentSwarm", args),
+        )
+    }
+
+    @Test
+    fun `an AgentSwarm resumes-only call sizes the resume_agent_ids map`() {
+        val args = buildJsonObject {
+            put(
+                "resume_agent_ids",
+                buildJsonObject {
+                    put("agent-1", true)
+                    put("agent-2", true)
+                },
+            )
+        }
+
+        assertEquals(
+            ToolPayload.AgentSwarm(description = null, expectedTotal = 2),
+            ToolPayloads.of("AgentSwarm", args),
+        )
+    }
+
+    @Test
+    fun `an AgentSwarm call without items resumes or description yields no payload`() {
+        assertNull(ToolPayloads.of("AgentSwarm", null))
+        assertNull(ToolPayloads.of("AgentSwarm", buildJsonObject { }))
+        assertNull(ToolPayloads.of("AgentSwarm", buildJsonObject { put("description", "  ") }))
+        // A present-but-empty items array is a real (zero) expectation, not an absence.
+        assertEquals(
+            ToolPayload.AgentSwarm(description = null, expectedTotal = 0),
+            ToolPayloads.of("AgentSwarm", buildJsonObject { put("items", buildJsonArray { }) }),
+        )
     }
 
     @Test
