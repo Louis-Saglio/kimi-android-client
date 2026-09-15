@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-09-14
-(server version `0.43.0`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-09-15
+(server version `0.43.1`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
@@ -14,7 +14,8 @@ the workspace list used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `0.42.0`
+**Protocol history:** this document previously described server `0.43.0`
+(verified 2026-09-14; see git history), `0.42.0`
 (verified 2026-09-09; see git history), `0.41.0`
 (verified 2026-09-04; see git history), `0.40.1`
 (verified 2026-09-02; see git history), `0.39.1`
@@ -33,6 +34,83 @@ used are shown with each section. Secrets are redacted (`<token>`).
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
 that, `0.27.0` before that, and `0.23.3` before that.
+
+The drift from 0.43.0 to 0.43.1 is **nil for the core loop — one behavioral
+search fix on a route the app never calls, everything else engine-internal
+or out of scope**. The upstream diff between the two tags (14 commits, most
+of it TUI/web-bundle/oauth churn) changed the client-facing wire in exactly
+one place:
+
+- **Indexed search results are now verified against session sources**
+  (commit `1336be38`; verified live 2026-09-15 — see Search): hits whose
+  source session no longer exists are filtered at query time. A throwaway
+  session's unique token was findable via container search while the
+  session lived; after `:delete` the token never surfaced in the global
+  index across two refresh cycles, while a live session's identical token
+  was indexed and found normally (user + assistant hits). The
+  request/response shapes and `index_state` are unchanged (`stale:true`
+  observed across the refresh cycles; no multi-page token walk this run).
+  **The Android app never calls `/api/v1/search` — no ticket.**
+- **Wire-invisible here:** the session event bus was sharded by agent id
+  (`f2486241` — the v1 broadcaster file and the bus publish path are
+  byte-identical between the tags; this run's capture re-observes the
+  documented sub-agent `prompt.completed` frames), swarm cancellation no
+  longer crashes the CLI (`82ec469e`), a tower-mode roster identity fix
+  (`0725ef1c` — the `tower` flag is `false` here), a
+  `[secondary_model].default_effort` config validation (`513e71ed`), the
+  managed-usage OAuth payload moved to the quota model (`bb0c66a1` — the
+  `/oauth` routes are out of scope), and the pi-tui re-baseline
+  (`486dcd26`) plus web-dist sync (`26a28419`).
+- **First-time live itemizations this run** (all additive, all predate
+  0.43.1 in the engine source — recorded because earlier runs did not call
+  them out): the compact splice's trailing `compaction_continuation`
+  injection (see Compact), a single-select question item carrying
+  `"multi_select":false` verbatim from the model's tool input (the
+  omission rule is input-dependent — see Questions), and a cross-turn
+  question re-resolve answering `40405` where a same-turn one answers
+  `40902` (see the verification log).
+
+Everything else re-verified unchanged live on 0.43.1 (see the verification
+log): auth 401s (missing + wrong token), meta (5 flags, 17 features —
+byte-similar apart from `server_version`), models catalog (10 entries, same
+content), config (`default_model` `kimi-code/k3-256k`, `thinking.effort`
+`"max"`, `default_permission_mode` `"yolo"`), sessions create/get/list
+(`last_seq` real on the detail path — `1` fresh; list still `0`), `40401`
+envelopes without `stack`, both compact `40910`s with `stack`, `/status`,
+the full snapshot (top-level keys, real `session.usage` omitting
+`total_cost_usd`/`turn_count`, busy `in_flight_turn` with `running_tools`,
+empty pending/roster lists), messages history (newest-first), prompts POST
++ ACK (`prompt_id` == `user_message_id`), one full prompt round-trip (the
+documented skeleton, no `streaming` phase), prompt queueing + steer
+(`prompt.queued` `queueLength`, `turn.steer` `{input, origin}`,
+`prompt.steered`), mid-run `:abort` (full interrupted sequence) plus idle
+`:abort` `{"aborted":true}`, compact with `{"instruction":…}` (instant ACK,
+instruction echo, wholesale splice, `tokensAfter` == post-compaction
+`context_tokens`, the persisted `compaction_summary` message), the
+questions flow end-to-end (`question_<uuid>` ≠ `tool_call_id`, pending
+poll, `single` answer → `{"resolved":true}`, dismiss `40909`,
+re-dismiss/re-answer `40902`, all three `event.question.*`), the
+manual-approval round-trip (`approval_<uuid>` ≠ `tool_call_id` on all
+surfaces, `tool_call_id` POST → `40404`, `approved` → both resolved frames,
+snapshot `pending_approvals` item), files upload/download/`Range`
+206/delete/`40407` plus the image `session_media` projection with `name` in
+the ACK echo AND history, the upload-id reuse, and the media copy surviving
+the upload's delete, foreground + background sub-agents (full lifecycles:
+`subagent.spawned` with `taskId`/`model`/`thinkingEffort:"max"`,
+`subagent.started`/`completed`, `task.started` → `background.task.started`
+→ `task.terminated` → `background.task.terminated`, mid-turn notification
+splice + `task.notified`, REST `/tasks` list with all the
+0.39.0/0.36.1 fields), the TodoList contract
+(`{"todos":[{status,title}…]}` verbatim), the tools catalog (37 entries on
+an initialized agent — 28 builtins incl. `ReadMediaFile` + 9 MCP; 36 on a
+fresh never-prompted session, the documented liveness caveat), the v2
+grouped session table, the v3 protocol spot-check (`WS /api/v3/ws` hello +
+`GET .../history`), the session lifecycle events (`event.session.created`
+on the new session's own stream, `:delete` → `{"deleted":true}` + global
+`event.session.deleted`), and WS hello/heartbeat/subscribe/ack/
+cursor-resume (10 s pings; replay from seq 236 re-delivered 237+ in order
+before the ack; future-seq cursor → standalone `resync_required` then the
+ack listing it). **App impact: no breakage, no new tickets.**
 
 The drift from 0.42.0 to 0.43.0 is **small for the core loop — one removed WS
 phase kind (`streaming`), one removed error code (`40903`), one new event type
@@ -2230,6 +2308,15 @@ Response `data`:
   observed, source-derived).
 - `source` — `"index"` for global searches, `"live"` for container-scoped
   single-session scans.
+- **0.43.1 (behavioral, commit `1336be38`; verified live 2026-09-15):**
+  indexed hits are verified against their session sources at query time —
+  results whose source session no longer exists are filtered out. Verified
+  with a unique token planted in two sessions: after one was `:delete`d,
+  the global search returned only the live session's user/assistant hits
+  across two index refresh cycles, and a container-scoped search on the
+  deleted session answered `code:0` with zero items. Before the fix,
+  indexed hits from deleted sessions could linger until the index rebuilt.
+  Shapes unchanged.
 
 Verbatim `data` meta (items elided, verified 2026-08-05 on 0.33.0 — the
 index was mid-rebuild, hence `stale:true`):
@@ -2692,6 +2779,15 @@ from the 0.31.0 capture):
 ['content','origin','role','toolCalls']             origin compaction_summary
 ```
 
+**Observed 2026-09-15 on 0.43.1 (first live itemization; the emitting code
+has existed since the agent-core-v2 landing):** the splice may carry a third
+message kind after the summary — a whole-message `<system-reminder>`
+injection with `origin: {"kind":"injection","variant":"compaction_continuation"}`
+and no `id`, reading "Context compaction is complete — continue the work
+that was in progress when it began." It is context-only (not persisted in
+`GET .../messages`); clients that strip reminder envelopes (the app does)
+need no change.
+
 The spliced summary text is prefixed with model-facing instructions that are
 **not** persisted — history stores the bare summary (verified, see below).
 The prefix (verbatim, re-verified byte-identical 2026-09-04 on 0.41.0;
@@ -2847,7 +2943,13 @@ carries a **`multi_select` boolean** — **0.34.0: present only when `true`**
 payload, the `/questions?status=pending` poll, and the history `tool_use`
 input; re-verified live 2026-08-06 — on 0.31.1 it appeared in both `true` and
 `false` form). Treat absence as `false`; the protocol schema marks it
-optional, and the session snapshot behaves the same. The history
+optional, and the session snapshot behaves the same. **0.43.1 observation
+(2026-09-15):** the omission rule is input-dependent — when the model
+passes `multi_select` explicitly in its `AskUserQuestion` input, the wire
+item echoes it verbatim, so a single-select item can arrive with
+`"multi_select":false` present (observed on both the
+`event.question.requested` frame and the pending poll). Decoders must
+accept both forms. The history
 (`GET .../messages`) `tool_use` input for
 `AskUserQuestion` also carries `multi_select` per question (when true), but its options
 are **label-only** (no ids). The `skipped` answer kind and the optional
@@ -4467,6 +4569,98 @@ session `40401`. The loopback-only debug xstate stream
 deployment** (verified live — handshake refused).
 
 ## Verification log
+
+- 2026-09-15 re-verification on `0.43.1` (server 0.43.0 → 0.43.1; throwaway
+  sessions `session_f067fe3d-…` and `session_dc97867b-…` in
+  `/home/ubuntu/spike`, both `:delete`d after; guided by the upstream
+  0.43.0→0.43.1 diff — 14 commits; the only core-loop-wire one is `1336be38`
+  (indexed search results verified against session sources), the rest is
+  wire-invisible here: `f2486241` (session event bus sharding — the v1
+  broadcaster file and the bus publish path are byte-identical between the
+  tags), `82ec469e` (swarm-cancel CLI crash), `0725ef1c` (tower roster
+  identity, flag off here), `513e71ed` (`secondary_model` effort
+  validation), `bb0c66a1` (managed-usage quota payload — touches the
+  `/oauth` route, out of scope), `486dcd26` (pi-tui re-baseline),
+  `26a28419` (web-dist sync)).
+  Drift found: **none in shape**. The search fix verified live: a unique
+  token planted in two sessions — after one was `:delete`d, the global
+  index returned only the live session's hits (user + assistant) across two
+  refresh cycles, and container search on the deleted session answered
+  `code:0` with zero items. First-time itemizations (additive, predate
+  0.43.1 in the engine source): the compact splice's trailing
+  `compaction_continuation` `<system-reminder>` injection (no `id`, not
+  persisted in history); sub-agent `prompt.completed` frames with internal
+  prompt ids and `agentId:"agent-89"/"agent-90"` on the session channel
+  (the behavior documented in Sub-agents — re-observed verbatim, no
+  matching `prompt.submitted`); a single-select question item echoing the
+  model's explicit `"multi_select":false`; and a cross-turn re-resolve of a
+  resolved question answering `40405` where a same-turn re-resolve answers
+  `40902` (the resolved-interaction registry evicts older entries — both
+  codes are long documented, the app maps both generically). Re-verified
+  unchanged, most byte-for-byte: auth 401s (missing + wrong token), meta (5
+  flags, 17 features — byte-similar apart from `server_version`), models
+  catalog (10 entries), config (`default_model` `kimi-code/k3-256k`,
+  `thinking.effort` `"max"`, `default_permission_mode` `"yolo"`), sessions
+  create/get/list (`last_seq` real on the detail path — `1` fresh; list
+  still `0`), `40401` without `stack`, both compact `40910`s with `stack`
+  (empty + busy), `/status`, the full snapshot (top-level keys, real
+  `session.usage` omitting `total_cost_usd`/`turn_count`, busy
+  `in_flight_turn` with `running_tools`, empty pending/roster lists),
+  messages history (newest-first; `origin.attachments` on the attachment
+  message; the `date_change` injection with today's `localDate` re-spliced
+  on the session's first turn), prompts POST + ACK (`prompt_id` == `user_message_id`), one full
+  prompt round-trip (the documented skeleton — `session.meta.updated` →
+  `prompt.submitted` → `turn.started` with always-on `promptId` →
+  `context.spliced` → `prompt.started` → steps/deltas →
+  `tool.call.started`/`tool.progress`/`tool.result` → `turn.ended` →
+  `prompt.completed`; no `streaming` phase), prompt queueing + steer
+  (`prompt.queued` `queueLength:1`, `turn.steer` `{input, origin}`,
+  `prompt.steered` with `activePromptId`/`promptIds`/`steeredAt`,
+  `prompt.completed` with the original id), mid-run `:abort`
+  (`turn.step.interrupted` → `turn.ended` `cancelled`/`user_cancelled` →
+  interruption-reminder splice → `prompt.aborted`) plus idle `:abort`
+  `{"aborted":true}`, compact with `{"instruction":…}` (instant empty ACK,
+  instruction echo in `compaction.started`, wholesale `context.spliced` —
+  summary without `id`, the prefix sentence intact — `compaction.completed`
+  with the full `result` block, `tokensAfter` 30144 == post-compaction
+  `context_tokens`, the persisted `compaction_summary` history message),
+  the questions flow end-to-end (`question_<uuid>` ≠ `tool_call_id`,
+  pending poll, `single` answer → `{"resolved":true}` with the label
+  flattened, dismiss `40909`, re-dismiss/re-answer `40902`, all three
+  `event.question.*`), the manual-approval round-trip (`approval_<uuid>` ≠
+  `tool_call_id` on both frames and the snapshot `pending_approvals` item,
+  `tool_call_id` POST → `40404`, `approved` → both resolved frames), files
+  upload (sniffed `media_type`)/download/`Range` 206/delete/`40407` after
+  delete + the image `session_media` projection with `name` in the ACK echo
+  AND history + the upload-id reuse + the media copy surviving the upload's
+  delete, foreground + background sub-agents (full lifecycles:
+  `subagent.spawned` with `taskId`/`model`/`thinkingEffort:"max"`/
+  `runInBackground`, `subagent.started`/`completed`, `task.started` →
+  `background.task.started` → `task.terminated` →
+  `background.task.terminated`, mid-turn notification splice +
+  `task.notified`, REST `/tasks` list with `run_in_background`/`agent_id`/
+  `subagent_type`/`parent_tool_call_id`), the TodoList contract
+  (`{"todos":[{status,title}…]}` verbatim), the tools catalog (37 on the
+  initialized agent — 28 builtins incl. `ReadMediaFile` + 9 MCP; 36 on a
+  fresh never-prompted session, the documented liveness caveat), the v2
+  grouped session table, the v3 spot-check (`/api/v3/ws` hello
+  `protocol_version:"3"` + `GET .../history` `{messages, has_more}`), the
+  session lifecycle events (`event.session.created` on the new session's
+  own stream at `seq:1`, `:delete` → `{"deleted":true}` + global
+  `event.session.deleted` with camelCase `sessionId`), and WS
+  hello/heartbeat/subscribe/ack/cursor-resume (10 s `ping`s; replay from
+  seq 236 re-delivered 237+ in order before the ack; future-seq cursor →
+  standalone `resync_required` `epoch_changed` then the ack listing it).
+  **App impact: no breakage, no new tickets** — the only wire change is on
+  a route the app never calls, and every first-time itemization lands in
+  territory the app already tolerates (unknown `prompt.*` frames ignored,
+  reminder envelopes stripped, `multi_select` decoded optional).
+  `:app:testDebugUnitTest` — 805 tests, 0 failures (4 skipped). Tooling:
+  websocat with a fifo pong feeder whose writer fd stays open for the
+  feeder's lifetime — the open-per-write variant races websocat into an
+  stdin-EOF disconnect mid-capture. Watch item re-confirmed: a prompt-level
+  `permission_mode:"manual"` stays sticky for the session's later turns
+  (reset via `POST .../profile`).
 
 - 2026-09-14 re-verification on `0.43.0` (server 0.42.0 → 0.43.0;
   throwaway sessions `session_c0ea7090-…` and `session_85f66878-…` in
