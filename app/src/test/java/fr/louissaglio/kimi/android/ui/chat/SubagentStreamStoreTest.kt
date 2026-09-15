@@ -1,5 +1,6 @@
 package fr.louissaglio.kimi.android.ui.chat
 
+import fr.louissaglio.kimi.android.data.chat.AGENT_SWARM_TOOL_NAME
 import fr.louissaglio.kimi.android.data.chat.BackgroundTask
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
@@ -31,12 +32,19 @@ class SubagentStreamStoreTest {
 
     private val store = testSubagentStreamStore(streamCoalesceWindowMillis = 0)
 
-    private fun spawned(id: String, toolCallId: String = "tool_1") = SessionEvent.SubagentSpawned(
+    private fun spawned(
+        id: String,
+        toolCallId: String = "tool_1",
+        swarmIndex: Int? = null,
+        taskId: String? = null,
+    ) = SessionEvent.SubagentSpawned(
         subagentId = id,
         name = "explore",
         parentToolCallId = toolCallId,
         description = "doc-verify",
         runInBackground = false,
+        swarmIndex = swarmIndex,
+        taskId = taskId,
     )
 
     private fun userSplice(text: String, agentId: String, id: String = "msg_1") = SessionEvent.ContextSpliced(
@@ -198,7 +206,7 @@ class SubagentStreamStoreTest {
             seeded.items,
         )
         // The result marker registered the row link in the session registry.
-        assertEquals(mapOf("tool_1" to "agent-12"), store.linksFor(SESSION_ID))
+        assertEquals(mapOf("tool_1" to listOf("agent-12")), store.linksFor(SESSION_ID))
     }
 
     @Test
@@ -469,6 +477,7 @@ class SubagentStreamStoreTest {
         phase: SubagentRosterPhase,
         outputPreview: String? = null,
         parentToolCallId: String = "tool_1",
+        swarmIndex: Int? = null,
     ) = SubagentRosterEntry(
         id = id,
         subagentType = "explore",
@@ -477,6 +486,7 @@ class SubagentStreamStoreTest {
         parentToolCallId = parentToolCallId,
         runInBackground = false,
         outputPreview = outputPreview,
+        swarmIndex = swarmIndex,
     )
 
     @Test
@@ -637,7 +647,106 @@ class SubagentStreamStoreTest {
         )
 
         assertEquals(
-            mapOf("tool_1" to "agent-12", "tool_2" to "agent-13", "tool_3" to "agent-14"),
+            mapOf("tool_1" to listOf("agent-12"), "tool_2" to listOf("agent-13"), "tool_3" to listOf("agent-14")),
+            store.linksFor(SESSION_ID),
+        )
+    }
+
+    // --- AgentSwarm (ticket 134) ----------------------------------------------------------
+
+    @Test
+    fun `swarm members register under the shared tool call id in arrival order`() = runBlocking {
+        store.apply(SESSION_ID, spawned("agent-1", toolCallId = "tool_swarm", swarmIndex = 0, taskId = "agent-t1"))
+        store.apply(SESSION_ID, spawned("agent-2", toolCallId = "tool_swarm", swarmIndex = 1, taskId = "agent-t2"))
+        store.apply(SESSION_ID, spawned("agent-3", toolCallId = "tool_swarm", swarmIndex = 2, taskId = "agent-t3"))
+        // A duplicate spawned (cursor replay) keeps the list distinct and ordered.
+        store.apply(SESSION_ID, spawned("agent-2", toolCallId = "tool_swarm", swarmIndex = 1, taskId = "agent-t2"))
+
+        assertEquals(
+            mapOf("tool_swarm" to listOf("agent-1", "agent-2", "agent-3")),
+            store.linksFor(SESSION_ID),
+        )
+        // The spawned metadata reached the records.
+        assertEquals(1, entry("agent-2")!!.swarmIndex)
+        assertEquals("agent-t2", entry("agent-2")!!.taskId)
+    }
+
+    @Test
+    fun `swarmMembers sorts by index with nulls keeping arrival order at the end`() = runBlocking {
+        // swarmIndex is schema-only upstream (docs/server-api.md:3311): an ordering
+        // hint when present, never a requirement — grouping is the shared toolCallId.
+        store.apply(SESSION_ID, spawned("agent-1", toolCallId = "tool_swarm", swarmIndex = 2))
+        store.apply(SESSION_ID, spawned("agent-2", toolCallId = "tool_swarm"))
+        store.apply(SESSION_ID, spawned("agent-3", toolCallId = "tool_swarm", swarmIndex = 0))
+
+        assertEquals(
+            listOf("agent-3", "agent-1", "agent-2"),
+            store.swarmMembers(SESSION_ID, "tool_swarm").first().map { it.id },
+        )
+    }
+
+    @Test
+    fun `the roster seeds swarm membership and index for the cold-start rebuild`() = runBlocking {
+        // Reopened after process death mid-swarm: the snapshot roster alone rebuilds
+        // the grouping — no spawned frame was ever observed this process.
+        store.applyRoster(
+            SESSION_ID,
+            listOf(
+                rosterEntry("agent-1", SubagentRosterPhase.Working, parentToolCallId = "tool_swarm", swarmIndex = 1),
+                rosterEntry("agent-2", SubagentRosterPhase.Working, parentToolCallId = "tool_swarm", swarmIndex = 0),
+            ),
+        )
+
+        assertEquals(mapOf("tool_swarm" to listOf("agent-1", "agent-2")), store.linksFor(SESSION_ID))
+        assertEquals(
+            listOf("agent-2", "agent-1"),
+            store.swarmMembers(SESSION_ID, "tool_swarm").first().map { it.id },
+        )
+        // The roster carries no task-id field (verified upstream): the record's stays null.
+        assertNull(entry("agent-1")!!.taskId)
+    }
+
+    @Test
+    fun `an AgentSwarm call stores its label and leaves member records untouched`() = runBlocking {
+        // Both members spawned, neither live-pinned: without the swarm branch the
+        // result text below would resolve agent-1 (first link, and its agent_id:
+        // marker) and flip it Completed — the canary proving the branch leaves
+        // member records alone (the <agent_swarm_result> parse is 136's).
+        store.apply(SESSION_ID, spawned("agent-1", toolCallId = "tool_swarm", swarmIndex = 0))
+        store.apply(SESSION_ID, spawned("agent-2", toolCallId = "tool_swarm", swarmIndex = 1))
+
+        store.applyAgentCall(
+            SESSION_ID,
+            toolCallId = "tool_swarm",
+            argsJson = SWARM_ARGS,
+            resultText = "<agent_swarm_result>\nagent_id: agent-1\nstatus: completed\n</agent_swarm_result>",
+            rowStatus = ToolStatus.Done,
+            toolName = AGENT_SWARM_TOOL_NAME,
+        )
+
+        // The call's own description arg is the swarm's label (the roster screen's
+        // supporting line)...
+        assertEquals("review the docs", store.swarmDescription(SESSION_ID, "tool_swarm").first())
+        // ...first writer wins on a re-mine.
+        store.applyAgentCall(
+            SESSION_ID,
+            toolCallId = "tool_swarm",
+            argsJson = """{"description":"another label"}""",
+            resultText = null,
+            rowStatus = ToolStatus.Running,
+            toolName = AGENT_SWARM_TOOL_NAME,
+        )
+        assertEquals("review the docs", store.swarmDescription(SESSION_ID, "tool_swarm").first())
+        // ...and the member records are exactly as their own frames left them.
+        val first = entry("agent-1")!!
+        assertEquals(SubagentStatus.Queued, first.status)
+        assertEquals("doc-verify", first.description)
+        assertEquals(0, first.swarmIndex)
+        assertNull(first.resultSummary)
+        assertEquals(SubagentStatus.Queued, entry("agent-2")!!.status)
+        // No new record, no new links.
+        assertEquals(
+            mapOf("tool_swarm" to listOf("agent-1", "agent-2")),
             store.linksFor(SESSION_ID),
         )
     }
@@ -932,5 +1041,9 @@ class SubagentStreamStoreTest {
 
         /** The `Agent` call's args as mined from a row/snapshot (raw JSON). */
         const val AGENT_ARGS = """{"subagent_type":"explore","description":"doc-verify","prompt":"Reply ok"}"""
+
+        /** The `AgentSwarm` call's args as mined from a row (raw JSON): no
+         * subagent_type/prompt — one prompt_template + the items fan the members out. */
+        const val SWARM_ARGS = """{"description":"review the docs","prompt_template":"Check {{item}}","items":["a","b","c"]}"""
     }
 }

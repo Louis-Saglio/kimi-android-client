@@ -8,6 +8,7 @@ import androidx.navigation.toRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
 import fr.louissaglio.kimi.android.data.attachments.AttachmentStore
 import fr.louissaglio.kimi.android.data.toUserMessage
+import fr.louissaglio.kimi.android.data.chat.AGENT_SWARM_TOOL_NAME
 import fr.louissaglio.kimi.android.data.chat.AGENT_TOOL_NAME
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
@@ -180,6 +181,10 @@ class ChatViewModel internal constructor(
          * pill above the composer counts the Running ones; terminal jobs linger for
          * the sheet. */
         val jobs: List<Job> = emptyList(),
+        /** toolCallId → linked sub-agent count for every linked call of the session
+         * (ticket 134), from the store's link registry; the swarm card reads its own
+         * id and only renders while the count is > 0. */
+        val swarmMemberCounts: Map<String, Int> = emptyMap(),
         /** True while older history exists (scroll-to-top loads it, ticket 043). */
         val hasMoreHistory: Boolean = false,
         /** True while an older history page loads; the list shows a header spinner. */
@@ -522,14 +527,22 @@ class ChatViewModel internal constructor(
     }
 
     /** Re-drives the store's session link registry (ticket 091 — spawned / roster /
-     * result marker, one owner) into the timeline's `Agent` rows. Runs after every
-     * store-affecting apply: the timeline's own healing keeps links across refetches,
-     * but only the store's registry survives this ViewModel. Idempotent and cheap. */
+     * result marker, one owner; one-to-many since 134, a swarm's members sharing one
+     * toolCallId) into the timeline's rows, and publishes the per-call member counts
+     * the swarm cards read. Runs after every store-affecting apply: the timeline's
+     * own healing keeps links across refetches, but only the store's registry
+     * survives this ViewModel. Idempotent and cheap. */
     private fun applySubagentLinks() {
-        subagentStore.linksFor(sessionId).forEach { (toolCallId, subagentId) ->
-            timeline.linkSubagentTool(toolCallId, subagentId)
+        val links = subagentStore.linksFor(sessionId)
+        links.forEach { (toolCallId, subagentIds) ->
+            subagentIds.forEach { subagentId -> timeline.linkSubagentTool(toolCallId, subagentId) }
         }
-        uiState.update { it.copy(items = timeline.items()) }
+        uiState.update {
+            it.copy(
+                items = timeline.items(),
+                swarmMemberCounts = links.mapValues { entry -> entry.value.size },
+            )
+        }
     }
 
     /** Bumped on every turn.started/turn.ended event, so [seedSessionStatus] and
@@ -899,21 +912,24 @@ class ChatViewModel internal constructor(
         if (event is SessionEvent.SubagentSpawned) applySubagentLinks()
     }
 
-    /** Mines the timeline's `Agent` rows into the store (ticket 091): the row's
+    /** Mines the timeline's `Agent`/`AgentSwarm` rows into the store (ticket 091;
+     * AgentSwarm added in 134 — the store's swarm branch keeps only the call's
+     * label, its members arrive through their own spawned/roster frames): the row's
      * args/result carry the identity, task prompt, lifecycle status and result
      * summary — the store resolves the sub-agent through its link registry or the
      * result's `agent_id:` marker, healing existing records per its precedence
      * table. Then the store's links re-drive onto the rows (a row the link
      * predates — e.g. one a history page just loaded — gains its open affordance).
-     * Idempotent and cheap — `Agent` rows are few. */
+     * Idempotent and cheap — such rows are few. */
     private fun mineAgentRowsIntoStore() {
         timeline.items()
             .flatMap { (it as? ChatItem.ToolGroup)?.tools.orEmpty() }
-            .filter { it.name == AGENT_TOOL_NAME }
+            .filter { it.name == AGENT_TOOL_NAME || it.name == AGENT_SWARM_TOOL_NAME }
             .forEach { row ->
                 subagentStore.applyAgentCall(
                     sessionId,
                     toolCallId = row.id,
+                    toolName = row.name,
                     argsJson = row.input,
                     resultText = row.output.ifBlank { null },
                     rowStatus = row.status,

@@ -1671,4 +1671,62 @@ class ToolRowTest {
         composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
         composeTestRule.onNodeWithText("Entered plan mode.").assertIsDisplayed()
     }
+
+    /** Ticket 134: a linked AgentSwarm call renders as the swarm card — sparkles
+     * glyph, "Swarm" title, the description arg, the member count — one tap target
+     * firing the roster navigation with the tool call id. */
+    @Test
+    fun swarmCardShowsTitleDescriptionMemberCountAndFiresCallback() {
+        val args = buildJsonObject {
+            put("description", "review the docs")
+            put("prompt_template", "Check {{item}}")
+            put("items", buildJsonArray { })
+        }
+        var opened: String? = null
+        composeTestRule.setContent {
+            KimiTheme {
+                ToolRow(
+                    ChatItem.ToolActivity(
+                        "tool_1",
+                        "AgentSwarm",
+                        ToolStatus.Running,
+                        preview = ToolPreview.of("AgentSwarm", args),
+                    ),
+                    swarmMemberCounts = mapOf("tool_1" to 3),
+                    onOpenSwarm = { opened = it },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithTag("toolIconSwarm", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithText("Swarm").assertIsDisplayed()
+        composeTestRule.onNodeWithText("review the docs").assertIsDisplayed()
+        composeTestRule.onNodeWithText("3 members").assertIsDisplayed()
+        // The generic row is fully replaced: no name row, no expand affordance.
+        composeTestRule.onNodeWithText("AgentSwarm").assertDoesNotExist()
+        composeTestRule.onNodeWithContentDescription("Expand tool details").assertDoesNotExist()
+
+        composeTestRule.onNodeWithText("Swarm").performClick()
+        assertEquals("tool_1", opened)
+    }
+
+    /** Ticket 134: with zero member links (cold history before the mining lands) the
+     * AgentSwarm row keeps today's generic rendering. */
+    @Test
+    fun agentSwarmRowWithoutLinksKeepsTheGenericRow() {
+        toolRow(
+            ChatItem.ToolActivity(
+                "tool_1",
+                "AgentSwarm",
+                ToolStatus.Done,
+                preview = "review the docs",
+                input = "{\"description\":\"review the docs\"}",
+            ),
+        )
+
+        composeTestRule.onNodeWithText("Swarm").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("toolIconSwarm", useUnmergedTree = true).assertDoesNotExist()
+        composeTestRule.onNodeWithText("AgentSwarm").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Expand tool details").assertIsDisplayed()
+    }
 }

@@ -400,8 +400,8 @@ data class TaskInfoDto(
 )
 
 /** `subagent.spawned` payload (docs/server-api.md, Sub-agents): the only frame carrying
- * a sub-agent's identity metadata. `parentToolCallUuid`/`swarmIndex` exist upstream but
- * are not consumed. The frame itself is tagged `agentId:"main"`. */
+ * a sub-agent's identity metadata. `parentToolCallUuid` exists upstream but is not
+ * consumed. The frame itself is tagged `agentId:"main"`. */
 @Serializable
 data class SubagentSpawnedPayload(
     val subagentId: String = "",
@@ -409,6 +409,8 @@ data class SubagentSpawnedPayload(
     val parentToolCallId: String = "",
     val description: String = "",
     val runInBackground: Boolean = false,
+    val swarmIndex: Int? = null,
+    val taskId: String? = null,
 )
 
 /** Shared shape of `subagent.started`/`completed`/`failed`/`suspended`: every variant
@@ -467,6 +469,10 @@ data class SubagentRosterEntryDto(
     @SerialName("subagent_phase") val subagentPhase: String = "",
     @SerialName("parent_tool_call_id") val parentToolCallId: String = "",
     @SerialName("run_in_background") val runInBackground: Boolean = false,
+    // Optional (docs/server-api.md, Session snapshot roster): the member's position
+    // inside an AgentSwarm call. The roster carries no task-id field — its `id` is
+    // the subagent id (verified upstream, ticket 134).
+    @SerialName("swarm_index") val swarmIndex: Int? = null,
     // Present once the run is terminal (the result summary tail).
     @SerialName("output_preview") val outputPreview: String? = null,
 )

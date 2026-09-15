@@ -1,6 +1,7 @@
 package fr.louissaglio.kimi.android.ui.chat
 
 import android.util.Log
+import fr.louissaglio.kimi.android.data.chat.AGENT_SWARM_TOOL_NAME
 import fr.louissaglio.kimi.android.data.chat.AGENT_TOOL_NAME
 import fr.louissaglio.kimi.android.data.chat.AgentScopedEvent
 import fr.louissaglio.kimi.android.data.chat.BackgroundTask
@@ -70,10 +71,11 @@ enum class SubagentStatus { Queued, Working, Suspended, Completed, Failed }
  * authoritative for, per the precedence table on [SubagentRecord.statusSource]:
  * late canonical data HEALS instead of bouncing off a never-overwrite guard, and
  * re-applying the same source is a no-op by content, not by refusal.
- * 3. The session's `toolCallId → subagentId` link registry lives here (not in a
+ * 3. The session's `toolCallId → subagentIds` link registry lives here (not in a
  * per-ViewModel timeline): populated by the funnel (spawned / roster / result
  * marker), read by ChatViewModel via [linksFor] to re-drive the timeline's row
- * links after every store-affecting apply.
+ * links after every store-affecting apply. One-to-many since ticket 134: every
+ * member of an `AgentSwarm` call shares the call's toolCallId.
  *
  * Each record owns a [ChatTimeline] in non-history-backed mode (turn.started seals the
  * finished internal turn's live rows; ticket 046's transcript pages feed the committed
@@ -124,6 +126,12 @@ class SubagentStreamStore @Inject constructor(
          * transcript's `task` turn origins (ticket 099) — no REST seed exists: REST
          * `/tasks` serves only the main agent's task store (docs/server-api.md). */
         val jobs: List<Job> = emptyList(),
+        /** The member's position inside its `AgentSwarm` call (schema-only upstream —
+         * ordering hint for the swarm roster, ticket 134); null for plain `Agent` spawns. */
+        val swarmIndex: Int? = null,
+        /** The background-task registration id (0.38.0 spawned frame); null from the
+         * snapshot roster, which carries no such field. */
+        val taskId: String? = null,
     )
 
     /** Which source a record's status came from — the precedence order among status
@@ -155,8 +163,16 @@ class SubagentStreamStore @Inject constructor(
          * git-context prefix), never cleared. */
         var prompt: String? = null
 
-        /** The spawning `Agent` tool call — the row link (first writer wins). */
+        /** The spawning `Agent`/`AgentSwarm` tool call — the row link (first writer wins). */
         var parentToolCallId: String? = null
+
+        /** The member's position inside its `AgentSwarm` call (first writer wins —
+         * spawned frame or snapshot roster; ticket 134). */
+        var swarmIndex: Int? = null
+
+        /** The background-task registration id (first writer wins): only the spawned
+         * frame carries it — the roster has no such field. */
+        var taskId: String? = null
 
         var status: SubagentStatus = SubagentStatus.Queued
         var statusSource: StatusSource? = null
@@ -300,6 +316,7 @@ class SubagentStreamStore @Inject constructor(
             return SubagentState(
                 id, name, description, runInBackground, status, resultSummary, error,
                 hasMoreTurns, promptBubble + timeline.items(), timeline.todos(), jobs.values.toList(),
+                swarmIndex, taskId,
             )
         }
     }
@@ -312,11 +329,18 @@ class SubagentStreamStore @Inject constructor(
     private val records = mutableMapOf<String, MutableMap<String, SubagentRecord>>()
     private val states = MutableStateFlow<Map<String, Map<String, SubagentState>>>(emptyMap())
 
-    // sessionId → (toolCallId → subagentId): the session-scoped link registry
+    // sessionId → (toolCallId → subagentIds): the session-scoped link registry
     // (ticket 091). Learned by the funnel (spawned / roster / result marker), it
     // survives the per-ViewModel timelines; ChatViewModel re-drives it into its
-    // timeline after every store-affecting apply.
-    private val links = mutableMapOf<String, MutableMap<String, String>>()
+    // timeline after every store-affecting apply. Ordered one-to-many since ticket
+    // 134: a swarm's members share the AgentSwarm call's toolCallId and register in
+    // spawn-arrival order.
+    private val links = mutableMapOf<String, MutableMap<String, MutableList<String>>>()
+
+    // sessionId → (toolCallId → description): the AgentSwarm call's own label (its
+    // `description` arg), mined by applyAgentCall's swarm branch (ticket 134). The
+    // roster screen's supporting line; first writer wins.
+    private val swarmDescriptions = MutableStateFlow<Map<String, Map<String, String>>>(emptyMap())
 
     // sessionId → number of open sub-agent pages. One of the two inputs of
     // [reconcileKeepAlive]: a page needs the store fed from the socket.
@@ -337,10 +361,28 @@ class SubagentStreamStore @Inject constructor(
     fun entry(sessionId: String, subagentId: String): Flow<SubagentState?> =
         states.map { it[sessionId]?.get(subagentId) }.distinctUntilChanged()
 
-    /** The session's `Agent` tool-call → sub-agent links learned so far (spawned,
-     * roster, result marker). ChatViewModel re-drives them into its timeline's rows
-     * after every store-affecting apply — one owner, explicit rebuild. */
-    fun linksFor(sessionId: String): Map<String, String> = links[sessionId]?.toMap().orEmpty()
+    /** The session's `Agent`/`AgentSwarm` tool-call → sub-agent links learned so far
+     * (spawned, roster, result marker), in spawn-arrival order. ChatViewModel
+     * re-drives them into its timeline's rows after every store-affecting apply —
+     * one owner, explicit rebuild. */
+    fun linksFor(sessionId: String): Map<String, List<String>> =
+        links[sessionId]?.mapValues { it.value.toList() }.orEmpty()
+
+    /** The members of one `AgentSwarm` call (ticket 134): the linked sub-agent states
+     * sorted by [SubagentState.swarmIndex], members without an index keeping their
+     * spawn-arrival order at the end (sortedBy is stable). Live: re-fires on every
+     * publish of the session's records. */
+    fun swarmMembers(sessionId: String, toolCallId: String): Flow<List<SubagentState>> =
+        states.map { bySession ->
+            links[sessionId]?.get(toolCallId).orEmpty()
+                .mapNotNull { bySession[sessionId]?.get(it) }
+                .sortedBy { it.swarmIndex ?: Int.MAX_VALUE }
+        }.distinctUntilChanged()
+
+    /** The `AgentSwarm` call's own label (its `description` arg), mined by
+     * [applyAgentCall]'s swarm branch; null until the call's args reach the store. */
+    fun swarmDescription(sessionId: String, toolCallId: String): Flow<String?> =
+        swarmDescriptions.map { it[sessionId]?.get(toolCallId) }.distinctUntilChanged()
 
     /** How many sub-agent pages of [sessionId] are currently open. */
     fun openPageCount(sessionId: String): Flow<Int> =
@@ -432,6 +474,7 @@ class SubagentStreamStore @Inject constructor(
     fun release(sessionId: String) {
         records.remove(sessionId)?.values?.forEach { it.coalescer.cancel() }
         links.remove(sessionId)
+        swarmDescriptions.update { it - sessionId }
         keepAliveJobs.remove(sessionId)?.cancel()
         states.update { it - sessionId }
         openPages.update { it - sessionId }
@@ -450,6 +493,8 @@ class SubagentStreamStore @Inject constructor(
         if (record.parentToolCallId == null && event.parentToolCallId.isNotBlank()) {
             record.parentToolCallId = event.parentToolCallId
         }
+        if (record.swarmIndex == null) record.swarmIndex = event.swarmIndex
+        if (record.taskId == null) record.taskId = event.taskId
         if (event.parentToolCallId.isNotBlank()) registerLink(sessionId, event.parentToolCallId, event.subagentId)
         publish(sessionId)
     }
@@ -474,6 +519,7 @@ class SubagentStreamStore @Inject constructor(
             if (record.parentToolCallId == null && entry.parentToolCallId.isNotBlank()) {
                 record.parentToolCallId = entry.parentToolCallId
             }
+            if (record.swarmIndex == null) record.swarmIndex = entry.swarmIndex
             if (entry.parentToolCallId.isNotBlank()) registerLink(sessionId, entry.parentToolCallId, entry.id)
             val status = when (entry.phase) {
                 SubagentRosterPhase.Queued -> SubagentStatus.Queued
@@ -499,7 +545,16 @@ class SubagentStreamStore @Inject constructor(
      * messages page, `in_flight_turn.running_tools`. The sub-agent id resolves from
      * the link registry (spawned/roster) or the result's `agent_id:` marker (the
      * version-pinned wire format); without either there is nothing to learn and the
-     * call is skipped.
+     * call is skipped. A registry hit takes the FIRST linked id — right for a plain
+     * `Agent` call, and swarm calls never reach this path (below).
+     *
+     * The `AgentSwarm` branch (ticket 134) is a different shape: the args carry no
+     * `subagent_type`/`prompt` (one `prompt_template` + `items[]` fan the members
+     * out), so the call's own `description` arg is kept as the swarm's label (the
+     * roster screen's supporting line) and member records stay untouched — each
+     * member is fed by its own spawned/roster frames, and the swarm's
+     * `<agent_swarm_result>` text names many ids (136 owns its parsing), so
+     * resolving one member here would clobber it with a result that isn't its own.
      *
      * A missing record is created from the args/result (identity, task prompt,
      * status, the `[summary]` section standing in as the final assistant bubble until
@@ -514,8 +569,26 @@ class SubagentStreamStore @Inject constructor(
         argsJson: String,
         resultText: String?,
         rowStatus: ToolStatus,
+        // [AGENT_SWARM_TOOL_NAME] takes the swarm branch above, anything else the
+        // plain-`Agent` path below. Defaults to `Agent`: the callers mining
+        // plain-Agent history (SnapshotSync, most tests) pass nothing.
+        toolName: String = AGENT_TOOL_NAME,
     ) {
-        val subagentId = links[sessionId]?.get(toolCallId)
+        if (toolName == AGENT_SWARM_TOOL_NAME) {
+            val label = agentArg(argsJson, "description")
+            if (label != null) {
+                swarmDescriptions.update { bySession ->
+                    val sessionLabels = bySession[sessionId].orEmpty()
+                    if (sessionLabels.containsKey(toolCallId)) {
+                        bySession
+                    } else {
+                        bySession + (sessionId to sessionLabels + (toolCallId to label))
+                    }
+                }
+            }
+            return
+        }
+        val subagentId = links[sessionId]?.get(toolCallId)?.firstOrNull()
             ?: resultText?.let { agentResultSubagentId(it) }
             ?: return
         registerLink(sessionId, toolCallId, subagentId)
@@ -737,8 +810,12 @@ class SubagentStreamStore @Inject constructor(
     }
 
     private fun registerLink(sessionId: String, toolCallId: String, subagentId: String) {
-        // First writer wins (spawned → roster → result marker all name the same pair).
-        links.getOrPut(sessionId) { mutableMapOf() }.putIfAbsent(toolCallId, subagentId)
+        // Ordered one-to-many (ticket 134): distinct ids in arrival order — spawned,
+        // roster and result marker all name the same pairs, and a swarm's members
+        // share one toolCallId.
+        val sessionLinks = links.getOrPut(sessionId) { mutableMapOf() }
+        val ids = sessionLinks.getOrPut(toolCallId) { mutableListOf() }
+        if (subagentId !in ids) ids += subagentId
     }
 
     private fun record(sessionId: String, subagentId: String): SubagentRecord? = records[sessionId]?.get(subagentId)

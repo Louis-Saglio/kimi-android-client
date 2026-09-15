@@ -253,9 +253,18 @@
   entry — a fresh roster heals non-live-pinned statuses), `Agent` calls from any
   carrier (history rows, snapshot messages, `running_tools`) via `applyAgentCall`,
   transcript pages via `applyTranscriptPage`/`prependTranscriptPage`. The
-  `toolCallId → subagentId` link registry lives in the store (learned from
+  `toolCallId → subagentIds` link registry lives in the store (learned from
   spawned/roster/result-marker); ChatViewModel re-drives `store.linksFor` into its
-  timeline after every store-affecting apply. The store is fed by
+  timeline after every store-affecting apply. One-to-many since 134: an
+  `AgentSwarm` call's members all register under the call's toolCallId in
+  spawn-arrival order, `swarmMembers(sessionId, toolCallId)` serves them sorted by
+  `swarmIndex` (nulls last), and `applyAgentCall`'s AgentSwarm branch keeps only
+  the call's own `description` label (member records stay untouched — 136 owns
+  the `<agent_swarm_result>` parse). Timeline row driving stays single-`Agent`:
+  a swarm row never carries `subagentId` — it renders as the swarm card
+  (member count from `UiState.swarmMemberCounts`) navigating to `SwarmScreen`
+  by the tool call id; `SwarmScreen`/`SwarmViewModel` mirror the sub-agent
+  page's store access (pageOpened/pageClosed included). The store is fed by
   exactly ONE session-socket collection at a time (064): the chat's while its
   socket gate holds the session (ChatViewModel signals
   chatCollectionStarted/Stopped), otherwise the store's own keep-alive

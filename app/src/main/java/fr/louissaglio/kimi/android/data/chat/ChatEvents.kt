@@ -11,6 +11,10 @@ const val MAIN_AGENT_ID = "main"
 /** The main agent's sub-agent-spawning tool (docs/server-api.md, Sub-agents). */
 const val AGENT_TOOL_NAME = "Agent"
 
+/** The main agent's swarm-spawning tool (docs/server-api.md, Sub-agents): one call
+ * fans out N sub-agents sharing its tool call id as `parentToolCallId` (ticket 134). */
+const val AGENT_SWARM_TOOL_NAME = "AgentSwarm"
+
 /** A transcript event scoped to one emitting agent (payload `agentId`). The chat
  * screen consumes only [MAIN_AGENT_ID] events itself; the rest are routed to the
  * sub-agent stream store (ticket 045). */
@@ -101,14 +105,20 @@ sealed interface SessionEvent {
     ) : SessionEvent, AgentScopedEvent
 
     /** `subagent.spawned`: the only carrier of a sub-agent's identity metadata —
-     * [parentToolCallId] links the spawning `Agent` tool row, [name] is the subagent
-     * type (e.g. "explore"). Later lifecycle frames carry only the id. */
+     * [parentToolCallId] links the spawning `Agent`/`AgentSwarm` tool row, [name] is
+     * the subagent type (e.g. "explore"). Later lifecycle frames carry only the id.
+     * [swarmIndex] is the member's position inside an `AgentSwarm` call (schema-only
+     * upstream, never captured live — docs/server-api.md:3311): parsed for ordering,
+     * never depended on. [taskId] is the member's background-task registration id
+     * (0.38.0). Both are null for a plain `Agent` spawn. */
     data class SubagentSpawned(
         override val subagentId: String,
         val name: String,
         val parentToolCallId: String,
         val description: String,
         val runInBackground: Boolean,
+        val swarmIndex: Int? = null,
+        val taskId: String? = null,
     ) : SubagentLifecycleEvent
 
     /** `subagent.started`; re-fires when a suspended sub-agent resumes. */

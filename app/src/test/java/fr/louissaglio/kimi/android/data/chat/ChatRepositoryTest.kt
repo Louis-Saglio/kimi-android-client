@@ -2091,6 +2091,39 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun `a swarm member's spawned frame decodes swarmIndex and taskId`() = runBlocking {
+        // The verbatim 0.38.0 capture (docs/server-api.md:3257) with swarmIndex added:
+        // a swarm member's frame carries the member's position and its background-task
+        // registration id next to the shared parentToolCallId (ticket 134).
+        val emitted = runSocketEvents(
+            """{"type":"subagent.spawned","seq":41,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-08-20T10:00:00.000Z","payload":{"type":"subagent.spawned",""" +
+                """"time":1787254524517,"subagentId":"agent-1","subagentName":"explore",""" +
+                """"parentToolCallId":"tool_ArVyKiUhCDxXT341BmjTba8L","parentAgentId":"main",""" +
+                """"callerAgentId":"main","description":"Ask what is 2+2","runInBackground":false,""" +
+                """"model":"kimi-code/k3","thinkingEffort":"high","swarmIndex":2,""" +
+                """"taskId":"agent-rhh36xem","agentId":"main","sessionId":"session_1"}}""",
+        )
+
+        assertEquals(
+            listOf(
+                SocketEvent.Event(
+                    SessionEvent.SubagentSpawned(
+                        subagentId = "agent-1",
+                        name = "explore",
+                        parentToolCallId = "tool_ArVyKiUhCDxXT341BmjTba8L",
+                        description = "Ask what is 2+2",
+                        runInBackground = false,
+                        swarmIndex = 2,
+                        taskId = "agent-rhh36xem",
+                    ),
+                ),
+            ),
+            emitted.filterIsInstance<SocketEvent.Event>(),
+        )
+    }
+
+    @Test
     fun `sub-agent approval and question frames still emit`() = runBlocking {
         // Interaction events are actionable whoever raised them (todo/044): a filtered
         // sub-agent approval would hang the session on an answer nobody can give.

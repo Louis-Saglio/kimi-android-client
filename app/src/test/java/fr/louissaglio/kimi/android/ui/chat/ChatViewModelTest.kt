@@ -524,6 +524,52 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     }
 
     @Test
+    fun `a swarm's members all link to the one call from the cold-start roster`() = runBlocking {
+        // Cold start mid-swarm (ticket 134): the snapshot roster's three members share
+        // the AgentSwarm call's toolCallId, the messages page carries the call itself.
+        // The store links every member (the one-to-many registry), the row stays
+        // unlinked (the swarm card navigates by the tool call id), and the UiState
+        // publishes the member count the card shows.
+        snapshotBody = """{"code":0,"msg":"success","data":{"as_of_seq":18,"epoch":"ep_1",""" +
+            """"session":{"id":"session_1","busy":true,"usage":{"context_tokens":0,"context_limit":0}},""" +
+            """"messages":{"items":[""" +
+            """{"id":"msg_1","session_id":"session_1","role":"assistant",""" +
+            """"content":[{"type":"tool_use","tool_call_id":"tool_swarm","tool_name":"AgentSwarm",""" +
+            """"input":{"description":"review the docs","prompt_template":"Check {{item}}",""" +
+            """"items":["a","b","c"]}}],""" +
+            """"created_at":"2026-09-15T10:00:00.000Z"}],"has_more":false},""" +
+            """"in_flight_turn":null,""" +
+            """"subagents":[""" +
+            swarmRosterEntry("agent-1", 0, "Check a") + "," +
+            swarmRosterEntry("agent-2", 1, "Check b") + "," +
+            swarmRosterEntry("agent-3", 2, "Check c") +
+            """],"pending_approvals":[],"pending_questions":[]},"request_id":"r"}"""
+
+        viewModel.onScreenStarted()
+
+        awaitCondition {
+            subagentStore.linksFor("session_1")["tool_swarm"] == listOf("agent-1", "agent-2", "agent-3")
+        }
+        awaitState(viewModel.uiState) { it.swarmMemberCounts["tool_swarm"] == 3 }
+        // The AgentSwarm row itself never gains a subagentId (single-Agent only)...
+        val row = viewModel.uiState.value.items.orEmpty()
+            .filterIsInstance<ChatItem.ToolGroup>()
+            .flatMap { it.tools }
+            .single { it.id == "tool_swarm" }
+        assertNull(row.subagentId)
+        // ...the call's own description arg is the swarm's label...
+        assertEquals("review the docs", subagentStore.swarmDescription("session_1", "tool_swarm").first())
+        // ...and the members carry their roster-seeded index.
+        assertEquals(1, subagentEntry("agent-2")!!.swarmIndex)
+    }
+
+    private fun swarmRosterEntry(id: String, index: Int, description: String): String =
+        """{"id":"$id","session_id":"session_1","kind":"subagent","description":"$description",""" +
+            """"status":"running","subagent_phase":"working","subagent_type":"explore",""" +
+            """"parent_tool_call_id":"tool_swarm","run_in_background":false,"swarm_index":$index,""" +
+            """"created_at":"2026-09-15T10:00:00.000Z","started_at":"2026-09-15T10:00:00.100Z"}"""
+
+    @Test
     fun `onHistoryTopReached prepends the next page deduplicated and stops when has_more is false`() = runBlocking {
         // Newest page (wire order newest-first): msg_2 is the oldest loaded — the cursor.
         messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +

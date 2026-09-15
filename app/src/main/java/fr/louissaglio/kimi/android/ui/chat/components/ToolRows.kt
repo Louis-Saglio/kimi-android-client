@@ -44,6 +44,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import fr.louissaglio.kimi.android.data.chat.AGENT_SWARM_TOOL_NAME
 import fr.louissaglio.kimi.android.data.chat.BashOutputs
 import fr.louissaglio.kimi.android.data.chat.EditDiffs
 import fr.louissaglio.kimi.android.data.chat.FetchUrlOutputs
@@ -60,6 +61,7 @@ import fr.louissaglio.kimi.android.ui.common.icons.GlobeIcon
 import fr.louissaglio.kimi.android.ui.common.icons.ImageIcon
 import fr.louissaglio.kimi.android.ui.common.icons.LinkIcon
 import fr.louissaglio.kimi.android.ui.common.icons.SearchIcon
+import fr.louissaglio.kimi.android.ui.common.icons.SparklesIcon
 import fr.louissaglio.kimi.android.ui.common.icons.WorkspaceIcon
 import fr.louissaglio.kimi.android.ui.theme.diffColors
 import fr.louissaglio.kimi.android.ui.theme.successColor
@@ -105,6 +107,8 @@ internal fun ToolGroupCard(
     onQuestionRowTapped: (toolCallId: String, input: String, output: String) -> Unit = { _, _, _ -> },
     onOpenEditDiff: (toolCallId: String, payload: ToolPayload.Edit) -> Unit = { _, _ -> },
     onOpenFileContent: (toolCallId: String, payload: ToolPayload, output: String) -> Unit = { _, _, _ -> },
+    swarmMemberCounts: Map<String, Int> = emptyMap(),
+    onOpenSwarm: (String) -> Unit = {},
 ) {
     val status = when {
         group.tools.any { it.status == ToolStatus.Running } -> ToolStatus.Running
@@ -140,8 +144,70 @@ internal fun ToolGroupCard(
             group.tools.forEachIndexed { index, tool ->
                 // 1dp outlineVariant hairline between rows, like the web's row separators.
                 if (index > 0) HorizontalDivider()
-                ToolRow(tool, onOpenSubagent, onOpenJob, onQuestionRowTapped, onOpenEditDiff, onOpenFileContent)
+                ToolRow(tool, onOpenSubagent, onOpenJob, onQuestionRowTapped, onOpenEditDiff, onOpenFileContent, swarmMemberCounts, onOpenSwarm)
             }
+        }
+    }
+}
+
+/** The swarm card (ticket 134): a linked `AgentSwarm` call's compact affordance,
+ * replacing its generic row while at least one member link exists. The group-card
+ * idiom (outlined, `surfaceContainerLow`); the description arg on one line
+ * (ToolPreview extracts it into the row's preview), the member count trailing.
+ * The whole card is one tap target opening the roster screen. */
+@Composable
+private fun SwarmCard(
+    activity: ChatItem.ToolActivity,
+    memberCount: Int,
+    onOpenSwarm: (String) -> Unit,
+) {
+    val detailColor = MaterialTheme.colorScheme.onSurfaceVariant
+    OutlinedCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onOpenSwarm(activity.id) },
+        colors = CardDefaults.outlinedCardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                // M3: the whole card is the tap target, at least 48dp tall.
+                .heightIn(min = 48.dp)
+                .padding(horizontal = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Icon(
+                imageVector = SparklesIcon,
+                contentDescription = null,
+                modifier = Modifier
+                    .size(14.dp)
+                    .testTag("toolIconSwarm"),
+                tint = detailColor,
+            )
+            Text(
+                text = "Swarm",
+                style = MaterialTheme.typography.labelMedium,
+            )
+            Text(
+                text = activity.preview,
+                style = MaterialTheme.typography.labelMedium,
+                color = detailColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = if (memberCount == 1) "1 member" else "$memberCount members",
+                style = MaterialTheme.typography.labelMedium,
+                color = detailColor,
+            )
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = "Open swarm",
+                modifier = Modifier.size(16.dp),
+                tint = detailColor,
+            )
         }
     }
 }
@@ -161,6 +227,10 @@ internal fun ToolGroupCard(
  * An `Agent` row linked to its sub-agent (ticket 045) never expands: the sub-agent
  * page already shows everything the details would, so tapping the row navigates to
  * that page, as does the trailing open button (chevron-right, own tap target).
+ *
+ * An `AgentSwarm` row with at least one linked member (ticket 134) is replaced
+ * wholesale by the swarm card — one tap target opening the roster screen; with zero
+ * links (cold history before the mining lands) the generic row below renders.
  *
  * A background `Bash` row linked to its job (ticket 096, [ChatItem.ToolActivity.bashTaskId])
  * behaves the same way: its result is only the `task_id:` stub — the command's real
@@ -246,7 +316,14 @@ internal fun ToolRow(
     onQuestionRowTapped: (toolCallId: String, input: String, output: String) -> Unit = { _, _, _ -> },
     onOpenEditDiff: (toolCallId: String, payload: ToolPayload.Edit) -> Unit = { _, _ -> },
     onOpenFileContent: (toolCallId: String, payload: ToolPayload, output: String) -> Unit = { _, _, _ -> },
+    swarmMemberCounts: Map<String, Int> = emptyMap(),
+    onOpenSwarm: (String) -> Unit = {},
 ) {
+    val swarmMemberCount = swarmMemberCounts[activity.id] ?: 0
+    if (activity.name == AGENT_SWARM_TOOL_NAME && swarmMemberCount > 0) {
+        SwarmCard(activity, swarmMemberCount, onOpenSwarm)
+        return
+    }
     val detailColor = MaterialTheme.colorScheme.onSurfaceVariant
     val linkedSubagentId = activity.subagentId
     val linkedBashTaskId = activity.bashTaskId

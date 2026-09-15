@@ -517,10 +517,15 @@ class ChatTimeline(
 
     /** Live row→sub-agent linkage (ticket 045): `subagent.spawned` names the `Agent`
      * call it answers, so the row gains its open affordance. The whole timeline is
-     * searched — a mid-turn refetch may have committed the running row already. */
+     * searched — a mid-turn refetch may have committed the running row already.
+     * Single-`Agent` only (ticket 134): an `AgentSwarm` row never carries a
+     * subagentId — it fans out many members, and the swarm card navigates by the
+     * tool call id it already holds. */
     fun linkSubagentTool(toolCallId: String, subagentId: String) {
         subagentLinks[toolCallId] = subagentId
-        healTool(toolCallId) { row -> if (row.subagentId == null) row.copy(subagentId = subagentId) else row }
+        healTool(toolCallId) { row ->
+            if (row.subagentId == null && row.name == AGENT_TOOL_NAME) row.copy(subagentId = subagentId) else row
+        }
     }
 
     /** Live row linkage (tickets 045/096/097, unified in 098): one [enriched] pass over
@@ -540,14 +545,19 @@ class ChatTimeline(
         }
     }
 
-    /** Re-applies live-learned links after a refetch rebuilt the committed rows. */
+    /** Re-applies live-learned links after a refetch rebuilt the committed rows.
+     * Single-`Agent` only, same guard as [linkSubagentTool] (ticket 134). */
     private fun reapplySubagentLinks() {
         for (index in 0 until liveStart) {
             val group = rows[index] as? ChatItem.ToolGroup ?: continue
-            if (group.tools.none { it.subagentId == null && it.id in subagentLinks }) continue
+            if (group.tools.none { it.subagentId == null && it.name == AGENT_TOOL_NAME && it.id in subagentLinks }) continue
             rows[index] = group.copy(
                 tools = group.tools.map { tool ->
-                    if (tool.subagentId == null) tool.copy(subagentId = subagentLinks[tool.id]) else tool
+                    if (tool.subagentId == null && tool.name == AGENT_TOOL_NAME) {
+                        tool.copy(subagentId = subagentLinks[tool.id])
+                    } else {
+                        tool
+                    }
                 },
             )
         }

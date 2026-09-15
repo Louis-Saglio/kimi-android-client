@@ -47,4 +47,11 @@ class RoutesTest {
             Json.decodeFromString(FileContent.serializer(), Json.encodeToString(FileContent.serializer(), route))
         assertEquals(route, decoded)
     }
+
+    @Test
+    fun `swarm route round-trips through json`() {
+        val route = Swarm(sessionId = "session_1", toolCallId = "tool/1 & #2")
+        val decoded = Json.decodeFromString(Swarm.serializer(), Json.encodeToString(Swarm.serializer(), route))
+        assertEquals(route, decoded)
+    }
 }

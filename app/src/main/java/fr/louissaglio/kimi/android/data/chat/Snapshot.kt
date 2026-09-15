@@ -43,8 +43,12 @@ data class SnapshotApproval(
 )
 
 /** One foreground sub-agent of the snapshot roster (docs/server-api.md, Session
- * snapshot roster). [parentToolCallId] links the spawning `Agent` tool row;
- * [outputPreview] is the terminal run's result summary tail. */
+ * snapshot roster). [parentToolCallId] links the spawning `Agent`/`AgentSwarm` tool
+ * row; [outputPreview] is the terminal run's result summary tail. [swarmIndex] is
+ * the member's position inside an `AgentSwarm` call (schema-only upstream — parsed
+ * for ordering, never depended on). [taskId] is the background-task registration
+ * id: the roster carries no such field (verified upstream, ticket 134), so it is
+ * always null here — records heal it from the `subagent.spawned` frame only. */
 data class SubagentRosterEntry(
     val id: String,
     val subagentType: String,
@@ -53,6 +57,8 @@ data class SubagentRosterEntry(
     val parentToolCallId: String,
     val runInBackground: Boolean,
     val outputPreview: String?,
+    val swarmIndex: Int? = null,
+    val taskId: String? = null,
 )
 
 /** `subagent_phase` of a roster entry; [Unknown] covers anything newer the server

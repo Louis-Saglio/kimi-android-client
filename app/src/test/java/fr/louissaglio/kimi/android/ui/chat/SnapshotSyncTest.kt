@@ -154,7 +154,7 @@ class SnapshotSyncTest {
         assertEquals("explore", record.name)
         assertEquals(SubagentStatus.Working, record.status)
         assertEquals(listOf(ChatItem.UserMessage("seeded_prompt", "Reply ok")), record.items)
-        assertEquals(mapOf("tool_agent" to "agent-12"), store.linksFor(SESSION_ID))
+        assertEquals(mapOf("tool_agent" to listOf("agent-12")), store.linksFor(SESSION_ID))
     }
 
     @Test

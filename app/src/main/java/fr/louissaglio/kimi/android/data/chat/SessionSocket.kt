@@ -339,6 +339,7 @@ class SessionSocket @Inject constructor(
                     onEvent(
                         SessionEvent.SubagentSpawned(
                             it.subagentId, it.subagentName, it.parentToolCallId, it.description, it.runInBackground,
+                            it.swarmIndex, it.taskId,
                         ),
                     )
                 }

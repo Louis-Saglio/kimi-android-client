@@ -178,6 +178,7 @@ class ChatMessageMapper @Inject constructor(json: Json) {
                 parentToolCallId = entry.parentToolCallId,
                 runInBackground = entry.runInBackground,
                 outputPreview = entry.outputPreview?.takeIf { it.isNotBlank() },
+                swarmIndex = entry.swarmIndex,
             )
         },
         inFlightTurn = dto.inFlightTurn?.let { turn ->

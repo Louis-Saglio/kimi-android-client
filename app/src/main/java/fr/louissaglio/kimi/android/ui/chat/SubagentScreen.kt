@@ -175,7 +175,7 @@ fun SubagentScreen(
 }
 
 @Composable
-private fun SubagentStatusChip(status: SubagentStatus, modifier: Modifier = Modifier) {
+internal fun SubagentStatusChip(status: SubagentStatus, modifier: Modifier = Modifier) {
     val (label, color) = when (status) {
         SubagentStatus.Queued -> "Queued" to MaterialTheme.colorScheme.surfaceVariant
         SubagentStatus.Working -> "Working" to MaterialTheme.colorScheme.primaryContainer

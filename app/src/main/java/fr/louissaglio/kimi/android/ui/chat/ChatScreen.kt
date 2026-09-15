@@ -66,6 +66,9 @@ import java.time.Instant
 fun ChatScreen(
     onNavigateBack: () -> Unit,
     onNavigateToSubagent: (sessionId: String, subagentId: String) -> Unit = { _, _ -> },
+    /** Ticket 134: a swarm card opens its roster screen, addressed by the AgentSwarm
+     * call's toolCallId. */
+    onNavigateToSwarm: (sessionId: String, toolCallId: String) -> Unit = { _, _ -> },
     onNavigateToJob: (
         sessionId: String,
         taskId: String,
@@ -145,6 +148,10 @@ fun ChatScreen(
     val onOpenSubagent = remember(onNavigateToSubagent, sessionId) {
         { subagentId: String -> onNavigateToSubagent(sessionId, subagentId) }
     }
+    // Swarm cards (ticket 134) open their roster screen by the call's toolCallId.
+    val onOpenSwarm = remember(onNavigateToSwarm, sessionId) {
+        { toolCallId: String -> onNavigateToSwarm(sessionId, toolCallId) }
+    }
     // Linked background `Bash` rows (ticket 096) open their job screen. The timeout
     // budget (ticket 097) resolves from the matching timeline row — the call input is
     // the only wire location of the timeout — and the timed-out flag from the jobs
@@ -211,6 +218,7 @@ fun ChatScreen(
         onOpenJob = onOpenJob,
         onOpenEditDiff = onNavigateToEditDiff,
         onOpenFileContent = onNavigateToFileContent,
+        onOpenSwarm = onOpenSwarm,
         onHistoryTopReached = onHistoryTopReached,
         onCompact = viewModel::onCompact,
         onFork = viewModel::onFork,
@@ -290,6 +298,7 @@ private fun ChatContent(
     onOpenJob: (String) -> Unit = {},
     onOpenEditDiff: (toolCallId: String, payload: ToolPayload.Edit) -> Unit = { _, _ -> },
     onOpenFileContent: (toolCallId: String, payload: ToolPayload, output: String) -> Unit = { _, _, _ -> },
+    onOpenSwarm: (String) -> Unit = {},
     onHistoryTopReached: () -> Unit = {},
     onCompact: () -> Unit = {},
     onFork: () -> Unit = {},
@@ -509,6 +518,8 @@ private fun ChatContent(
                     // Tickets 088/089: AskUserQuestion rows never expand — the pending
                     // row toggles the live card, a resolved row opens its read-only view.
                     onQuestionRowTapped = onQuestionRowTapped,
+                    swarmMemberCounts = uiState.swarmMemberCounts,
+                    onOpenSwarm = onOpenSwarm,
                     isLoadingMoreHistory = uiState.isLoadingMoreHistory,
                     onHistoryTopReached = onHistoryTopReached,
                     scrollToBottomTick = scrollToBottomTick,

@@ -13,6 +13,7 @@ import fr.louissaglio.kimi.android.ui.chat.EditDiffScreen
 import fr.louissaglio.kimi.android.ui.chat.FileContentRoute
 import fr.louissaglio.kimi.android.ui.chat.JobDetailScreen
 import fr.louissaglio.kimi.android.ui.chat.SubagentScreen
+import fr.louissaglio.kimi.android.ui.chat.SwarmScreen
 import fr.louissaglio.kimi.android.ui.chat.ToolContentStore
 import fr.louissaglio.kimi.android.ui.sessions.ArchivedSessionsScreen
 import fr.louissaglio.kimi.android.ui.sessions.SessionsScreen
@@ -43,6 +44,11 @@ data class Chat(val sessionId: String, val title: String? = null, val cwd: Strin
  * through its SavedStateHandle. */
 @Serializable
 data class Subagent(val sessionId: String, val subagentId: String)
+
+/** One `AgentSwarm` call's roster screen (ticket 134): ids only — the member list
+ * and the swarm's label read live from the SubagentStreamStore. */
+@Serializable
+data class Swarm(val sessionId: String, val toolCallId: String)
 
 /** Background-bash job detail page (ticket 096): information, live output tail and
  * the Stop action; both ids reach the ViewModel through its SavedStateHandle. The
@@ -132,6 +138,11 @@ fun KimiNavHost(toolContentStore: ToolContentStore) {
                         launchSingleTop = true
                     }
                 },
+                onNavigateToSwarm = { sessionId, toolCallId ->
+                    navController.navigate(Swarm(sessionId, toolCallId)) {
+                        launchSingleTop = true
+                    }
+                },
                 onNavigateToJob = { sessionId, taskId, budgetSeconds, budgetIsDefault, timedOut, description, command ->
                     navController.navigate(
                         JobDetail(sessionId, taskId, budgetSeconds, budgetIsDefault, timedOut, description, command),
@@ -203,6 +214,19 @@ fun KimiNavHost(toolContentStore: ToolContentStore) {
         }
         composable<JobDetail> {
             JobDetailScreen(onNavigateBack = { navController.popBackStack() })
+        }
+        composable<Swarm> { entry ->
+            // A member row opens the member's own sub-agent page (ticket 134 → 045's
+            // screen) of the SAME session (from this entry's route).
+            val route = entry.toRoute<Swarm>()
+            SwarmScreen(
+                onNavigateBack = { navController.popBackStack() },
+                onOpenSubagent = { subagentId ->
+                    navController.navigate(Subagent(route.sessionId, subagentId)) {
+                        launchSingleTop = true
+                    }
+                },
+            )
         }
         composable<EditDiff> {
             EditDiffScreen(onNavigateBack = { navController.popBackStack() })

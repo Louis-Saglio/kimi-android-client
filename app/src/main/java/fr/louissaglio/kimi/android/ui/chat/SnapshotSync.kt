@@ -126,7 +126,13 @@ class SnapshotSync @Inject constructor(
             val store = subagentStore.get()
             store.applyRoster(sessionId, snapshot.subagents)
             mineAgentCalls(snapshot).forEach { call ->
-                store.applyAgentCall(sessionId, call.toolCallId, call.argsJson, call.resultText, call.rowStatus)
+                // The miner filters on AGENT_TOOL_NAME, so the call is always a plain
+                // `Agent` one — AgentSwarm calls are mined by ChatViewModel only
+                // (ticket 134): the roster already linked every swarm member.
+                store.applyAgentCall(
+                    sessionId, call.toolCallId, call.argsJson, call.resultText, call.rowStatus,
+                    toolName = AGENT_TOOL_NAME,
+                )
             }
         }
         return result
