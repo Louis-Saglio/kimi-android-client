@@ -149,6 +149,19 @@ class SubagentStreamStore @Inject constructor(
         val ghost: Boolean = false,
     ) {
 
+        /** True while the swarm roster row offers its stop action (ticket 137): the
+         * member still runs (Queued/Working/Suspended), its task id — the REST
+         * `:cancel` target, carried only by the spawned frame — is known, and it is
+         * no ghost row (a backfilled `not_started` member runs nothing). Terminal
+         * members and ghosts never show it. */
+        val stoppable: Boolean
+            get() = !ghost && taskId != null &&
+                (
+                    status == SubagentStatus.Queued ||
+                        status == SubagentStatus.Working ||
+                        status == SubagentStatus.Suspended
+                    )
+
         /** The swarm roster row's one-line activity (ticket 136), null when the row
          * shows nothing: while Working, the last non-blank line of the live
          * timeline's last assistant text; while Suspended, the suspend cause; when
@@ -197,6 +210,13 @@ class SubagentStreamStore @Inject constructor(
 
         /** The spawning `Agent`/`AgentSwarm` tool call — the row link (first writer wins). */
         var parentToolCallId: String? = null
+
+        /** The call the member was latest spawned or roster-listed under (LAST writer
+         * wins — unlike [parentToolCallId], the stable row link): a member resumed
+         * under a new `AgentSwarm` call moves to it, which is what keeps an OLD call's
+         * re-mined `<agent_swarm_result>` from settling the record again (the ticket
+         * 137 foreground-stop heal demotes only pins this call owns). */
+        var latestToolCallId: String? = null
 
         /** The member's position inside its `AgentSwarm` call (first writer wins —
          * spawned frame or snapshot roster; ticket 134). */
@@ -547,6 +567,7 @@ class SubagentStreamStore @Inject constructor(
         if (record.parentToolCallId == null && event.parentToolCallId.isNotBlank()) {
             record.parentToolCallId = event.parentToolCallId
         }
+        if (event.parentToolCallId.isNotBlank()) record.latestToolCallId = event.parentToolCallId
         if (record.swarmIndex == null) record.swarmIndex = event.swarmIndex
         if (record.taskId == null) record.taskId = event.taskId
         if (!event.model.isNullOrBlank()) record.model = event.model
@@ -575,6 +596,7 @@ class SubagentStreamStore @Inject constructor(
             if (record.parentToolCallId == null && entry.parentToolCallId.isNotBlank()) {
                 record.parentToolCallId = entry.parentToolCallId
             }
+            if (entry.parentToolCallId.isNotBlank()) record.latestToolCallId = entry.parentToolCallId
             if (record.swarmIndex == null) record.swarmIndex = entry.swarmIndex
             if (record.model == null) record.model = entry.model
             if (record.thinkingEffort == null) record.thinkingEffort = entry.thinkingEffort
@@ -707,11 +729,18 @@ class SubagentStreamStore @Inject constructor(
      * A member no record names is created — blank identity but the `item` excerpt
      * as the label — and linked under the call.
      *
-     * Precedence (the [StatusSource] table's, extended rather than changed): live
-     * events and a fresh roster WIN — the parse rides the Result tier, so a
-     * live-pinned record (ticket 135's killed-task pin included) or a
-     * roster-applied one is never touched, and the parse fills only members with
-     * no live or roster state. Every status it writes is terminal, so it never
+     * Precedence (the [StatusSource] table's, refined by ticket 137): TERMINAL pins
+     * keep winning — a live-settled record or ticket 135's killed-task Cancelled is
+     * never rewritten by the parse, and a fresh roster's terminal phase holds too.
+     * A NON-TERMINAL pin (live or roster) the member's own call owns is stale by
+     * construction, though: the result only exists once every member settled
+     * server-side, and a cancelled FOREGROUND member gets no live terminal frame at
+     * all (docs/server-api.md — no `task.terminated`, no `subagent.completed`/
+     * `subagent.failed`), so this parse is its ONLY terminal carrier; the pin is
+     * demoted to the Result tier and the parse heals it. The guard is
+     * [SubagentRecord.latestToolCallId]: only the member's LATEST call's result may
+     * settle it, so an old call's re-mined result never flips a member since resumed
+     * under a new call. Every status the parse writes is terminal, so it never
      * demotes a record OUT of a terminal state either.
      *
      * Members with `state="not_started"` never spawned: no live frame, roster
@@ -734,6 +763,20 @@ class SubagentStreamStore @Inject constructor(
             if (record.description.isBlank() && member.item != null) record.description = member.item
             if (record.parentToolCallId == null) record.parentToolCallId = toolCallId
             registerLink(sessionId, toolCallId, agentId)
+            // Ticket 137: a non-terminal pin this call owns is stale — the call
+            // settled, and a cancelled foreground member gets no live terminal
+            // frame, so this parse is its only terminal carrier. Demote the pin so
+            // the heal below lands; terminal pins and other calls' members are
+            // untouched (the KDoc's precedence rule).
+            if (
+                record.status != SubagentStatus.Completed &&
+                record.status != SubagentStatus.Failed &&
+                record.status != SubagentStatus.Cancelled &&
+                record.statusSource != null &&
+                record.latestToolCallId == toolCallId
+            ) {
+                record.statusSource = StatusSource.Result
+            }
             record.applyStatus(
                 when (member.outcome) {
                     SwarmResultParser.Outcome.Completed -> SubagentStatus.Completed

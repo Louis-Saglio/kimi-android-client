@@ -15,15 +15,20 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -38,11 +43,17 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.navigation.toRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
+import fr.louissaglio.kimi.android.data.DataError
+import fr.louissaglio.kimi.android.data.chat.ChatRepository
+import fr.louissaglio.kimi.android.data.settings.SettingsRepository
+import fr.louissaglio.kimi.android.data.toUserMessage
 import fr.louissaglio.kimi.android.navigation.Swarm
 import fr.louissaglio.kimi.android.ui.common.EmptyState
 import javax.inject.Inject
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -58,6 +69,8 @@ import kotlinx.coroutines.launch
 @HiltViewModel
 class SwarmViewModel internal constructor(
     private val subagentStore: SubagentStreamStore,
+    private val chatRepository: ChatRepository,
+    private val settingsRepository: SettingsRepository,
     private val routeArgs: Swarm,
 ) : ViewModel() {
 
@@ -67,21 +80,40 @@ class SwarmViewModel internal constructor(
     @Inject
     constructor(
         subagentStore: SubagentStreamStore,
+        chatRepository: ChatRepository,
+        settingsRepository: SettingsRepository,
         savedStateHandle: SavedStateHandle,
-    ) : this(subagentStore, savedStateHandle.toRoute<Swarm>())
+    ) : this(subagentStore, chatRepository, settingsRepository, savedStateHandle.toRoute<Swarm>())
 
     private val sessionId: String = routeArgs.sessionId
     private val toolCallId: String = routeArgs.toolCallId
 
     /** [description] is the swarm call's own label (its `description` arg), null
      * until the call's args reached the store; the top bar falls back to the bare
-     * title then. [members] are sorted by swarmIndex, nulls in arrival order. */
+     * title then. [members] are sorted by swarmIndex, nulls in arrival order.
+     * [stoppingMemberIds] latches the ids whose stop call succeeded or is in
+     * flight (ticket 137): the row's Stop disables on tap and stays down — the
+     * wire (`task.terminated` killed, else the settled call's result) flips the
+     * member terminal, which hides the button. A failure removes the latch. */
     data class UiState(
         val sessionId: String,
         val toolCallId: String,
         val description: String? = null,
         val members: List<SubagentStreamStore.SubagentState> = emptyList(),
+        val stoppingMemberIds: Set<String> = emptySet(),
     )
+
+    /** One-shot snackbars (the ChatViewModel.Effect pattern). */
+    sealed interface Effect {
+        val message: String
+
+        /** The stop call failed: the row's Stop re-enables, the member keeps its
+         * true state. */
+        data class MemberStopFailed(override val message: String) : Effect
+    }
+
+    private val _effects = Channel<Effect>(Channel.BUFFERED)
+    val effects = _effects.receiveAsFlow()
 
     val uiState: StateFlow<UiState>
         field = MutableStateFlow(UiState(sessionId = sessionId, toolCallId = toolCallId))
@@ -108,6 +140,36 @@ class SwarmViewModel internal constructor(
     fun onScreenStopped() {
         subagentStore.pageClosed(sessionId)
     }
+
+    /** Stops one running member (`POST .../tasks/{taskId}:cancel` — ticket 092's
+     * endpoint, working on foreground members since server 0.34.0, docs/server-api.md)
+     * through the same repository wrapper the jobs sheet uses, so error surfacing
+     * stays consistent. No confirmation (web parity). The button disables on tap and
+     * stays down on success — NO optimistic status flip: the row settles when the
+     * kill's `task.terminated` (status killed) or, for a foreground member, the
+     * settled call's result lands. A 40904 (the member went terminal first) is
+     * already-terminal success, the jobs idiom: the latch stands. Any other failure
+     * re-enables the button and snackbars. */
+    fun onStopMember(memberId: String) {
+        val member = uiState.value.members.firstOrNull { it.id == memberId } ?: return
+        if (!member.stoppable || member.id in uiState.value.stoppingMemberIds) return
+        val taskId = member.taskId ?: return
+        uiState.update { it.copy(stoppingMemberIds = it.stoppingMemberIds + memberId) }
+        viewModelScope.launch {
+            chatRepository.cancelTask(settingsRepository.current(), sessionId, taskId)
+                .onFailure { error ->
+                    if ((error as? DataError.Api)?.code == TASK_ALREADY_TERMINAL_CODE) return@onFailure
+                    uiState.update { it.copy(stoppingMemberIds = it.stoppingMemberIds - memberId) }
+                    _effects.send(Effect.MemberStopFailed(error.toUserMessage()))
+                }
+        }
+    }
+
+    private companion object {
+        /** Envelope code of a cancel aimed at an already-terminal task
+         * (docs/server-api.md, REST /tasks) — tolerated as success. */
+        const val TASK_ALREADY_TERMINAL_CODE = 40904
+    }
 }
 
 @Composable
@@ -118,13 +180,23 @@ fun SwarmScreen(
     viewModel: SwarmViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(Unit) {
+        viewModel.effects.collect { effect -> snackbarHostState.showSnackbar(effect.message) }
+    }
     // Registers the page while visible (ON_START/ON_STOP pair), exactly like the
     // sub-agent page: the registration keeps the store fed for as long as a page
     // of the session is open — by the chat's socket gate when it exists, by the
     // store's own keep-alive collection otherwise (064).
     LifecycleEventEffect(Lifecycle.Event.ON_START) { viewModel.onScreenStarted() }
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) { viewModel.onScreenStopped() }
-    SwarmContent(uiState, onNavigateBack, onOpenSubagent)
+    SwarmContent(
+        uiState,
+        onNavigateBack,
+        onOpenSubagent,
+        onStopMember = viewModel::onStopMember,
+        snackbarHostState = snackbarHostState,
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -133,8 +205,12 @@ internal fun SwarmContent(
     uiState: SwarmViewModel.UiState,
     onNavigateBack: () -> Unit,
     onOpenSubagent: (String) -> Unit = {},
+    /** A running member row's trailing Stop (ticket 137), reported by member id. */
+    onStopMember: (String) -> Unit = {},
+    snackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
 ) {
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = {
@@ -195,7 +271,12 @@ internal fun SwarmContent(
                     }
                     LazyColumn(Modifier.fillMaxSize()) {
                         items(uiState.members, key = { it.id }) { member ->
-                            SwarmMemberRow(member, onClick = { onOpenSubagent(member.id) })
+                            SwarmMemberRow(
+                                member,
+                                stopping = member.id in uiState.stoppingMemberIds,
+                                onClick = { onOpenSubagent(member.id) },
+                                onStop = { onStopMember(member.id) },
+                            )
                         }
                     }
                 }
@@ -210,9 +291,17 @@ internal fun SwarmContent(
  * working, the suspend cause while suspended, the result/error's first line once
  * terminal) and the open chevron; the whole row is the tap target. A ghost row
  * (a backfilled `not_started` member, ticket 136) has no sub-agent page to open:
- * no chevron, not clickable. */
+ * no chevron, not clickable. A stoppable member ([SubagentStreamStore.SubagentState.stoppable]
+ * — running, task id known, no ghost) carries a trailing Stop button (ticket 137,
+ * the jobs sheet's close-icon idiom, no confirmation), disabled while its stop
+ * call is in flight ([stopping]). */
 @Composable
-private fun SwarmMemberRow(member: SubagentStreamStore.SubagentState, onClick: () -> Unit) {
+private fun SwarmMemberRow(
+    member: SubagentStreamStore.SubagentState,
+    stopping: Boolean,
+    onClick: () -> Unit,
+    onStop: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -238,6 +327,19 @@ private fun SwarmMemberRow(member: SubagentStreamStore.SubagentState, onClick: (
                     overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (member.stoppable) {
+            IconButton(
+                onClick = onStop,
+                enabled = !stopping,
+                modifier = Modifier.testTag("stopMember:${member.id}"),
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Close,
+                    contentDescription = "Stop",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }

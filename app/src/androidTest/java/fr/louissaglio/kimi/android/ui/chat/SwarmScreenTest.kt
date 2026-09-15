@@ -1,7 +1,10 @@
 package fr.louissaglio.kimi.android.ui.chat
 
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
@@ -29,6 +32,7 @@ class SwarmScreenTest {
         status: SubagentStatus,
         model: String? = null,
         thinkingEffort: String? = null,
+        taskId: String? = null,
     ) =
         SubagentStreamStore.SubagentState(
             id = id,
@@ -38,6 +42,7 @@ class SwarmScreenTest {
             status = status,
             model = model,
             thinkingEffort = thinkingEffort,
+            taskId = taskId,
         )
 
     @Test
@@ -190,5 +195,83 @@ class SwarmScreenTest {
 
         composeTestRule.onNodeWithText("2 working").assertIsDisplayed()
         composeTestRule.onNodeWithText("kimi-code/k3 · high").assertDoesNotExist()
+    }
+
+    /** Ticket 137: a running member whose task id is known shows a trailing stop
+     * button; terminal members, a running member without a task id (the snapshot
+     * roster carries none), and ghost rows never do. */
+    @Test
+    fun stopButtonShowsOnlyForRunningMembersWithAKnownTaskId() {
+        composeTestRule.setContent {
+            KimiTheme {
+                SwarmContent(
+                    uiState = SwarmViewModel.UiState(
+                        sessionId = "session_1",
+                        toolCallId = "tool_swarm",
+                        members = listOf(
+                            member("agent-1", "Check a", SubagentStatus.Queued, taskId = "agent-t1"),
+                            member("agent-2", "Check b", SubagentStatus.Working, taskId = "agent-t2"),
+                            member("agent-3", "Check c", SubagentStatus.Suspended, taskId = "agent-t3"),
+                            member("agent-4", "Check d", SubagentStatus.Working),
+                            member("agent-5", "Check e", SubagentStatus.Completed, taskId = "agent-t5"),
+                            member("agent-6", "Check f", SubagentStatus.Cancelled, taskId = "agent-t6"),
+                            member("tool_swarm:ghost:7", "Check g", SubagentStatus.Cancelled).copy(ghost = true),
+                        ),
+                    ),
+                    onNavigateBack = {},
+                )
+            }
+        }
+
+        composeTestRule.onAllNodesWithContentDescription("Stop").assertCountEquals(3)
+        composeTestRule.onNodeWithTag("stopMember:agent-1").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("stopMember:agent-2").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("stopMember:agent-3").assertIsDisplayed()
+    }
+
+    /** Ticket 137: tapping Stop reports the member and disables the button
+     * immediately; the row settles (button gone, terminal chip) when the kill's
+     * `task.terminated` lands — the store's killed → Cancelled mapping (ticket 135)
+     * drives the state flip, the row just renders it. */
+    @Test
+    fun tappingStopDisablesTheButtonAndTheSettledRowHidesIt() {
+        var stopped: String? = null
+        val state = mutableStateOf(
+            SwarmViewModel.UiState(
+                sessionId = "session_1",
+                toolCallId = "tool_swarm",
+                members = listOf(member("agent-1", "Check a", SubagentStatus.Working, taskId = "agent-t1")),
+            ),
+        )
+        composeTestRule.setContent {
+            KimiTheme {
+                SwarmContent(
+                    uiState = state.value,
+                    onNavigateBack = {},
+                    onStopMember = { memberId ->
+                        stopped = memberId
+                        // The ViewModel's synchronous latch (unit-tested separately).
+                        state.value = state.value.copy(
+                            stoppingMemberIds = state.value.stoppingMemberIds + memberId,
+                        )
+                    },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithTag("stopMember:agent-1").assertIsEnabled()
+        composeTestRule.onNodeWithTag("stopMember:agent-1").performClick()
+        assertEquals("agent-1", stopped)
+        composeTestRule.onNodeWithTag("stopMember:agent-1").assertIsNotEnabled()
+
+        // The kill's task.terminated arrives: the member goes terminal, the button
+        // is gone, the chip reads the cancelled truth.
+        composeTestRule.runOnIdle {
+            state.value = state.value.copy(
+                members = listOf(member("agent-1", "Check a", SubagentStatus.Cancelled, taskId = "agent-t1")),
+            )
+        }
+        composeTestRule.onAllNodesWithContentDescription("Stop").assertCountEquals(0)
+        composeTestRule.onNodeWithText("Cancelled").assertIsDisplayed()
     }
 }

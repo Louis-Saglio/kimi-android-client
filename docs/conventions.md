@@ -272,9 +272,18 @@
   `<agent_swarm_result>` heal (`SwarmResultParser` in data/chat — the upstream
   render pinned from source, never captured live): members match by `agent_id`
   (completed/failed/aborted → Completed/Failed/Cancelled, the member's
-  stop_reason riding as the record's error line) at the Result precedence tier —
-  live pins and fresh rosters win — and `not_started` items backfill as ghost
-  records (Cancelled, item-excerpt label, page-less rows). The roster rows' other
+  stop_reason riding as the record's error line) at the Result precedence tier.
+  Ticket 137 refined that tier's rule: TERMINAL pins keep winning (a live-settled
+  record, 135's killed-task Cancelled, a roster's terminal phase), but a
+  NON-terminal pin (live or roster) the member's LATEST call owns yields to the
+  parse — the result only exists once every member settled server-side, and a
+  cancelled FOREGROUND member gets no live terminal frame at all (no
+  `task.terminated`, no `subagent.completed`/`failed`), so the parse is its only
+  terminal carrier; the new `latestToolCallId` record field (last writer wins,
+  unlike the first-writer-wins row link) guards the heal against an old call's
+  re-mined result flipping a member since resumed under a new call — and
+  `not_started` items backfill as ghost records (Cancelled, item-excerpt label,
+  page-less rows). The roster rows' other
   136 piece is `SubagentState.activityLine`: the one-line muted activity (last
   assistant text while Working, the `subagent.suspended` reason while Suspended,
   the resultSummary/error's first line once terminal). Timeline row driving stays single-`Agent`:
@@ -287,7 +296,15 @@
   count, the per-phase segmented bar, the running/settled subtitle, and a
   model line when every member agrees; `SwarmScreen` shows the same
   counts/model strip under its top bar and, with `SwarmViewModel`, mirrors the
-  sub-agent page's store access (pageOpened/pageClosed included). The store is fed by
+  sub-agent page's store access (pageOpened/pageClosed included). Ticket 137
+  adds the roster row's stop action: a trailing Stop IconButton shows while the
+  member is `SubagentState.stoppable` (Queued/Working/Suspended, `taskId` known,
+  no ghost), tapping it disables the button and posts the member's
+  `tasks/{taskId}:cancel` through the same `ChatRepository.cancelTask` wrapper
+  the jobs sheet uses (40904 tolerated as already-terminal success; any other
+  failure re-enables and snackbars via the screen's own Effect channel) — no
+  optimistic flip, the row settles from the wire (the killed `task.terminated`'s
+  135 pin, or the settled call's result per the refined tier above). The store is fed by
   exactly ONE session-socket collection at a time (064): the chat's while its
   socket gate holds the session (ChatViewModel signals
   chatCollectionStarted/Stopped), otherwise the store's own keep-alive
