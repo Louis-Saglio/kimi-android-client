@@ -42,8 +42,8 @@ class ModelsRepository @Inject constructor(
 
     /**
      * The server-wide config projection (`GET /api/v1/config`): default model, default
-     * thinking effort and providers. Cached per server URL like [models]; fetch
-     * failures are not cached.
+     * thinking effort, default permission mode and providers. Cached per server URL like
+     * [models]; fetch failures are not cached.
      */
     suspend fun config(settings: ServerSettings): Result<ServerConfig> {
         val baseUrl = api.baseUrl(settings)
@@ -73,6 +73,16 @@ class ModelsRepository @Inject constructor(
             api.json.decodeFromString<Envelope<JsonObject>>(body).toAckResult()
         }
         result.onSuccess { patchCachedConfig(settings) { it.copy(defaultModel = model) } }
+        return result
+    }
+
+    /** Sets the server-wide default permission mode (ticket 142 — the wire value:
+     * manual/yolo/auto); same contract as [setDefaultModel]. */
+    suspend fun setDefaultPermissionMode(settings: ServerSettings, mode: String): Result<Unit> {
+        val result = api.post(settings, "/api/v1/config", api.jsonBody { put("default_permission_mode", mode) }) { body ->
+            api.json.decodeFromString<Envelope<JsonObject>>(body).toAckResult()
+        }
+        result.onSuccess { patchCachedConfig(settings) { it.copy(defaultPermissionMode = mode) } }
         return result
     }
 
@@ -131,6 +141,7 @@ class ModelsRepository @Inject constructor(
                 ServerConfig(
                     defaultModel = data?.defaultModel?.takeIf { it.isNotBlank() },
                     defaultEffort = data?.thinking?.effort?.takeIf { it.isNotBlank() },
+                    defaultPermissionMode = data?.defaultPermissionMode?.takeIf { it.isNotBlank() },
                     providers = data?.providers.orEmpty().map { (name, dto) ->
                         ServerProvider(
                             name = name,

@@ -38,6 +38,7 @@ class ModelsRepositoryTest {
 
         assertEquals("kimi-code/k3", config.defaultModel)
         assertEquals("high", config.defaultEffort)
+        assertEquals("yolo", config.defaultPermissionMode)
         assertEquals(
             listOf(
                 ServerProvider(
@@ -91,12 +92,48 @@ class ModelsRepositoryTest {
         assertEquals(2, server.requestCount)
     }
 
+    @Test
+    fun `setDefaultPermissionMode posts the snake_case body and the cache serves the new default`() = runBlocking {
+        server.enqueue(MockResponse(body = CONFIG_BODY))
+        assertEquals("yolo", repository.config(settings()).getOrThrow().defaultPermissionMode)
+        server.takeRequest()
+        server.enqueue(MockResponse(body = """{"code":0,"msg":"success","data":{}}"""))
+
+        assertTrue(repository.setDefaultPermissionMode(settings(), "manual").isSuccess)
+
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/config", request.target)
+        assertEquals("""{"default_permission_mode":"manual"}""", request.body!!.utf8())
+        // Served from the patched cache — no refetch.
+        assertEquals("manual", repository.config(settings()).getOrThrow().defaultPermissionMode)
+        assertEquals(2, server.requestCount)
+    }
+
+    @Test
+    fun `a failed setDefaultPermissionMode write leaves the cache untouched`() = runBlocking {
+        server.enqueue(MockResponse(body = CONFIG_BODY))
+        assertEquals("yolo", repository.config(settings()).getOrThrow().defaultPermissionMode)
+        server.takeRequest()
+        server.enqueue(MockResponse(code = 500))
+
+        val error = repository.setDefaultPermissionMode(settings(), "auto").exceptionOrNull()
+
+        assertEquals(DataError.Http(500), error)
+        val request = server.takeRequest()
+        assertEquals("""{"default_permission_mode":"auto"}""", request.body!!.utf8())
+        assertEquals("yolo", repository.config(settings()).getOrThrow().defaultPermissionMode)
+        assertEquals(2, server.requestCount)
+    }
+
     private companion object {
-        // Verbatim trimmed capture (0.39.1, 2026-09-01): the consumed fields are
+        // Verbatim trimmed capture (0.39.1, 2026-09-01) plus default_permission_mode
+        // (verified live on 0.42.0, 2026-09-15 — ticket 142): the consumed fields are
         // snake_case on both the GET and the POST echo.
         const val CONFIG_BODY =
             """{"code":0,"msg":"success","data":{""" +
                 """"default_model":"kimi-code/k3",""" +
+                """"default_permission_mode":"yolo",""" +
                 """"thinking":{"enabled":true,"effort":"high"},""" +
                 """"providers":{""" +
                 """"managed:kimi-code":{"type":"kimi","base_url":"https://api.kimi.com/coding/v1","has_api_key":true},""" +

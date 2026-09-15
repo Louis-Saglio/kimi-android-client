@@ -143,7 +143,8 @@
 - `ui/<screen>/` — screen composable + ViewModel. Chat building blocks live in
   `ui/chat/components/` (same package, `internal` — androidTests import them; the
   `ModelPickerSheet` doubles as the Settings screen's server-default model/effort
-  editor, ticket 109).
+  editor, ticket 109, and the `PermissionPickerSheet` as its server-default
+  permission-mode editor, ticket 142).
   `ui/common/` holds shared `StateViews` (loading/error/empty) and
   `Formatters` — reuse them instead of adding one-off copies. Large tool-payload
   content reaches its detail screen through `ToolContentStore` (ui/chat,

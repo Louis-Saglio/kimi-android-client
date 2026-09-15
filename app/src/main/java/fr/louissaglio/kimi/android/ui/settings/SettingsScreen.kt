@@ -42,6 +42,8 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import fr.louissaglio.kimi.android.data.chat.ServerConfig
 import fr.louissaglio.kimi.android.ui.chat.ModelPickerSheet
+import fr.louissaglio.kimi.android.ui.chat.PermissionMode
+import fr.louissaglio.kimi.android.ui.chat.PermissionPickerSheet
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 
 @Composable
@@ -51,7 +53,7 @@ fun SettingsScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
-    var sheetOpen by remember { mutableStateOf(false) }
+    var openSheet by remember { mutableStateOf<Sheet?>(null) }
     LaunchedEffect(Unit) {
         viewModel.effects.collect { effect ->
             when (effect) {
@@ -60,7 +62,7 @@ fun SettingsScreen(
                 is SettingsViewModel.Effect.ConfigWriteFailed -> {
                     // The picker sheet is modal: dismiss it first or the snackbar
                     // hides behind its scrim.
-                    sheetOpen = false
+                    openSheet = null
                     snackbarHostState.showSnackbar(effect.message)
                 }
             }
@@ -69,8 +71,8 @@ fun SettingsScreen(
     SettingsContent(
         uiState = uiState,
         snackbarHostState = snackbarHostState,
-        sheetOpen = sheetOpen,
-        onSheetOpenChange = { sheetOpen = it },
+        openSheet = openSheet,
+        onOpenSheetChange = { openSheet = it },
         onNavigateBack = onNavigateBack,
         onServerUrlChange = viewModel::onServerUrlChange,
         onTokenChange = viewModel::onTokenChange,
@@ -78,16 +80,20 @@ fun SettingsScreen(
         onTestConnection = viewModel::onTestConnection,
         onDefaultModelSelected = viewModel::onDefaultModelSelected,
         onDefaultEffortSelected = viewModel::onDefaultEffortSelected,
+        onDefaultPermissionModeSelected = viewModel::onDefaultPermissionModeSelected,
     )
 }
+
+/** The picker sheet currently open over the server-config rows, if any. */
+private enum class Sheet { Model, Permission }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsContent(
     uiState: SettingsViewModel.UiState,
     snackbarHostState: SnackbarHostState,
-    sheetOpen: Boolean,
-    onSheetOpenChange: (Boolean) -> Unit,
+    openSheet: Sheet?,
+    onOpenSheetChange: (Sheet?) -> Unit,
     onNavigateBack: () -> Unit,
     onServerUrlChange: (String) -> Unit,
     onTokenChange: (String) -> Unit,
@@ -95,6 +101,7 @@ private fun SettingsContent(
     onTestConnection: () -> Unit,
     onDefaultModelSelected: (String) -> Unit,
     onDefaultEffortSelected: (String) -> Unit,
+    onDefaultPermissionModeSelected: (PermissionMode) -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -169,10 +176,11 @@ private fun SettingsContent(
                 ServerConfigSections(
                     uiState = uiState,
                     config = config,
-                    sheetOpen = sheetOpen,
-                    onSheetOpenChange = onSheetOpenChange,
+                    openSheet = openSheet,
+                    onOpenSheetChange = onOpenSheetChange,
                     onDefaultModelSelected = onDefaultModelSelected,
                     onDefaultEffortSelected = onDefaultEffortSelected,
+                    onDefaultPermissionModeSelected = onDefaultPermissionModeSelected,
                 )
             }
         }
@@ -181,23 +189,32 @@ private fun SettingsContent(
 
 /** The server-wide model settings (ticket 109, revised after Louis's pass): a single
  * "Default model" row opening the chat's model-picker sheet — the check IS the server
- * default here, so no "Default" badge — then the read-only providers under their own
- * header. A pick writes through the ViewModel; the sheet's check moves on success and
- * stays put on failure (the failure also dismisses the sheet for the snackbar). */
+ * default here, so no "Default" badge —, the "Default permission" row (ticket 142)
+ * opening the chat's permission sheet the same way, then the read-only providers under
+ * their own header. A pick writes through the ViewModel; the sheet's check moves on
+ * success and stays put on failure (the failure also dismisses the sheet for the
+ * snackbar). */
 @Composable
 private fun ServerConfigSections(
     uiState: SettingsViewModel.UiState,
     config: ServerConfig,
-    sheetOpen: Boolean,
-    onSheetOpenChange: (Boolean) -> Unit,
+    openSheet: Sheet?,
+    onOpenSheetChange: (Sheet?) -> Unit,
     onDefaultModelSelected: (String) -> Unit,
     onDefaultEffortSelected: (String) -> Unit,
+    onDefaultPermissionModeSelected: (PermissionMode) -> Unit,
 ) {
     SectionHeader("Models")
     SettingsRow(
         title = "Default model",
         value = uiState.defaultModelSummary ?: "Not set",
-        onClick = { onSheetOpenChange(true) },
+        onClick = { onOpenSheetChange(Sheet.Model) },
+    )
+    SettingsRow(
+        title = "Default permission",
+        value = uiState.defaultPermissionLabel ?: "Not set",
+        supportingText = "Applies to new sessions",
+        onClick = { onOpenSheetChange(Sheet.Permission) },
     )
     if (config.providers.isNotEmpty()) {
         SectionHeader("Providers")
@@ -211,7 +228,7 @@ private fun ServerConfigSections(
         }
     }
 
-    if (sheetOpen) {
+    if (openSheet == Sheet.Model) {
         ModelPickerSheet(
             availableModels = uiState.availableModels,
             currentModelId = config.defaultModel,
@@ -221,7 +238,14 @@ private fun ServerConfigSections(
             defaultEffort = uiState.currentDefaultModel?.defaultEffort,
             onModelSelected = onDefaultModelSelected,
             onEffortSelected = onDefaultEffortSelected,
-            onDismiss = { onSheetOpenChange(false) },
+            onDismiss = { onOpenSheetChange(null) },
+        )
+    }
+    if (openSheet == Sheet.Permission) {
+        PermissionPickerSheet(
+            current = PermissionMode.fromWire(config.defaultPermissionMode),
+            onSelected = onDefaultPermissionModeSelected,
+            onDismiss = { onOpenSheetChange(null) },
         )
     }
 }
@@ -235,9 +259,15 @@ private fun SectionHeader(text: String) {
     )
 }
 
-/** One settings row: label over current value; a null [onClick] makes it read-only. */
+/** One settings row: label over current value, then the optional supporting text; a
+ * null [onClick] makes it read-only. */
 @Composable
-private fun SettingsRow(title: String, value: String, onClick: (() -> Unit)?) {
+private fun SettingsRow(
+    title: String,
+    value: String,
+    onClick: (() -> Unit)?,
+    supportingText: String? = null,
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -250,6 +280,13 @@ private fun SettingsRow(title: String, value: String, onClick: (() -> Unit)?) {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        if (supportingText != null) {
+            Text(
+                text = supportingText,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 
@@ -260,8 +297,8 @@ private fun SettingsContentPreview() {
         SettingsContent(
             uiState = SettingsViewModel.UiState(token = "tok123", isLoaded = true),
             snackbarHostState = remember { SnackbarHostState() },
-            sheetOpen = false,
-            onSheetOpenChange = {},
+            openSheet = null,
+            onOpenSheetChange = {},
             onNavigateBack = {},
             onServerUrlChange = {},
             onTokenChange = {},
@@ -269,6 +306,7 @@ private fun SettingsContentPreview() {
             onTestConnection = {},
             onDefaultModelSelected = {},
             onDefaultEffortSelected = {},
+            onDefaultPermissionModeSelected = {},
         )
     }
 }

@@ -10,6 +10,7 @@ import fr.louissaglio.kimi.android.data.network.ConnectionChecker
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.data.toUserMessage
+import fr.louissaglio.kimi.android.ui.chat.PermissionMode
 import javax.inject.Inject
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -62,6 +63,13 @@ class SettingsViewModel @Inject constructor(
             get() = defaultModelLabel?.let { label ->
                 val effort = serverConfig?.defaultEffort
                 if (effortOptions.isNotEmpty() && effort != null) "$label · $effort" else label
+            }
+
+        /** Row value for the default permission mode (ticket 142): the upstream label
+         * for a known wire value, the raw wire value for one this app predates. */
+        val defaultPermissionLabel: String?
+            get() = serverConfig?.defaultPermissionMode?.let { wire ->
+                PermissionMode.fromWire(wire)?.label ?: wire
             }
     }
 
@@ -130,6 +138,13 @@ class SettingsViewModel @Inject constructor(
         applyConfigWrite(
             write = { modelsRepository.setDefaultEffort(fieldSettings(), effort) },
             apply = { it.copy(defaultEffort = effort) },
+        )
+    }
+
+    fun onDefaultPermissionModeSelected(mode: PermissionMode) {
+        applyConfigWrite(
+            write = { modelsRepository.setDefaultPermissionMode(fieldSettings(), mode.wire) },
+            apply = { it.copy(defaultPermissionMode = mode.wire) },
         )
     }
 

@@ -107,11 +107,13 @@ data class AgentStatusUpdatedPayload(
 )
 
 /** `data` of `GET /api/v1/config` (and the POST's echo): the app consumes the
- * server-wide default model, the default thinking effort and the providers map
- * (credentials redacted to `has_api_key`) — ticket 109. */
+ * server-wide default model, the default thinking effort, the default permission
+ * mode (ticket 142) and the providers map (credentials redacted to `has_api_key`)
+ * — ticket 109. */
 @Serializable
 data class ConfigData(
     @SerialName("default_model") val defaultModel: String? = null,
+    @SerialName("default_permission_mode") val defaultPermissionMode: String? = null,
     val thinking: ThinkingConfigDto? = null,
     val providers: Map<String, ProviderDto> = emptyMap(),
 )

@@ -3,12 +3,15 @@ package fr.louissaglio.kimi.android.data.chat
 /**
  * The server-wide config projection the Settings "Models" section edits (ticket 109,
  * `GET`/`POST /api/v1/config`, docs/server-api.md): the default model, the default
- * thinking effort, and the providers (read-only — managing them is out of scope for
- * the phone client). Nulls mean the server has no such value.
+ * thinking effort, the default permission mode (ticket 142 — the raw wire value, the
+ * UI maps it through PermissionMode.fromWire), and the providers (read-only —
+ * managing them is out of scope for the phone client). Nulls mean the server has no
+ * such value.
  */
 data class ServerConfig(
     val defaultModel: String?,
     val defaultEffort: String?,
+    val defaultPermissionMode: String?,
     val providers: List<ServerProvider>,
 )
 
