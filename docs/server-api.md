@@ -3378,6 +3378,29 @@ resume_hint: To continue or recover this same subagent later, call Agent(resume=
 
 The killed-task notification body carries the same resume hint.
 
+The `AgentSwarm` call's result is an **XML document** instead —
+upstream-schema-only (never captured live; pinned from `renderSwarmResults`,
+`packages/agent-core-v2/src/features/swarm/tools/agent-swarm/agentSwarmTool.ts`
+at tag 0.43.1, and its tests). One `<subagent>` element per planned member,
+attribute order `mode agent_id item state outcome stop_reason` (every one
+optional but `outcome`; `agent_id` absent when the member never spawned,
+`state="not_started"` marks those; `stop_reason` rides completed runs that
+stopped on their own condition). Attribute values are XML-escaped; member
+bodies are NOT (a member's raw output can nest the tag family):
+
+```
+<agent_swarm_result>
+<summary>completed: 1, aborted: 2</summary>
+<resume_hint>Call AgentSwarm with resume_agent_ids using the agent_id values in this result to continue unfinished work.</resume_hint>
+<subagent agent_id="agent-coder-1" item="src/a.ts" outcome="completed">imports are stable</subagent>
+<subagent agent_id="agent-coder-2" item="src/b.ts" state="started" outcome="aborted">The user manually interrupted this subagent batch before this subagent finished.</subagent>
+<subagent item="src/c.ts" state="not_started" outcome="aborted">The user manually interrupted this subagent batch before this subagent was started.</subagent>
+</agent_swarm_result>
+```
+
+The `<summary>` counts show only when > 0; `<resume_hint>` is present when any
+member is unfinished or carries a stop reason and any member has an agent id.
+
 `GET .../messages` history carries only the main agent's messages — the
 `Agent` tool_use/tool_result pair is the **only** trace of a sub-agent there
 (verified 2026-07-28).

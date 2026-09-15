@@ -90,7 +90,7 @@ class SubagentStreamStoreTest {
         store.apply(SESSION_ID, SessionEvent.SubagentStarted("agent-12"))
         assertEquals(SubagentStatus.Working, entry("agent-12")!!.status)
 
-        store.apply(SESSION_ID, SessionEvent.SubagentSuspended("agent-12"))
+        store.apply(SESSION_ID, SessionEvent.SubagentSuspended("agent-12", "waiting_on_input"))
         assertEquals(SubagentStatus.Suspended, entry("agent-12")!!.status)
 
         // started re-fires when a suspended sub-agent resumes (docs/server-api.md).
@@ -719,7 +719,9 @@ class SubagentStreamStoreTest {
         // Both members spawned, neither live-pinned: without the swarm branch the
         // result text below would resolve agent-1 (first link, and its agent_id:
         // marker) and flip it Completed — the canary proving the branch leaves
-        // member records alone (the <agent_swarm_result> parse is 136's).
+        // member records alone. A result holding no <subagent> elements heals
+        // nothing (136's parse): the member records stay exactly as their own
+        // frames left them.
         store.apply(SESSION_ID, spawned("agent-1", toolCallId = "tool_swarm", swarmIndex = 0))
         store.apply(SESSION_ID, spawned("agent-2", toolCallId = "tool_swarm", swarmIndex = 1))
 
@@ -969,6 +971,153 @@ class SubagentStreamStoreTest {
 
         assertEquals(SubagentStatus.Queued, entry("agent-12")!!.status)
         assertNull(store.entry(SESSION_ID, "agent-99").first())
+    }
+
+    // --- The <agent_swarm_result> heal (ticket 136) --------------------------------
+
+    /** Verbatim upstream render (swarm.test.ts at 0.43.1, the user-cancellation
+     * run): one completed member, one aborted mid-flight, one never-started item. */
+    private val SWARM_RESULT =
+        "<agent_swarm_result>\n" +
+            "<summary>completed: 1, aborted: 2</summary>\n" +
+            "<resume_hint>Call AgentSwarm with resume_agent_ids using the agent_id values in this result to continue unfinished work.</resume_hint>\n" +
+            "<subagent agent_id=\"agent-1\" item=\"src/a.ts\" outcome=\"completed\">imports are stable</subagent>\n" +
+            "<subagent agent_id=\"agent-2\" item=\"src/b.ts\" state=\"started\" outcome=\"aborted\">The user manually interrupted this subagent batch before this subagent finished.</subagent>\n" +
+            "<subagent item=\"src/c.ts\" state=\"not_started\" outcome=\"aborted\">The user manually interrupted this subagent batch before this subagent was started.</subagent>\n" +
+            "</agent_swarm_result>"
+
+    private fun applySwarmResult(resultText: String) = store.applyAgentCall(
+        SESSION_ID,
+        toolCallId = "tool_swarm",
+        argsJson = SWARM_ARGS,
+        resultText = resultText,
+        rowStatus = ToolStatus.Done,
+        toolName = AGENT_SWARM_TOOL_NAME,
+    )
+
+    @Test
+    fun `a settled swarm's result heals member states and backfills the ghost`() = runBlocking {
+        // The cold history open: nothing but the call and its result survived.
+        applySwarmResult(SWARM_RESULT)
+
+        // Outcome mapping: completed → Completed, aborted → the 135 deliberate stop.
+        val completed = entry("agent-1")!!
+        assertEquals(SubagentStatus.Completed, completed.status)
+        // The item excerpt is the parse-created record's label.
+        assertEquals("src/a.ts", completed.description)
+        assertEquals(SubagentStatus.Cancelled, entry("agent-2")!!.status)
+        // The not_started item backfills as a ghost: Cancelled, item label, no page.
+        val ghost = entry("tool_swarm:ghost:2")!!
+        assertEquals(SubagentStatus.Cancelled, ghost.status)
+        assertEquals("src/c.ts", ghost.description)
+        assertTrue(ghost.ghost)
+        assertNull(ghost.activityLine)
+        // All three are roster members in document order, the ghost linked last.
+        assertEquals(
+            mapOf("tool_swarm" to listOf("agent-1", "agent-2", "tool_swarm:ghost:2")),
+            store.linksFor(SESSION_ID),
+        )
+        assertEquals(
+            listOf("agent-1", "agent-2", "tool_swarm:ghost:2"),
+            store.swarmMembers(SESSION_ID, "tool_swarm").first().map { it.id },
+        )
+
+        // Re-mining the same result is a no-op: no duplicate ghost.
+        applySwarmResult(SWARM_RESULT)
+        assertEquals(
+            listOf("agent-1", "agent-2", "tool_swarm:ghost:2"),
+            store.swarmMembers(SESSION_ID, "tool_swarm").first().map { it.id },
+        )
+    }
+
+    @Test
+    fun `the result parse fills only members with no live or roster state`() = runBlocking {
+        // Live pins: a running member and a live-settled one — the parse touches
+        // neither (135's live-precedence pin, extended over the result tier).
+        store.apply(SESSION_ID, spawned("agent-1", toolCallId = "tool_swarm", swarmIndex = 0))
+        store.apply(SESSION_ID, SessionEvent.SubagentStarted("agent-1"))
+        store.apply(SESSION_ID, spawned("agent-4", toolCallId = "tool_swarm", swarmIndex = 3))
+        store.apply(SESSION_ID, SessionEvent.SubagentCompleted("agent-4", "live summary"))
+        // A fresh roster's state outranks the parse too...
+        store.applyRoster(
+            SESSION_ID,
+            listOf(rosterEntry("agent-2", SubagentRosterPhase.Working, parentToolCallId = "tool_swarm", swarmIndex = 1)),
+        )
+        // ...while a transcript-derived state yields to it.
+        store.applyTranscriptPage(
+            SESSION_ID, "agent-3",
+            TranscriptPage("agent-3", listOf(TranscriptTurn("t0", 0, TranscriptState.Running, null, emptyList())), hasMore = false),
+            keepLive = true,
+        )
+
+        applySwarmResult(
+            "<agent_swarm_result>\n" +
+                "<summary>completed: 3, failed: 1</summary>\n" +
+                "<subagent agent_id=\"agent-1\" item=\"src/a.ts\" outcome=\"completed\">a</subagent>\n" +
+                "<subagent agent_id=\"agent-2\" item=\"src/b.ts\" outcome=\"completed\">b</subagent>\n" +
+                "<subagent agent_id=\"agent-3\" item=\"src/c.ts\" outcome=\"completed\">c</subagent>\n" +
+                "<subagent agent_id=\"agent-4\" item=\"src/d.ts\" outcome=\"failed\">boom</subagent>\n" +
+                "</agent_swarm_result>",
+        )
+
+        // The live pins hold.
+        assertEquals(SubagentStatus.Working, entry("agent-1")!!.status)
+        assertNull(entry("agent-1")!!.resultSummary)
+        val settled = entry("agent-4")!!
+        assertEquals(SubagentStatus.Completed, settled.status)
+        assertEquals("live summary", settled.resultSummary)
+        // The roster's word holds — and its real label is not the item excerpt.
+        val rostered = entry("agent-2")!!
+        assertEquals(SubagentStatus.Working, rostered.status)
+        assertEquals("doc-verify", rostered.description)
+        // The transcript-derived state heals to the parsed terminal one.
+        assertEquals(SubagentStatus.Completed, entry("agent-3")!!.status)
+    }
+
+    @Test
+    fun `a member's stop reason heals as the record's error line`() = runBlocking {
+        applySwarmResult(
+            "<agent_swarm_result>\n" +
+                "<summary>completed: 1</summary>\n" +
+                "<subagent agent_id=\"agent-1\" item=\"src/a.ts\" outcome=\"completed\" stop_reason=\"Max turns reached\">partial result</subagent>\n" +
+                "</agent_swarm_result>",
+        )
+
+        val member = entry("agent-1")!!
+        assertEquals(SubagentStatus.Completed, member.status)
+        assertEquals("Max turns reached", member.error)
+        assertEquals("Max turns reached", member.activityLine)
+    }
+
+    @Test
+    fun `the roster activity line follows the member's status`() = runBlocking {
+        // Working: the last non-blank line of the live assistant text.
+        store.apply(SESSION_ID, spawned("agent-1", toolCallId = "tool_swarm", swarmIndex = 0))
+        store.apply(SESSION_ID, SessionEvent.SubagentStarted("agent-1"))
+        store.apply(SESSION_ID, SessionEvent.AssistantDelta("first line\nsecond line", "agent-1"))
+        assertEquals("second line", entry("agent-1")!!.activityLine)
+
+        // Suspended: the frame's reason...
+        store.apply(SESSION_ID, SessionEvent.SubagentSuspended("agent-1", "provider rate limit"))
+        assertEquals("provider rate limit", entry("agent-1")!!.activityLine)
+
+        // ...cleared when the run resumes.
+        store.apply(SESSION_ID, SessionEvent.SubagentStarted("agent-1"))
+        assertNull(entry("agent-1")!!.suspendReason)
+        assertEquals("second line", entry("agent-1")!!.activityLine)
+
+        // Terminal: the result summary's first line.
+        store.apply(SESSION_ID, SessionEvent.SubagentCompleted("agent-1", "line one\nline two"))
+        assertEquals("line one", entry("agent-1")!!.activityLine)
+
+        // A failed member shows its error's first line.
+        store.apply(SESSION_ID, spawned("agent-2", toolCallId = "tool_swarm", swarmIndex = 1))
+        store.apply(SESSION_ID, SessionEvent.SubagentFailed("agent-2", "boom\nstack"))
+        assertEquals("boom", entry("agent-2")!!.activityLine)
+
+        // Queued has nothing to say.
+        store.apply(SESSION_ID, spawned("agent-3", toolCallId = "tool_swarm", swarmIndex = 2))
+        assertNull(entry("agent-3")!!.activityLine)
     }
 
     // --- Todos & jobs (the sub-agent page's dock) ---------------------------------------

@@ -267,9 +267,17 @@
   timeline after every store-affecting apply. One-to-many since 134: an
   `AgentSwarm` call's members all register under the call's toolCallId in
   spawn-arrival order, `swarmMembers(sessionId, toolCallId)` serves them sorted by
-  `swarmIndex` (nulls last), and `applyAgentCall`'s AgentSwarm branch keeps only
-  the call's own `description` label (member records stay untouched — 136 owns
-  the `<agent_swarm_result>` parse). Timeline row driving stays single-`Agent`:
+  `swarmIndex` (nulls last), and `applyAgentCall`'s AgentSwarm branch keeps the
+  call's own `description` label plus, since 136, the settled call's
+  `<agent_swarm_result>` heal (`SwarmResultParser` in data/chat — the upstream
+  render pinned from source, never captured live): members match by `agent_id`
+  (completed/failed/aborted → Completed/Failed/Cancelled, the member's
+  stop_reason riding as the record's error line) at the Result precedence tier —
+  live pins and fresh rosters win — and `not_started` items backfill as ghost
+  records (Cancelled, item-excerpt label, page-less rows). The roster rows' other
+  136 piece is `SubagentState.activityLine`: the one-line muted activity (last
+  assistant text while Working, the `subagent.suspended` reason while Suspended,
+  the resultSummary/error's first line once terminal). Timeline row driving stays single-`Agent`:
   a swarm row never carries `subagentId` — it renders as the swarm card
   navigating to `SwarmScreen` by the tool call id. The card's aggregate (135)
   is pure derivation (`SwarmProgress`) from the member list

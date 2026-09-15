@@ -924,8 +924,10 @@ class ChatViewModel internal constructor(
     }
 
     /** Mines the timeline's `Agent`/`AgentSwarm` rows into the store (ticket 091;
-     * AgentSwarm added in 134 — the store's swarm branch keeps only the call's
-     * label, its members arrive through their own spawned/roster frames): the row's
+     * AgentSwarm added in 134 — the store's swarm branch keeps the call's label and,
+     * since 136, heals the member states from the settled call's
+     * `<agent_swarm_result>`; the members' live state still arrives through their own
+     * spawned/roster frames): the row's
      * args/result carry the identity, task prompt, lifecycle status and result
      * summary — the store resolves the sub-agent through its link registry or the
      * result's `agent_id:` marker, healing existing records per its precedence

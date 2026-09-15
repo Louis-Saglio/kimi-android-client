@@ -421,12 +421,13 @@ data class SubagentSpawnedPayload(
 
 /** Shared shape of `subagent.started`/`completed`/`failed`/`suspended`/`cancelled`:
  * every variant carries [subagentId], plus only its own extra field (resultSummary,
- * error, reason — the last one not consumed). */
+ * error, reason). */
 @Serializable
 data class SubagentLifecyclePayload(
     val subagentId: String = "",
     val resultSummary: String? = null,
     val error: String? = null,
+    val reason: String? = null,
 )
 
 // --- GET /api/v1/sessions/{id}/snapshot (docs/server-api.md, Session snapshot —

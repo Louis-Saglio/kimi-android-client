@@ -13,6 +13,7 @@ import fr.louissaglio.kimi.android.data.chat.SocketEvent
 import fr.louissaglio.kimi.android.data.chat.SubagentLifecycleEvent
 import fr.louissaglio.kimi.android.data.chat.SubagentRosterEntry
 import fr.louissaglio.kimi.android.data.chat.SubagentRosterPhase
+import fr.louissaglio.kimi.android.data.chat.SwarmResultParser
 import fr.louissaglio.kimi.android.data.chat.TaskInfo
 import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.TodoParser
@@ -140,7 +141,30 @@ class SubagentStreamStore @Inject constructor(
          * cold-start ones; the swarm aggregate's shared-model line reads them. */
         val model: String? = null,
         val thinkingEffort: String? = null,
-    )
+        /** The live suspend cause (ticket 136): set by `subagent.suspended`, cleared
+         * when the run resumes or settles. Null from every other source. */
+        val suspendReason: String? = null,
+        /** A backfilled `not_started` swarm member (ticket 136): it never spawned, so
+         * no sub-agent page exists for it — the roster row is not clickable. */
+        val ghost: Boolean = false,
+    ) {
+
+        /** The swarm roster row's one-line activity (ticket 136), null when the row
+         * shows nothing: while Working, the last non-blank line of the live
+         * timeline's last assistant text; while Suspended, the suspend cause; when
+         * terminal, the first non-blank line of [resultSummary] (or of [error] —
+         * a failed run's cause, a parsed result's stop_reason). */
+        val activityLine: String?
+            get() = when (status) {
+                SubagentStatus.Working -> items.filterIsInstance<ChatItem.AssistantMessage>()
+                    .lastOrNull { it.text.isNotBlank() }
+                    ?.text?.lineSequence()?.lastOrNull { it.isNotBlank() }
+                SubagentStatus.Suspended -> suspendReason?.takeIf { it.isNotBlank() }
+                SubagentStatus.Completed, SubagentStatus.Failed, SubagentStatus.Cancelled ->
+                    (resultSummary ?: error)?.lineSequence()?.firstOrNull { it.isNotBlank() }
+                SubagentStatus.Queued -> null
+            }
+    }
 
     /** Which source a record's status came from — the precedence order among status
      * sources (ticket 091): a live lifecycle frame pins (nothing else writes),
@@ -197,6 +221,15 @@ class SubagentStreamStore @Inject constructor(
 
         var resultSummary: String? = null
         var error: String? = null
+
+        /** The live suspend cause (ticket 136): written by `subagent.suspended`,
+         * cleared when the run resumes or settles — stale reasons never survive a
+         * status change. */
+        var suspendReason: String? = null
+
+        /** A backfilled `not_started` swarm member (ticket 136): the record exists
+         * only so the roster row can render — no page, no transcript, a synthetic id. */
+        var ghost: Boolean = false
 
         /** The sub-agent's own background tasks, keyed by task id (live-only — REST
          * `/tasks` never serves them; a transcript `task` origin heals the terminal
@@ -330,7 +363,7 @@ class SubagentStreamStore @Inject constructor(
             return SubagentState(
                 id, name, description, runInBackground, status, resultSummary, error,
                 hasMoreTurns, promptBubble + timeline.items(), timeline.todos(), jobs.values.toList(),
-                swarmIndex, taskId, model, thinkingEffort,
+                swarmIndex, taskId, model, thinkingEffort, suspendReason, ghost,
             )
         }
     }
@@ -577,10 +610,9 @@ class SubagentStreamStore @Inject constructor(
      * The `AgentSwarm` branch (ticket 134) is a different shape: the args carry no
      * `subagent_type`/`prompt` (one `prompt_template` + `items[]` fan the members
      * out), so the call's own `description` arg is kept as the swarm's label (the
-     * roster screen's supporting line) and member records stay untouched — each
-     * member is fed by its own spawned/roster frames, and the swarm's
-     * `<agent_swarm_result>` text names many ids (136 owns its parsing), so
-     * resolving one member here would clobber it with a result that isn't its own.
+     * roster screen's supporting line) and the members are fed by their own
+     * spawned/roster frames. The settled call's `<agent_swarm_result>` text names
+     * many ids at once: [applySwarmResult] (ticket 136) heals them member by member.
      *
      * A missing record is created from the args/result (identity, task prompt,
      * status, the `[summary]` section standing in as the final assistant bubble until
@@ -612,6 +644,7 @@ class SubagentStreamStore @Inject constructor(
                     }
                 }
             }
+            if (resultText != null) applySwarmResult(sessionId, toolCallId, resultText)
             return
         }
         val subagentId = links[sessionId]?.get(toolCallId)?.firstOrNull()
@@ -660,6 +693,76 @@ class SubagentStreamStore @Inject constructor(
             }
         }
         publish(sessionId)
+    }
+
+    /**
+     * The `<agent_swarm_result>` heal (ticket 136): the settled `AgentSwarm` call's
+     * result text is the ONLY persisted per-member record of a swarm — `subagent.*`
+     * events never replay on cursor resume and the snapshot roster clears when the
+     * main agent starts its next turn (docs/server-api.md), so a swarm reopened
+     * from history rebuilds its member states here. Members match records by
+     * `agent_id`: outcome completed → Completed, failed → Failed, aborted →
+     * Cancelled (the deliberate-stop state, ticket 135); the member's stop_reason
+     * rides along as the record's error line (the roster row's terminal activity).
+     * A member no record names is created — blank identity but the `item` excerpt
+     * as the label — and linked under the call.
+     *
+     * Precedence (the [StatusSource] table's, extended rather than changed): live
+     * events and a fresh roster WIN — the parse rides the Result tier, so a
+     * live-pinned record (ticket 135's killed-task pin included) or a
+     * roster-applied one is never touched, and the parse fills only members with
+     * no live or roster state. Every status it writes is terminal, so it never
+     * demotes a record OUT of a terminal state either.
+     *
+     * Members with `state="not_started"` never spawned: no live frame, roster
+     * entry, or real id will ever name them. They backfill as GHOST records —
+     * Cancelled, the `item` excerpt as the label, a synthetic id, [SubagentRecord.ghost]
+     * set (no page to open) — but only while the call's linked members are fewer
+     * than the result's member total: the members live sources already registered
+     * fill the earlier slots, and re-mining the same result is a no-op.
+     */
+    private fun applySwarmResult(sessionId: String, toolCallId: String, resultText: String) {
+        val result = SwarmResultParser.of(resultText) ?: return
+        var changed = false
+        val sessionRecords = records.getOrPut(sessionId) { mutableMapOf() }
+        for (member in result.members) {
+            if (member.notStarted) continue // the ghost backfill below owns those
+            val agentId = member.agentId ?: continue
+            val record = sessionRecords.getOrPut(agentId) {
+                SubagentRecord(agentId, sessionId, todoParser).also { changed = true }
+            }
+            if (record.description.isBlank() && member.item != null) record.description = member.item
+            if (record.parentToolCallId == null) record.parentToolCallId = toolCallId
+            registerLink(sessionId, toolCallId, agentId)
+            record.applyStatus(
+                when (member.outcome) {
+                    SwarmResultParser.Outcome.Completed -> SubagentStatus.Completed
+                    SwarmResultParser.Outcome.Failed -> SubagentStatus.Failed
+                    SwarmResultParser.Outcome.Aborted -> SubagentStatus.Cancelled
+                },
+                StatusSource.Result,
+                error = member.stopReason,
+            )
+            changed = true
+        }
+        val deficit = result.members.size - links[sessionId]?.get(toolCallId).orEmpty().size
+        if (deficit > 0) {
+            result.members
+                .mapIndexedNotNull { index, member -> if (member.notStarted) index to member else null }
+                .take(deficit)
+                .forEach { (index, member) ->
+                    val ghostId = "$toolCallId:ghost:$index"
+                    if (sessionRecords.containsKey(ghostId)) return@forEach
+                    val ghost = SubagentRecord(ghostId, sessionId, todoParser)
+                    ghost.description = member.item.orEmpty()
+                    ghost.ghost = true
+                    ghost.applyStatus(SubagentStatus.Cancelled, StatusSource.Result, error = member.stopReason)
+                    sessionRecords[ghostId] = ghost
+                    registerLink(sessionId, toolCallId, ghostId)
+                    changed = true
+                }
+        }
+        if (changed) publish(sessionId)
     }
 
     /** True once a transcript page landed for [subagentId] (ticket 046) — the page's
@@ -822,24 +925,35 @@ class SubagentStreamStore @Inject constructor(
         record.coalescer.flush()
         when (event) {
             is SessionEvent.SubagentSpawned -> Unit // handled by spawn()
-            is SessionEvent.SubagentStarted ->
+            is SessionEvent.SubagentStarted -> {
+                // A resume: the suspend cause is spent (ticket 136).
+                record.suspendReason = null
                 record.applyStatus(SubagentStatus.Working, StatusSource.Live)
-            is SessionEvent.SubagentSuspended ->
+            }
+            is SessionEvent.SubagentSuspended -> {
+                record.suspendReason = event.reason.ifBlank { null }
                 record.applyStatus(SubagentStatus.Suspended, StatusSource.Live)
-            is SessionEvent.SubagentCompleted ->
+            }
+            is SessionEvent.SubagentCompleted -> {
+                record.suspendReason = null
                 record.applyStatus(
                     SubagentStatus.Completed,
                     StatusSource.Live,
                     summary = event.resultSummary.ifBlank { null },
                 )
-            is SessionEvent.SubagentFailed ->
+            }
+            is SessionEvent.SubagentFailed -> {
+                record.suspendReason = null
                 record.applyStatus(
                     SubagentStatus.Failed,
                     StatusSource.Live,
                     error = event.error.ifBlank { null },
                 )
-            is SessionEvent.SubagentCancelled ->
+            }
+            is SessionEvent.SubagentCancelled -> {
+                record.suspendReason = null
                 record.applyStatus(SubagentStatus.Cancelled, StatusSource.Live)
+            }
         }
         publish(sessionId)
     }

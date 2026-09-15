@@ -132,8 +132,11 @@ sealed interface SessionEvent {
 
     data class SubagentFailed(override val subagentId: String, val error: String) : SubagentLifecycleEvent
 
-    /** `subagent.suspended`; not terminal — a later [SubagentStarted] marks the resume. */
-    data class SubagentSuspended(override val subagentId: String) : SubagentLifecycleEvent
+    /** `subagent.suspended` (upstream schema: `{subagentId, reason}`); not terminal —
+     * a later [SubagentStarted] marks the resume. [reason] is the suspend cause,
+     * shown as the swarm roster row's activity line (ticket 136); blank when the
+     * frame carried none. */
+    data class SubagentSuspended(override val subagentId: String, val reason: String) : SubagentLifecycleEvent
 
     /** `subagent.cancelled` (upstream schema-level, never captured live): the run was
      * stopped on purpose. The LIVE carrier of the same truth is `task.terminated`

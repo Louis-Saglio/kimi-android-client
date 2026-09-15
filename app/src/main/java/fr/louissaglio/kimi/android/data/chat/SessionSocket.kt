@@ -350,7 +350,7 @@ class SessionSocket @Inject constructor(
             "subagent.failed" -> frame.decodePayload<SubagentLifecyclePayload>()
                 ?.let { onEvent(SessionEvent.SubagentFailed(it.subagentId, it.error.orEmpty())) }
             "subagent.suspended" -> frame.decodePayload<SubagentLifecyclePayload>()
-                ?.let { onEvent(SessionEvent.SubagentSuspended(it.subagentId)) }
+                ?.let { onEvent(SessionEvent.SubagentSuspended(it.subagentId, it.reason.orEmpty())) }
             // Upstream schema-level (never captured live): a deliberate stop. The
             // live path carries the same truth as task.terminated status "killed".
             "subagent.cancelled" -> frame.decodePayload<SubagentLifecyclePayload>()

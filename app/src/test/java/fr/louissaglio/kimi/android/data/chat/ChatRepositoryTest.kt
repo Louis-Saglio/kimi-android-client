@@ -2084,7 +2084,7 @@ class ChatRepositoryTest {
                 SocketEvent.Event(SessionEvent.SubagentStarted("agent-12")),
                 SocketEvent.Event(SessionEvent.SubagentCompleted("agent-12", "the sub-agent's result summary")),
                 SocketEvent.Event(SessionEvent.SubagentFailed("agent-13", "boom")),
-                SocketEvent.Event(SessionEvent.SubagentSuspended("agent-13")),
+                SocketEvent.Event(SessionEvent.SubagentSuspended("agent-13", "waiting_on_input")),
             ),
             emitted.filterIsInstance<SocketEvent.Event>(),
         )

@@ -1,7 +1,9 @@
 package fr.louissaglio.kimi.android.ui.chat
 
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -84,6 +86,56 @@ class SwarmScreenTest {
         }
 
         composeTestRule.onNodeWithText("No members known yet").assertIsDisplayed()
+    }
+
+    /** Ticket 136: roster rows carry a one-line muted activity (the last assistant
+     * text while working, the suspend cause while suspended, the result/error's
+     * first line once terminal), and a ghost row (a backfilled `not_started`
+     * member) shows no open chevron and is not clickable. */
+    @Test
+    fun memberRowsShowTheActivityLineAndGhostRowsAreNotClickable() {
+        var opened: String? = null
+        composeTestRule.setContent {
+            KimiTheme {
+                SwarmContent(
+                    uiState = SwarmViewModel.UiState(
+                        sessionId = "session_1",
+                        toolCallId = "tool_swarm",
+                        members = listOf(
+                            member("agent-1", "Check a", SubagentStatus.Working).copy(
+                                items = listOf(
+                                    ChatItem.AssistantMessage("live_0", "first line\nsecond line", thinking = ""),
+                                ),
+                            ),
+                            member("agent-2", "Check b", SubagentStatus.Suspended).copy(
+                                suspendReason = "provider rate limit",
+                            ),
+                            member("agent-3", "Check c", SubagentStatus.Completed).copy(
+                                resultSummary = "the tail\nwith details",
+                            ),
+                            member("tool_swarm:ghost:3", "Check d", SubagentStatus.Cancelled).copy(ghost = true),
+                        ),
+                    ),
+                    onNavigateBack = {},
+                    onOpenSubagent = { opened = it },
+                )
+            }
+        }
+
+        // The activity line per status: last text line, suspend reason, summary head.
+        composeTestRule.onNodeWithText("second line").assertIsDisplayed()
+        composeTestRule.onNodeWithText("provider rate limit").assertIsDisplayed()
+        composeTestRule.onNodeWithText("the tail").assertIsDisplayed()
+
+        // The ghost row renders its label and cancelled chip but no open chevron.
+        composeTestRule.onNodeWithText("Check d").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Cancelled").assertIsDisplayed()
+        composeTestRule.onAllNodesWithContentDescription("Open sub-agent").assertCountEquals(3)
+        // ...and is not clickable, while a live member's row opens its page.
+        composeTestRule.onNodeWithText("Check d").performClick()
+        assertEquals(null, opened)
+        composeTestRule.onNodeWithText("Check c").performClick()
+        assertEquals("agent-3", opened)
     }
 
     /** Ticket 135: the strip under the top bar renders the same aggregate as the

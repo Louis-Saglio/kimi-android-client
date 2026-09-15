@@ -570,6 +570,57 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             """"created_at":"2026-09-15T10:00:00.000Z","started_at":"2026-09-15T10:00:00.100Z"}"""
 
     @Test
+    fun `a settled swarm's cold open rebuilds the roster from the result xml`() = runBlocking {
+        // Ticket 136: reopened after the swarm settled — the roster cleared on the
+        // main agent's next turn and no subagent.* frame ever replays, so the only
+        // per-member record left is the call's <agent_swarm_result> (member shapes
+        // verbatim from the upstream render, swarm.test.ts at 0.43.1).
+        val resultXml = (
+            "<agent_swarm_result>\n" +
+                "<summary>completed: 1, failed: 1, aborted: 2</summary>\n" +
+                "<resume_hint>Call AgentSwarm with resume_agent_ids using the agent_id values in this result to continue unfinished work.</resume_hint>\n" +
+                "<subagent agent_id=\"agent-1\" item=\"src/a.ts\" outcome=\"completed\">imports are stable</subagent>\n" +
+                "<subagent agent_id=\"agent-2\" item=\"src/b.ts\" outcome=\"failed\">Agent timed out after 30s.</subagent>\n" +
+                "<subagent agent_id=\"agent-3\" item=\"src/c.ts\" state=\"started\" outcome=\"aborted\">The user manually interrupted this subagent batch before this subagent finished.</subagent>\n" +
+                "<subagent item=\"src/d.ts\" state=\"not_started\" outcome=\"aborted\">The user manually interrupted this subagent batch before this subagent was started.</subagent>\n" +
+                "</agent_swarm_result>"
+            ).replace("\"", "\\\"").replace("\n", "\\n")
+        messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
+            """{"id":"msg_2","session_id":"session_1","role":"tool",""" +
+            """"content":[{"type":"tool_result","tool_call_id":"tool_swarm","is_error":false,""" +
+            """"output":"$resultXml"}],""" +
+            """"created_at":"2026-09-15T10:05:00.000Z"},""" +
+            """{"id":"msg_1","session_id":"session_1","role":"assistant",""" +
+            """"content":[{"type":"tool_use","tool_call_id":"tool_swarm","tool_name":"AgentSwarm",""" +
+            """"input":{"description":"review the docs","prompt_template":"Check {{item}}",""" +
+            """"items":["src/a.ts","src/b.ts","src/c.ts","src/d.ts"]}}],""" +
+            """"created_at":"2026-09-15T10:00:00.000Z"}""" +
+            """],"has_more":false},"request_id":"r"}"""
+
+        viewModel.onScreenStarted()
+
+        // The roster rebuilds from the result alone (the snapshot roster is empty):
+        // the three healed members plus the backfilled ghost, in document order.
+        awaitCondition {
+            runBlocking { subagentStore.swarmMembers("session_1", "tool_swarm").first().map { it.id } } ==
+                listOf("agent-1", "agent-2", "agent-3", "tool_swarm:ghost:3")
+        }
+        assertEquals(SubagentStatus.Completed, subagentEntry("agent-1")!!.status)
+        assertEquals(SubagentStatus.Failed, subagentEntry("agent-2")!!.status)
+        assertEquals(SubagentStatus.Cancelled, subagentEntry("agent-3")!!.status)
+        val ghost = subagentEntry("tool_swarm:ghost:3")!!
+        assertEquals(SubagentStatus.Cancelled, ghost.status)
+        assertEquals("src/d.ts", ghost.description)
+        assertTrue(ghost.ghost)
+        // The UiState carries the same member list for the swarm card's aggregate
+        // (135): 1 completed · 1 failed · 2 cancelled.
+        awaitState(viewModel.uiState) { state ->
+            state.swarmMembers["tool_swarm"]?.map { it.id } ==
+                listOf("agent-1", "agent-2", "agent-3", "tool_swarm:ghost:3")
+        }
+    }
+
+    @Test
     fun `onHistoryTopReached prepends the next page deduplicated and stops when has_more is false`() = runBlocking {
         // Newest page (wire order newest-first): msg_2 is the oldest loaded — the cursor.
         messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +

@@ -205,8 +205,12 @@ internal fun SwarmContent(
 }
 
 /** One member of the roster: its live status chip, its label (the record's
- * description, else the subagent type, else the bare id on a deep cold start) and
- * the open chevron; the whole row is the tap target. */
+ * description, else the subagent type, else the bare id on a deep cold start), the
+ * one-line activity under the label (ticket 136 — the last assistant text while
+ * working, the suspend cause while suspended, the result/error's first line once
+ * terminal) and the open chevron; the whole row is the tap target. A ghost row
+ * (a backfilled `not_started` member, ticket 136) has no sub-agent page to open:
+ * no chevron, not clickable. */
 @Composable
 private fun SwarmMemberRow(member: SubagentStreamStore.SubagentState, onClick: () -> Unit) {
     Row(
@@ -214,24 +218,36 @@ private fun SwarmMemberRow(member: SubagentStreamStore.SubagentState, onClick: (
             .fillMaxWidth()
             // M3: the whole row is the tap target, at least 48dp tall.
             .heightIn(min = 48.dp)
-            .clickable(onClick = onClick)
+            .clickable(enabled = !member.ghost, onClick = onClick)
             .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         SubagentStatusChip(member.status)
-        Text(
-            text = member.description.ifBlank { member.name }.ifBlank { member.id },
-            modifier = Modifier.weight(1f),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        Icon(
-            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-            contentDescription = "Open sub-agent",
-            modifier = Modifier.size(16.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = member.description.ifBlank { member.name }.ifBlank { member.id },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            member.activityLine?.let { activity ->
+                Text(
+                    text = activity,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (!member.ghost) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = "Open sub-agent",
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
