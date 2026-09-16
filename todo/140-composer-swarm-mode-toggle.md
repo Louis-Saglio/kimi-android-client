@@ -79,3 +79,40 @@ repository fake with the flag set.
 - The prompt body reference: docs/server-api.md:2422; `/status` `swarm_mode`:
   docs/server-api.md:1547. Transcript markers `swarm.enter`/`swarm.exit` are
   already tolerated by the parse and stay unrendered (ChatDtos.kt:500-514).
+
+## Implementation notes
+
+**2026-09-16 — step 1 probe: the field is dead on the live 0.43.1 server;
+the stop condition fired and the toggle was NOT built.**
+
+Probe (throwaway session `session_40deee77-…` at `/home/ubuntu/spike`,
+aborted and `:delete`d afterwards):
+
+- `POST /api/v1/sessions/{id}/prompts` with
+  `{"content":[{"type":"text","text":"…"}],"swarm_mode":true}` → acked
+  `code:0`, the turn ran to completion ("probe-ok" reply, one step, 15 s).
+  `/status` polled during and after the turn: `swarm_mode` stayed `false`
+  every read; the transcript carried no `swarm.enter` marker.
+- Positive control on the same session: `POST .../profile` with
+  `{"agent_config":{"swarm_mode":true}}` flipped `/status` `swarm_mode` to
+  `true` — swarm mode itself works on this server; only the prompt-body
+  field is inert.
+- Upstream confirmation at tag `@moonshot-ai/kimi-code@0.43.1`:
+  `packages/kap-server/src/routes/prompts.ts` (submitPrompt) applies only
+  `profile`/`model`/`thinking`/`permission_mode`/`disabled_tools` from the
+  body; `swarm_mode` parses (`protocol/rest-prompt.ts:28`) but is never
+  consumed. The only live consumer is `applySessionAgentConfig`
+  (`routes/sessionAgentConfig.ts` → `swarm.enter('manual')`), reached via
+  the profile route's `agent_config`.
+
+docs/server-api.md was updated with this finding (Prompts section); the
+edit is left UNCOMMITTED in the worktree — per the stop condition nothing
+was committed. Steps 2-6 (state, chip, send path, tests) were not
+implemented: shipping the toggle would give the composer a chip whose flag
+never reaches the agent.
+
+Follow-up path if the feature is still wanted: either wait for an upstream
+fix making the prompt-body field live, or re-scope the ticket to drive
+swarm mode through `POST .../profile` `agent_config.swarm_mode` (a
+session-level toggle with its own UX semantics — the chip would then
+read/write server state instead of stamping a per-prompt flag).

@@ -2556,10 +2556,25 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../promp
     `turn.started.promptAttachments` is still never emitted live (the schema
     gained a `kind:"file"` variant in 0.39.1; unobserved). The app decodes
     only `origin.kind` — additive, ignored.
+- **`swarm_mode` in the prompt body is DEAD on 0.43.1** (verified live
+  2026-09-16, ticket 140 — throwaway session, deleted after): a prompt posted
+  with `"swarm_mode": true` ran to completion with `/status` `swarm_mode`
+  never flipping and no `swarm.enter` transcript marker. Upstream at tag
+  0.43.1 the submitPrompt handler applies only
+  `profile`/`model`/`thinking`/`permission_mode`/`disabled_tools`
+  (`packages/kap-server/src/routes/prompts.ts`) — the field parses
+  (`rest-prompt.ts`) but is never consumed; `plan_mode`, `goal_objective`
+  and `goal_control` are likewise parsed-but-unapplied there (source-derived,
+  not live-verified). Swarm mode DOES engage through the session profile
+  route: `POST /api/v1/sessions/{id}/profile` with
+  `{"agent_config":{"swarm_mode":true}}` flips `/status` `swarm_mode` to
+  `true` (verified live on the same probe session; upstream
+  `applySessionAgentConfig` → `swarm.enter('manual')`, Session profile).
 - Optional body fields (per-prompt overrides): `permission_mode`
   (`manual`/`auto`/`yolo` — `manual` verified live), `model` (verified: a
   session with empty `agent_config.model` runs when the prompt carries one),
-  `thinking`, `plan_mode`, `swarm_mode`, `agent_id`, `metadata`,
+  `thinking`, `plan_mode`, `swarm_mode` (**dead on 0.43.1** — see above),
+  `agent_id`, `metadata`,
   `goal_objective`, `goal_control`, `disabled_tools`, `prompt_id` (**0.37.2**:
   a client-chosen prompt record id echoed on the ACK `prompt_id`/
   `user_message_id`, the history message id, and `turn.started.promptId`;
