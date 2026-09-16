@@ -87,6 +87,23 @@ class SubagentStreamStoreTest {
     }
 
     @Test
+    fun `displayNames resolves the subagent name, then the description, and skips nameless records`() = runBlocking {
+        // The approval card's badge source (ticket 139): name first…
+        store.apply(SESSION_ID, spawned("agent-12"))
+        // …the description when the spawned frame carried no name (a blank identity
+        // writer leaves the field empty)…
+        store.apply(SESSION_ID, spawned("agent-13", toolCallId = "tool_2").copy(name = ""))
+        // …and a record with neither earns no badge entry at all (the card's plain
+        // "Sub-agent" fallback).
+        store.apply(SESSION_ID, spawned("agent-14", toolCallId = "tool_3").copy(name = "", description = ""))
+
+        assertEquals(
+            mapOf("agent-12" to "explore", "agent-13" to "doc-verify"),
+            store.displayNames(SESSION_ID).first(),
+        )
+    }
+
+    @Test
     fun `lifecycle frames transition the status`() = runBlocking {
         store.apply(SESSION_ID, spawned("agent-12"))
         store.apply(SESSION_ID, SessionEvent.SubagentStarted("agent-12"))

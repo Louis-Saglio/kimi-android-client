@@ -389,6 +389,7 @@ private fun ChatContent(
                     ApprovalCard(
                         approval = approval,
                         queueSize = uiState.pendingApprovals.size,
+                        subagentName = uiState.subagentNames[approval.agentId],
                         onAllow = onAllow,
                         onDeny = onDeny,
                     )

@@ -54,6 +54,42 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     }
 
     @Test
+    fun `a sub-agent's approval request queues with its asking agent and the badge name resolves from the store`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+
+        // The member's identity lands first (subagent.spawned → the store), then its
+        // request arrives stamped with its id (ticket 139): it queues on the MAIN
+        // queue like any request — the stamp is presentation only.
+        socket.send(subagentSpawnedFrame())
+        socket.send(approvalRequestedFrame(id = "ap_1", tool = "Bash", action = "Running: sleep 300", command = "sleep 300", agentId = "agent-12"))
+        awaitState(viewModel.uiState) { it.pendingApprovals.isNotEmpty() }
+        assertEquals(
+            listOf(ChatViewModel.PendingApproval("ap_1", "Bash", "sleep 300", agentId = "agent-12")),
+            viewModel.uiState.value.pendingApprovals,
+        )
+        // The badge's name is the store record's subagent name.
+        awaitState(viewModel.uiState) { it.subagentNames["agent-12"] == "explore" }
+    }
+
+    @Test
+    fun `a sub-agent approval racing ahead of its record queues without a badge name, which the late spawn heals`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+
+        // The request can arrive before subagent.spawned (ticket 139): the card must
+        // not wait for the record — no badge name, the plain "Sub-agent" fallback.
+        socket.send(approvalRequestedFrame(id = "ap_1", tool = "Bash", action = "Running: sleep 300", command = "sleep 300", agentId = "agent-1"))
+        awaitState(viewModel.uiState) { it.pendingApprovals.isNotEmpty() }
+        assertEquals("agent-1", viewModel.uiState.value.pendingApprovals.single().agentId)
+        assertNull(viewModel.uiState.value.subagentNames["agent-1"])
+
+        // The late spawned frame lands the record — the badge gains its name live.
+        socket.send(subagentSpawnedFrame(id = "agent-1"))
+        awaitState(viewModel.uiState) { it.subagentNames["agent-1"] == "explore" }
+    }
+
+    @Test
     fun `stream deltas publish the leading edge then coalesce until a substantive event flushes`() = runBlocking {
         val vm = newViewModel(streamCoalesceWindowMillis = 100)
         vm.onScreenStarted()

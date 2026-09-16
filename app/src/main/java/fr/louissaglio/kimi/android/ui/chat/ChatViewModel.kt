@@ -13,6 +13,7 @@ import fr.louissaglio.kimi.android.data.chat.AGENT_TOOL_NAME
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
+import fr.louissaglio.kimi.android.data.chat.MAIN_AGENT_ID
 import fr.louissaglio.kimi.android.data.chat.MessagePage
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.data.chat.ResolvedQuestion
@@ -95,11 +96,14 @@ class ChatViewModel internal constructor(
     private val seedTitle: String? = routeArgs.title
     private val seedCwd: String? = routeArgs.cwd
 
-    /** One pending permission request, surfaced as the approval card above the input row. */
+    /** One pending permission request, surfaced as the approval card above the input row.
+     * [agentId] is the asking agent (ticket 139): "main", or the sub-agent's id — the
+     * card badges itself with the member's name from [UiState.subagentNames]. */
     data class PendingApproval(
         val approvalId: String,
         val toolName: String,
         val summary: String,
+        val agentId: String = MAIN_AGENT_ID,
     )
 
     /** Transient LLM-retry status of the in-flight step (turn.step.retrying, 0.31.0 —
@@ -186,6 +190,10 @@ class ChatViewModel internal constructor(
          * reads them), live from the store's registry; the swarm card reads its own
          * id and only renders while the list is non-empty. */
         val swarmMembers: Map<String, List<SubagentStreamStore.SubagentState>> = emptyMap(),
+        /** subagentId → display name for the approval card's sub-agent badge
+         * (ticket 139), live from the store; a request whose record has not landed
+         * yet is absent — the card falls back to a plain "Sub-agent" label. */
+        val subagentNames: Map<String, String> = emptyMap(),
         /** True while older history exists (scroll-to-top loads it, ticket 043). */
         val hasMoreHistory: Boolean = false,
         /** True while an older history page loads; the list shows a header spinner. */
@@ -406,6 +414,14 @@ class ChatViewModel internal constructor(
                 uiState.update { it.copy(swarmMembers = byCall) }
             }
         }
+        // The approval card's sub-agent badge names (ticket 139): live from the store —
+        // a member's spawned frame can land AFTER its approval request, and the badge
+        // gains its name the moment the record exists.
+        viewModelScope.launch {
+            subagentStore.displayNames(sessionId).collect { names ->
+                uiState.update { it.copy(subagentNames = names) }
+            }
+        }
     }
 
     /**
@@ -519,7 +535,7 @@ class ChatViewModel internal constructor(
                 pendingApprovals =
                     if (!approvalsSeedGuard.isStale(guards.approvals)) {
                         snapshot.pendingApprovals
-                            .map { a -> PendingApproval(a.approvalId, a.toolName, a.summary) }
+                            .map { a -> PendingApproval(a.approvalId, a.toolName, a.summary, a.agentId) }
                             .distinctBy { a -> a.approvalId }
                     } else {
                         it.pendingApprovals
@@ -995,7 +1011,7 @@ class ChatViewModel internal constructor(
                     it.copy(
                         pendingApprovals = it.pendingApprovals
                             .filterNot { a -> a.approvalId == event.approvalId } +
-                            PendingApproval(event.approvalId, event.toolName, event.summary),
+                            PendingApproval(event.approvalId, event.toolName, event.summary, event.agentId),
                     )
                 }
             }

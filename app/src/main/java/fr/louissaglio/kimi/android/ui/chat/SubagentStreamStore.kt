@@ -435,6 +435,18 @@ class SubagentStreamStore @Inject constructor(
     fun entry(sessionId: String, subagentId: String): Flow<SubagentState?> =
         states.map { it[sessionId]?.get(subagentId) }.distinctUntilChanged()
 
+    /** subagentId → display name (the record's subagent name, else its description)
+     * for every known member of the session (ticket 139): the approval card's
+     * sub-agent badge resolves the asking member from here. Records with neither
+     * field are absent — the badge falls back to a plain "Sub-agent". Live: a name
+     * landing after the request (the spawned frame can lag it) republishes. */
+    fun displayNames(sessionId: String): Flow<Map<String, String>> =
+        states.map { bySession ->
+            bySession[sessionId].orEmpty()
+                .mapValues { (_, state) -> state.name.ifBlank { state.description } }
+                .filterValues { it.isNotBlank() }
+        }.distinctUntilChanged()
+
     /** The session's `Agent`/`AgentSwarm` tool-call → sub-agent links learned so far
      * (spawned, roster, result marker), in spawn-arrival order. ChatViewModel
      * re-drives them into its timeline's rows after every store-affecting apply —

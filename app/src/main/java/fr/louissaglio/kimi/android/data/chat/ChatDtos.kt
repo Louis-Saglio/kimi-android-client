@@ -274,6 +274,12 @@ data class ApprovalRequestedPayload(
     @SerialName("tool_name") val toolName: String = "",
     val action: String = "",
     @SerialName("tool_input_display") val toolInputDisplay: ToolInputDisplayDto? = null,
+    /** The ASKING agent (0.33.0 — ticket 139): "main", or the sub-agent's id for a
+     * swarm member's request. Stamped on the live WS frame's payload; the snapshot's
+     * `pending_approvals` items carry NO stamp (verified upstream at 0.43.1 —
+     * kap-server's toWireApproval), so a cold-open request decodes as "main" until
+     * upstream stamps the snapshot items too. */
+    val agentId: String = MAIN_AGENT_ID,
 )
 
 /** `tool_input_display` of an approval request; only `command` (kind "command") is consumed. */

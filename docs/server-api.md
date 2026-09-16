@@ -1778,7 +1778,10 @@ verified live on 0.31.1 (2026-08-01). Top-level keys of `data`:
   `event.approval.requested` payload verbatim (up to 0.38.0 `approval_id` ==
   `tool_call_id`; **0.39.0:** `approval_id` is a dedicated `approval_<uuid>`
   id distinct from `tool_call_id` — see Permissions; 2026-08-01 capture,
-  id fields from the pre-split era):
+  id fields from the pre-split era) — **minus the `agentId` stamp**: the
+  items are built by kap-server's `toWireApproval`, which has no agent field
+  (verified upstream at 0.43.1 — ticket 139); only the live WS frames carry
+  the asking agent:
 
   ```json
   {"approval_id":"tool_EYGD…","session_id":"session_…","turn_id":0,

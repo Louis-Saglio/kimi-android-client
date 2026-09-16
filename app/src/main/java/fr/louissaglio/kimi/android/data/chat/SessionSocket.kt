@@ -239,8 +239,10 @@ class SessionSocket @Inject constructor(
         // their own agentId (docs/server-api.md, Sub-agents). Transcript frames emit
         // their events tagged with the emitting agent; the collector routes sub-agent
         // events to the sub-agent stream store (SessionEvent.isSubagentScoped, ticket
-        // 045) so they never reach the main chat. Interaction families stay untagged:
-        // a sub-agent's approval/question is actionable whoever raised it.
+        // 045) so they never reach the main chat. Interaction families stay
+        // main-chat-routed whoever raised them: a sub-agent's approval/question is
+        // actionable from the session level — the approval payload's agentId stamp is
+        // decoded for the card's badge only (ticket 139), never for routing.
         val agentId = frame.agentId()
         when (frame.type) {
             "assistant.delta" -> frame.decodePayload<DeltaPayload>()
@@ -269,7 +271,7 @@ class SessionSocket @Inject constructor(
             // double the cards. If a future server drops the legacy family, approvals
             // must switch to the v2 frames.
             "event.approval.requested" -> frame.decodePayload<ApprovalRequestedPayload>()
-                ?.let { onEvent(SessionEvent.ApprovalRequested(it.approvalId, it.toolName, mapper.summary(it))) }
+                ?.let { onEvent(SessionEvent.ApprovalRequested(it.approvalId, it.toolName, mapper.summary(it), it.agentId)) }
             "event.approval.resolved" -> frame.decodePayload<ApprovalResolvedPayload>()
                 ?.let { onEvent(SessionEvent.ApprovalResolved(it.approvalId)) }
             "event.question.requested" -> frame.decodePayload<QuestionRequestedPayload>()

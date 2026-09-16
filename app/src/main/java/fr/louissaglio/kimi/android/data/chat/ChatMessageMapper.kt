@@ -159,7 +159,7 @@ class ChatMessageMapper @Inject constructor(json: Json) {
             hasMore = dto.messages?.hasMore == true,
         ),
         pendingApprovals = dto.pendingApprovals.map {
-            SnapshotApproval(it.approvalId, it.toolName, summary(it))
+            SnapshotApproval(it.approvalId, it.toolName, summary(it), it.agentId)
         },
         pendingQuestions = dto.pendingQuestions.map { toDomain(it) },
         subagents = dto.subagents.map { entry ->

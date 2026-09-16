@@ -35,11 +35,17 @@ data class SessionSnapshot(
 )
 
 /** One pending approval of the snapshot; [summary] is the card's compact argument
- * preview (ChatMessageMapper.summary, the same rendering the live event gets). */
+ * preview (ChatMessageMapper.summary, the same rendering the live event gets).
+ * [agentId] is the asking agent (ticket 139): the snapshot items carry no such stamp
+ * as of 0.43.1 (verified upstream, kap-server's toWireApproval — unlike the live
+ * `event.approval.requested` payload), so it reads "main" here until upstream stamps
+ * them; the decode rides the shared ApprovalRequestedPayload DTO, so a future stamp
+ * lands without a wire change. */
 data class SnapshotApproval(
     val approvalId: String,
     val toolName: String,
     val summary: String,
+    val agentId: String = MAIN_AGENT_ID,
 )
 
 /** One foreground sub-agent of the snapshot roster (docs/server-api.md, Session

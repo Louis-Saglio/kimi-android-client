@@ -2162,8 +2162,10 @@ class ChatRepositoryTest {
         )
 
         val events = emitted.filterIsInstance<SocketEvent.Event>().map { it.event }
+        // The payload's agentId stamp lands on the event (ticket 139) — presentation
+        // only; the emission this test guards is unchanged.
         assertEquals(
-            SessionEvent.ApprovalRequested("tool_sub_bash", "Bash", "ls"),
+            SessionEvent.ApprovalRequested("tool_sub_bash", "Bash", "ls", agentId = "agent-12"),
             events[0],
         )
         assertEquals(

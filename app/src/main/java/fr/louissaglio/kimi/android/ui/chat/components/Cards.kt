@@ -22,6 +22,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -29,12 +30,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import fr.louissaglio.kimi.android.data.chat.MAIN_AGENT_ID
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 
 @Composable
 internal fun ApprovalCard(
     approval: ChatViewModel.PendingApproval,
     queueSize: Int,
+    subagentName: String? = null,
     onAllow: () -> Unit,
     onDeny: () -> Unit,
 ) {
@@ -56,6 +59,18 @@ internal fun ApprovalCard(
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onTertiaryContainer,
             )
+            // Ticket 139 (web parity): a sub-agent's request names the asking member —
+            // the record's name/description from the store, or the plain fallback while
+            // the record has not landed (the request can race ahead of subagent.spawned).
+            if (approval.agentId != MAIN_AGENT_ID) {
+                Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.small) {
+                    Text(
+                        text = if (subagentName != null) "Sub-agent · $subagentName" else "Sub-agent",
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+            }
             Text(text = approval.toolName, style = MaterialTheme.typography.titleSmall)
             if (approval.summary.isNotBlank()) {
                 Text(

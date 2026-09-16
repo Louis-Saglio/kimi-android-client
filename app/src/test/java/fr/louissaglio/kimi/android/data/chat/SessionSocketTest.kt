@@ -41,6 +41,7 @@ class SessionSocketTest {
         vararg frames: String,
         eventCount: Int = frames.size,
         settleMillis: Long = 0,
+        sessionId: String = "session_1",
     ): List<SocketEvent> = coroutineScope {
         server.enqueue(
             webSocketUpgradeResponse(
@@ -52,7 +53,7 @@ class SessionSocketTest {
             ),
         )
         val emitted = CopyOnWriteArrayList<SocketEvent>()
-        val job = launch { socket.observe(settings(), "session_1").collect { emitted += it } }
+        val job = launch { socket.observe(settings(), sessionId).collect { emitted += it } }
         try {
             awaitCondition { emitted.count { it is SocketEvent.Event } >= eventCount }
             if (settleMillis > 0) delay(settleMillis)
@@ -188,6 +189,41 @@ class SessionSocketTest {
                             agentId = "agent-14",
                             subagentType = "agent",
                         ),
+                    ),
+                ),
+            ),
+            emitted.filterIsInstance<SocketEvent.Event>(),
+        )
+    }
+
+    @Test
+    fun `an approval request frame carries the asking agent id from the payload stamp`() = runBlocking {
+        // Verbatim 0.33.0 capture of a SUB-AGENT's request — the legacy
+        // event.approval.requested at protocol-verify-0.33.0/ws-s1.jsonl:535 (the v2
+        // twin the ticket references, :532, is one of the permission.approval.*
+        // duplicates this socket deliberately ignores). Shape unchanged at 0.43.1
+        // (docs/server-api.md, Permissions). The frame keeps its real session id, so
+        // the collection subscribes to it.
+        val emitted = runSocketEvents(
+            """{"type":"event.approval.requested","seq":149,""" +
+                """"session_id":"session_5921be1f-f753-445f-983f-288aa3bae382","timestamp":"2026-08-05T19:42:12.906Z",""" +
+                """"payload":{"type":"event.approval.requested","agentId":"agent-1",""" +
+                """"sessionId":"session_5921be1f-f753-445f-983f-288aa3bae382","approval_id":"tool_B1gn9gVO0nEwtnqs3CtmVMql",""" +
+                """"session_id":"session_5921be1f-f753-445f-983f-288aa3bae382","turn_id":0,"tool_call_id":"tool_B1gn9gVO0nEwtnqs3CtmVMql",""" +
+                """"tool_name":"Bash","action":"Running: sleep 300 && echo awake",""" +
+                """"tool_input_display":{"kind":"command","command":"sleep 300 && echo awake","cwd":"/home/ubuntu/spike","language":"bash"},""" +
+                """"created_at":"2026-08-05T19:42:12.905Z","expires_at":"2026-08-06T19:42:12.905Z"},"epoch":"ep_01KZ9PJAZMRMFAX8RWB0NYG8GM"}""",
+            sessionId = "session_5921be1f-f753-445f-983f-288aa3bae382",
+        )
+
+        assertEquals(
+            listOf(
+                SocketEvent.Event(
+                    SessionEvent.ApprovalRequested(
+                        approvalId = "tool_B1gn9gVO0nEwtnqs3CtmVMql",
+                        toolName = "Bash",
+                        summary = "sleep 300 && echo awake",
+                        agentId = "agent-1",
                     ),
                 ),
             ),

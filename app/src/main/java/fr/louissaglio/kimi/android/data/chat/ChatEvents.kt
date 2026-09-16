@@ -145,8 +145,17 @@ sealed interface SessionEvent {
     data class SubagentCancelled(override val subagentId: String) : SubagentLifecycleEvent
 
     /** A tool call waits on the user's decision. [summary] is the compact argument
-     * preview for the approval card (the command for shell calls, else the action). */
-    data class ApprovalRequested(val approvalId: String, val toolName: String, val summary: String) : SessionEvent
+     * preview for the approval card (the command for shell calls, else the action).
+     * [agentId] is the ASKING agent (ticket 139) — "main", or the sub-agent's id:
+     * presentation only (the card's sub-agent badge), deliberately NOT an
+     * [AgentScopedEvent] — the request resolves through the session-level approvals
+     * route whoever asked, so it must stay main-chat-routed. */
+    data class ApprovalRequested(
+        val approvalId: String,
+        val toolName: String,
+        val summary: String,
+        val agentId: String = MAIN_AGENT_ID,
+    ) : SessionEvent
 
     /** The request was decided — by this client or another one (event.approval.resolved). */
     data class ApprovalResolved(val approvalId: String) : SessionEvent

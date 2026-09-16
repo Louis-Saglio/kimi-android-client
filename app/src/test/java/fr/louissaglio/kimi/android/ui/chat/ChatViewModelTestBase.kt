@@ -556,10 +556,10 @@ abstract class ChatViewModelTestBase {
             """"deleteCount":0,"messages":[{"role":"user","content":[{"type":"text","text":"$text"}],""" +
             """"toolCalls":[],"origin":{"kind":"user"}}],"agentId":"main","sessionId":"session_1"}}"""
 
-    protected fun approvalRequestedFrame(id: String, tool: String, action: String, command: String): String =
+    protected fun approvalRequestedFrame(id: String, tool: String, action: String, command: String, agentId: String = "main"): String =
         """{"type":"event.approval.requested","seq":7,"epoch":"ep_1","session_id":"session_1",""" +
             """"timestamp":"2026-07-19T00:00:00.000Z","payload":{"type":"event.approval.requested",""" +
-            """"sessionId":"session_1","agentId":"main","approval_id":"$id","session_id":"session_1",""" +
+            """"sessionId":"session_1","agentId":"$agentId","approval_id":"$id","session_id":"session_1",""" +
             """"turn_id":0,"tool_call_id":"tool_1","tool_name":"$tool","action":"$action",""" +
             """"tool_input_display":{"kind":"command","command":"$command","cwd":"/tmp","language":"bash"},""" +
             """"created_at":"2026-07-19T00:00:00.000Z","expires_at":"2026-07-19T00:01:00.000Z"}}"""
@@ -591,10 +591,10 @@ abstract class ChatViewModelTestBase {
             """"agentId":"main","sessionId":"session_1"}}"""
 
     /** Verbatim 0.29.2 subagent.spawned (docs/server-api.md, Sub-agents). */
-    protected fun subagentSpawnedFrame(): String =
+    protected fun subagentSpawnedFrame(id: String = "agent-12"): String =
         """{"type":"subagent.spawned","seq":19,"epoch":"ep_1","session_id":"session_1",""" +
             """"timestamp":"2026-07-28T03:37:35.492Z","payload":{"type":"subagent.spawned",""" +
-            """"subagentId":"agent-12","subagentName":"explore","parentToolCallId":"tool_agent",""" +
+            """"subagentId":"$id","subagentName":"explore","parentToolCallId":"tool_agent",""" +
             """"parentAgentId":"main","callerAgentId":"main","description":"doc-verify",""" +
             """"runInBackground":false,"agentId":"main","sessionId":"session_1"}}"""
 
