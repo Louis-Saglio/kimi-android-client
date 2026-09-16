@@ -10,8 +10,9 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** Semantics tests for the composer's permission-mode chip (ticket 141): the mode's
- * short label sits on the chip and in the contentDescription; null hides the chip. */
+/** Semantics tests for the composer's permission-mode chip (ticket 141): the chip is
+ * icon-only, the mode's label lives in the contentDescription instead of on the chip;
+ * null hides the chip. */
 @RunWith(AndroidJUnit4::class)
 class PermissionModeChipTest {
 
@@ -45,11 +46,11 @@ class PermissionModeChipTest {
     }
 
     @Test
-    fun chipShowsTheModeLabel() {
+    fun chipCarriesTheModeInItsContentDescriptionOnly() {
         inputBar(permissionMode = PermissionMode.AskWhenNeeded)
 
-        composeTestRule.onNodeWithText("Ask When Needed").assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription("Permission mode: Ask When Needed").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Ask When Needed").assertDoesNotExist()
     }
 
     @Test
