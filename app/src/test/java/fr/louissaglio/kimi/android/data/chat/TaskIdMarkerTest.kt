@@ -27,4 +27,18 @@ class TaskIdMarkerTest {
         assertNull(agentTaskIdOf("Bash", "task_id: agent-7noib8bb\nstatus: running"))
         assertNull(agentTaskIdOf("Agent", ""))
     }
+
+    @Test
+    fun `a detach stub yields its agent- task id`() {
+        // The detached foreground Agent call resolves with the background stub plus
+        // the note line (docs/server-api.md, REST /tasks :detach — ticket 138): the
+        // first line keeps the task_id marker, so the ticket-101 jobs seed keeps a
+        // still-running DETACHED sub-agent exactly like a spawned-background one.
+        val output = "task_id: agent-7noib8bb\nstatus: running\nagent_id: agent-13\n" +
+            "actual_subagent_type: explore\nautomatic_notification: true\n\n" +
+            "description: doc-verify\n\n" +
+            "note: The user moved this subagent to the background.\nnext_step: …\n"
+
+        assertEquals("agent-7noib8bb", agentTaskIdOf("Agent", output))
+    }
 }

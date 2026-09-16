@@ -376,6 +376,16 @@ data class TaskCancelData(
     val cancelled: Boolean = false,
 )
 
+/** `data` of `POST .../tasks/{id}:detach` (0.39.0 — ticket 138): a converted
+ * foreground task answers `detached:true, status:"running"`; an already-background
+ * or terminal task answers envelope code 0 with `detached:false` and the current
+ * status — success is `data.detached`, not `code == 0` (the dismissQuestion shape). */
+@Serializable
+data class TaskDetachData(
+    val detached: Boolean = false,
+    val status: String = "",
+)
+
 /** Shared payload shape of `task.started`/`task.terminated` (docs/server-api.md).
  * [agentId] is the envelope stamp naming the OWNING agent — the one whose task store
  * holds the task ("main", or the sub-agent that spawned the task); it differs from

@@ -318,6 +318,17 @@
   read-only `SubagentScreen` reuses `MessageList`/`ToolRows`; linked `Agent`
   rows carry `subagentId` — linked rows never expand (the page has all the
   details); tapping the row or its trailing open button navigates to the page.
+  The page's one mutation is ticket 138's detach: the top bar's overflow shows
+  "To background" (web-parity label) while the record is
+  `SubagentState.detachable` (a running foreground member with a known
+  `taskId` — `stoppable && !runInBackground`), posting `tasks/{taskId}:detach`
+  through `ChatApi.detachTask` (success gates on `data.detached` — a code-0
+  `detached:false` refusal snackbars as a failure; the in-flight latch mirrors
+  137's stop idiom). The detach's main-owned agent-kind `task.started`
+  (`info.agentId` naming the member) routes to the store from `ChatViewModel`
+  like 135's `task.terminated` and flips the record's `runInBackground` — no
+  duplicate record, the main-owned listing itself stays JobsStore's — which
+  removes the affordance.
   The record also owns the page's dock data: the sub-agent's own todo list
   (the record timeline's `todos()` — the chat's ticket-042 mechanism) and its
   own background tasks (the live `task.*` frames stamped with its id, upserted

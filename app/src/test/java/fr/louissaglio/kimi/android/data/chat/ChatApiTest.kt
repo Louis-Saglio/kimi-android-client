@@ -181,4 +181,45 @@ class ChatApiTest {
 
         assertEquals(DataError.Api(40406, "task not found"), error)
     }
+
+    @Test
+    fun `detach of a running foreground task posts to the detach endpoint and succeeds`() = runBlocking {
+        // docs/server-api.md, REST /tasks (0.39.0 — ticket 138).
+        server.enqueue(
+            MockResponse(body = """{"code":0,"msg":"success","data":{"detached":true,"status":"running"},"request_id":"r"}"""),
+        )
+
+        assertTrue(api.detachTask(settings(), "session_1", "agent-rhh36xem").isSuccess)
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/sessions/session_1/tasks/agent-rhh36xem:detach", request.target)
+    }
+
+    @Test
+    fun `detach of an already-background or terminal task surfaces the refusal`() = runBlocking {
+        // The refusal rides envelope code 0 (docs/server-api.md): success is
+        // data.detached, not code == 0 — the dismissQuestion shape.
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"detached":false,"status":"completed"},"request_id":"r"}""",
+            ),
+        )
+
+        val error = api.detachTask(settings(), "session_1", "agent-rhh36xem").exceptionOrNull()
+
+        assertEquals(DataError.Api(0, "task is not a running foreground task (status: completed)"), error)
+    }
+
+    @Test
+    fun `detach of an unknown task surfaces the typed 40406`() = runBlocking {
+        server.enqueue(
+            MockResponse(body =
+                """{"code":40406,"msg":"task not found","request_id":"r"}""",
+            ),
+        )
+
+        val error = api.detachTask(settings(), "session_1", "agent-nope").exceptionOrNull()
+
+        assertEquals(DataError.Api(40406, "task not found"), error)
+    }
 }

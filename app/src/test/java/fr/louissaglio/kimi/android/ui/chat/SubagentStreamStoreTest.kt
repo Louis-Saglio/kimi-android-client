@@ -38,6 +38,7 @@ class SubagentStreamStoreTest {
         toolCallId: String = "tool_1",
         swarmIndex: Int? = null,
         taskId: String? = null,
+        runInBackground: Boolean = false,
         model: String? = null,
         thinkingEffort: String? = null,
     ) = SessionEvent.SubagentSpawned(
@@ -45,7 +46,7 @@ class SubagentStreamStoreTest {
         name = "explore",
         parentToolCallId = toolCallId,
         description = "doc-verify",
-        runInBackground = false,
+        runInBackground = runInBackground,
         swarmIndex = swarmIndex,
         taskId = taskId,
         model = model,
@@ -1229,7 +1230,144 @@ class SubagentStreamStoreTest {
         assertEquals(SubagentStatus.Working, entry("agent-1")!!.status)
     }
 
-    // --- Todos & jobs (the sub-agent page's dock) ---------------------------------------
+    // --- Detaching a member to the background (ticket 138) -----------------------------
+
+    @Test
+    fun `detachable needs a running foreground status, a known task id, and a real record`() = runBlocking {
+        // The task id is the REST :detach target: without it (the snapshot roster
+        // carries none) even a running foreground member offers no detach.
+        store.apply(SESSION_ID, spawned("agent-1"))
+        store.apply(SESSION_ID, SessionEvent.SubagentStarted("agent-1"))
+        assertFalse(entry("agent-1")!!.detachable)
+
+        // Queued, Working and Suspended foreground members are detachable once the
+        // task id is known...
+        store.apply(SESSION_ID, spawned("agent-2", toolCallId = "tool_2", taskId = "agent-t2"))
+        assertTrue(entry("agent-2")!!.detachable)
+        store.apply(SESSION_ID, SessionEvent.SubagentStarted("agent-2"))
+        assertTrue(entry("agent-2")!!.detachable)
+        store.apply(SESSION_ID, SessionEvent.SubagentSuspended("agent-2", "provider rate limit"))
+        assertTrue(entry("agent-2")!!.detachable)
+
+        // ...a background member never is (it needs no conversion)...
+        store.apply(SESSION_ID, spawned("agent-3", toolCallId = "tool_3", taskId = "agent-t3", runInBackground = true))
+        store.apply(SESSION_ID, SessionEvent.SubagentStarted("agent-3"))
+        assertFalse(entry("agent-3")!!.detachable)
+
+        // ...terminal members never are...
+        store.apply(SESSION_ID, SessionEvent.SubagentCompleted("agent-2", "done"))
+        assertFalse(entry("agent-2")!!.detachable)
+
+        // ...and neither is a ghost row (a backfilled not_started member runs nothing).
+        applySwarmResult(
+            "<agent_swarm_result>\n" +
+                "<subagent agent_id=\"agent-9\" item=\"src/a.ts\" outcome=\"completed\">a</subagent>\n" +
+                "<subagent item=\"src/b.ts\" state=\"not_started\" outcome=\"aborted\">never started</subagent>\n" +
+                "</agent_swarm_result>",
+        )
+        assertFalse(entry("tool_swarm:ghost:1")!!.detachable)
+    }
+
+    @Test
+    fun `the detach's main-owned task started flips the member to background`() = runBlocking {
+        // The detach sequence (docs/server-api.md, REST /tasks :detach): the WS emits
+        // task.started for the converted task — main-owned, kind agent, info.agentId
+        // naming the member. A foreground run emits no task.* frames until detached,
+        // so the frame PROVES the conversion: it merges into the existing record.
+        store.apply(SESSION_ID, spawned("agent-12", taskId = "agent-t1"))
+        store.apply(SESSION_ID, SessionEvent.SubagentStarted("agent-12"))
+        assertTrue(entry("agent-12")!!.detachable)
+
+        store.apply(
+            SESSION_ID,
+            SessionEvent.TaskStarted(
+                taskInfo("agent-t1", TaskInfo.Status.Running, kind = TaskInfo.Kind.Agent, agentId = "agent-12"),
+            ),
+        )
+
+        val state = entry("agent-12")!!
+        assertTrue(state.runInBackground)
+        // The flip hides the page's overflow item; the status and the page's own jobs
+        // are untouched (the main-owned listing is the chat's JobsStore's business).
+        assertFalse(state.detachable)
+        assertEquals(SubagentStatus.Working, state.status)
+        assertEquals("agent-t1", state.taskId)
+        assertTrue(state.jobs.isEmpty())
+    }
+
+    @Test
+    fun `the detach frame fills the registration id a roster seed lacks`() = runBlocking {
+        // A cold start seeds the record from the snapshot roster, which carries no
+        // task id; the detach (done from another client) arrives as the task.started.
+        store.applyRoster(SESSION_ID, listOf(rosterEntry("agent-12", SubagentRosterPhase.Working)))
+        assertNull(entry("agent-12")!!.taskId)
+        assertFalse(entry("agent-12")!!.detachable)
+
+        store.apply(
+            SESSION_ID,
+            SessionEvent.TaskStarted(
+                taskInfo("agent-t1", TaskInfo.Status.Running, kind = TaskInfo.Kind.Agent, agentId = "agent-12"),
+            ),
+        )
+
+        val state = entry("agent-12")!!
+        assertTrue(state.runInBackground)
+        assertEquals("agent-t1", state.taskId)
+    }
+
+    @Test
+    fun `a detached member's terminal frame keeps the background flag and settles no status`() = runBlocking {
+        // Completion then follows the background lifecycle: subagent.completed pins
+        // the status, the task.terminated (core completed) flips nothing back.
+        store.apply(SESSION_ID, spawned("agent-12", taskId = "agent-t1"))
+        store.apply(
+            SESSION_ID,
+            SessionEvent.TaskStarted(
+                taskInfo("agent-t1", TaskInfo.Status.Running, kind = TaskInfo.Kind.Agent, agentId = "agent-12"),
+            ),
+        )
+        store.apply(SESSION_ID, SessionEvent.SubagentCompleted("agent-12", "the summary"))
+
+        store.apply(
+            SESSION_ID,
+            SessionEvent.TaskTerminated(
+                taskInfo(
+                    "agent-t1", TaskInfo.Status.Completed, kind = TaskInfo.Kind.Agent,
+                    endedAt = Instant.ofEpochMilli(1785210118804), agentId = "agent-12",
+                ),
+            ),
+        )
+
+        val state = entry("agent-12")!!
+        assertTrue(state.runInBackground)
+        assertEquals(SubagentStatus.Completed, state.status)
+        assertEquals("the summary", state.resultSummary)
+    }
+
+    @Test
+    fun `a bash-kind or unnamed task frame never flips a member to background`() = runBlocking {
+        store.apply(SESSION_ID, spawned("agent-12", taskId = "agent-t1"))
+
+        // A process-kind frame is background bash, never the member's conversion...
+        store.apply(
+            SESSION_ID,
+            SessionEvent.TaskStarted(
+                taskInfo("bash-1", TaskInfo.Status.Running, kind = TaskInfo.Kind.Process, agentId = "agent-12"),
+            ),
+        )
+        // ...and an agent-kind frame naming no record creates none (the detach of an
+        // unknown member drops exactly like its transcript frames).
+        store.apply(
+            SESSION_ID,
+            SessionEvent.TaskStarted(
+                taskInfo("agent-t9", TaskInfo.Status.Running, kind = TaskInfo.Kind.Agent, agentId = "agent-99"),
+            ),
+        )
+
+        assertFalse(entry("agent-12")!!.runInBackground)
+        assertNull(store.entry(SESSION_ID, "agent-99").first())
+    }
+
 
     private fun taskInfo(
         taskId: String,

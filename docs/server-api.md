@@ -639,7 +639,8 @@ in exactly these places:
   background."), emits `task.started` + `background.task.started` for the
   task (foreground tasks have no `task.*` frames until detached), and the run
   then lives the full background lifecycle (`task.terminated`, notification
-  turn). See the Tasks section. The app has no detach UI; no ticket.
+  turn). See the Tasks section. The app detaches from the sub-agent page's
+  overflow ("To background", ticket 138).
 - **`/status` gained `tower_mode`** (boolean; the new tower mode, commits
   `0f44537c`/`d3b27cc7`, flag `tower: false` here) next to
   `plan_mode`/`swarm_mode`. Additive; the app decodes none of the mode flags.
@@ -3710,7 +3711,9 @@ holds.
   `background.task.started` for it (a foreground task has no `task.*` frames
   until detached), and completion then follows the background lifecycle
   (`subagent.completed` + `task.terminated` + the task-origin notification
-  turn). The Android app has no detach UI.
+  turn). The Android app detaches from the sub-agent page's overflow ("To
+  background" → `:detach`, ticket 138); the conversion's `task.started`
+  flips the member record to background.
 
 Background **bash** tasks live in their own id namespace (`bash-…`, vs
 `agent-…` for sub-agents) and carry the shell **`command`** on the wire

@@ -162,6 +162,13 @@ class SubagentStreamStore @Inject constructor(
                         status == SubagentStatus.Suspended
                     )
 
+        /** True while the sub-agent page's overflow offers "To background" (ticket
+         * 138): the member still runs IN THE FOREGROUND — a background run needs no
+         * conversion — with its task id (the REST `:detach` target) known. Terminal
+         * members, background members and ghosts never show it. */
+        val detachable: Boolean
+            get() = stoppable && !runInBackground
+
         /** The swarm roster row's one-line activity (ticket 136), null when the row
          * shows nothing: while Working, the last non-blank line of the live
          * timeline's last assistant text; while Suspended, the suspend cause; when
@@ -884,9 +891,17 @@ class SubagentStreamStore @Inject constructor(
      * [TaskInfo.agentId] names a record pins that member Cancelled (ticket 135): a
      * deliberately stopped member gets NO `subagent.completed`/`failed` frame
      * (docs/server-api.md), so the live task.terminated is the only live carrier of
-     * the cancelled truth — a main-owned swarm member's frame included. Unknown
-     * sub-agent (its spawn predates the subscription): dropped exactly like its
-     * transcript frames. */
+     * the cancelled truth — a main-owned swarm member's frame included.
+     *
+     * Independently of both, an AGENT-kind frame whose [TaskInfo.agentId] names a
+     * record merges the detach transition into it (ticket 138): a foreground run
+     * emits no task.* frames until it is detached (docs/server-api.md, REST /tasks
+     * `:detach`), so any such frame PROVES the run now lives in the background —
+     * the record's runInBackground flips and the registration id fills when the
+     * spawned frame never carried it (a roster seed has none). The frame merges
+     * into the EXISTING record only: no duplicate creation (an unknown id drops
+     * exactly like its transcript frames), no record job — the main-owned listing
+     * is the chat's JobsStore's business. */
     private fun onTaskEvent(sessionId: String, agentId: String, info: TaskInfo, terminal: Boolean) {
         var changed = false
         if (terminal && info.status == TaskInfo.Status.Killed) {
@@ -894,6 +909,19 @@ class SubagentStreamStore @Inject constructor(
             if (member != null) {
                 member.applyStatus(SubagentStatus.Cancelled, StatusSource.Live)
                 changed = true
+            }
+        }
+        if (info.kind == TaskInfo.Kind.Agent) {
+            val member = info.agentId?.let { record(sessionId, it) }
+            if (member != null) {
+                if (!member.runInBackground) {
+                    member.runInBackground = true
+                    changed = true
+                }
+                if (member.taskId == null) {
+                    member.taskId = info.taskId
+                    changed = true
+                }
             }
         }
         if (agentId != MAIN_AGENT_ID) {

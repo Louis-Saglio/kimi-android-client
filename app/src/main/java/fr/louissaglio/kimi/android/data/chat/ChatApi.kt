@@ -411,4 +411,32 @@ class ChatApi @Inject constructor(
         api.post(settings, "/api/v1/sessions/$sessionId/tasks/$taskId:cancel", api.jsonBody {}) { body ->
             api.json.decodeFromString<Envelope<TaskCancelData>>(body).toAckResult()
         }
+
+    /**
+     * Detaches one running FOREGROUND task (`POST /api/v1/sessions/{id}/tasks/{taskId}:detach`,
+     * docs/server-api.md, REST /tasks — 0.39.0, ticket 138): the run converts to
+     * background — the foreground `Agent` call resolves with a stub, `task.started`
+     * fires for it, and completion follows the background lifecycle, all over the
+     * WebSocket, so success carries no payload. Beware the ack shape: an
+     * already-background or terminal task answers envelope code 0 with
+     * `{"detached":false,"status":<current>}` — success is `data.detached` (the
+     * dismissQuestion shape), and the refusal surfaces as [DataError.Api] like any
+     * envelope error (an unknown task's 40406 included, via the [toResult] idiom).
+     */
+    suspend fun detachTask(settings: ServerSettings, sessionId: String, taskId: String): Result<Unit> =
+        api.post(settings, "/api/v1/sessions/$sessionId/tasks/$taskId:detach", api.jsonBody {}) { body ->
+            val envelope = api.json.decodeFromString<Envelope<TaskDetachData>>(body)
+            val data = envelope.data
+            when {
+                envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
+                data?.detached == true -> Result.success(Unit)
+                else -> Result.failure(
+                    DataError.Api(
+                        envelope.code,
+                        "task is not a running foreground task" +
+                            data?.status?.takeIf { it.isNotBlank() }?.let { " (status: $it)" }.orEmpty(),
+                    ),
+                )
+            }
+        }
 }

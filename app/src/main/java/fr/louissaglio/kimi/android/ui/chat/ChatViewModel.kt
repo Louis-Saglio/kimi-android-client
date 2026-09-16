@@ -1011,7 +1011,15 @@ class ChatViewModel internal constructor(
             is SessionEvent.QuestionResolved -> questions.onResolved(event)
             // Background tasks (ticket 092): the collaborator owns the list, including
             // the core→wire status mapping.
-            is SessionEvent.TaskStarted -> jobsStore.onStarted(event.info)
+            is SessionEvent.TaskStarted -> {
+                jobsStore.onStarted(event.info)
+                // A main-owned agent-kind frame still concerns the store when its
+                // info.agentId names a member (ticket 138): the detach's task.started
+                // is the live carrier of the foreground → background conversion — the
+                // record's runInBackground flips off it. The funnel no-ops on
+                // everything else.
+                subagentStore.apply(sessionId, event)
+            }
             is SessionEvent.TaskTerminated -> {
                 jobsStore.onTerminated(event.info)
                 // A main-owned frame still concerns the store when its info.agentId

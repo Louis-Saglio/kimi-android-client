@@ -10,17 +10,25 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -51,6 +59,10 @@ import fr.louissaglio.kimi.android.ui.theme.warningColor
  * — timeline and jobs sheet alike — open the job screen (ticket 098), which runs
  * store-backed for these sub-agent-owned tasks; the sheet stays without a Stop
  * (REST `/tasks` serves only the main agent's task store — docs/server-api.md).
+ * The top bar's overflow hosts "To background" (ticket 138) while the record is a
+ * running FOREGROUND member with a known task id — the single home of the detach
+ * affordance, covering plain agents and swarm members alike since both open this
+ * screen.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -85,6 +97,10 @@ fun SubagentScreen(
     // gate when it exists, by the store's own keep-alive collection otherwise (064).
     LifecycleEventEffect(Lifecycle.Event.ON_START) { viewModel.onScreenStarted() }
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) { viewModel.onScreenStopped() }
+    val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(Unit) {
+        viewModel.effects.collect { effect -> snackbarHostState.showSnackbar(effect.message) }
+    }
     // Linked background `Bash` rows open their job screen (ticket 098) — the chat's
     // ticket-096 resolution: the timeout budget comes from the matching timeline row
     // (the call input is the only wire location of the timeout), the timed-out flag
@@ -111,7 +127,40 @@ fun SubagentScreen(
             )
         }
     }
+    SubagentContent(
+        uiState = uiState,
+        onNavigateBack = onNavigateBack,
+        onOpenSubagent = onOpenSubagent,
+        onOpenJob = onOpenJob,
+        onOpenEditDiff = onNavigateToEditDiff,
+        onOpenFileContent = onNavigateToFileContent,
+        onDetachToBackground = viewModel::onDetachToBackground,
+        onRetry = viewModel::onRetry,
+        onHistoryTopReached = viewModel::onHistoryTopReached,
+        snackbarHostState = snackbarHostState,
+    )
+}
+
+/** The page body, split from the ViewModel for semantics tests (the SwarmContent
+ * pattern): a plain [SubagentViewModel.UiState] plus intent callbacks. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun SubagentContent(
+    uiState: SubagentViewModel.UiState,
+    onNavigateBack: () -> Unit,
+    onOpenSubagent: (String) -> Unit = {},
+    onOpenJob: (String) -> Unit = {},
+    onOpenEditDiff: (toolCallId: String, payload: ToolPayload.Edit) -> Unit = { _, _ -> },
+    onOpenFileContent: (toolCallId: String, payload: ToolPayload, output: String) -> Unit = { _, _, _ -> },
+    /** The overflow's "To background" (ticket 138), offered while the record says
+     * the member is detachable. */
+    onDetachToBackground: () -> Unit = {},
+    onRetry: () -> Unit = {},
+    onHistoryTopReached: () -> Unit = {},
+    snackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
+) {
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = {
@@ -141,6 +190,34 @@ fun SubagentScreen(
                     uiState.status?.let { status ->
                         SubagentStatusChip(status, Modifier.padding(end = 12.dp))
                     }
+                    // Ticket 138: the detach affordance lives only here (not the
+                    // timeline card, not the roster row) and only while the record
+                    // is a running foreground member with a known task id — a
+                    // background member and a terminal one never see it. The item
+                    // disables while the POST is in flight; the conversion's
+                    // task.started flips the record, which removes the whole
+                    // affordance (web-parity label).
+                    if (uiState.detachable) {
+                        var menuExpanded by remember { mutableStateOf(false) }
+                        Box {
+                            IconButton(onClick = { menuExpanded = true }) {
+                                Icon(Icons.Filled.MoreVert, contentDescription = "Sub-agent options")
+                            }
+                            DropdownMenu(
+                                expanded = menuExpanded,
+                                onDismissRequest = { menuExpanded = false },
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("To background") },
+                                    enabled = !uiState.detaching,
+                                    onClick = {
+                                        menuExpanded = false
+                                        onDetachToBackground()
+                                    },
+                                )
+                            }
+                        }
+                    }
                 },
             )
         },
@@ -162,7 +239,7 @@ fun SubagentScreen(
                 // The transcript fetch is the page's only data source here (no spawn,
                 // no seed, no stream): its failure gets the full-screen retry.
                 error != null && uiState.items.isEmpty() ->
-                    ErrorState(error, onRetry = viewModel::onRetry)
+                    ErrorState(error, onRetry = onRetry)
                 uiState.status == null && uiState.isLoading -> LoadingState()
                 // Neither a live stream nor a transcript entry exists.
                 uiState.status == null -> EmptyState("No transcript for this sub-agent.")
@@ -171,10 +248,10 @@ fun SubagentScreen(
                     uiState.items,
                     onOpenSubagent = onOpenSubagent,
                     onOpenJob = onOpenJob,
-                    onOpenEditDiff = onNavigateToEditDiff,
-                    onOpenFileContent = onNavigateToFileContent,
+                    onOpenEditDiff = onOpenEditDiff,
+                    onOpenFileContent = onOpenFileContent,
                     isLoadingMoreHistory = uiState.isLoadingMoreHistory,
-                    onHistoryTopReached = viewModel::onHistoryTopReached,
+                    onHistoryTopReached = onHistoryTopReached,
                 )
             }
         }

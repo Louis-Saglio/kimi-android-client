@@ -250,6 +250,14 @@ class ChatRepository @Inject constructor(
     suspend fun cancelTask(settings: ServerSettings, sessionId: String, taskId: String): Result<Unit> =
         chatApi.cancelTask(settings, sessionId, taskId)
 
+    /** Detaches one running foreground task to the background
+     * (`POST .../tasks/{taskId}:detach` — ticket 138, server 0.39.0); the
+     * `task.started` conversion frame arrives over the WebSocket. An unknown task
+     * surfaces as the typed DataError.Api(40406), an already-background or terminal
+     * one as a refusal. */
+    suspend fun detachTask(settings: ServerSettings, sessionId: String, taskId: String): Result<Unit> =
+        chatApi.detachTask(settings, sessionId, taskId)
+
     /** Seeds the socket's resume cursor from a snapshot watermark (ticket 085), so the
      * session's next subscribe resumes exactly where the bundle was taken. */
     fun seedSessionCursor(sessionId: String, seq: Long, epoch: String) =

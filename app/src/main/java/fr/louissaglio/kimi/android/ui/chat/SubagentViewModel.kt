@@ -12,8 +12,10 @@ import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.data.toUserMessage
 import fr.louissaglio.kimi.android.navigation.Subagent
 import javax.inject.Inject
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -76,7 +78,31 @@ class SubagentViewModel internal constructor(
          * tasks — the dock at the page's bottom bar, same widgets as the chat's. */
         val todos: List<Todo>? = null,
         val jobs: List<Job> = emptyList(),
+        /** Ticket 138: the record's background-task registration id (the REST
+         * `:detach` target, null when the spawned frame never carried it) and the
+         * overflow's "To background" affordance — [detachable] mirrors the record's
+         * own rule (a running foreground member with a known task id), [detaching]
+         * latches the tap until the wire's conversion frame hides the item. */
+        val taskId: String? = null,
+        val detachable: Boolean = false,
+        val detaching: Boolean = false,
     )
+
+    /** One-shot snackbars (the ChatViewModel.Effect pattern). */
+    sealed interface Effect {
+        val message: String
+
+        /** The detach succeeded: the run now lives the background lifecycle — the
+         * jobs dock lists it, this page keeps streaming. */
+        data class DetachedToBackground(override val message: String) : Effect
+
+        /** The detach POST failed: the menu item re-enables, the run stays
+         * foreground. */
+        data class DetachFailed(override val message: String) : Effect
+    }
+
+    private val _effects = Channel<Effect>(Channel.BUFFERED)
+    val effects = _effects.receiveAsFlow()
 
     val uiState: StateFlow<UiState>
         field = MutableStateFlow(UiState(subagentId = subagentId, sessionId = sessionId))
@@ -138,6 +164,8 @@ class SubagentViewModel internal constructor(
                         hasMoreHistory = entry?.hasMoreTurns == true,
                         todos = entry?.todos,
                         jobs = entry?.jobs.orEmpty(),
+                        taskId = entry?.taskId,
+                        detachable = entry?.detachable == true,
                     )
                 }
                 maybeReconcile(entry?.status)
@@ -174,6 +202,32 @@ class SubagentViewModel internal constructor(
     fun onRetry() {
         uiState.update { it.copy(error = null) }
         historyPager.refresh(keepLive = true)
+    }
+
+    /** Detaches the running foreground sub-agent to the background
+     * (`POST .../tasks/{taskId}:detach` — ticket 138, server 0.39.0) through the same
+     * repository wrapper the jobs sheet's cancel uses, so error surfacing stays
+     * consistent. No confirmation (web parity). The menu item disables on tap and
+     * stays down on success — NO optimistic flip: the detach's `task.started`
+     * (main-owned, kind agent — a foreground run emits no task.* frames until
+     * detached) flips the record's runInBackground, which hides the item; the page
+     * itself stays open and keeps streaming (the sub-agent id does not change). Any
+     * failure re-enables the item and snackbars. */
+    fun onDetachToBackground() {
+        val state = uiState.value
+        val taskId = state.taskId ?: return
+        if (!state.detachable || state.detaching) return
+        uiState.update { it.copy(detaching = true) }
+        viewModelScope.launch {
+            chatRepository.detachTask(settingsRepository.current(), sessionId, taskId)
+                .onSuccess {
+                    _effects.send(Effect.DetachedToBackground("Moved to background — it keeps running in Jobs"))
+                }
+                .onFailure { error ->
+                    uiState.update { it.copy(detaching = false) }
+                    _effects.send(Effect.DetachFailed(error.toUserMessage()))
+                }
+        }
     }
 
     /** Wired to ON_START. */

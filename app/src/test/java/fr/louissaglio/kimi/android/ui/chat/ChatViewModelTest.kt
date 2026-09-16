@@ -1828,4 +1828,34 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         }
     }
 
+    // --- Detaching a member to the background (ticket 138) ---
+
+    @Test
+    fun `the detach's task started flips the member record and lists the job`() {
+        runBlocking {
+            viewModel.onScreenStarted()
+            val socket = awaitServerSocket()
+
+            // A foreground spawn lands with no task frames; the detach makes the
+            // core re-register the member's task as MAIN-OWNED — the frame names
+            // the member in info.agentId (docs/server-api.md, Background
+            // lifecycle). JobsStore lists it, the member record flips to
+            // background so the page's "To background" affordance disappears.
+            socket.send(subagentSpawnedFrame())
+            socket.send(
+                taskStartedFrame(
+                    taskId = "agent-t1",
+                    description = "doc-verify",
+                    agentId = "agent-12",
+                ),
+            )
+
+            awaitState(viewModel.uiState) { state -> state.jobs.size == 1 }
+            val job = viewModel.uiState.value.jobs.single()
+            assertEquals("agent-12", job.agentId)
+            assertEquals(BackgroundTask.Kind.Subagent, job.kind)
+            awaitCondition { subagentEntry("agent-12")?.runInBackground == true }
+        }
+    }
+
 }
