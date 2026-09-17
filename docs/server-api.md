@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-09-15
-(server version `0.43.1`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-09-17
+(server version `2.0.0`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
@@ -14,7 +14,8 @@ the workspace list used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `0.43.0`
+**Protocol history:** this document previously described server `0.43.1`
+(verified 2026-09-15; see git history), `0.43.0`
 (verified 2026-09-14; see git history), `0.42.0`
 (verified 2026-09-09; see git history), `0.41.0`
 (verified 2026-09-04; see git history), `0.40.1`
@@ -34,6 +35,108 @@ used are shown with each section. Secrets are redacted (`<token>`).
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
 that, `0.27.0` before that, and `0.23.3` before that.
+
+The drift from 0.43.1 to 2.0.0 is **additive-only for the core loop — one new
+WS event (`subagent.cancelled`), one new prompt-POST field (`metadata`), one
+event-order swap (`prompt.steered` before `turn.steer`), and one
+routinely-present optional step field (`llmClientBlockedMs`); nothing breaks
+the Android app, which ignores unknown event types and fields**. The upstream
+diff between the two tags (29 commits, reviewed via the GitHub API) touched
+the client-facing wire in exactly these places:
+
+- **New WS event `subagent.cancelled`** (commit `7d174ac9` — subagent scope
+  LRU + the new event; verified live 2026-09-17 — see Sub-agents): payload
+  `{type, time, subagentId, agentId:"main", sessionId}`. Verbatim frame:
+
+  ```json
+  {"type":"subagent.cancelled","seq":25,
+   "payload":{"type":"subagent.cancelled","time":1789673862080,
+              "subagentId":"agent-0","agentId":"main","sessionId":"session_..."}}
+  ```
+
+  It fires on REST `:cancel` of a running foreground AND background sub-agent
+  — previously cancels produced no terminal `subagent.*` event at all.
+  Observed sequences: foreground cancel → `prompt.aborted` →
+  `subagent.cancelled` → the Agent `tool.result` (`status: failed`,
+  `stop_reason: cancelled`, `isError:true`); background cancel →
+  `subagent.cancelled` → `task.terminated` (`status:"killed"`) →
+  `background.task.terminated` → a task-origin notification turn +
+  `task.notified` (`notificationType:"task.killed"`). After a cancel the
+  snapshot `subagents` roster entry reads
+  `"status":"cancelled","subagent_phase":"cancelled"` — `cancelled` is a new
+  live-observed roster phase enum value (see the snapshot roster) — and REST
+  `/tasks/{id}` shows `status:"cancelled"`. **The Android data layer already
+  parses `subagent.cancelled` defensively and maps roster phase `"cancelled"`
+  — no ticket.**
+- **Prompt POST `metadata` field** (commit `41eac5d2`; verified live
+  2026-09-17 — see Prompts): an arbitrary client JSON object accepted in the
+  prompt POST body; echoed on the HTTP ACK as `data.metadata`; rides
+  `prompt.submitted`/`prompt.queued` as `clientMetadata:[<metadata>]`, the
+  `context.spliced` origin, history `metadata.origin.clientMetadata`, and the
+  transcript prompts[] / user-turn origin payloads. Absent everywhere when not
+  sent. Additive; the app sends none and ignores unknown fields — no ticket.
+- **Steer event order swap** (commit `2bb6e12c`; verified live 2026-09-17 —
+  see Steer): `prompt.steered` now precedes `turn.steer` (observed seq 42 then
+  43; was the reverse since 0.43.0). Everything else about steer is unchanged
+  (`queueLength` on `prompt.queued`, the fresh-ULID splice, same-turn
+  continuation, `prompt.completed` with the original prompt id). The app
+  treats both frames as order-insensitive notifications — no ticket.
+- **`turn.step.completed` now routinely carries `llmClientBlockedMs`**
+  (schema-optional since 0.43.1; first live observation this run — every step
+  frame of this run's round-trips carried it, e.g. `"llmClientBlockedMs":47`).
+  Additive; ignored — no ticket.
+- **Doc correction (not 2.0.0 drift):** the legacy `GET /api/v1/files/{id}`
+  route answers **HTTP 404** with body `{"code":40407,"msg":"file not found"}`
+  for a deleted file — this doc previously claimed an HTTP-200 envelope. The
+  route source is identical at tags 0.43.1 and 2.0.0; the old claim was wrong
+  (verified live 2026-09-17 — see Files). The media download route behaves
+  the same (HTTP 404 + `40407`).
+- **Tools catalog content drift** (server-config only, not wire shape): 38
+  tools on an initialized agent (28 builtins incl. `ReadMediaFile` + 10 MCP —
+  tavily gained `tavily_feedback`, kiln has 4); 37 on a fresh never-prompted
+  session (27 builtins + 10 MCP). See Tools.
+- **Wire-invisible here:** image uploads now ride to the LLM as file refs
+  (`5653c739` — engine↔LLM internal; the prompt-side `session_media`
+  projection re-verified byte-identical), kosong gained optional media names
+  (`540133f0`), four transcript-projection fixes landed (`1c7e996a`,
+  `cafd9b5a`, `0cf413f7`, `bd061789` — history rendering internals), and the
+  remaining commits are wire-invisible refactors.
+
+Everything else re-verified unchanged live on 2.0.0 (see the verification
+log): auth 401s (missing + wrong token), `/api/v1/meta` (5 flags, 17 features —
+only `server_version` differs), the models catalog (10 entries, same content),
+config (`default_model` `kimi-code/k3-256k`, `thinking.effort` `"max"`,
+`default_permission_mode` `"yolo"`), sessions create/get/list (`last_seq`
+real on the detail path — `1` fresh; list still `0`), `40401` envelopes
+without `stack`, `/status` (fresh session `thinking_level` `""`,
+`max_context_tokens` 262144), the full snapshot (top-level keys, real
+`session.usage`), the full prompt round-trip skeleton (`session.meta.updated`
+→ `prompt.submitted` → `turn.started` with `promptId` → `context.spliced` →
+`prompt.started` → steps → `tool.*` → `turn.ended` → `prompt.completed`; no
+`streaming` phase; the `date_change` injection), mid-run and idle `:abort`,
+compact with `{"instruction":…}` (instant ACK, instruction echo, wholesale
+splice with `compaction_summary` + `compaction_continuation`, `tokensAfter`
+== post-compaction `context_tokens`, both `40910`s), the questions flow
+end-to-end (pending poll, answer, dismiss `40909`, re-answer/re-dismiss
+`40902`, the `multi_select` omission rule), the manual-approval round-trip
+(`approval_<uuid>` split, `tool_call_id` POST → `40404`, both resolved
+frames), files (upload with sniffed `media_type`, download 200, `Range` 206,
+delete, the image `session_media` projection with `name`, the media copy
+surviving the upload's delete), the TodoList contract, foreground +
+background sub-agents (full lifecycles: `subagent.spawned` with
+`taskId`/`model`/`thinkingEffort:"max"`, `subagent.completed` with
+`resultSummary`/`usage`/`contextTokens`), REST `/tasks` list/get
+`with_output`, the v2 grouped session table, the v3 spot-check (WS hello
+`protocol_version:"3"` + `/history` `{messages, has_more}`), the session
+lifecycle events (`event.session.created` at seq 1, `:delete` →
+`event.session.deleted` with camelCase `sessionId`), and WS
+hello/heartbeat/subscribe/ack/cursor-resume (`protocol_version: 2`,
+`heartbeat_ms` 10000; replay before the ack; future-seq cursor → standalone
+`resync_required` `epoch_changed` then the ack listing it). **App impact:
+none — the Android data layer already parses `subagent.cancelled` defensively
+and maps roster phase `"cancelled"`; prompt `metadata`, the steer order swap
+and `llmClientBlockedMs` are all ignored safely (`ignoreUnknownKeys`). No
+tickets filed.**
 
 The drift from 0.43.0 to 0.43.1 is **nil for the core loop — one behavioral
 search fix on a route the app never calls, everything else engine-internal
@@ -2415,9 +2518,12 @@ for image/video/audio. Errors return **HTTP 404** (not the usual HTTP-200
 envelope): unknown session → `40401` "session not found", unknown file →
 **`40407`** "file not found" (**0.40.1 drift** — `40406` up to 0.39.1;
 verified live 2026-09-02. The legacy `GET /api/v1/files/{id}` route moved
-the same way: a deleted file answers the HTTP-200 envelope
-`{"code":40407,"msg":"file not found"}`. `40406` survives for unknown
-**tasks** only). For media uploaded through `POST /api/v1/files` the
+the same way — **correction, verified live 2026-09-17 on 2.0.0:** a deleted
+file answers **HTTP 404** with body `{"code":40407,"msg":"file not found"}`
+on BOTH routes (the legacy files route and the media route alike); the route
+source is identical at tags 0.43.1 and 2.0.0, so this was already true on
+0.43.1 — this doc's earlier "HTTP-200 envelope" claim for the legacy route
+was wrong. `40406` survives for unknown **tasks** only). For media uploaded through `POST /api/v1/files` the
 `file_id` is the same `f_…` id, so the legacy `GET /api/v1/files/{id}` still
 serves it (verified live: both returned the same 70 bytes for a 1×1 png); the
 session-media route is the canonical path and the only one that works for media
@@ -2582,6 +2688,28 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../promp
   `prompt.id_conflict`), and `skills` (**0.37.2**:
   `[{"name":"…","args":"…"}]` bundled skill activations — the app sends none;
   skills stay out of scope).
+- **`metadata` — live since 2.0.0** (commit `41eac5d2`; verified live
+  2026-09-17): an arbitrary client JSON object in the prompt POST body. It is
+  echoed on the HTTP ACK as `data.metadata`, and rides the wire as
+  `clientMetadata:[<metadata>]` (array-wrapped) on `prompt.submitted` /
+  `prompt.queued`, on the `context.spliced` user message's
+  `origin.clientMetadata`, on `turn.started`'s `origin.clientMetadata`, in
+  history at `metadata.origin.clientMetadata`, and in the transcript
+  prompts[] / user-turn origin payloads. Absent everywhere when not sent.
+  Verbatim `prompt.submitted` for a prompt posted with
+  `"metadata":{"client":"doc-verify-200","index":1}`:
+
+  ```json
+  {"type":"prompt.submitted","seq":22,
+   "payload":{"type":"prompt.submitted","time":1789673445307,"agentId":"main",
+              "promptId":"msg_01M2RDK5XQN21NFQPNV3D3W14X",
+              "userMessageId":"msg_01M2RDK5XQN21NFQPNV3D3W14X","status":"running",
+              "content":[{"type":"text","text":"Reply with exactly: meta-ok"}],
+              "clientMetadata":[{"client":"doc-verify-200","index":1}],
+              "createdAt":"2026-09-17T19:30:45.307Z","sessionId":"session_..."}}
+  ```
+
+  The app sends no `metadata` and ignores the field (`ignoreUnknownKeys`).
 - `thinking` (verified live 2026-07-24, ticket 032) is a **plain effort
   string**, not an object: `"thinking": "low"`. Values come from the model's
   `support_efforts` (`GET /api/v1/models`; K3 on 0.29.0: `low`/`high`/`max`,
@@ -2639,15 +2767,18 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../promp
   `{"code":40001,"msg":"prompt_ids: Too small: expected array to have >=1 items",...}`
   (re-verified 2026-07-23).
 - WS sequence when the steer lands mid-turn (verbatim capture in the WS
-  section): **0.43.0 adds a `turn.steer` frame first** (engine-side steer
+  section): `prompt.steered` → **`turn.steer`** (engine-side steer
   application, carrying `{input: [<the steered prompt's content parts>],
-  origin: {"kind":"user"}}` — verified live 2026-09-14) → `prompt.steered`
+  origin: {"kind":"user"}}` — first captured live 2026-09-14 on 0.43.0)
   → the current step runs to `turn.step.completed` → the steered user
   message arrives via `context.spliced` → a new
   `turn.step.started` **in the same turn** (no new `turn.started`) →
   `turn.ended` `"completed"` → a single `prompt.completed` carrying the
   **original** active prompt id. The agent then follows the steered
-  instruction. Re-verified 2026-07-27 on 0.29.2.
+  instruction. Re-verified 2026-07-27 on 0.29.2. **Event order flipped in
+  2.0.0** (commit `2bb6e12c`; verified live 2026-09-17): `prompt.steered`
+  now fires **before** `turn.steer` (observed seq 42 then 43) — from 0.43.0
+  through 0.43.1 `turn.steer` came first.
 
 ## Abort
 
@@ -3146,7 +3277,12 @@ session-state-dependent. **0.42.0 (verified live 2026-09-09): 37 entries —
 **`ReadMediaFile`, back in the catalog** on this server (it was withheld
 from non-multimodal models on 0.38.0); the new **`NotifyUser` tool is NOT
 advertised** — it is gated behind the `notify_user` experimental flag
-(`false` here, commit `f6a9c39e`). Also re-observed this run: the 0.31.1
+(`false` here, commit `f6a9c39e`). **2.0.0 (verified live 2026-09-17): 38
+entries on an initialized agent — the same 28 builtins plus 10 MCP tools
+(tavily gained `tavily_feedback`, now 6; kiln has 4) — and 37 on a fresh
+never-prompted session (27 builtins + the same 10 MCP).** Content drift from
+this server's MCP config, not wire-shape drift; the builtin set is
+unchanged. Also re-observed this run: the 0.31.1
 liveness caveat below still holds verbatim — right after session create,
 before any prompt ran, the catalog answered `{"tools":[]}`; it resolved to
 the 37 entries only once a session had run a turn. Two MCP routes ride along (both verified live
@@ -3505,10 +3641,33 @@ Upstream schema only (not captured live): `subagent.spawned` may also carry
 `parentToolCallUuid` and `swarmIndex` (the `AgentSwarm` member index);
 `subagent.started` re-fires when a suspended sub-agent resumes;
 `subagent.suspended` is `{subagentId, reason}` (not terminal);
-`subagent.failed` is `{subagentId, error}`;
-`subagent.cancelled` is `{subagentId}` (terminal — a deliberate stop; the live
-stream carries the same truth as `task.terminated` with `status:"killed"`, and
-the roster phase `cancelled` matches it — see the snapshot roster).
+`subagent.failed` is `{subagentId, error}`.
+
+`subagent.cancelled` — **captured live since 2.0.0** (commit `7d174ac9`;
+verified live 2026-09-17): `{type, time, subagentId, agentId:"main",
+sessionId}` — terminal, a deliberate stop. It fires on REST `:cancel` of a
+running foreground AND background sub-agent; on earlier versions cancels
+produced no terminal `subagent.*` event at all (the live stream carried only
+the same truth as `task.terminated` with `status:"killed"`). Verbatim frame:
+
+```json
+{"type":"subagent.cancelled","seq":25,
+ "payload":{"type":"subagent.cancelled","time":1789673862080,
+            "subagentId":"agent-0","agentId":"main","sessionId":"session_..."}}
+```
+
+Observed sequences (2026-09-17): **foreground cancel** → `prompt.aborted`
+(the running prompt's id, `abortedAt`) → `subagent.cancelled` → the spawning
+Agent `tool.result` with `isError:true` and output
+`agent_id: agent-0\nactual_subagent_type: explore\nstatus: failed\nstop_reason: cancelled\n\nsubagent error: The subagent was stopped before it finished by user.\nnext_step: …`.
+**Background cancel** → the sub-agent's internal `prompt.aborted`
+(`agentId:"<subagentId>"`) → `subagent.cancelled` → `task.terminated`
+(`info.status:"killed"`, `stopReason:"Aborted by the user"`) →
+`background.task.terminated` (same `info`) → a task-origin notification turn
+(`turn.started` origin `{"kind":"task","taskId":"agent-1wjam2nz","status":"killed","notificationId":"task:agent-1wjam2nz:killed"}`)
++ `task.notified` (`notificationType:"task.killed"`). After a cancel the
+snapshot roster entry reads `"status":"cancelled","subagent_phase":"cancelled"`
+(see the snapshot roster) and REST `/tasks/{id}` shows `status:"cancelled"`.
 
 ### Sub-agent turn frames share the session channel
 
@@ -3823,8 +3982,12 @@ Terminal — both state fields flip and the run's result-summary tail arrives
 ```
 
 - `subagent_phase`: `queued` | `working` | `suspended` | `completed` |
-  `failed`; `cancelled` joins them schema-level (never captured live — the
-  same truth as `task.terminated` with `status:"killed"`); `suspended_reason`
+  `failed` | `cancelled` — **`cancelled` observed live since 2.0.0**
+  (verified live 2026-09-17: a REST `:cancel` of a running foreground
+  sub-agent leaves the roster entry reading
+  `"status":"cancelled","subagent_phase":"cancelled"`; REST `/tasks/{id}`
+  shows `status:"cancelled"`; was schema-level only before — the same truth
+  as `task.terminated` with `status:"killed"`); `suspended_reason`
   and `swarm_index` optional. The flatter
   `status` mirrors it with the `/tasks` vocabulary (`working` → `running`
   there); `subagent_phase` is the precise one.
@@ -4283,7 +4446,11 @@ REST `/tasks/{id}?with_output=true` instead (see REST `/tasks`).
 
 **Step completed** — unchanged (latency breakdown `llmRequestBuildMs`,
 `llmServerFirstTokenMs`, `llmServerDecodeMs`, `llmClientConsumeMs` and
-`rawFinishReason` all still present):
+`rawFinishReason` all still present). **2.0.0 (first live observation
+2026-09-17):** the optional **`llmClientBlockedMs`** (schema-declared since
+0.43.1) is now routinely present — every `turn.step.completed` of this run's
+round-trips carried it (e.g. `"llmClientBlockedMs":47`); earlier captures
+never showed it:
 
 ```json
 {"type":"turn.step.completed","seq":16,
@@ -4618,6 +4785,89 @@ session `40401`. The loopback-only debug xstate stream
 deployment** (verified live — handshake refused).
 
 ## Verification log
+
+- 2026-09-17 re-verification on `2.0.0` (server 0.43.1 → 2.0.0; throwaway
+  sessions `session_2c247ce5-…` / `session_894f3d11-…` /
+  `session_bfd7170d-…` created with `metadata.cwd=/home/ubuntu/spike`, all
+  `:delete`d after; guided by the nightly job's `pending-changelog.md` — 29
+  upstream commits between the tags, reviewed via the GitHub API; live probes
+  over REST + websocat against `127.0.0.1:58627`; the wire-relevant commits
+  are `7d174ac9` (subagent scope LRU + `subagent.cancelled`), `41eac5d2`
+  (prompt `metadata` / clientMetadata), `2bb6e12c` (steer event order swap),
+  `5653c739` (image upload as file refs — engine↔LLM internal,
+  wire-invisible), `540133f0` (kosong optional media names — wire-invisible),
+  and `1c7e996a`/`cafd9b5a`/`0cf413f7`/`bd061789` (transcript-projection
+  fixes — history rendering internals); the rest are wire-invisible
+  refactors).
+  Drift found (all additive; nothing breaks the Android app — it ignores
+  unknown event types/fields):
+  (a) new WS event `subagent.cancelled` `{type, time, subagentId,
+      agentId:"main", sessionId}` — fires on REST `:cancel` of a running
+      foreground AND background sub-agent; previously cancels produced no
+      terminal `subagent.*` event at all. Foreground sequence:
+      `prompt.aborted` → `subagent.cancelled` → Agent `tool.result`
+      (`status: failed`, `stop_reason: cancelled`, `isError:true`);
+      background sequence: `subagent.cancelled` → `task.terminated`
+      (`status:"killed"`) → `background.task.terminated` → task-origin
+      notification turn + `task.notified` (`task.killed`). Post-cancel the
+      snapshot roster entry reads `"status":"cancelled","subagent_phase":"cancelled"`
+      (new live-observed phase) and REST `/tasks/{id}` shows
+      `status:"cancelled"` (verbatim captures in Sub-agents);
+  (b) prompt POST `metadata` field — arbitrary client JSON object echoed on
+      the ACK as `data.metadata` and riding `prompt.submitted`/
+      `prompt.queued` as `clientMetadata:[<metadata>]`, the
+      `context.spliced` origin, history `metadata.origin.clientMetadata` and
+      the transcript origin payloads; absent everywhere when not sent
+      (verbatim frame in Prompts);
+  (c) steer event order swap — `prompt.steered` now precedes `turn.steer`
+      (observed seq 42 then 43; was the reverse since 0.43.0); everything
+      else about steer unchanged;
+  (d) `turn.step.completed` now routinely carries `llmClientBlockedMs`
+      (schema-optional since 0.43.1; first live observation this run);
+  (e) doc correction, not 2.0.0 drift — the legacy `GET /api/v1/files/{id}`
+      answers HTTP 404 + `{"code":40407,"msg":"file not found"}` after
+      delete (the media route the same); the route source is identical at
+      both tags, the doc's old HTTP-200-envelope claim was wrong;
+  (f) tools catalog content drift (server-config only, not wire shape) — 38
+      tools on an initialized agent (28 builtins incl. `ReadMediaFile` + 10
+      MCP: tavily gained `tavily_feedback`, kiln has 4), 37 on a fresh
+      never-prompted session (27 builtins + 10 MCP).
+  Re-verified unchanged, most byte-for-byte: auth 401s (missing + wrong
+  token), `/api/v1/meta` (5 flags, 17 features — only `server_version`
+  differs), the models catalog (10 entries), config (`default_model`
+  `kimi-code/k3-256k`, `thinking.effort` `"max"`, `default_permission_mode`
+  `"yolo"`), sessions create/get/list (`last_seq` `1` on a fresh detail, `0`
+  on the list), `40401` without `stack`, `/status` (fresh session
+  `thinking_level` `""`, `max_context_tokens` 262144), the snapshot
+  (top-level keys, real `session.usage`), the full prompt round-trip
+  skeleton (`session.meta.updated` → `prompt.submitted` → `turn.started`
+  with `promptId` → `context.spliced` → `prompt.started` → steps → `tool.*`
+  → `turn.ended` → `prompt.completed`; no `streaming` phase; `date_change`
+  injection), mid-run and idle `:abort`, compact (instant ACK, instruction
+  echo, wholesale splice with `compaction_summary` +
+  `compaction_continuation`, `tokensAfter` == `context_tokens`, both
+  `40910`s), questions end-to-end (pending poll, answer, dismiss `40909`,
+  re-answer/re-dismiss `40902`, the `multi_select` omission rule), approvals
+  (`approval_<uuid>` split, `tool_call_id` POST → `40404`, both resolved
+  frames), files (sniffed `media_type` upload, download 200, `Range` 206,
+  delete, `session_media` with `name`, the media copy surviving the upload's
+  delete), the TodoList contract, foreground + background sub-agent
+  lifecycles (`subagent.spawned` with `taskId`/`model`/
+  `thinkingEffort:"max"`, `subagent.completed` with `resultSummary`/`usage`/
+  `contextTokens`), REST `/tasks` list/get `with_output`, the v2 grouped
+  session table, the v3 spot-check (WS hello `protocol_version:"3"` +
+  `/history` `{messages, has_more}`), the lifecycle events
+  (`event.session.created` at seq 1, `:delete` → `event.session.deleted`
+  with camelCase `sessionId`), and WS hello/subscribe/ack/cursor-resume
+  (`protocol_version: 2`, `heartbeat_ms` 10000; replay before the ack;
+  future-seq cursor → standalone `resync_required` `epoch_changed` then the
+  ack). **App impact: none — the data layer already parses
+  `subagent.cancelled` defensively and maps roster phase `"cancelled"`;
+  prompt `metadata`, the steer order swap and `llmClientBlockedMs` are all
+  ignored safely (`ignoreUnknownKeys`). No tickets filed.**
+  Unit tests: `:app:testDebugUnitTest` green — 886 tests, 0 failures,
+  4 skipped (task UP-TO-DATE against the current tree; counts from the
+  JUnit XML of that execution).
 
 - 2026-09-15 re-verification on `0.43.1` (server 0.43.0 → 0.43.1; throwaway
   sessions `session_f067fe3d-…` and `session_dc97867b-…` in
