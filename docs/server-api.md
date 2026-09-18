@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-09-17
-(server version `2.0.0`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-09-18
+(server version `2.0.1`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
@@ -14,7 +14,8 @@ the workspace list used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `0.43.1`
+**Protocol history:** this document previously described server `2.0.0`
+(verified 2026-09-17; see git history), `0.43.1`
 (verified 2026-09-15; see git history), `0.43.0`
 (verified 2026-09-14; see git history), `0.42.0`
 (verified 2026-09-09; see git history), `0.41.0`
@@ -35,6 +36,102 @@ used are shown with each section. Secrets are redacted (`<token>`).
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
 that, `0.27.0` before that, and `0.23.3` before that.
+
+The drift from 2.0.0 to 2.0.1 is **additive-only — `turn.ended` gained an
+optional `traceId`, and the steer frames gained a message-identity set
+(`messageId` on `prompt.steered`; `messageId`/`promptIds`/`turnId` and an
+`inTurn:true` origin on `turn.steer`; the spliced steered message and history
+carry that same id and origin). A single steer now reuses the queued prompt's
+own id as the steered message's id; a multi-prompt steer still mints a fresh
+ULID for the merged message. Nothing breaks the Android app — it ignores both
+steer events entirely and reads only `reason` off `turn.ended`**. The upstream
+diff between the two tags (21 commits, reviewed via the GitHub API) touched
+the client-facing wire in exactly these places:
+
+- **`turn.ended` gained optional `traceId`** (commit `3cc6b2a3` — the turn
+  trace id, carried for rating-survey telemetry; verified live 2026-09-18 —
+  every `turn.ended` of this run's round-trips carried it, main and sub-agent
+  turns alike). Verbatim frame:
+
+  ```json
+  {"type":"turn.ended","seq":26,
+   "payload":{"type":"turn.ended","time":1789760155505,"turnId":0,"reason":"completed",
+              "durationMs":14175,"traceId":"365206127174fa1a7979ea31f2e51554",
+              "agentId":"main","sessionId":"session_..."}}
+  ```
+
+  The app's `TurnEndedPayload` reads only `reason` — no ticket.
+- **Steer message-identity pairing** (commits `53e5e3fc`, `60f2a632`,
+  `73ebe9ab`; verified live 2026-09-18 — see Steer and the verbatim frames in
+  WebSocket): `prompt.steered` gained **`messageId`**; `turn.steer` gained
+  **`messageId`**, **`promptIds`** and **`turnId`**, and its origin now reads
+  `{"kind":"user","inTurn":true}`; the `context.spliced` steered user message
+  carries that same `messageId` as its `id` plus the `inTurn:true` origin,
+  and so does message history. **A single steer reuses the queued prompt's
+  own id** as `messageId` (`60f2a632` — observed `prompt.steered`
+  `promptIds:["msg_01M2V0F8B40WBPS5J5QC2RPZJ9"]` with
+  `messageId:"msg_01M2V0F8B40WBPS5J5QC2RPZJ9"`, and the spliced message
+  carries that same id); **a multi-prompt steer mints a fresh ULID** for the
+  merged message (`promptIds` lists both queued ids, `messageId` is a third,
+  fresh one). The event sequence is unchanged since 2.0.0: `prompt.steered` →
+  the current step runs to `turn.step.completed` → `context.spliced` →
+  `turn.steer` → a new `turn.step.started` in the same turn → `turn.ended` →
+  a single `prompt.completed` with the **original** prompt id. The app
+  ignores `prompt.steered`/`turn.steer` entirely, never local-echoes a sent
+  prompt (history is splice-driven, so the single-steer id reuse cannot
+  duplicate anything), and `MessageOriginDto` reads only `kind` — no ticket.
+- **Provider config/catalog fields** (commits `c5ad17f0`, `92c3c59b` —
+  source-reviewed; these routes are out of scope here): provider config
+  responses may carry an optional **`api_key_env`** (the name of an env var
+  holding the credential), and the models.dev catalog provider items gained a
+  required-nullable **`base_url`**. The app never calls the provider-catalog
+  routes and reads `data.providers` with `ignoreUnknownKeys` — no ticket.
+- **Behavioral, wire shape unchanged:** yolo permission mode now
+  auto-approves bash commands the analyzer cannot parse (`86e08208` —
+  dangerous verdicts still ask); session `:delete` no longer hangs while a
+  turn is shutting down (`e3f48a22`); the search index sync caps at 500
+  sessions per cycle (`5108cad9` — perf; `/api/v1/search` is a route the app
+  never calls).
+- **Undo behavior change** (TUI-only; source-derived from the upstream
+  `sessions.test.ts` diff, not probed live): an `:undo` count of 2/3 reaching
+  into a steered turn now answers `40911` instead of partially undoing. The
+  app has no undo.
+- **Wire-invisible here:** `7dc253c5` restores thinking for the openrouter
+  reasoning dialect (engine↔LLM `reasoningKey` — verified absent from this
+  run's WS frames), `f233f9de`/`5acc863a`/`1fddc16e`/`910aba27` touch tool
+  prose and system-prompt text only, `a80fe31c` is workspace watchers,
+  `b0d0a80c`/`bbcdde0b` telemetry plumbing, `c1047a6b` CLI print mode, and
+  `25dd4ce9`/`00bd3c22`/`caf7d4e2` are CLI/docs/CI churn.
+
+Everything else re-verified unchanged live on 2.0.1 (see the verification
+log): auth 401s (missing + wrong token), `/api/v1/meta` (5 flags, 17 features
+— only `server_version` differs), the models catalog (10 entries), config
+(`default_model` `kimi-code/k3-256k`, `thinking.effort` `"max"`,
+`default_permission_mode` `"yolo"`), sessions create/get/list (`last_seq` `1`
+on a fresh detail, `0` on the list), `40401` without `stack`, `/status`, the
+snapshot (top-level keys, real `session.usage`, the sub-agent roster), the
+full prompt round-trip skeleton (no `streaming` phase), the questions flow
+end-to-end (pending poll, answer → `resolved:true`, re-answer/re-dismiss
+`40902`, dismiss `40909` + `dismissed:true`, all three `event.question.*`
+frames), the manual-approval round-trip (`approval_<uuid>` split,
+`tool_call_id` POST → `40404`, both resolved frames, the snapshot item),
+files (upload, download 200, `Range` 206, delete, `40407` at HTTP 404 after
+delete, the `session_media` projection with `name` in the ACK and history,
+the media copy surviving the upload's delete), the TodoList contract
+(verbatim `{"todos":[{status,title}]}`), foreground + background sub-agent
+lifecycles (verbatim `subagent.cancelled`, unchanged shape), REST `/tasks`
+list/get `with_output`, the v2 grouped session table, the v3 spot-check (WS
+hello `protocol_version:"3"` + `/history` `{messages, has_more}`), the
+lifecycle events (`event.session.created` at seq 1, `event.session.deleted`
+with camelCase `sessionId`), WS hello/subscribe/ack/cursor-resume
+(`protocol_version: 2`, `heartbeat_ms` 10000; replay before the ack;
+future-seq cursor → standalone `resync_required` `epoch_changed` then the ack
+listing it), compact (instruction echo, wholesale splice with the id-less
+`compaction_summary` + `compaction_continuation`, `tokensAfter` 31496 ==
+post-compact `context_tokens`, both `40910`s with `stack`), and the
+transcript's steered frames keeping `promptIds`. **App impact: none — every
+2.0.1 change is additive on payloads the app either ignores wholesale or
+parses with `ignoreUnknownKeys`. No tickets filed.**
 
 The drift from 0.43.1 to 2.0.0 is **additive-only for the core loop — one new
 WS event (`subagent.cancelled`), one new prompt-POST field (`metadata`), one
@@ -1479,7 +1576,10 @@ unchanged from 0.29.2):
   2026-08-28, the model write on 2026-09-01). The POST response echoes the full
   config projection (same consumed fields snake_case). `data.providers` is a
   map of provider name to `{"type", "base_url", "has_api_key"}` with
-  credentials redacted — surfaced read-only in Settings. Every config write
+  credentials redacted — surfaced read-only in Settings. **2.0.1, additive:**
+  the values may also carry an optional **`api_key_env`** (the name of an env
+  var holding the credential; commit `c5ad17f0` — parsed with
+  `ignoreUnknownKeys`, no ticket). Every config write
   pushes a global `event.config.changed` frame (see WebSocket, Global events);
   the app drops its models/config caches on it (ticket 110).
 - **`default_permission_mode`** (verified live 2026-09-15 on 0.43.0): the
@@ -2778,7 +2878,16 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../promp
   instruction. Re-verified 2026-07-27 on 0.29.2. **Event order flipped in
   2.0.0** (commit `2bb6e12c`; verified live 2026-09-17): `prompt.steered`
   now fires **before** `turn.steer` (observed seq 42 then 43) — from 0.43.0
-  through 0.43.1 `turn.steer` came first.
+  through 0.43.1 `turn.steer` came first. **2.0.1, additive (commits
+  `53e5e3fc`/`60f2a632`/`73ebe9ab`; verified live 2026-09-18):** the steer
+  frames gained a message-identity set — `prompt.steered` carries
+  **`messageId`**, `turn.steer` carries **`messageId`**, **`promptIds`** and
+  **`turnId`** with origin `{"kind":"user","inTurn":true}`, and the spliced
+  steered message (plus its history entry) carries that same `messageId` as
+  its `id` with the `inTurn:true` origin. **A single steer reuses the queued
+  prompt's own id** as `messageId`; **a multi-prompt steer mints a fresh
+  ULID** for the merged message (verbatim frames in WebSocket → Core event
+  payloads).
 
 ## Abort
 
@@ -4383,16 +4492,46 @@ Unchanged:
 
 **Steered user message** (`context.spliced` after `prompt.steered`) —
 **changed again in 0.29.2: the spliced steered message carries an `id`
-again** (0.29.0/0.29.1 dropped it). Note the id is a **fresh ULID**, not the
-queued prompt's `msg_...` id (`msg_01KYJGTJCZPX81AMH663V8881Z` below vs prompt
-id `msg_01KYJGT9HN3BCDQZ8MXG4AYH69`). Keep treating spliced-message ids as
-optional — both forms are in the wild (verbatim 0.29.2 capture, 2026-07-27):
+again** (0.29.0/0.29.1 dropped it). On 0.29.2 the id was a **fresh ULID**,
+not the queued prompt's `msg_...` id (`msg_01KYJGTJCZPX81AMH663V8881Z` below
+vs prompt id `msg_01KYJGT9HN3BCDQZ8MXG4AYH69`). **2.0.1 (verified live
+2026-09-18):** the origin now reads `{"kind":"user","inTurn":true}` and the
+id pairing changed — a **single** steer splices the message under the
+**queued prompt's own id**, while a **multi-prompt** steer mints a fresh ULID
+for the merged message (verbatim 2.0.1 captures after the 0.29.2 one). Treat
+spliced-message ids as opaque (verbatim 0.29.2 capture, 2026-07-27):
 
 ```json
 {"type":"context.spliced","seq":30,"epoch":"ep_...","session_id":"session_...","timestamp":"...",
  "payload":{"type":"context.spliced","start":6,"deleteCount":0,
   "messages":[{"role":"user","content":[{"type":"text","text":"Stop. Reply with exactly: steered-ok-0292"}],
                "toolCalls":[],"origin":{"kind":"user"},"id":"msg_01KYJGTJCZPX81AMH663V8881Z"}],
+  "agentId":"main","sessionId":"session_..."}}
+```
+
+Verbatim 2.0.1 captures (2026-09-18) — single steer, where the spliced
+message id **is** the queued prompt's id (`msg_01M2V0F8B40WBPS5J5QC2RPZJ9` is
+the id the prompt POST returned):
+
+```json
+{"type":"context.spliced","seq":18,
+ "payload":{"type":"context.spliced","start":4,"deleteCount":0,
+  "messages":[{"role":"user","content":[{"type":"text","text":"STEERED-MARKER-201"}],
+               "toolCalls":[],"origin":{"kind":"user","inTurn":true},
+               "id":"msg_01M2V0F8B40WBPS5J5QC2RPZJ9"}],
+  "agentId":"main","sessionId":"session_..."}}
+```
+
+multi-prompt steer, where the two queued prompts merge into one spliced
+message under a fresh ULID id:
+
+```json
+{"type":"context.spliced","seq":116,
+ "payload":{"type":"context.spliced","start":17,"deleteCount":0,
+  "messages":[{"role":"user","content":[{"type":"text","text":"MULTI-STEER-A"},
+                                        {"type":"text","text":"MULTI-STEER-B"}],
+               "toolCalls":[],"origin":{"kind":"user","inTurn":true},
+               "id":"msg_01M2V1PDZGA1RG0KQKQ6659RSF"}],
   "agentId":"main","sessionId":"session_..."}}
 ```
 
@@ -4479,7 +4618,12 @@ a REST `:abort` reports `"user_cancelled"` (verbatim capture in Abort).
 **0.41.0, additive (upstream wire manifest, commit `b6b9b374`; never
 observed live):** `turn.ended` gained an optional **`stopReason`** string for
 forced stops (e.g. the repeat breaker) — every 0.41.0 live capture,
-completed and cancelled alike, omits it.
+completed and cancelled alike, omits it. **2.0.1, additive (commit
+`3cc6b2a3`; verified live 2026-09-18):** `turn.ended` gained an optional
+**`traceId`** (the turn trace id, carried for rating-survey telemetry) —
+every `turn.ended` of this run's round-trips carried it, main and sub-agent
+turns alike (e.g. `"traceId":"365206127174fa1a7979ea31f2e51554"`);
+`turn.started` does not carry one.
 **0.37.2, additive:** `turn.ended` gained optional **`time`** (epoch ms,
 schema-declared — commit `3ded0808`); live, `turn.started` and
 `prompt.completed` also emit a top-level `time` (epoch ms) without a matching
@@ -4647,7 +4791,48 @@ payload).
 ```
 
 **Prompt steered** (`prompt.steered`; `activePromptId` is the running prompt,
-`promptIds` the steered-in queued ones, their content inline). Unchanged:
+`promptIds` the steered-in queued ones, their content inline). **2.0.1,
+additive (verified live 2026-09-18):** gained **`messageId`** — the id the
+spliced steered message will carry. For a **single** steered prompt it equals
+that prompt's queued id; for a **multi-prompt** steer it is a fresh ULID
+minted for the merged message. Verbatim 2.0.1 captures — single steer:
+
+```json
+{"type":"prompt.steered","seq":15,
+ "payload":{"type":"prompt.steered","time":1789760356644,
+            "activePromptId":"msg_01M2V0F4B5H2Z9CRZE8ZE4SFW2",
+            "promptIds":["msg_01M2V0F8B40WBPS5J5QC2RPZJ9"],
+            "messageId":"msg_01M2V0F8B40WBPS5J5QC2RPZJ9",
+            "content":[{"type":"text","text":"STEERED-MARKER-201"}],
+            "steeredAt":"2026-09-18T19:39:16.644Z","agentId":"main","sessionId":"session_..."}}
+```
+
+multi-prompt steer:
+
+```json
+{"type":"prompt.steered","seq":106,
+ "payload":{"type":"prompt.steered","time":1789761632240,
+            "activePromptId":"msg_01M2V1P9SMCNP2W645DYSSMNN2",
+            "promptIds":["msg_01M2V1PDS79PZE7QERNKYNY208","msg_01M2V1PDV6A77QW94DX088AMW9"],
+            "messageId":"msg_01M2V1PDZGA1RG0KQKQ6659RSF",
+            "content":[{"type":"text","text":"MULTI-STEER-A"},{"type":"text","text":"MULTI-STEER-B"}],
+            "steeredAt":"2026-09-18T20:00:32.240Z","agentId":"main","sessionId":"session_..."}}
+```
+
+The matching `turn.steer` frames carry the same `messageId` plus `promptIds`,
+`turnId` and an `inTurn:true` origin — verbatim (single steer, seq 19):
+
+```json
+{"type":"turn.steer","seq":19,
+ "payload":{"type":"turn.steer","time":1789760393742,"turnId":0,
+            "input":[{"type":"text","text":"STEERED-MARKER-201"}],
+            "origin":{"kind":"user","inTurn":true},
+            "messageId":"msg_01M2V0F8B40WBPS5J5QC2RPZJ9",
+            "promptIds":["msg_01M2V0F8B40WBPS5J5QC2RPZJ9"],
+            "agentId":"main","sessionId":"session_..."}}
+```
+
+Pre-2.0.1 capture (no `messageId`; 0.29.x era):
 
 ```json
 {"type":"prompt.steered","seq":28,
@@ -4785,6 +4970,78 @@ session `40401`. The loopback-only debug xstate stream
 deployment** (verified live — handshake refused).
 
 ## Verification log
+
+- 2026-09-18 re-verification on `2.0.1` (server 2.0.0 → 2.0.1; throwaway
+  sessions `session_81a2130c-…` / `session_516ea33e-…` /
+  `session_cd550cb1-…` created with `metadata.cwd=/home/ubuntu/spike`, all
+  `:delete`d after; guided by the nightly job's `pending-changelog.md` — 21
+  upstream commits between the tags, reviewed via the GitHub API; live probes
+  over REST + websocat against `127.0.0.1:58627`; the wire-relevant commits
+  are `3cc6b2a3` (turn `traceId`), `53e5e3fc`/`60f2a632`/`73ebe9ab` (steer
+  message-identity pairing), `c5ad17f0` (provider `api_key_env`), `92c3c59b`
+  (catalog provider `base_url`), `86e08208` (yolo approves unanalyzable
+  bash), `e3f48a22` (session-delete hang fix) and `5108cad9` (search sync
+  cap); the rest are wire-invisible — see the drift section above).
+  Drift found (all additive; nothing breaks the Android app):
+  (a) `turn.ended` gained optional `traceId` — present on every
+      `turn.ended` of this run, main and sub-agent turns alike;
+      `turn.started` does not carry one;
+  (b) steer message-identity pairing — `prompt.steered` gained `messageId`;
+      `turn.steer` gained `messageId`/`promptIds`/`turnId` and an
+      `{"kind":"user","inTurn":true}` origin; the `context.spliced` steered
+      message and history carry that same id and origin. A **single** steer
+      reuses the queued prompt's own id (verbatim seq 15/18/19 on
+      `session_516ea33e-…`, id `msg_01M2V0F8B40WBPS5J5QC2RPZJ9`); a
+      **multi-prompt** steer mints a fresh ULID for the merged message
+      (verbatim seq 106/116/117 on `session_cd550cb1-…`,
+      `msg_01M2V1PDZGA1RG0KQKQ6659RSF` merging
+      `msg_01M2V1PDS79PZE7QERNKYNY208` + `msg_01M2V1PDV6A77QW94DX088AMW9`).
+      Sequence unchanged since 2.0.0: `prompt.steered` → step completes →
+      `context.spliced` → `turn.steer` → new step in the same turn →
+      `turn.ended` → `prompt.completed` with the original prompt id;
+  (c) provider config/catalog fields (source-reviewed, routes out of scope):
+      optional `api_key_env` on provider config values; required-nullable
+      `base_url` on models.dev catalog provider items;
+  (d) behavioral, wire shape unchanged — yolo auto-approves unanalyzable bash
+      (`86e08208`; dangerous verdicts still ask), `:delete` no longer hangs
+      (`e3f48a22`), search sync caps at 500 sessions/cycle (`5108cad9`);
+  (e) undo behavior (TUI-only, source-derived from `sessions.test.ts`, not
+      probed live): an `:undo` count of 2/3 reaching into a steered turn now
+      answers `40911` instead of partially undoing.
+  Re-verified unchanged, most byte-for-byte: auth 401s (missing + wrong
+  token), `/api/v1/meta` (5 flags, 17 features — only `server_version`
+  differs), the models catalog (10 entries), config (`default_model`
+  `kimi-code/k3-256k`, `thinking.effort` `"max"`, `default_permission_mode`
+  `"yolo"`), sessions create/get/list (`last_seq` `1` on a fresh detail, `0`
+  on the list), `40401` without `stack`, `/status`, the snapshot (top-level
+  keys, real `session.usage`, the sub-agent roster), the full prompt
+  round-trip skeleton (no `streaming` phase), the questions flow end-to-end
+  (pending poll, answer → `resolved:true`, re-answer/re-dismiss `40902`,
+  dismiss `40909` + `dismissed:true`, all three `event.question.*` frames),
+  the manual-approval round-trip (`approval_<uuid>` split, `tool_call_id`
+  POST → `40404`, both resolved frames, the snapshot item), files (upload,
+  download 200, `Range` 206, delete, `40407` at HTTP 404 after delete, the
+  `session_media` projection with `name` in the ACK and history, the media
+  copy surviving the upload's delete), the TodoList contract (verbatim
+  `{"todos":[{status,title}]}`), foreground + background sub-agent lifecycles
+  (verbatim `subagent.cancelled`, unchanged shape), REST `/tasks` list/get
+  `with_output`, the v2 grouped session table, the v3 spot-check (WS hello
+  `protocol_version:"3"` + `/history` `{messages, has_more}`), the lifecycle
+  events (`event.session.created` at seq 1, `event.session.deleted` with
+  camelCase `sessionId`), WS hello/subscribe/ack/cursor-resume
+  (`protocol_version: 2`, `heartbeat_ms` 10000; replay of seqs 131–136 before
+  the ack; future-seq cursor → standalone `resync_required` `epoch_changed`
+  then the ack listing it), compact (instruction echo, wholesale splice with
+  the id-less `compaction_summary` + `compaction_continuation`,
+  `tokensAfter` 31496 == post-compact `context_tokens`, both `40910`s with
+  `stack`), and the transcript's steered frames keeping `promptIds`. **App
+  impact: none — every 2.0.1 change is additive on payloads the app either
+  ignores wholesale (it never reads `prompt.steered`/`turn.steer`, and
+  `TurnEndedPayload` reads only `reason`) or parses with
+  `ignoreUnknownKeys`. No tickets filed.**
+  Unit tests: `:app:testDebugUnitTest` green — 886 tests, 0 failures
+  (task UP-TO-DATE against the current tree; counts from the JUnit XML of
+  that execution).
 
 - 2026-09-17 re-verification on `2.0.0` (server 0.43.1 → 2.0.0; throwaway
   sessions `session_2c247ce5-…` / `session_894f3d11-…` /
