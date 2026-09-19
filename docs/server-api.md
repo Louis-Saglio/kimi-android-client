@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-09-18
-(server version `2.0.1`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-09-19
+(server version `2.0.2`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
@@ -14,7 +14,8 @@ the workspace list used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `2.0.0`
+**Protocol history:** this document previously described server `2.0.1`
+(verified 2026-09-18; see git history), `2.0.0`
 (verified 2026-09-17; see git history), `0.43.1`
 (verified 2026-09-15; see git history), `0.43.0`
 (verified 2026-09-14; see git history), `0.42.0`
@@ -36,6 +37,86 @@ used are shown with each section. Secrets are redacted (`<token>`).
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
 that, `0.27.0` before that, and `0.23.3` before that.
+
+The drift from 2.0.1 to 2.0.2 is **additive-only on the v2 surface — the
+interaction payloads (approvals and questions) gained an `agent_id` field
+everywhere they appear — plus one removal the app never used: the v3
+protocol is gone**. The upstream diff between the two tags (12 commits,
+reviewed via the GitHub API) touched the client-facing wire in exactly these
+places:
+
+- **`agent_id` on approval wire items** (commit `2cedfaf1` — "deliver
+  session-level interaction events past agent filters"; verified live
+  2026-09-19): the snapshot `pending_approvals` items and the legacy
+  `event.approval.requested` frame now carry a required **`agent_id`**
+  (`"main"` for the main agent, the asking sub-agent's id otherwise) — in
+  addition to the camelCase `agentId` stamp the WS frame already had. This
+  also retro-fills ticket 139's gap: the REST/snapshot read path now names
+  the asking agent too. Verbatim 2.0.2 frame:
+
+  ```json
+  {"type":"event.approval.requested","seq":67,
+   "payload":{"type":"event.approval.requested","agentId":"main","sessionId":"session_...",
+              "approval_id":"approval_58b631f8-2537-4ed6-bdca-b3f06be56c71","session_id":"session_...",
+              "agent_id":"main","turn_id":2,"tool_call_id":"tool_aTSHHtVv3uhqcac3axTAXWBV",
+              "tool_name":"Bash","action":"Running: rm -rf /home/ubuntu/spike/approval-probe-2",
+              "tool_input_display":{"kind":"command","command":"rm -rf /home/ubuntu/spike/approval-probe-2",
+                                    "cwd":"/home/ubuntu/spike","language":"bash"},
+              "created_at":"2026-09-19T19:33:50.309Z","expires_at":"2026-09-20T19:33:50.309Z"}}
+  ```
+
+- **`agent_id` on question wire items** (same commit; optional in the
+  schema, present on every 2.0.2 live capture): the
+  `/questions?status=pending` items, the snapshot `pending_questions` items,
+  and the `event.question.requested` frame carry it too. Verbatim 2.0.2
+  pending-poll item:
+
+  ```json
+  {"question_id":"question_be59fa0e-0fe6-4437-b407-29cc6b7dd723","session_id":"session_...",
+   "questions":[{"id":"q_0","question":"Cake or pie?",
+                 "options":[{"id":"opt_0_0","label":"Cake"},{"id":"opt_0_1","label":"Pie"}],
+                 "header":"Dessert","allow_other":true}],
+   "created_at":"2026-09-19T19:32:06.261Z","agent_id":"main","turn_id":1,
+   "tool_call_id":"tool_5gF7ty3rd1ssoctEgV3yoPuQ"}
+  ```
+
+- **Interaction events bypass agent filters** (same commit): a WS subscribe
+  carrying an `agent_ids` filter still receives the session-level
+  `event.approval.*` / `event.question.*` frames. The app subscribes
+  unfiltered — invisible to it.
+- **The v3 protocol is removed** (commit `2502d215` — a revert of the 0.43.0
+  addition, which had only ever shipped unused): `WS /api/v3/ws` refuses the
+  handshake and `GET /api/v1/sessions/{id}/history` answers a plain Fastify
+  404 (both verified live 2026-09-19). The v2 endpoint is byte-untouched
+  (`server_hello` still numeric `protocol_version: 2`, subscribe/ack/cursors
+  re-verified). The app never used v3 — see the updated v3 section below.
+- **Behavioral, wire shape unchanged:** an unconsumed steer that seeds the
+  next turn no longer records a `turn.steer` (`97212596` — in-turn consumed
+  steers still do; re-verified live 2026-09-19 with a single-prompt steer:
+  `prompt.steered` (`messageId` == the queued prompt's id) → `turn.steer`
+  with the 2.0.1 message-identity set, unchanged); turn ids are floored at
+  the wire-wide max and cold transcripts fold over the active branch
+  (`9df7a9cc` — transcript/catch-up internals); compaction pre-shrinks
+  history to the effective model window (`88a7d932` — the
+  `compaction.started` → `context.spliced` → `compaction.completed` sequence
+  is unchanged, re-verified live 2026-09-19 with both `{}` and
+  `{"instruction":"..."}` triggers).
+
+Everything else spot-checked unchanged live on 2.0.2 (see the verification
+log): `/api/v1/meta` (only `server_version` differs), session
+create/get/list, `/status` (`permission`/`plan_mode`/`swarm_mode`/
+`context_usage` fields all present), messages history (`items` newest-first
+with `has_more`), the snapshot's top-level keys, the questions flow
+end-to-end (pending poll, answer → `resolved:true`, dismiss → `40909` +
+`dismissed:true`, all `event.question.*` frames), the approval round-trip
+(pending poll, `{"decision":"approved"}` → `resolved:true`,
+`event.approval.resolved` + the `permission.approval.resolved` v2
+duplicate), abort, WS hello/subscribe/ack and the heartbeat-timeout close.
+One error-schema observation: the approvals POST `40001` for a bad decision
+now lists `"approved"|"rejected"|"cancelled"` as the valid enum (the doc has
+only ever exercised the first two). **App impact: none — every 2.0.2 change
+is additive on payloads the app parses with `ignoreUnknownKeys`, or removes
+a protocol the app never used. No tickets filed.**
 
 The drift from 2.0.0 to 2.0.1 is **additive-only — `turn.ended` gained an
 optional `traceId`, and the steer frames gained a message-identity set
@@ -1976,15 +2057,27 @@ verified live on 0.31.1 (2026-08-01). Top-level keys of `data`:
 
 - `subagents`: the foreground sub-agent roster at the watermark — see
   [Session snapshot roster](#session-snapshot-roster) under Sub-agents.
-- `pending_approvals`: the pending permission requests — the ONLY REST read
-  that exists for approvals. Each item is the legacy
-  `event.approval.requested` payload verbatim (up to 0.38.0 `approval_id` ==
-  `tool_call_id`; **0.39.0:** `approval_id` is a dedicated `approval_<uuid>`
-  id distinct from `tool_call_id` — see Permissions; 2026-08-01 capture,
-  id fields from the pre-split era) — **minus the `agentId` stamp**: the
-  items are built by kap-server's `toWireApproval`, which has no agent field
-  (verified upstream at 0.43.1 — ticket 139); only the live WS frames carry
-  the asking agent:
+- `pending_approvals`: the pending permission requests. Each item is the
+  legacy `event.approval.requested` payload minus the camelCase `agentId`
+  stamp (up to 0.38.0 `approval_id` == `tool_call_id`; **0.39.0:**
+  `approval_id` is a dedicated `approval_<uuid>` id distinct from
+  `tool_call_id` — see Permissions). **2.0.2:** the items now carry
+  **`agent_id`** (snake_case, required — `"main"` or the asking sub-agent's
+  id; verified live 2026-09-19), so the asking agent is no longer WS-only
+  (this retro-fills ticket 139's gap). Verbatim 2.0.2 item:
+
+  ```json
+  {"approval_id":"approval_58b631f8-2537-4ed6-bdca-b3f06be56c71","session_id":"session_…",
+   "agent_id":"main","turn_id":2,"tool_call_id":"tool_aTSHHtVv3uhqcac3axTAXWBV",
+   "tool_name":"Bash","action":"Running: rm -rf /home/ubuntu/spike/approval-probe-2",
+   "tool_input_display":{"kind":"command","command":"rm -rf /home/ubuntu/spike/approval-probe-2",
+                         "cwd":"/home/ubuntu/spike","language":"bash"},
+   "created_at":"2026-09-19T19:33:50.309Z","expires_at":"2026-09-20T19:33:50.309Z"}
+  ```
+
+  Pre-2.0.2 capture (no agent field at all — the items were built by
+  kap-server's `toWireApproval`, which had none; verified upstream at
+  0.43.1 — ticket 139):
 
   ```json
   {"approval_id":"tool_EYGD…","session_id":"session_…","turn_id":0,
@@ -2001,6 +2094,8 @@ verified live on 0.31.1 (2026-08-01). Top-level keys of `data`:
   `created_at`, `turn_id`. **0.38.0:** `question_id` is a dedicated
   `question_<uuid>` interaction id and the item also carries a distinct
   `tool_call_id` (was: `question_id` == `tool_call_id` — see Questions).
+  **2.0.2:** the item also carries `agent_id` (snake_case; verified live
+  2026-09-19).
 
 ### Session table (v2) — `GET /api/v2/sessions`
 
@@ -3136,6 +3231,14 @@ endpoint. The decision is posted back via REST.
    `toolCallId`/`tool_call_id` (`tool_…`) both frames also carry (they were
    equal up to 0.38.0 — the same split questions got in 0.38.0). The
    `awaiting_approval` phase of `agent.status.updated` carries both ids too.
+   **2.0.2: the legacy frame and the snapshot `pending_approvals` items also
+   carry `agent_id`** (snake_case, required — `"main"` or the asking
+   sub-agent's id; verified live 2026-09-19), alongside the camelCase
+   `agentId` stamp the WS frame already had.
+   Pending approvals can also be polled —
+   `GET /api/v1/sessions/{id}/approvals?status=pending` returns
+   `{"code":0,...,"data":{"items":[<same item shape as the snapshot's
+   pending_approvals>]}}` (verified live 2026-09-19 on 2.0.2).
 2. Post the decision. **Only the `approval_<uuid>` id is accepted** —
    posting the `tool_call_id` answers
    `{"code":40404,"msg":"approval tool_… not found","data":null,...}`
@@ -3150,7 +3253,9 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../appro
 # {"code":0,"msg":"success","data":{"resolved":true,"resolved_at":"2026-08-27T19:54:53.787Z"},"request_id":"01M12CM9EJDYPKP9BT211FGFDP"}
 ```
 
-Body fields: `decision` (`"approved"` | `"rejected"`), optional `scope`,
+Body fields: `decision` (`"approved"` | `"rejected"`; the 40001 error for an
+invalid value lists a third accepted enum, `"cancelled"` — observed
+2026-09-19 on 2.0.2, never exercised), optional `scope`,
 `feedback`, `selected_label`. After the decision the WS emits
 `event.approval.resolved` and `permission.approval.resolved`, then the tool
 runs.
@@ -3182,7 +3287,10 @@ On 0.38.0 question ids are server-minted `question_<uuid>` strings (see step
    resolve/dismiss routes and resolution bookkeeping off `question_id`; the
    `tool_call_id` is only the transcript row's id. Unlike
    approvals there is **no v2 camelCase duplicate** — only the
-   `event.question.*` family exists.
+   `event.question.*` family exists. **2.0.2: the payload (WS frame, pending
+   poll, snapshot item alike) also carries `agent_id`** (snake_case,
+   optional in the schema, present on every 2.0.2 live capture — `"main"`
+   or the asking sub-agent's id; verified live 2026-09-19).
 2. While a question is pending, the session object shows
    `"pending_interaction": "question"`.
 3. Pending questions can also be polled —
@@ -4762,7 +4870,8 @@ camelCase; **no `expires_at`**). **0.39.0:** gained a dedicated
 emitted right after the v2 one; `expires_at` is `created_at` + 24 h).
 **0.39.0:** `approval_id` is the same dedicated `approval_<uuid>` as the v2
 frame's `id`, no longer equal to `tool_call_id` (fresh 0.39.0 capture,
-verified 2026-08-27):
+verified 2026-08-27). **2.0.2:** the payload gained snake_case `agent_id`
+(see Permissions; verbatim 2.0.2 capture in the header drift block):
 
 ```json
 {"type":"event.approval.requested","seq":278,
@@ -4846,7 +4955,8 @@ Pre-2.0.1 capture (no `messageId`; 0.29.x era):
 no v2 duplicate). **0.38.0 drift (verified live 2026-08-20): `question_id` is
 now a dedicated `question_<uuid>` interaction id, distinct from
 `tool_call_id`** — both fields are present (before 0.38.0 they were equal).
-`options[].description`
+**2.0.2:** the payload gained snake_case `agent_id` (see Questions;
+verbatim 2.0.2 item in the header drift block). `options[].description`
 is omitted when the option has none; `header` is optional and was absent
 entirely from the 2026-07-23 captures (key order is not stable either — never
 rely on it). `multi_select` is present per item in both `true` and `false`
@@ -4904,7 +5014,13 @@ selected option and free text both re-verified 2026-07-23:
             "dismissed_at":"2026-07-23T03:37:06.177Z","agentId":"main","sessionId":"session_..."}}
 ```
 
-### The v3 protocol (new in 0.43.0, additive — unused by the app)
+### The v3 protocol (added 0.43.0, **removed in 2.0.2** — never used by the app)
+
+**Removed in 2.0.2** (commit `2502d215`, a revert of the 0.43.0 addition;
+verified live 2026-09-19: `WS /api/v3/ws` refuses the handshake and
+`GET /api/v1/sessions/{id}/history` answers a plain Fastify 404 — the v2
+endpoint this document describes is byte-untouched). The notes below are
+kept for history only.
 
 0.43.0 (commit `64505e36`) adds a **second, opt-in wire protocol** next to
 the v2 one this document describes. The client picks the protocol by
@@ -4970,6 +5086,34 @@ session `40401`. The loopback-only debug xstate stream
 deployment** (verified live — handshake refused).
 
 ## Verification log
+
+- 2026-09-19 re-verification on `2.0.2` (server 2.0.1 → 2.0.2; throwaway
+  session `session_29a30643-…` created with `metadata.cwd=/home/ubuntu/spike`,
+  `:delete`d after; guided by the nightly job's `pending-changelog.md` — 12
+  upstream commits between the tags, reviewed via the GitHub API; live probes
+  over REST + websocat against `127.0.0.1:58627`; the wire-relevant commits
+  are `2cedfaf1` (`agent_id` on approval/question wire items + interaction
+  events bypassing agent filters), `2502d215` (v3 WS + `/history` revert),
+  `97212596` (no `turn.steer` for an unconsumed steer), `9df7a9cc` (turn-id
+  floor + cold-transcript fold) and `88a7d932` (compaction pre-shrink).
+  Verified live: the v3 handshake refused and `/history` 404; the v2
+  hello/subscribe/ack unchanged (`protocol_version: 2`, `heartbeat_ms`
+  10000); session create/get/list/`/status`/messages unchanged; the full
+  questions flow (pending poll, answer → `resolved:true`,
+  `event.question.answered` keyed by question text, dismiss → `40909`,
+  `event.question.requested` verbatim with the new `agent_id`); the approval
+  round-trip (`/approvals?status=pending` item with `agent_id`, decision
+  `approved` → `resolved:true`, `event.approval.requested` verbatim with
+  `agent_id`, `event.approval.resolved` + the v2 duplicate; a bogus decision
+  `40001`s listing `"approved"|"rejected"|"cancelled"`); the snapshot
+  (top-level keys unchanged; `pending_questions`/`pending_approvals` items
+  carry `agent_id`); a single-prompt steer (`prompt.steered` with
+  `messageId` == the queued id → `turn.steer` with the 2.0.1 identity set,
+  unchanged); compact with `{}` and with an instruction
+  (`compaction.started` `"trigger":"manual"` → `context.spliced` →
+  `compaction.completed` with the summary, unchanged); `:abort`; and the
+  heartbeat-timeout close (a subscriber that never answers pings is dropped
+  after ~20 s, as documented since 0.35.0).
 
 - 2026-09-18 re-verification on `2.0.1` (server 2.0.0 → 2.0.1; throwaway
   sessions `session_81a2130c-…` / `session_516ea33e-…` /
