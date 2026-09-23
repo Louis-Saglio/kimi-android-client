@@ -166,6 +166,22 @@
   row like a success) are mode-aware in the ViewModel; the fork inherits the source's `updated_at` (ticket 127), so
   its insert (ticket 128, from the long-press row dialog) lands at the sorted
   position next to the source, not at the top like create.
+- `data/search/` — ticket 146's global message search: `SearchApi` posts
+  `/api/v1/search` (query + page_size 20, the other request fields riding their
+  server defaults; the opaque v2 keyset `page_token` passed back verbatim —
+  docs/server-api.md, Search) and maps DTO→domain (`SearchPage`/`SearchHit`,
+  the hit's epoch-ms time → Instant, the `index_state.stale`/`degraded` pair
+  folded into `SearchPage.indexStale` — the screen's banner signal; `incomplete`
+  deliberately unsurfaced). `SearchRepository` is the thin facade. The screen
+  (`ui/search`, `SearchScreen`/`SearchViewModel`, entered from the session list's
+  top-bar magnifier) submits on the IME search action, shows the hit rows (role
+  icon, session title, snippet, platform-relative time) and pages on scroll with
+  the sessions lists' end-reached/footer idioms — the keyset cursor pins the
+  index generation, so no client-side dedup exists. A paged request's envelope
+  40001 is the documented restart-from-page-one signal (the loaded rows stay up
+  during the refetch, then are replaced); a new query cancels in-flight page
+  loads and drops the token, so tokens never cross queries. A hit tap opens the
+  session through the plain Chat route — jump-to-message is out of scope.
 - `data/attachments/` — `AttachmentStore` owns all platform file I/O (content
   resolver reads capped at 256 MiB — a client-side guard; the server removed
   its own upload cap in 0.31.0, see ticket 059; cache writes;

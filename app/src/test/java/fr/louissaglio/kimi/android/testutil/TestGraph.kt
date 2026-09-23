@@ -14,6 +14,8 @@ import fr.louissaglio.kimi.android.data.chat.SessionSocket
 import fr.louissaglio.kimi.android.data.chat.TodoParser
 import fr.louissaglio.kimi.android.data.network.ApiClient
 import fr.louissaglio.kimi.android.data.network.ConnectionChecker
+import fr.louissaglio.kimi.android.data.search.SearchApi
+import fr.louissaglio.kimi.android.data.search.SearchRepository
 import fr.louissaglio.kimi.android.data.sessions.SessionActivityStore
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
@@ -61,6 +63,9 @@ fun testSessionsRepository(): SessionsRepository {
     val json = Json { ignoreUnknownKeys = true }
     return SessionsRepository(ApiClient(OkHttpClient(), json), json)
 }
+
+fun testSearchRepository(): SearchRepository =
+    SearchRepository(SearchApi(ApiClient(OkHttpClient(), Json { ignoreUnknownKeys = true })))
 
 fun testModelsRepository(): ModelsRepository =
     ModelsRepository(ApiClient(OkHttpClient(), Json { ignoreUnknownKeys = true }))

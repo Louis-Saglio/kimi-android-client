@@ -19,6 +19,7 @@ import fr.louissaglio.kimi.android.ui.chat.TurnChangesRoute
 import fr.louissaglio.kimi.android.ui.chat.TurnFileContentRoute
 import fr.louissaglio.kimi.android.ui.sessions.ArchivedSessionsScreen
 import fr.louissaglio.kimi.android.ui.sessions.SessionsScreen
+import fr.louissaglio.kimi.android.ui.search.SearchScreen
 import fr.louissaglio.kimi.android.ui.settings.SettingsScreen
 import kotlinx.serialization.Serializable
 
@@ -36,6 +37,10 @@ object Settings
  * session list's overflow menu. */
 @Serializable
 object Archived
+
+/** Global message search (ticket 146); entry from the session list's top bar. */
+@Serializable
+object Search
 
 /** title/cwd ride along as optional query args so the chat top bar can show the
  * label the session list already had, before the session fetch lands. */
@@ -117,6 +122,7 @@ fun KimiNavHost(toolContentStore: ToolContentStore) {
             SessionsScreen(
                 onNavigateToSettings = { navController.navigate(Settings) },
                 onNavigateToArchived = { navController.navigate(Archived) },
+                onNavigateToSearch = { navController.navigate(Search) },
                 restoredFromArchive = restoredFromArchive,
                 onRestoredFromArchiveConsumed = {
                     entry.savedStateHandle[KEY_RESTORED_FROM_ARCHIVE] = false
@@ -139,6 +145,17 @@ fun KimiNavHost(toolContentStore: ToolContentStore) {
                     navController.previousBackStackEntry
                         ?.savedStateHandle
                         ?.set(KEY_RESTORED_FROM_ARCHIVE, true)
+                },
+            )
+        }
+        composable<Search> {
+            SearchScreen(
+                onNavigateBack = { navController.popBackStack() },
+                // A hit opens its session's chat; jump-to-message is out of scope.
+                onOpenSession = { hit ->
+                    navController.navigate(Chat(hit.sessionId, hit.sessionTitle)) {
+                        launchSingleTop = true
+                    }
                 },
             )
         }

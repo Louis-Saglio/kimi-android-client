@@ -81,6 +81,7 @@ import fr.louissaglio.kimi.android.ui.common.LoadingState
 import fr.louissaglio.kimi.android.ui.common.formatTimestamp
 import fr.louissaglio.kimi.android.ui.common.icons.ArchiveIcon
 import fr.louissaglio.kimi.android.ui.common.icons.ForkIcon
+import fr.louissaglio.kimi.android.ui.common.icons.SearchIcon
 import fr.louissaglio.kimi.android.ui.common.icons.WorkspaceIcon
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 import fr.louissaglio.kimi.android.ui.theme.warningColor
@@ -91,6 +92,7 @@ fun SessionsScreen(
     onNavigateToSettings: () -> Unit = {},
     onNavigateToChat: (Session) -> Unit = {},
     onNavigateToArchived: () -> Unit = {},
+    onNavigateToSearch: () -> Unit = {},
     /** Nav-result flag (ticket 132): true when a restore on the archived screen is
      * pending the main list's heal refresh. Consumed into a silentRefresh, then reset. */
     restoredFromArchive: Boolean = false,
@@ -158,6 +160,7 @@ fun SessionsScreen(
         snackbarHostState = snackbarHostState,
         onNavigateToSettings = onNavigateToSettings,
         onNavigateToArchived = onNavigateToArchived,
+        onNavigateToSearch = onNavigateToSearch,
         onSessionClick = { session ->
             viewModel.clearUnread(session.id)
             onNavigateToChat(session)
@@ -187,6 +190,7 @@ private fun SessionsContent(
     snackbarHostState: SnackbarHostState,
     onNavigateToSettings: () -> Unit,
     onNavigateToArchived: () -> Unit,
+    onNavigateToSearch: () -> Unit,
     onSessionClick: (Session) -> Unit,
     onRetry: () -> Unit,
     onPullToRefresh: () -> Unit,
@@ -209,6 +213,10 @@ private fun SessionsContent(
             TopAppBar(
                 title = { Text("Kimi Code") },
                 actions = {
+                    // Global message search (ticket 146).
+                    IconButton(onClick = onNavigateToSearch) {
+                        Icon(SearchIcon, contentDescription = "Search messages")
+                    }
                     // Flat ↔ grouped toggle (ticket 115): the icon is the mode a tap
                     // switches TO — a list glyph while grouped, the workspace folder
                     // while flat. The icon carries the state; the tint stays neutral.
@@ -852,6 +860,7 @@ private fun SessionsContentPreview() {
             snackbarHostState = remember { SnackbarHostState() },
             onNavigateToSettings = {},
             onNavigateToArchived = {},
+            onNavigateToSearch = {},
             onSessionClick = {},
             onRetry = {},
             onPullToRefresh = {},
