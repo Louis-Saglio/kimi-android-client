@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.Flow
 @Singleton
 class ChatRepository @Inject constructor(
     private val chatApi: ChatApi,
+    private val fileHistory: FileHistoryApi,
     private val models: ModelsRepository,
     private val prefs: SessionPrefsStore,
     private val socket: SessionSocket,
@@ -259,6 +260,14 @@ class ChatRepository @Inject constructor(
      * one as a refusal. */
     suspend fun detachTask(settings: ServerSettings, sessionId: String, taskId: String): Result<Unit> =
         chatApi.detachTask(settings, sessionId, taskId)
+
+    /** One turn's changed files (`GET .../file-history/changes?turn_id=N` — ticket
+     * 149, live since server 0.41.0): [turnId] is the main agent's 0-based turn
+     * index (the transcript ordinal). A turn with nothing recorded comes back as
+     * an empty list with `recorded` false. An unknown session surfaces as the
+     * typed DataError.Api(40401). */
+    suspend fun getFileChanges(settings: ServerSettings, sessionId: String, turnId: Int): Result<TurnFileChanges> =
+        fileHistory.getChanges(settings, sessionId, turnId)
 
     /** Seeds the socket's resume cursor from a snapshot watermark (ticket 085), so the
      * session's next subscribe resumes exactly where the bundle was taken. */

@@ -10,6 +10,10 @@
   the collector's REST resync) treats a silently-stalled socket exactly like a
   dropped one.
 - `data/chat/` — `ChatRepository` is a thin facade over `ChatApi` (REST verbs),
+  `FileHistoryApi` (the turn file-history REST routes, ticket 149 —
+  `GET .../file-history/changes?turn_id=N` → domain `TurnFileChanges`/`FileChange`;
+  `turn_id` is the main transcript's ordinal, and `binary`/`oversize` rows have no
+  comparable content),
   `SessionSocket` (WebSocket, reconnect, per-session resume cursor held at
   instance level so it survives the ON_STOP/ON_START collection restarts —
   ticket 048; a refused cursor acks as `resync_required` → snapshot re-sync,
@@ -209,7 +213,14 @@
   for `active`) — and Skill/CreateGoal/SetGoalBudget are pure `ToolPreview` tuning
   (invocation preview, objective, "30 minutes"). The diff rows' added/removed palettes are the
   `LocalDiffColors` container/content pairs (the `LocalSuccessColor` extension
-  pattern), AA-checked in both themes.
+  pattern), AA-checked in both themes. The turn file-changes screen (ticket 149 —
+  `TurnChanges` route, `TurnChangesRoute`/`TurnChangesScreen` in ui/chat, the
+  FileContent route/stateless-screen split; rows badge the change status on those
+  same diff palettes and stat the `+a −b` counts in the 119 idiom) is NOT staged
+  through the store: it fetches from `FileHistoryApi`, and is entered from the chat
+  overflow's "Files changed", which resolves the session's newest main turn at tap
+  time from the main transcript's ordinals (message history carries no turn ids,
+  so no per-turn timeline affordance exists).
 - Chat feature collaborators (the 065 `DeltaCoalescer` pattern, generalized by
   072): a cohesive chat feature gets an `internal` class in `ui/chat`
   (`DeltaCoalescer`, `SeedGuard`, `ChatAttachments`, `QuestionWizard`,

@@ -88,6 +88,9 @@ fun ChatScreen(
     /** Ticket 127: a successful fork opens the forked session's chat (same
      * argument hand-off as the session list's navigation). */
     onNavigateToChat: (session: Session) -> Unit = {},
+    /** Ticket 149: the overflow's "Files changed" opens the resolved turn's
+     * file-changes screen. */
+    onNavigateToTurnChanges: (sessionId: String, turnId: Int) -> Unit = { _, _ -> },
     /** Ticket 158: the composer prefill handed back by a sub-agent page's
      * Continue (a nav result on this entry's SavedStateHandle — KimiNavHost);
      * consumed once into the composer's text. */
@@ -123,6 +126,9 @@ fun ChatScreen(
                     }
                 // A fork opens the forked session's chat (ticket 127).
                 is ChatViewModel.Effect.SessionForked -> onNavigateToChat(effect.session)
+                // "Files changed" resolved its turn (ticket 149): open the list.
+                is ChatViewModel.Effect.OpenTurnChanges ->
+                    onNavigateToTurnChanges(uiState.sessionId, effect.turnId)
                 // Every other effect is a plain message snackbar (ticket 071).
                 else -> snackbarHostState.showSnackbar(effect.message)
             }
@@ -240,6 +246,7 @@ fun ChatScreen(
         onHistoryTopReached = onHistoryTopReached,
         onCompact = viewModel::onCompact,
         onFork = viewModel::onFork,
+        onFilesChanged = viewModel::onFilesChanged,
         onCancelJob = viewModel::onCancelJob,
     )
     fullScreenImage?.let { image ->
@@ -322,6 +329,7 @@ private fun ChatContent(
     onHistoryTopReached: () -> Unit = {},
     onCompact: () -> Unit = {},
     onFork: () -> Unit = {},
+    onFilesChanged: () -> Unit = {},
     onCancelJob: (String) -> Unit = {},
 ) {
     var showModelPicker by rememberSaveable { mutableStateOf(false) }
@@ -393,6 +401,17 @@ private fun ChatContent(
                                 onClick = {
                                     menuExpanded = false
                                     onFork()
+                                },
+                            )
+                            // Ticket 149: the phone's answer to "what did the agent
+                            // just touch?" — the tap resolves the newest main turn
+                            // (transcript ordinals are the file-history turn ids) and
+                            // navigates; a failure snackbars from the ViewModel.
+                            DropdownMenuItem(
+                                text = { Text("Files changed") },
+                                onClick = {
+                                    menuExpanded = false
+                                    onFilesChanged()
                                 },
                             )
                         }

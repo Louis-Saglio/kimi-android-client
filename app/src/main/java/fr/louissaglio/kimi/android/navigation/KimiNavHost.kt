@@ -15,6 +15,7 @@ import fr.louissaglio.kimi.android.ui.chat.JobDetailScreen
 import fr.louissaglio.kimi.android.ui.chat.SubagentScreen
 import fr.louissaglio.kimi.android.ui.chat.SwarmScreen
 import fr.louissaglio.kimi.android.ui.chat.ToolContentStore
+import fr.louissaglio.kimi.android.ui.chat.TurnChangesRoute
 import fr.louissaglio.kimi.android.ui.sessions.ArchivedSessionsScreen
 import fr.louissaglio.kimi.android.ui.sessions.SessionsScreen
 import fr.louissaglio.kimi.android.ui.settings.SettingsScreen
@@ -87,6 +88,12 @@ data class EditDiff(val toolCallId: String)
  * through the [ToolContentStore]. */
 @Serializable
 data class FileContent(val toolCallId: String)
+
+/** One turn's file-changes list (ticket 149): the turn id is the main agent's
+ * 0-based turn index — the transcript ordinal — resolved by the chat at navigation
+ * time; the list itself is fetched from the file-history route, nothing is staged. */
+@Serializable
+data class TurnChanges(val sessionId: String, val turnId: Int)
 
 @Composable
 fun KimiNavHost(toolContentStore: ToolContentStore) {
@@ -178,6 +185,12 @@ fun KimiNavHost(toolContentStore: ToolContentStore) {
                 onNavigateToChat = { session ->
                     navController.navigate(Chat(session.id, session.title, session.cwd))
                 },
+                // Ticket 149: the overflow's "Files changed" opens the turn's list.
+                onNavigateToTurnChanges = { sessionId, turnId ->
+                    navController.navigate(TurnChanges(sessionId, turnId)) {
+                        launchSingleTop = true
+                    }
+                },
             )
         }
         composable<Subagent> { entry ->
@@ -256,6 +269,9 @@ fun KimiNavHost(toolContentStore: ToolContentStore) {
             // the Edit diff screen's store-miss recovery.
             val staged = remember { toolContentStore.consume(route.toolCallId) }
             FileContentRoute(route.toolCallId, staged, onNavigateBack = { navController.popBackStack() })
+        }
+        composable<TurnChanges> {
+            TurnChangesRoute(onNavigateBack = { navController.popBackStack() })
         }
     }
 }

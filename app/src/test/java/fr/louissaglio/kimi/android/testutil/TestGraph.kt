@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import fr.louissaglio.kimi.android.data.chat.ChatApi
 import fr.louissaglio.kimi.android.data.chat.ChatMessageMapper
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
+import fr.louissaglio.kimi.android.data.chat.FileHistoryApi
 import fr.louissaglio.kimi.android.data.chat.ModelsRepository
 import fr.louissaglio.kimi.android.data.chat.SessionPrefsStore
 import fr.louissaglio.kimi.android.data.chat.SessionSocket
@@ -48,6 +49,7 @@ fun testChatRepository(
     val mapper = ChatMessageMapper(json)
     return ChatRepository(
         ChatApi(api, mapper),
+        FileHistoryApi(api),
         ModelsRepository(api),
         SessionPrefsStore(dataStore),
         SessionSocket(OkHttpClient(), json, mapper),

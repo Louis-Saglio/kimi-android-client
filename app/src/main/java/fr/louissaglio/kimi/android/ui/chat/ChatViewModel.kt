@@ -320,6 +320,17 @@ class ChatViewModel internal constructor(
             // Never shown: the collector's SessionForked branch navigates instead.
             override val message: String get() = session.displayName
         }
+
+        /** The "Files changed" tap resolved the turn (ticket 149): the collector
+         * navigates to the turn's file-changes screen. */
+        data class OpenTurnChanges(val turnId: Int) : Effect {
+            // Never shown: the collector's OpenTurnChanges branch navigates instead.
+            override val message: String get() = "Turn $turnId"
+        }
+
+        /** The turn resolution behind "Files changed" failed (ticket 149) — the
+         * transcript fetch errored, or the session has no turn yet. */
+        data class TurnChangesFailed(override val message: String) : Effect
     }
 
     val uiState: StateFlow<UiState>
@@ -836,6 +847,31 @@ class ChatViewModel internal constructor(
             chatRepository.compact(settingsRepository.current(), sessionId)
                 .onSuccess { uiState.update { it.copy(isCompacting = true) } }
                 .onFailure { error -> _effects.send(Effect.CompactionFailed(error.toUserMessage())) }
+        }
+    }
+
+    /**
+     * The overflow's "Files changed" (ticket 149): opens the file-changes screen for
+     * the session's NEWEST main turn — the phone's answer to "what did the agent
+     * just touch?". The turn id is resolved at tap time from the main agent's
+     * transcript (its ordinals ARE the file-history `turn_id` numbering — there is
+     * no second id): message history carries no turn ids, and live `turn.ended`
+     * tracking would leave a cold-opened session without any. A turn with nothing
+     * recorded is not an error — the screen's empty state covers it. A fresh
+     * session (no turns at all) snackbars instead of navigating.
+     */
+    fun onFilesChanged() {
+        viewModelScope.launch {
+            chatRepository.getTranscript(settingsRepository.current(), sessionId, MAIN_AGENT_ID, beforeTurn = null, pageSize = 5)
+                .onSuccess { page ->
+                    val turn = page.turns.lastOrNull()
+                    if (turn == null) {
+                        _effects.send(Effect.TurnChangesFailed("No turns yet"))
+                    } else {
+                        _effects.send(Effect.OpenTurnChanges(turn.ordinal))
+                    }
+                }
+                .onFailure { error -> _effects.send(Effect.TurnChangesFailed(error.toUserMessage())) }
         }
     }
 

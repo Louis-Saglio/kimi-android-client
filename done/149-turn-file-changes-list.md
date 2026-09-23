@@ -64,3 +64,34 @@ state; androidTest: rows render status badge and counts.
   second id.
 - `enabled` from the 0.40.1 source-derived shape does not exist in the
   shipped schema; parse only `changes` and `recorded`.
+
+## Implementation notes (2026-09-23)
+
+- **Entry-point deviation (the ticket's premise vs the code):** the app has no
+  "turn header overflow" — the chat timeline renders message bubbles and tool
+  groups, no turn headers, and no `ChatItem` carries a turn id (`/messages`
+  history carries none; only the sub-agent page is transcript-backed, and its
+  flattened rows drop the id). `usage.turn_count` on the session object is zeroed
+  server-side (verified live 2026-09-23), so it cannot seed one either. The
+  affordance therefore lives in the chat top-bar overflow — alongside "Compact
+  session"/"Fork session", the app's existing turn/session actions — as "Files
+  changed", and resolves the session's NEWEST main turn at tap time from
+  `GET .../transcript?agent_id=main&page_size=5` (transcript ordinals ARE the
+  file-history `turn_id` numbering; the existing mapper filters markers). A fresh
+  session snackbars "No turns yet". Per-turn timeline affordances stay impossible
+  without turn-boundary data in `/messages`.
+- `FileHistoryApi` is the new data-layer collaborator (the facade-delegate rule):
+  `getChanges(sessionId, turnId)` → domain `TurnFileChanges(changes, recorded)` /
+  `FileChange(path, status, additions, deletions, binary, oversize)`; the closed
+  wire status enum gains `Other` for unknown values (the app's ignore-unknown
+  rule). `turnId` rides the typed route as an Int (the transcript ordinal's type).
+- The screen splits `TurnChangesRoute` (stateful) / `TurnChangesScreen`
+  (stateless, `internal`) — the FileContent precedent — so the androidTest drives
+  rows without Hilt or network. `binary`/`oversize` rows show their note in place
+  of the counts and carry no click action. Normal row taps report through
+  `onOpenFile`, the ticket-150 hook; nothing wires it yet.
+- Tests: `FileHistoryApiTest` (documented shape incl. a `binary:true` row,
+  `recorded:false`, 40401), `TurnChangesViewModelTest` (empty state),
+  `TurnChangesScreenTest` (badges/counts, binary row not clickable + the tap
+  hook, empty state). androidTests compile-checked only — no emulator on this
+  machine.
