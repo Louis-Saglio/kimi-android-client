@@ -208,6 +208,9 @@ data class ToolCallPayload(
     // server's display rendering — both feed the live row preview.
     val args: JsonObject? = null,
     val display: ToolInputDisplayDto? = null,
+    // tool.call.started only: the server-rendered human-readable action (same text
+    // as the approval's `action`) — the row title's first choice (ticket 153).
+    val description: String? = null,
 )
 
 @Serializable

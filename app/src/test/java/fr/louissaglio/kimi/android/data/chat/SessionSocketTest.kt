@@ -10,6 +10,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
 import okhttp3.Response
 import okhttp3.WebSocket
@@ -224,6 +226,39 @@ class SessionSocketTest {
                         toolName = "Bash",
                         summary = "sleep 300 && echo awake",
                         agentId = "agent-1",
+                    ),
+                ),
+            ),
+            emitted.filterIsInstance<SocketEvent.Event>(),
+        )
+    }
+
+    @Test
+    fun `a tool call started frame carries the server description onto the event`() = runBlocking {
+        // Doc-verbatim frame (docs/server-api.md, tool.call.started): the payload's
+        // `description` is the server-rendered action — it lands on the event and
+        // wins the row preview over display.command (ticket 153).
+        val emitted = runSocketEvents(
+            """{"type":"tool.call.started","seq":14,""" +
+                """"payload":{"type":"tool.call.started","turnId":0,""" +
+                """"toolCallId":"tool_RMgBIy1asIorg1eV8P3ZhHiL","name":"Bash",""" +
+                """"args":{"command":"echo doc-verify-0290"},""" +
+                """"description":"Running: echo doc-verify-0290",""" +
+                """"display":{"kind":"command","command":"echo doc-verify-0290",""" +
+                """"cwd":"/home/ubuntu/spike","language":"bash"},""" +
+                """"agentId":"main","sessionId":"session_..."}}""",
+        )
+
+        assertEquals(
+            listOf(
+                SocketEvent.Event(
+                    SessionEvent.ToolCallStarted(
+                        toolCallId = "tool_RMgBIy1asIorg1eV8P3ZhHiL",
+                        name = "Bash",
+                        preview = "Running: echo doc-verify-0290",
+                        input = "{\n    \"command\": \"echo doc-verify-0290\"\n}",
+                        args = buildJsonObject { put("command", "echo doc-verify-0290") },
+                        description = "Running: echo doc-verify-0290",
                     ),
                 ),
             ),

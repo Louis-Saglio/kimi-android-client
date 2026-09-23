@@ -1423,10 +1423,11 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun `tool call started frame emits the command preview`() = runBlocking {
+    fun `tool call started frame emits the server description or args preview`() = runBlocking {
         val emitted = runSocketEvents(
-            // Verbatim tool.call.started shape (docs/server-api.md: args and display on
-            // start, unchanged from 0.23.3).
+            // Verbatim tool.call.started shape (docs/server-api.md: args, description
+            // and display on start). The server description is the row preview
+            // (ticket 153); without one it derives from display/args.
             """{"type":"tool.call.started","seq":9,"epoch":"ep_1","session_id":"session_1",""" +
                 """"timestamp":"2026-07-19T15:07:43.000Z","payload":{"type":"tool.call.started",""" +
                 """"turnId":0,"toolCallId":"tool_3oZjtQUGzDwUwQwfkXioAtne","name":"Bash",""" +
@@ -1434,7 +1435,7 @@ class ChatRepositoryTest {
                 """"description":"Running: echo hello-from-spike",""" +
                 """"display":{"kind":"command","command":"echo hello-from-spike",""" +
                 """"cwd":"/tmp/spike","language":"bash"},"agentId":"main","sessionId":"session_1"}}""",
-            // No display object: the preview is derived from args instead.
+            // No description and no display object: the preview is derived from args.
             """{"type":"tool.call.started","seq":10,"epoch":"ep_1","session_id":"session_1",""" +
                 """"timestamp":"2026-07-19T15:07:44.000Z","payload":{"type":"tool.call.started",""" +
                 """"turnId":0,"toolCallId":"tool_2","name":"Read",""" +
@@ -1446,9 +1447,10 @@ class ChatRepositoryTest {
             SessionEvent.ToolCallStarted(
                 "tool_3oZjtQUGzDwUwQwfkXioAtne",
                 "Bash",
-                "echo hello-from-spike",
+                "Running: echo hello-from-spike",
                 input = "{\n    \"command\": \"echo hello-from-spike\"\n}",
                 args = buildJsonObject { put("command", "echo hello-from-spike") },
+                description = "Running: echo hello-from-spike",
             ),
             events[0],
         )

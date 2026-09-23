@@ -38,10 +38,12 @@ class ChatMessageMapper @Inject constructor(json: Json) {
     fun summary(payload: ApprovalRequestedPayload): String =
         payload.toolInputDisplay?.command?.takeIf { it.isNotBlank() } ?: payload.action
 
-    /** The row preview for a started call: a Bash call's non-blank `description`
-     * argument wins (ticket 095), then the server's display command when it sent one,
-     * else derived from the arguments (ToolPreview). */
+    /** The row preview for a started call: the server-rendered `description` wins
+     * (ticket 153 — every tool gets a readable label), then a Bash call's non-blank
+     * `description` argument (ticket 095), then the server's display command when it
+     * sent one, else derived from the arguments (ToolPreview). */
     fun preview(payload: ToolCallPayload): String {
+        payload.description?.takeIf { it.isNotBlank() }?.let { return it }
         if (payload.name == "Bash") {
             val description = (payload.args?.get("description") as? JsonPrimitive)?.contentOrNull
             if (!description.isNullOrBlank()) return ToolPreview.of(payload.name, payload.args)

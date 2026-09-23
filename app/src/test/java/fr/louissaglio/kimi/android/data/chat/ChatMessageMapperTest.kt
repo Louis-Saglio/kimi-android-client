@@ -35,6 +35,54 @@ class ChatMessageMapperTest {
         assertEquals("Run the unit tests", mapper.preview(payload))
     }
 
+    // --- Server description precedence (ticket 153) -------------------------------------
+
+    @Test
+    fun `the server description beats the bash description argument and the display command`() {
+        // ticket 153: tool.call.started carries the server-rendered action — it wins
+        // over both of 095's sources.
+        val payload = ToolCallPayload(
+            toolCallId = "tool_1",
+            name = "Bash",
+            args = buildJsonObject {
+                put("command", "./gradlew test")
+                put("description", "Run the unit tests")
+            },
+            display = ToolInputDisplayDto(kind = "command", command = "./gradlew test"),
+            description = "Running: ./gradlew test",
+        )
+
+        assertEquals("Running: ./gradlew test", mapper.preview(payload))
+    }
+
+    @Test
+    fun `a non-bash call previews the server description over its args`() {
+        val payload = ToolCallPayload(
+            toolCallId = "tool_1",
+            name = "Read",
+            args = buildJsonObject { put("path", "/tmp/spike/a.txt") },
+            description = "Reading /tmp/spike/a.txt",
+        )
+
+        assertEquals("Reading /tmp/spike/a.txt", mapper.preview(payload))
+    }
+
+    @Test
+    fun `a blank server description falls through to the 095 path`() {
+        val payload = ToolCallPayload(
+            toolCallId = "tool_1",
+            name = "Bash",
+            args = buildJsonObject {
+                put("command", "./gradlew test")
+                put("description", "Run the unit tests")
+            },
+            display = ToolInputDisplayDto(kind = "command", command = "./gradlew test"),
+            description = " ",
+        )
+
+        assertEquals("Run the unit tests", mapper.preview(payload))
+    }
+
     // --- Raw args plumbing (ticket 118) ------------------------------------------------
 
     @Test

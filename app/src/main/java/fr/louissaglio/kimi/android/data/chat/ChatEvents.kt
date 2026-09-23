@@ -65,10 +65,12 @@ sealed interface SessionEvent {
     data class ThinkingDelta(val delta: String, override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
     data class ToolCallDelta(val toolCallId: String, val name: String, override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
 
-    /** [preview] is derived from the started payload's display/args (ToolPreview), so the
-     * live row shows what the call is doing from the start, not only after a refetch.
-     * [args] is the raw arguments object (ticket 118), rendered by the expanded row as a
-     * key/value table (ToolDetailFields); [input] is the same arguments pretty-printed —
+    /** [preview] is derived from the started payload's description/display/args
+     * (tickets 153/095, ToolPreview), so the live row shows what the call is doing
+     * from the start, not only after a refetch. [description] is the server-rendered
+     * action the preview prefers (ticket 153). [args] is the raw arguments object
+     * (ticket 118), rendered by the expanded row as a key/value table
+     * (ToolDetailFields); [input] is the same arguments pretty-printed —
      * the expanded row's fallback when no object args exist. */
     data class ToolCallStarted(
         val toolCallId: String,
@@ -76,6 +78,7 @@ sealed interface SessionEvent {
         val preview: String = "",
         val input: String = "",
         val args: JsonObject? = null,
+        val description: String? = null,
         override val agentId: String = MAIN_AGENT_ID,
     ) : SessionEvent, AgentScopedEvent
 
