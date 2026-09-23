@@ -32,6 +32,10 @@ data class MessageDto(
 ) {
     /** The message's origin kind wherever the wire shape puts it; null when absent. */
     val originKind: String? get() = metadata?.origin?.kind ?: origin?.kind
+
+    /** The prompt's file attachments wherever the wire shape puts them (ticket 160 —
+     * 0.39.1, docs/server-api.md, Prompts); null when the message carried none. */
+    val originAttachments: List<OriginAttachmentDto>? get() = metadata?.origin?.attachments ?: origin?.attachments
 }
 
 @Serializable
@@ -42,6 +46,20 @@ data class MessageMetadataDto(
 @Serializable
 data class MessageOriginDto(
     val kind: String = "",
+    // 0.39.1: every prompt file attachment is recorded here, camelCase
+    // (docs/server-api.md, Prompts) — the structured source of the chat's chips.
+    val attachments: List<OriginAttachmentDto>? = null,
+)
+
+/** One entry of `origin.attachments` (ticket 160). [path] is server-local: the
+ * materialized `<sessionDir>/attachments/<fileId>-<name>` copy for uploads, the original
+ * path for server-local ones — never displayed, only mined for the file id. */
+@Serializable
+data class OriginAttachmentDto(
+    val name: String = "",
+    val mediaType: String = "",
+    val size: Long = 0,
+    val path: String = "",
 )
 
 /** Flat part shape: each `type` fills only its own fields, the rest stay null. */
@@ -64,6 +82,9 @@ data class ContentPartDto(
     // were a history data-url, ACK raw base64, a file reference a file_id
     // (docs/server-api.md).
     val source: MediaSourceDto? = null,
+    // 0.42.0: image/video parts carry the original file's `name` on both the ACK echo
+    // and history (docs/server-api.md, Prompts) — the bubble's filename label (160).
+    val name: String? = null,
 )
 
 /** `source` of an image content part; each `kind` fills only its own fields. */

@@ -778,7 +778,7 @@ class ChatViewModel internal constructor(
                         uploaded.filterNot { it.isImage }
                             .map { ChatMessage.Part.Attachment(it.name, it.mediaType, it.sizeBytes, it.id) },
                         uploaded.filter { it.isImage }
-                            .map { ChatMessage.Part.Image(base64Data = null, fileId = it.id) },
+                            .map { ChatMessage.Part.Image(base64Data = null, fileId = it.id, name = it.name) },
                     )
                     uiState.update {
                         it.copy(

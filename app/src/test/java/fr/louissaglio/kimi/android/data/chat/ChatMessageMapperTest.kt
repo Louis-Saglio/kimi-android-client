@@ -300,6 +300,95 @@ class ChatMessageMapperTest {
         assertNull(page.turns.single().taskOrigin)
     }
 
+    // --- Origin attachments (ticket 160 — 0.39.1, docs/server-api.md, Prompts) ---------
+
+    private val wireJson = Json { ignoreUnknownKeys = true }
+
+    @Test
+    fun `origin attachments parse into chips and their notice text drops out`() {
+        // The doc shape: `metadata.origin.attachments` entries are camelCase
+        // {name, mediaType, size, path}. The server still rewrites each file part into
+        // its "Attached file" notice text part — the chip carries the structured data,
+        // the sentence drops; the 0.42.0 media part's `name` lands on the image.
+        val message = wireJson.decodeFromString(
+            MessageDto.serializer(),
+            """
+            {"id":"msg_1","role":"user","content":[
+              {"type":"text","text":"Attached file \"notes.txt\" (text/plain, 340 bytes): /home/ubuntu/.kimi-code/sessions/wd_1/session_2/attachments/f_01KYA4RCBE4NPA1RX5TT7DB5J9-notes.txt — open it with the Read tool"},
+              {"type":"text","text":"what is in this?"},
+              {"type":"image","source":{"kind":"session_media","file_id":"f_img"},"name":"one.png"}
+            ],
+            "metadata":{"origin":{"kind":"user","attachments":[
+              {"name":"notes.txt","mediaType":"text/plain","size":340,"path":"/home/ubuntu/.kimi-code/sessions/wd_1/session_2/attachments/f_01KYA4RCBE4NPA1RX5TT7DB5J9-notes.txt"}
+            ]}}}
+            """.trimIndent(),
+        )
+
+        assertEquals(
+            ChatMessage(
+                "msg_1",
+                ChatMessage.Role.User,
+                listOf(
+                    ChatMessage.Part.Text("what is in this?"),
+                    ChatMessage.Part.Image(base64Data = null, fileId = "f_img", isSessionMedia = true, name = "one.png"),
+                    ChatMessage.Part.Attachment("notes.txt", "text/plain", 340, "f_01KYA4RCBE4NPA1RX5TT7DB5J9"),
+                ),
+                originKind = "user",
+            ),
+            mapper.toDomain(message),
+        )
+    }
+
+    @Test
+    fun `the splice echo carries its attachments on the top-level origin`() {
+        // context.spliced puts the same array on the message's top-level `origin`
+        // (docs/server-api.md, Prompts). A server-local path carries no file id —
+        // the chip is inert.
+        val message = wireJson.decodeFromString(
+            MessageDto.serializer(),
+            """
+            {"id":"msg_1","role":"user","content":[
+              {"type":"text","text":"Attached file \"report.pdf\" (application/pdf, 2048 bytes): /tmp/report.pdf — open it with the Read tool"}
+            ],
+            "origin":{"kind":"user","attachments":[
+              {"name":"report.pdf","mediaType":"application/pdf","size":2048,"path":"/tmp/report.pdf"}
+            ]}}
+            """.trimIndent(),
+        )
+
+        assertEquals(
+            listOf(ChatMessage.Part.Attachment("report.pdf", "application/pdf", 2048, null)),
+            mapper.toDomain(message).parts,
+        )
+    }
+
+    @Test
+    fun `notice-shaped text without the origin array renders as plain text`() {
+        // No notice regex anymore (ticket 160): with no structured array there is no
+        // chip, and the sentence is just text to the app.
+        val message = mapper.toDomain(
+            MessageDto(
+                id = "msg_1",
+                role = "user",
+                content = listOf(
+                    ContentPartDto(
+                        type = "text",
+                        text = "Attached file \"notes.txt\" (text/plain, 340 bytes): /tmp/notes.txt — open it with the Read tool",
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                ChatMessage.Part.Text(
+                    "Attached file \"notes.txt\" (text/plain, 340 bytes): /tmp/notes.txt — open it with the Read tool",
+                ),
+            ),
+            message.parts,
+        )
+    }
+
     private fun transcript(vararg frames: TranscriptFrameDto): TranscriptData = TranscriptData(
         agentId = "agent-1",
         items = listOf(

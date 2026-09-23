@@ -13,8 +13,9 @@ enum class ToolStatus { Running, Done, Error }
 sealed interface ChatItem {
     val id: String
 
-    /** [attachments] are the non-image files recovered from the server's notice text,
-     * [images] the inlined image parts (ticket 034); both empty for plain messages.
+    /** [attachments] are the non-image files from the message origin's structured
+     * `attachments` array (ticket 160), [images] the inlined image parts (ticket 034);
+     * both empty for plain messages.
      * [createdAt] is the server timestamp, shown as a caption under the bubble
      * (ticket 039); null on live spliced messages until the turn-end refetch.
      * [queued] is the prompt's queue position while it waits server-side (ticket 154):

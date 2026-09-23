@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -35,6 +36,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.ui.common.formatFileSize
+import fr.louissaglio.kimi.android.ui.common.icons.ImageIcon
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -95,9 +97,10 @@ internal fun HistoryImageThumbnail(
     }
 }
 
-/** A non-image attachment inside a history bubble (ticket 034): generic sheet glyph,
- * name and size. Tappable only when the fileId was recovered from the notice — the
- * tap downloads the bytes and opens them in another app. */
+/** A non-image attachment inside a history bubble (tickets 034/160): a media-type glyph
+ * (image files get the image glyph, anything else the generic sheet), name and size.
+ * Tappable only when the fileId was recovered from the materialized path — the tap
+ * downloads the bytes and opens them in another app. */
 @Composable
 internal fun AttachmentChipRow(attachment: ChatMessage.Part.Attachment, onClick: () -> Unit) {
     val shape = MaterialTheme.shapes.small
@@ -114,11 +117,20 @@ internal fun AttachmentChipRow(attachment: ChatMessage.Part.Attachment, onClick:
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            CopyGlyph(
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                background = MaterialTheme.colorScheme.surfaceVariant,
-                modifier = Modifier.size(18.dp),
-            )
+            if (attachment.mimeType.startsWith("image/")) {
+                Icon(
+                    imageVector = ImageIcon,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                CopyGlyph(
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    background = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
             Column {
                 Text(
                     text = attachment.name,

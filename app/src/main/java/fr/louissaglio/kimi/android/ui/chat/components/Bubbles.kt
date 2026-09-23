@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CornerSize
 import androidx.compose.material3.DropdownMenu
@@ -41,6 +42,7 @@ import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.ui.common.formatTimestamp
@@ -128,11 +130,26 @@ internal fun UserBubble(
                     ) {
                         if (message.text.isNotBlank()) MarkdownBody(text = message.text)
                         message.images.forEach { image ->
-                            HistoryImageThumbnail(
-                                image = image,
-                                loadImageBytes = loadImageBytes,
-                                onClick = { onImageClick(image) },
-                            )
+                            Column {
+                                HistoryImageThumbnail(
+                                    image = image,
+                                    loadImageBytes = loadImageBytes,
+                                    onClick = { onImageClick(image) },
+                                )
+                                // The 0.42.0 media part's `name` (ticket 160): the
+                                // thumbnail gains its filename label, pinned to the
+                                // thumbnail's width.
+                                if (image.name != null) {
+                                    Text(
+                                        text = image.name,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.width(120.dp),
+                                    )
+                                }
+                            }
                         }
                         message.attachments.forEach { attachment ->
                             AttachmentChipRow(attachment = attachment, onClick = { onOpenAttachment(attachment) })

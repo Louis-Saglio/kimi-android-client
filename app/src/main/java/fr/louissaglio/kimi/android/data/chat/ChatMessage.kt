@@ -40,9 +40,10 @@ data class ChatMessage(
         /** [output] is the full result text, shown by the expanded row (ticket 023). */
         data class ToolResult(val toolCallId: String, val isError: Boolean, val output: String = "") : Part
 
-        /** A non-image uploaded file, recovered from the server's `Attached file "…"`
-         * text notice (AttachmentNotice, ticket 034). [fileId] comes from the
-         * materialized basename prefix; null means the bytes cannot be fetched back. */
+        /** A non-image uploaded file, from the message origin's structured `attachments`
+         * array (ticket 160, 0.39.1+ — docs/server-api.md, Prompts). [fileId] comes from
+         * the materialized path's `<fileId>-` prefix; null means the bytes cannot be
+         * fetched back and the chip is inert. */
         data class Attachment(
             val name: String,
             val mimeType: String,
@@ -55,12 +56,15 @@ data class ChatMessage(
          * docs/server-api.md), [fileId] for a file-referenced source. [isSessionMedia]
          * marks a 0.37.2 `session_media` source (ticket 104): its [fileId] is
          * session-scoped media, fetched via `GET /api/v1/sessions/{id}/media/{file_id}`
-         * rather than `/api/v1/files/{id}`. The wire media_type is dropped: nothing
-         * reads it, bytes are decoded as-is. */
+         * rather than `/api/v1/files/{id}`. [name] is the original file's name on
+         * 0.42.0+ media parts (ticket 160), shown as the bubble's filename label; null
+         * on older shapes. The wire media_type is dropped: nothing reads it, bytes are
+         * decoded as-is. */
         data class Image(
             val base64Data: String?,
             val fileId: String?,
             val isSessionMedia: Boolean = false,
+            val name: String? = null,
         ) : Part
     }
 }

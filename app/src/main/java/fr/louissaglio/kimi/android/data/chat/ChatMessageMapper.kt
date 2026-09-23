@@ -75,29 +75,35 @@ class ChatMessageMapper @Inject constructor(json: Json) {
             "tool" -> ChatMessage.Role.Tool
             else -> ChatMessage.Role.Other
         }
+        // The prompt's file attachments ride the origin's structured array (ticket 160 —
+        // 0.39.1, docs/server-api.md, Prompts): they become the bubble's chips. The
+        // server still rewrites each file part into its "Attached file" notice text
+        // part, fully determined by the same entry — that sentence drops out of the
+        // text, recognized by exact reconstruction, never pattern-matched.
+        val attachments = dto.originAttachments.orEmpty()
+        val notices = attachments.mapTo(HashSet()) { it.noticeText() }
         return ChatMessage(
             id = dto.id.orEmpty(),
             role = domainRole,
-            parts = dto.content.mapNotNull { toDomain(it, stripEnvelopes = domainRole == ChatMessage.Role.User) },
+            parts = dto.content.mapNotNull { toDomain(it, stripEnvelopes = domainRole == ChatMessage.Role.User, notices) } +
+                attachments.map { it.toDomain() },
             // A malformed timestamp must not fail the whole message: drop it, keep the rest.
             createdAt = dto.createdAt?.let { runCatching { Instant.parse(it) }.getOrNull() },
             originKind = dto.originKind,
         )
     }
 
-    private fun toDomain(dto: ContentPartDto, stripEnvelopes: Boolean): ChatMessage.Part? = when (dto.type) {
+    private fun toDomain(dto: ContentPartDto, stripEnvelopes: Boolean, attachmentNotices: Set<String>): ChatMessage.Part? = when (dto.type) {
         // Internal envelopes are stripped here — the single domain boundary every
         // ingestion path (history, context.spliced echoes) flows through. A part
         // left blank is dropped so ChatTimeline never sees an empty bubble's text.
         "text" -> dto.text
             ?.let { if (stripEnvelopes) InternalEnvelopes.strip(it) else it }
-            ?.takeIf { it.isNotBlank() }
-            // The server rewrites a prompt's file parts into this notice
-            // (docs/server-api.md, Prompts); recover the chip instead of rendering
-            // the raw sentence (ticket 034). User-role only: stripEnvelopes gates it.
-            ?.let { if (stripEnvelopes) AttachmentNotice.parse(it) ?: ChatMessage.Part.Text(it) else ChatMessage.Part.Text(it) }
+            ?.takeIf { it.isNotBlank() && it !in attachmentNotices }
+            ?.let { ChatMessage.Part.Text(it) }
         "thinking" -> dto.thinking?.let { ChatMessage.Part.Thinking(it) }
-        "image" -> dto.source?.let { toDomain(it) }
+        // 0.42.0: the media part carries the original file's `name` (ticket 160).
+        "image" -> dto.source?.let { toDomain(it)?.copy(name = dto.name) }
         "tool_use" -> dto.toolCallId?.let {
             ChatMessage.Part.ToolUse(
                 it,
@@ -131,6 +137,26 @@ class ChatMessageMapper @Inject constructor(json: Json) {
         DATA_URL_RE.matchEntire(url)?.let {
             ChatMessage.Part.Image(base64Data = it.groupValues[2], fileId = null)
         }
+
+    /** An `origin.attachments` entry → the bubble's chip (ticket 160). [OriginAttachmentDto.path]
+     * is server-local and never displayed; the file id hides in the materialized
+     * `<fileId>-<name>` basename prefix for uploads — a server-local path has none,
+     * leaving the chip inert. */
+    private fun OriginAttachmentDto.toDomain(): ChatMessage.Part.Attachment =
+        ChatMessage.Part.Attachment(
+            name = name,
+            mimeType = mediaType,
+            sizeBytes = size,
+            fileId = FILE_STORE_ID_AT_START_RE.find(path.split('/', '\\').last())?.value,
+        )
+
+    /** The notice sentence the server rewrote this file part into (docs/server-api.md,
+     * Prompts) — a pure function of the same four fields the origin carries, so a text
+     * part equal to it is the rewritten part, not user text (ticket 160). A wording
+     * drift fails visible (the raw sentence renders next to the chip), never a wrong
+     * chip. */
+    private fun OriginAttachmentDto.noticeText(): String =
+        "Attached file \"$name\" ($mediaType, $size bytes): $path — open it with the Read tool"
 
     /** Transcript page (docs/server-api.md, Transcript): marker items are dropped here,
      * turns keep their ascending wire order. */
@@ -390,5 +416,11 @@ class ChatMessageMapper @Inject constructor(json: Json) {
     private companion object {
         const val TAG = "ChatMessageMapper"
         val DATA_URL_RE = Regex("""^data:([^;,]+);base64,(.*)$""", RegexOption.DOT_MATCHES_ALL)
+
+        // File-store ids come in two shapes: v1 `f_`<26-char ULID> and v2 `f_`<randomUUID>.
+        // Anchored at the start of the `<fileId>-<name>` basename — splitting on the first
+        // '-' would truncate v2 UUID ids at their first inner hyphen.
+        val FILE_STORE_ID_AT_START_RE =
+            Regex("""^f_(?:[0-9A-Za-z]{26}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})(?=-)""")
     }
 }

@@ -265,4 +265,46 @@ class MarkdownBubbleTest {
 
         assertEquals("notes.txt", opened)
     }
+
+    // Ticket 160: the chip renders the structured attachment's name and human size.
+    @Test
+    fun attachmentChipShowsNameAndSize() {
+        composeTestRule.setContent {
+            KimiTheme {
+                UserBubble(
+                    ChatItem.UserMessage(
+                        "u1",
+                        "see attached",
+                        attachments = listOf(
+                            ChatMessage.Part.Attachment("notes.txt", "text/plain", 340, "f_1"),
+                        ),
+                    ),
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("notes.txt").assertIsDisplayed()
+        composeTestRule.onNodeWithText("340 B").assertIsDisplayed()
+    }
+
+    // Ticket 160: an image attachment's bubble shows the media part's filename.
+    @Test
+    fun imageBubbleShowsFilename() {
+        composeTestRule.setContent {
+            KimiTheme {
+                UserBubble(
+                    ChatItem.UserMessage(
+                        "u1",
+                        "look",
+                        images = listOf(
+                            ChatMessage.Part.Image(base64Data = "aGVsbG8=", fileId = null, name = "one.png"),
+                        ),
+                    ),
+                    loadImageBytes = { null },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("one.png").assertIsDisplayed()
+    }
 }

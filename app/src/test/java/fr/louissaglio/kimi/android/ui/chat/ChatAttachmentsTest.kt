@@ -48,6 +48,30 @@ class ChatAttachmentsTest : ChatViewModelTestBase() {
     }
 
     @Test
+    fun `a sent attachment echoes a bubble chip with its name and size`() = runBlocking {
+        viewModel.onScreenStarted()
+        awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        stagePicked("a.txt", 5, "text/plain", "hello".toByteArray())
+        viewModel.onInputChange("see attached")
+        viewModel.onSend()
+        awaitRequest("/api/v1/files")
+        awaitRequest("/prompts")
+
+        // The optimistic echo (ticket 154) carries the chip at once, built from the
+        // upload's structured metadata (ticket 160): real name, size and media type.
+        awaitState(viewModel.uiState) { it.items?.any { item -> item.id == "msg_1" } == true }
+        val echo = viewModel.uiState.value.items?.firstOrNull() as ChatItem.UserMessage
+        assertEquals("see attached", echo.text)
+        assertEquals(
+            listOf(ChatMessage.Part.Attachment("a.txt", "text/plain", 5, "f_1")),
+            echo.attachments,
+        )
+    }
+
+    @Test
     fun `send is a no-op while an attachment upload is in flight`() = runBlocking {
         val gate = CountDownLatch(1)
         filesResponseGate = gate

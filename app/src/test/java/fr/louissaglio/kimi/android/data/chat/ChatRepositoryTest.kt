@@ -329,10 +329,12 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun `history maps the attachment notice and image parts to domain parts`() = runBlocking {
-        // Fixture per docs/server-api.md (ticket 034): the server rewrites file parts
-        // into the "Attached file" notice; images come back as a data-url source in
-        // history, as raw base64 in the prompt ACK echo, or as a file reference.
+    fun `history maps the origin attachments and image parts to domain parts`() = runBlocking {
+        // Fixture per docs/server-api.md (tickets 034/160): file attachments ride
+        // `metadata.origin.attachments` (0.39.1) with the rewritten "Attached file"
+        // notice as a sibling text part; images come back as a data-url source in
+        // history, as raw base64 in the prompt ACK echo, or as a file reference —
+        // and carry the file's `name` since 0.42.0.
         server.enqueue(
             MockResponse(body = 
                 """
@@ -341,10 +343,13 @@ class ChatRepositoryTest {
                    "content":[
                      {"type":"text","text":"Attached file \"notes.txt\" (text/plain, 340 bytes): /home/ubuntu/.kimi-code/sessions/wd_1/session_2/attachments/f_01KYA4RCBE4NPA1RX5TT7DB5J9-notes.txt — open it with the Read tool"},
                      {"type":"text","text":"what is in these?"},
-                     {"type":"image","source":{"kind":"url","url":"data:image/png;base64,aGVsbG8="}},
+                     {"type":"image","source":{"kind":"url","url":"data:image/png;base64,aGVsbG8="},"name":"one.png"},
                      {"type":"image","source":{"kind":"base64","media_type":"image/jpeg","data":"anBlZw=="}},
                      {"type":"image","source":{"kind":"file","file_id":"f_abc","media_type":"image/webp"}}
                    ],
+                   "metadata":{"origin":{"kind":"user","attachments":[
+                     {"name":"notes.txt","mediaType":"text/plain","size":340,"path":"/home/ubuntu/.kimi-code/sessions/wd_1/session_2/attachments/f_01KYA4RCBE4NPA1RX5TT7DB5J9-notes.txt"}
+                   ]}},
                    "created_at":"2026-07-24T04:12:10.000Z"}
                 ],"has_more":false},"request_id":"01KX"}
                 """.trimIndent(),
@@ -358,13 +363,14 @@ class ChatRepositoryTest {
                 "msg_1",
                 ChatMessage.Role.User,
                 listOf(
-                    ChatMessage.Part.Attachment("notes.txt", "text/plain", 340, "f_01KYA4RCBE4NPA1RX5TT7DB5J9"),
                     ChatMessage.Part.Text("what is in these?"),
-                    ChatMessage.Part.Image(base64Data = "aGVsbG8=", fileId = null),
+                    ChatMessage.Part.Image(base64Data = "aGVsbG8=", fileId = null, name = "one.png"),
                     ChatMessage.Part.Image(base64Data = "anBlZw==", fileId = null),
                     ChatMessage.Part.Image(base64Data = null, fileId = "f_abc"),
+                    ChatMessage.Part.Attachment("notes.txt", "text/plain", 340, "f_01KYA4RCBE4NPA1RX5TT7DB5J9"),
                 ),
                 createdAt = Instant.parse("2026-07-24T04:12:10.000Z"),
+                originKind = "user",
             ),
             messages.single(),
         )
