@@ -38,6 +38,8 @@ class SessionListCacheTest {
                 updatedAt = Instant.parse("2026-07-17T03:48:31.606Z"),
                 isRunning = true,
                 isAwaitingInteraction = true,
+                // The interrupted badge survives the cold start (ticket 159).
+                isLastTurnInterrupted = true,
             ),
             // Null title and cwd round-trip as null, not as empty strings.
             Session(

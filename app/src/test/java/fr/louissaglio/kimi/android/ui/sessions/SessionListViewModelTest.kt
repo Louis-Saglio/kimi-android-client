@@ -810,6 +810,64 @@ class SessionListViewModelTest {
         awaitState(viewModel.uiState) { it.unreadIds.isEmpty() }
     }
 
+    // --- Interrupted-last-turn badge (ticket 159) ---
+
+    @Test
+    fun `a cancelled turn end lights the interrupted badge live, a completed one clears it`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+
+        fakeSocket.events.tryEmit(SessionListEvent.WorkChanged("session_1", busy = true, pendingInteraction = "none"))
+        awaitState(viewModel.uiState) { it.sessions!![0].isRunning }
+
+        fakeSocket.events.tryEmit(
+            SessionListEvent.WorkChanged("session_1", busy = false, pendingInteraction = "none", lastTurnReason = "cancelled"),
+        )
+        awaitState(viewModel.uiState) { it.sessions!![0].isLastTurnInterrupted }
+
+        // A new turn runs: the spinner wins while running, and the flag itself stays
+        // until that turn's own end frame (busy frames carry no reason).
+        fakeSocket.events.tryEmit(SessionListEvent.WorkChanged("session_1", busy = true, pendingInteraction = "none"))
+        awaitState(viewModel.uiState) { it.sessions!![0].isRunning && it.sessions[0].isLastTurnInterrupted }
+
+        fakeSocket.events.tryEmit(
+            SessionListEvent.WorkChanged("session_1", busy = false, pendingInteraction = "none", lastTurnReason = "completed"),
+        )
+        awaitState(viewModel.uiState) { !it.sessions!![0].isLastTurnInterrupted }
+        // Pure WebSocket: no REST call beyond the initial load.
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun `a refresh clears the interrupted badge once the turn completes server-side`() = runBlocking {
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"items":[
+                  {"id":"session_1","title":"Aborted","updated_at":"2026-07-17T03:48:31.606Z",
+                   "busy":false,"last_turn_reason":"cancelled","metadata":{"cwd":"/tmp/a"}}
+                ],"has_more":false},"request_id":"r"}""",
+            ),
+        )
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions?.single()?.isLastTurnInterrupted == true }
+
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"items":[
+                  {"id":"session_1","title":"Aborted","updated_at":"2026-07-17T03:48:31.606Z",
+                   "busy":false,"last_turn_reason":"completed","metadata":{"cwd":"/tmp/a"}}
+                ],"has_more":false},"request_id":"r"}""",
+            ),
+        )
+        viewModel.onPullToRefresh()
+
+        // The REST field is the source of truth: "completed" on the next refresh
+        // clears the badge, no WS event needed.
+        awaitState(viewModel.uiState) { it.sessions!!.none { s -> s.isLastTurnInterrupted } }
+    }
+
     @Test
     fun `a meta updated event patches the row title live`() = runBlocking {
         server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1")))

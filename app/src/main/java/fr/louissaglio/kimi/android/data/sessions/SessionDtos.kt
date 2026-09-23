@@ -22,6 +22,9 @@ data class SessionDto(
     val busy: Boolean = false,
     /** Server runtime state: "none" | "approval" | "question" (docs/server-api.md). */
     @SerialName("pending_interaction") val pendingInteraction: String = "none",
+    /** "completed" | "cancelled"; absent on sessions that never ran a turn
+     * (docs/server-api.md). "cancelled" lights the row's interrupted badge (ticket 159). */
+    @SerialName("last_turn_reason") val lastTurnReason: String? = null,
     val archived: Boolean = false,
     /** Set while archived, cleared on restore; absent on never-archived sessions
      * (docs/server-api.md). Declared for ticket 132's archived-sessions screen; the
@@ -51,6 +54,7 @@ internal fun SessionDto.toDomain(): Session = Session(
     updatedAt = runCatching { Instant.parse(updatedAt) }.getOrDefault(Instant.EPOCH),
     isRunning = busy,
     isAwaitingInteraction = isAwaitingInteraction(pendingInteraction),
+    isLastTurnInterrupted = lastTurnReason == "cancelled",
 )
 
 // The archived screen's mapping (ticket 132): same title/cwd rules as [toDomain], plus

@@ -21,7 +21,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** Semantics tests for the session-row status indicators (tickets 016/087/145), the supporting line (114) and the long-press full-name dialog (117). */
+/** Semantics tests for the session-row status indicators (tickets 016/087/145/159), the supporting line (114) and the long-press full-name dialog (117). */
 @RunWith(AndroidJUnit4::class)
 class SessionRowTest {
 
@@ -32,6 +32,7 @@ class SessionRowTest {
         title: String? = "A session",
         isRunning: Boolean = false,
         isAwaitingInteraction: Boolean = false,
+        isLastTurnInterrupted: Boolean = false,
         hasUnread: Boolean = false,
         cwd: String? = "/tmp/spike",
         workspaceLabel: String? = null,
@@ -50,6 +51,7 @@ class SessionRowTest {
                         updatedAt = updatedAt,
                         isRunning = isRunning,
                         isAwaitingInteraction = isAwaitingInteraction,
+                        isLastTurnInterrupted = isLastTurnInterrupted,
                     ),
                     workspaceLabel = workspaceLabel,
                     hasUnread = hasUnread,
@@ -76,6 +78,7 @@ class SessionRowTest {
         composeTestRule.onNodeWithContentDescription("Needs attention").assertDoesNotExist()
         composeTestRule.onNodeWithContentDescription("Session running").assertDoesNotExist()
         composeTestRule.onNodeWithContentDescription("Session has unread activity").assertDoesNotExist()
+        composeTestRule.onNodeWithContentDescription("Last turn did not complete").assertDoesNotExist()
     }
 
     @Test
@@ -101,6 +104,34 @@ class SessionRowTest {
         row(isRunning = true, hasUnread = true)
 
         composeTestRule.onNodeWithContentDescription("Session running").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Session has unread activity").assertDoesNotExist()
+    }
+
+    @Test
+    fun interruptedSessionShowsBadgeOnly() {
+        row(isLastTurnInterrupted = true)
+
+        composeTestRule.onNodeWithContentDescription("Last turn did not complete").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Session running").assertDoesNotExist()
+        composeTestRule.onNodeWithContentDescription("Session has unread activity").assertDoesNotExist()
+    }
+
+    @Test
+    fun runningWinsOverInterruptedBadge() {
+        // Spinner precedence (ticket 159): the badge shows only when not running.
+        row(isRunning = true, isLastTurnInterrupted = true)
+
+        composeTestRule.onNodeWithContentDescription("Session running").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Last turn did not complete").assertDoesNotExist()
+    }
+
+    @Test
+    fun interruptedBadgeWinsOverUnreadDot() {
+        // Web order (ticket 159): the badge sits between the spinner and the unread
+        // dot — the abort is the newer event, so it takes the trailing slot.
+        row(isLastTurnInterrupted = true, hasUnread = true)
+
+        composeTestRule.onNodeWithContentDescription("Last turn did not complete").assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription("Session has unread activity").assertDoesNotExist()
     }
 

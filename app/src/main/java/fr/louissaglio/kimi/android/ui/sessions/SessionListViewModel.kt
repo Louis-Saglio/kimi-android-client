@@ -261,6 +261,11 @@ class SessionListViewModel @Inject constructor(
                     it.copy(
                         isRunning = event.busy,
                         isAwaitingInteraction = isAwaitingInteraction(event.pendingInteraction),
+                        // The turn-end reason rides the idle frame only (null on busy
+                        // frames): "cancelled" lights the interrupted badge, "completed"
+                        // clears it (ticket 159); otherwise the REST-loaded value stays.
+                        isLastTurnInterrupted = event.lastTurnReason?.let { reason -> reason == "cancelled" }
+                            ?: it.isLastTurnInterrupted,
                     )
                 }
                 // A running row going idle on "completed" finished unseen (ticket 145).

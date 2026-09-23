@@ -78,6 +78,33 @@ class SessionsRepositoryTest {
     }
 
     @Test
+    fun `last turn reason maps to the interrupted flag, absent reads as normal`() = runBlocking {
+        server.enqueue(
+            MockResponse(body =
+                """
+                {"code":0,"msg":"success","data":{"items":[
+                  {"id":"session_cancelled","title":"Aborted","updated_at":"2026-07-17T03:48:31.606Z",
+                   "busy":false,"last_turn_reason":"cancelled","metadata":{"cwd":"/tmp/a"}},
+                  {"id":"session_completed","title":"Done","updated_at":"2026-07-17T03:48:31.606Z",
+                   "busy":false,"last_turn_reason":"completed","metadata":{"cwd":"/tmp/b"}},
+                  {"id":"session_never","title":"Fresh","updated_at":"2026-07-17T03:48:31.606Z",
+                   "busy":false,"metadata":{"cwd":"/tmp/c"}}
+                ],"has_more":false},"request_id":"01KX"}
+                """.trimIndent(),
+            ),
+        )
+
+        val sessions = repository.listSessions(settings()).getOrThrow().items
+
+        // "cancelled" lights the row's interrupted badge (ticket 159) — this is the
+        // persisted fallback that survives server restarts on cold sessions.
+        assertTrue(sessions[0].isLastTurnInterrupted)
+        assertFalse(sessions[1].isLastTurnInterrupted)
+        // Absent entirely on sessions that never ran a turn: normal row.
+        assertFalse(sessions[2].isLastTurnInterrupted)
+    }
+
+    @Test
     fun `next page sends before_id and parses has_more`() = runBlocking {
         server.enqueue(
             MockResponse(body =

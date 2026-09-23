@@ -12,6 +12,10 @@ data class Session(
     val isRunning: Boolean,
     /** True while the session is blocked on an approval or a question (see [isAwaitingInteraction]). */
     val isAwaitingInteraction: Boolean,
+    /** True when the session's last turn did not complete ("cancelled" — abort, crash,
+     * server restart mid-turn); the row's interrupted badge (ticket 159). Fed by the REST
+     * `last_turn_reason` and the WS turn-end frame; a later completed turn clears it. */
+    val isLastTurnInterrupted: Boolean = false,
 )
 
 /**

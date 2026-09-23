@@ -77,6 +77,7 @@ private data class CachedSession(
     val updatedAt: Long = 0,
     val isRunning: Boolean = false,
     val isAwaitingInteraction: Boolean = false,
+    val isLastTurnInterrupted: Boolean = false,
 )
 
 private fun CachedList.toEntry() = SessionListCache.Entry(
@@ -91,6 +92,7 @@ private fun CachedSession.toDomain() = Session(
     updatedAt = Instant.ofEpochMilli(updatedAt),
     isRunning = isRunning,
     isAwaitingInteraction = isAwaitingInteraction,
+    isLastTurnInterrupted = isLastTurnInterrupted,
 )
 
 private fun List<Session>.toCachedList(hasMore: Boolean) = CachedList(
@@ -102,6 +104,7 @@ private fun List<Session>.toCachedList(hasMore: Boolean) = CachedList(
             updatedAt = it.updatedAt.toEpochMilli(),
             isRunning = it.isRunning,
             isAwaitingInteraction = it.isAwaitingInteraction,
+            isLastTurnInterrupted = it.isLastTurnInterrupted,
         )
     },
     hasMore = hasMore,

@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.CircularProgressIndicator
@@ -81,6 +82,7 @@ import fr.louissaglio.kimi.android.ui.common.icons.ArchiveIcon
 import fr.louissaglio.kimi.android.ui.common.icons.ForkIcon
 import fr.louissaglio.kimi.android.ui.common.icons.WorkspaceIcon
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
+import fr.louissaglio.kimi.android.ui.theme.warningColor
 import java.time.Instant
 
 @Composable
@@ -636,12 +638,15 @@ internal fun SessionRow(
                 // A pending interaction reads as "needs me" and wins over "working": a
                 // session blocked on an approval or question is not making progress.
                 session.isAwaitingInteraction -> NeedsAttentionBadge()
+                // The spinner wins while running; the interrupted badge (ticket 159)
+                // shows on an idle row only, ahead of the unread dot (web order).
                 session.isRunning -> CircularProgressIndicator(
                     modifier = Modifier
                         .size(14.dp)
                         .semantics { contentDescription = "Session running" },
                     strokeWidth = 2.dp,
                 )
+                session.isLastTurnInterrupted -> InterruptedBadge()
                 hasUnread -> Box(
                     Modifier
                         .size(7.dp)
@@ -738,6 +743,21 @@ private fun NeedsAttentionBadge() {
     }
 }
 
+/**
+ * The interrupted-last-turn badge (ticket 159): a small warning-toned glyph meaning the
+ * last turn did not complete. A triage hint on a crowded row, not an alarm — icon-only,
+ * the 135 amber so it never reads as an error.
+ */
+@Composable
+private fun InterruptedBadge() {
+    Icon(
+        imageVector = Icons.Filled.Warning,
+        contentDescription = "Last turn did not complete",
+        tint = MaterialTheme.warningColor,
+        modifier = Modifier.size(14.dp),
+    )
+}
+
 /** How close (in rows) to the list end the scroll must get before the next page loads. */
 internal const val LOAD_MORE_THRESHOLD = 3
 
@@ -751,6 +771,7 @@ private fun SessionsContentPreview() {
                     Session("session_1", "Build an Android clone", "/home/ubuntu/kimi-android-client", Instant.now(), isRunning = true, isAwaitingInteraction = true),
                     Session("session_2", null, "/tmp/spike", Instant.now(), isRunning = false, isAwaitingInteraction = false),
                     Session("session_3", "Nightly protocol drift check", "/home/ubuntu/kimi-android-client", Instant.now(), isRunning = true, isAwaitingInteraction = false),
+                    Session("session_4", "Aborted migration run", "/tmp/spike", Instant.now(), isRunning = false, isAwaitingInteraction = false, isLastTurnInterrupted = true),
                 ),
                 unreadIds = setOf("session_2"),
             ),
