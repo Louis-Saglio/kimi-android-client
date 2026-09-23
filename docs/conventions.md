@@ -166,22 +166,29 @@
   row like a success) are mode-aware in the ViewModel; the fork inherits the source's `updated_at` (ticket 127), so
   its insert (ticket 128, from the long-press row dialog) lands at the sorted
   position next to the source, not at the top like create.
-- `data/search/` — ticket 146's global message search: `SearchApi` posts
+- `data/search/` — ticket 146's message search: `SearchApi` posts
   `/api/v1/search` (query + page_size 20, the other request fields riding their
   server defaults; the opaque v2 keyset `page_token` passed back verbatim —
   docs/server-api.md, Search) and maps DTO→domain (`SearchPage`/`SearchHit`,
   the hit's epoch-ms time → Instant, the `index_state.stale`/`degraded` pair
   folded into `SearchPage.indexStale` — the screen's banner signal; `incomplete`
-  deliberately unsurfaced). `SearchRepository` is the thin facade. The screen
-  (`ui/search`, `SearchScreen`/`SearchViewModel`, entered from the session list's
-  top-bar magnifier) submits on the IME search action, shows the hit rows (role
+  deliberately unsurfaced). Ticket 147's optional `container: {session_id}`
+  request field scopes the search to one session (`source:"live"` then;
+  `container.agent_id` is ignored server-side and never sent).
+  `SearchRepository` is the thin facade. The screen
+  (`ui/search`, `SearchScreen`/`SearchViewModel`, entered globally from the session
+  list's top-bar magnifier or scoped from the chat's top-bar magnifier — the scoped
+  `Search` route carrying the session id/title, the title slot's placeholder and
+  the prompt naming the scope) submits on the IME search action, shows the hit
+  rows (role
   icon, session title, snippet, platform-relative time) and pages on scroll with
   the sessions lists' end-reached/footer idioms — the keyset cursor pins the
   index generation, so no client-side dedup exists. A paged request's envelope
   40001 is the documented restart-from-page-one signal (the loaded rows stay up
   during the refetch, then are replaced); a new query cancels in-flight page
   loads and drops the token, so tokens never cross queries. A hit tap opens the
-  session through the plain Chat route — jump-to-message is out of scope.
+  session through the plain Chat route — or, scoped, just pops back to the chat
+  below (every hit is that session's) — jump-to-message is out of scope.
 - `data/attachments/` — `AttachmentStore` owns all platform file I/O (content
   resolver reads capped at 256 MiB — a client-side guard; the server removed
   its own upload cap in 0.31.0, see ticket 059; cache writes;

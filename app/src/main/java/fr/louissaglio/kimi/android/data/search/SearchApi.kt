@@ -10,13 +10,17 @@ import javax.inject.Singleton
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 
 /**
  * The global message search route (`POST /api/v1/search`, docs/server-api.md, Search —
  * ticket 146): full-text search over user messages, assistant replies and session
- * titles across all sessions. The request sends only `query`, `page_size` and the
- * continuation token: `mode`/`op`/`sort` ride their server defaults (terms/AND/score)
- * and the role/time filters are out of scope. Paging is the 0.33.0 v2 keyset cursor:
+ * titles across all sessions; ticket 147's [sessionId] scopes it to one session
+ * (`container.session_id` — the only container filter, `container.agent_id` being
+ * ignored server-side and never sent; the answer's `source` is then "live"). The
+ * request sends only `query`, `page_size` and the continuation token: `mode`/`op`/`sort`
+ * ride their server defaults (terms/AND/score) and the role/time filters are out of
+ * scope. Paging is the 0.33.0 v2 keyset cursor:
  * [pageToken] is opaque and goes back verbatim; a rejected token answers HTTP 200
  * with envelope code 40001, which surfaces as the typed
  * [fr.louissaglio.kimi.android.data.DataError.Api] through the [ApiClient] scaffold —
@@ -31,12 +35,21 @@ class SearchApi @Inject constructor(
     /**
      * Runs one page of the search. [pageToken] = null fetches the first page;
      * the response carries the next token only while [SearchPage.hasMore].
+     * [sessionId] scopes the search to that one session (ticket 147).
      */
-    suspend fun search(settings: ServerSettings, query: String, pageToken: String? = null): Result<SearchPage> {
+    suspend fun search(
+        settings: ServerSettings,
+        query: String,
+        pageToken: String? = null,
+        sessionId: String? = null,
+    ): Result<SearchPage> {
         val body = api.jsonBody {
             put("query", query)
             put("page_size", PAGE_SIZE)
             if (pageToken != null) put("page_token", pageToken)
+            if (sessionId != null) {
+                putJsonObject("container") { put("session_id", sessionId) }
+            }
         }
         return api.post(settings, "/api/v1/search", body) { responseBody ->
             api.json.decodeFromString<Envelope<SearchData>>(responseBody).toResult().map { it.toDomain() }

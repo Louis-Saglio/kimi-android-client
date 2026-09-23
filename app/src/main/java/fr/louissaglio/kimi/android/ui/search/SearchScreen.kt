@@ -51,11 +51,12 @@ import fr.louissaglio.kimi.android.ui.sessions.LoadMoreFooter
 import fr.louissaglio.kimi.android.ui.theme.warningColor
 
 /**
- * The global message search screen (ticket 146): a query field in the top bar
- * (submit on the IME search action), the hit list — role icon, session title,
- * snippet, hit time — paging on scroll, and the stale-index banner when the server
- * reports a lagging index. Tapping a hit opens its session's chat (jump-to-message
- * is out of scope).
+ * The message search screen (ticket 146; ticket 147's session-scoped variant): a
+ * query field in the top bar (submit on the IME search action), the hit list — role
+ * icon, session title, snippet, hit time — paging on scroll, and the stale-index
+ * banner when the server reports a lagging index. Scoped to one session, the title
+ * slot's placeholder and the prompt name it. Tapping a hit opens its session's chat —
+ * or, scoped, just returns to the chat below (jump-to-message is out of scope).
  */
 @Composable
 fun SearchScreen(
@@ -96,7 +97,13 @@ internal fun SearchContent(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(end = 8.dp),
-                        placeholder = { Text("Search messages") },
+                        placeholder = {
+                            Text(
+                                // Scoped (ticket 147): the title slot names the session.
+                                if (uiState.scopeTitle != null) "Search in \"${uiState.scopeTitle}\""
+                                else "Search messages",
+                            )
+                        },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                         keyboardActions = KeyboardActions(onSearch = { onSearchSubmit() }),
@@ -120,7 +127,13 @@ internal fun SearchContent(
             }
             when {
                 uiState.submittedQuery == null ->
-                    EmptyState("Search messages, replies and titles across all sessions")
+                    EmptyState(
+                        if (uiState.scopeTitle != null) {
+                            "Search messages and replies in \"${uiState.scopeTitle}\""
+                        } else {
+                            "Search messages, replies and titles across all sessions"
+                        },
+                    )
                 uiState.error != null -> ErrorState(uiState.error, onRetry)
                 uiState.results == null -> LoadingState()
                 uiState.results.isEmpty() ->

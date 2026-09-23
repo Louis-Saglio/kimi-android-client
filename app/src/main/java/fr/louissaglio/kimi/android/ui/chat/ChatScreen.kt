@@ -59,6 +59,7 @@ import fr.louissaglio.kimi.android.data.sessions.Session
 import fr.louissaglio.kimi.android.ui.common.EmptyState
 import fr.louissaglio.kimi.android.ui.common.ErrorState
 import fr.louissaglio.kimi.android.ui.common.LoadingState
+import fr.louissaglio.kimi.android.ui.common.icons.SearchIcon
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 import java.time.Instant
 import kotlinx.coroutines.delay
@@ -91,6 +92,9 @@ fun ChatScreen(
     /** Ticket 149: the overflow's "Files changed" opens the resolved turn's
      * file-changes screen. */
     onNavigateToTurnChanges: (sessionId: String, turnId: Int) -> Unit = { _, _ -> },
+    /** Ticket 147: the top bar's magnifier opens the search screen scoped to this
+     * session; the label rides along so the scoped screen can name its scope. */
+    onNavigateToSearch: (sessionId: String, sessionTitle: String?) -> Unit = { _, _ -> },
     /** Ticket 158: the composer prefill handed back by a sub-agent page's
      * Continue (a nav result on this entry's SavedStateHandle — KimiNavHost);
      * consumed once into the composer's text. */
@@ -204,6 +208,12 @@ fun ChatScreen(
     }
     // Scroll-to-top loads the next older history page (ticket 043).
     val onHistoryTopReached = remember(viewModel) { viewModel::onHistoryTopReached }
+    // The top bar's magnifier (ticket 147) opens the search scoped to this session,
+    // named by the label the top bar already shows.
+    val sessionLabel = uiState.sessionLabel
+    val onOpenSearch = remember(onNavigateToSearch, sessionId, sessionLabel) {
+        { onNavigateToSearch(sessionId, sessionLabel) }
+    }
     // AskUserQuestion rows (088/089): pending row toggles the live card, resolved
     // row opens/closes its read-only view — decided by the ViewModel.
     val onQuestionRowTapped = remember(viewModel) { viewModel::onQuestionRowTapped }
@@ -248,6 +258,7 @@ fun ChatScreen(
         onFork = viewModel::onFork,
         onFilesChanged = viewModel::onFilesChanged,
         onCancelJob = viewModel::onCancelJob,
+        onOpenSearch = onOpenSearch,
     )
     fullScreenImage?.let { image ->
         FullScreenImageViewer(
@@ -331,6 +342,7 @@ private fun ChatContent(
     onFork: () -> Unit = {},
     onFilesChanged: () -> Unit = {},
     onCancelJob: (String) -> Unit = {},
+    onOpenSearch: () -> Unit = {},
 ) {
     var showModelPicker by rememberSaveable { mutableStateOf(false) }
     var showPermissionPicker by rememberSaveable { mutableStateOf(false) }
@@ -372,6 +384,10 @@ private fun ChatContent(
                     }
                 },
                 actions = {
+                    // In-session message search (ticket 147).
+                    IconButton(onClick = onOpenSearch) {
+                        Icon(SearchIcon, contentDescription = "Search in session")
+                    }
                     // Session-level actions (ticket 056): the overflow menu hosts
                     // infrequent session management — "Compact session" first,
                     // "Fork session" (ticket 127) below it. The context ring, working

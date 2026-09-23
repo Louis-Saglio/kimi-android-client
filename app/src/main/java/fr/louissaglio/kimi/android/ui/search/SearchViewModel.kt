@@ -1,13 +1,16 @@
 package fr.louissaglio.kimi.android.ui.search
 
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.navigation.toRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
 import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.search.SearchHit
 import fr.louissaglio.kimi.android.data.search.SearchRepository
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.data.toUserMessage
+import fr.louissaglio.kimi.android.navigation.Search
 import javax.inject.Inject
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -16,20 +19,37 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
- * The global message search screen's state holder (ticket 146): `POST /api/v1/search`
- * over user messages, assistant replies and session titles across all sessions
- * (docs/server-api.md, Search). One query at a time: submitting cancels any in-flight
- * page load and drops the old page token, so a stale page can never land on a new
+ * The message search screen's state holder (ticket 146; scoped variant ticket 147):
+ * `POST /api/v1/search` over user messages, assistant replies and session titles —
+ * across all sessions, or only [routeArgs]' session when it carries one
+ * (`container.session_id`, docs/server-api.md, Search). One query at a time:
+ * submitting cancels any in-flight page load and drops the old page token, so a
+ * stale page can never land on a new
  * search and a token never crosses queries (the server would reject it — 40001 —
  * anyway). Paging appends while the server reports has_more, the opaque v2 keyset
  * token passed back verbatim; the keyset cursor pins the index generation, so pages
  * cannot overlap and no client-side dedup exists.
  */
 @HiltViewModel
-class SearchViewModel @Inject constructor(
+class SearchViewModel internal constructor(
     private val searchRepository: SearchRepository,
     private val settingsRepository: SettingsRepository,
+    private val routeArgs: Search,
 ) : ViewModel() {
+
+    // Production entry point (Hilt): the destination's SavedStateHandle is decoded
+    // from the typed route — ChatViewModel's construction pattern. Unit tests call
+    // the primary constructor with the route object directly (toRoute's decode path
+    // needs a real android.os.Bundle).
+    @Inject
+    constructor(
+        searchRepository: SearchRepository,
+        settingsRepository: SettingsRepository,
+        savedStateHandle: SavedStateHandle,
+    ) : this(searchRepository, settingsRepository, savedStateHandle.toRoute<Search>())
+
+    /** The session the search is scoped to (ticket 147); null = the global search. */
+    private val scopeSessionId: String? = routeArgs.sessionId
 
     /** [submittedQuery] null = no search submitted yet (the screen shows its prompt).
      * [results] null = the submitted query's first page has not landed (loading, or
@@ -46,10 +66,12 @@ class SearchViewModel @Inject constructor(
         val isLoadingMore: Boolean = false,
         val loadMoreError: String? = null,
         val indexStale: Boolean = false,
+        /** The scoped session's name (ticket 147); null on the global search. */
+        val scopeTitle: String? = null,
     )
 
     val uiState: StateFlow<UiState>
-        field = MutableStateFlow(UiState())
+        field = MutableStateFlow(UiState(scopeTitle = routeArgs.sessionTitle))
 
     /** The current query's opaque continuation token — deliberately not in UiState:
      * it is not renderable and must go back verbatim. */
@@ -89,7 +111,7 @@ class SearchViewModel @Inject constructor(
         val token = pageToken ?: return
         loadMoreJob = viewModelScope.launch {
             uiState.update { it.copy(isLoadingMore = true, loadMoreError = null) }
-            searchRepository.search(settingsRepository.current(), query, token)
+            searchRepository.search(settingsRepository.current(), query, token, scopeSessionId)
                 .onSuccess { page ->
                     pageToken = page.pageToken
                     uiState.update {
@@ -131,7 +153,7 @@ class SearchViewModel @Inject constructor(
                     indexStale = false,
                 )
             }
-            searchRepository.search(settingsRepository.current(), query)
+            searchRepository.search(settingsRepository.current(), query, sessionId = scopeSessionId)
                 .onSuccess { page ->
                     pageToken = page.pageToken
                     uiState.update {
@@ -158,7 +180,7 @@ class SearchViewModel @Inject constructor(
     private fun restartFromFirstPage(query: String) {
         pageToken = null
         loadMoreJob = viewModelScope.launch {
-            searchRepository.search(settingsRepository.current(), query)
+            searchRepository.search(settingsRepository.current(), query, sessionId = scopeSessionId)
                 .onSuccess { page ->
                     pageToken = page.pageToken
                     uiState.update {

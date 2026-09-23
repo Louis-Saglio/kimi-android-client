@@ -77,6 +77,30 @@ class SearchApiTest {
     }
 
     @Test
+    fun `search scoped to a session sends the container filter`() = runBlocking {
+        // Ticket 147: container.session_id scopes the search to one session; the
+        // answer's source is then "live" (docs/server-api.md:2611). container.agent_id
+        // is ignored server-side and never sent.
+        server.enqueue(
+            MockResponse(body =
+                """
+                {"code":0,"msg":"success","data":{"items":[],"has_more":false,
+                 "index_state":{"state":"ready","indexed_sessions":291,"total_sessions":291,"documents":6313},
+                 "source":"live"},"request_id":"01KY"}
+                """.trimIndent(),
+            ),
+        )
+
+        repository.search(settings(), "deploy failed", sessionId = "session_1").getOrThrow()
+
+        val request = server.takeRequest()
+        assertEquals(
+            """{"query":"deploy failed","page_size":20,"container":{"session_id":"session_1"}}""",
+            request.body!!.utf8(),
+        )
+    }
+
+    @Test
     fun `search passes the page token back verbatim and maps a current index`() = runBlocking {
         // A last page: has_more false, no token, and an index_state without
         // stale/degraded — no banner.

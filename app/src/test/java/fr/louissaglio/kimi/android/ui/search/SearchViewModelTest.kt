@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import fr.louissaglio.kimi.android.data.search.SearchHit
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
+import fr.louissaglio.kimi.android.navigation.Search
 import fr.louissaglio.kimi.android.testutil.awaitState
 import fr.louissaglio.kimi.android.testutil.testSearchRepository
 import java.util.concurrent.TimeUnit
@@ -51,7 +52,7 @@ class SearchViewModelTest {
             ),
             appScope,
         )
-        viewModel = SearchViewModel(testSearchRepository(), settingsRepository)
+        viewModel = SearchViewModel(testSearchRepository(), settingsRepository, Search())
     }
 
     @After
@@ -81,6 +82,36 @@ class SearchViewModelTest {
         assertEquals("POST", request.method)
         assertEquals("/api/v1/search", request.target)
         assertEquals("""{"query":"deploy failed","page_size":20}""", request.body!!.utf8())
+    }
+
+    @Test
+    fun `a session-scoped view model posts the container filter on every page`() = runBlocking {
+        // Ticket 147: the scoped variant (entered from the chat's top bar) sends
+        // container.session_id on the first page and keeps it while paging.
+        val scoped = SearchViewModel(
+            testSearchRepository(),
+            settingsRepository,
+            Search(sessionId = "session_1", sessionTitle = "Deploy hotfix"),
+        )
+        server.enqueue(MockResponse(body = pageBody(hasMore = true, "session_1")))
+
+        scoped.onQueryChange("deploy")
+        scoped.onSearch()
+
+        awaitState(scoped.uiState) { it.results != null }
+        assertEquals("Deploy hotfix", scoped.uiState.value.scopeTitle)
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1")))
+        scoped.onEndReached()
+
+        awaitState(scoped.uiState) { it.results?.size == 2 }
+        assertEquals(
+            """{"query":"deploy","page_size":20,"container":{"session_id":"session_1"}}""",
+            server.takeRequest(5, TimeUnit.SECONDS)!!.body!!.utf8(),
+        )
+        assertEquals(
+            """{"query":"deploy","page_size":20,"page_token":"tok_page_1","container":{"session_id":"session_1"}}""",
+            server.takeRequest(5, TimeUnit.SECONDS)!!.body!!.utf8(),
+        )
     }
 
     @Test

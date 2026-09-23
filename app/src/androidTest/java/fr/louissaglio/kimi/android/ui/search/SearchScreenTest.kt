@@ -44,6 +44,16 @@ class SearchScreenTest {
         )
 
     @Test
+    fun scopedSearchNamesTheSessionInTheTitleAndPrompt() {
+        // Ticket 147: the chat top bar's magnifier opens this screen scoped to the
+        // session — the title slot's placeholder and the prompt name it.
+        searchContent(SearchViewModel.UiState(scopeTitle = "Deploy hotfix"))
+
+        composeTestRule.onNodeWithText("Search in \"Deploy hotfix\"").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Search messages and replies in \"Deploy hotfix\"").assertIsDisplayed()
+    }
+
+    @Test
     fun resultsRenderTitleSnippetAndRoleIcon() {
         searchContent(
             SearchViewModel.UiState(

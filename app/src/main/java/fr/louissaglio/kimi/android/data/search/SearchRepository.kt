@@ -15,10 +15,16 @@ class SearchRepository @Inject constructor(
 ) {
 
     /**
-     * Runs one page of the global message search (`POST /api/v1/search`). [pageToken]
+     * Runs one page of the message search (`POST /api/v1/search`). [pageToken]
      * is the previous page's opaque continuation token, passed back verbatim; null
-     * fetches the first page.
+     * fetches the first page. [sessionId] scopes the search to that one session
+     * (ticket 147 — `container.session_id`); null is the global search.
      */
-    suspend fun search(settings: ServerSettings, query: String, pageToken: String? = null): Result<SearchPage> =
-        searchApi.search(settings, query, pageToken)
+    suspend fun search(
+        settings: ServerSettings,
+        query: String,
+        pageToken: String? = null,
+        sessionId: String? = null,
+    ): Result<SearchPage> =
+        searchApi.search(settings, query, pageToken, sessionId)
 }

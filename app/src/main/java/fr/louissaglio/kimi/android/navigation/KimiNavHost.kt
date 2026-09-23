@@ -38,9 +38,11 @@ object Settings
 @Serializable
 object Archived
 
-/** Global message search (ticket 146); entry from the session list's top bar. */
+/** Message search: global (ticket 146, entry from the session list's top bar) or
+ * scoped to one session (ticket 147, entry from the chat's top bar — the title rides
+ * along so the scoped screen can name its scope before any fetch). */
 @Serializable
-object Search
+data class Search(val sessionId: String? = null, val sessionTitle: String? = null)
 
 /** title/cwd ride along as optional query args so the chat top bar can show the
  * label the session list already had, before the session fetch lands. */
@@ -122,7 +124,7 @@ fun KimiNavHost(toolContentStore: ToolContentStore) {
             SessionsScreen(
                 onNavigateToSettings = { navController.navigate(Settings) },
                 onNavigateToArchived = { navController.navigate(Archived) },
-                onNavigateToSearch = { navController.navigate(Search) },
+                onNavigateToSearch = { navController.navigate(Search()) },
                 restoredFromArchive = restoredFromArchive,
                 onRestoredFromArchiveConsumed = {
                     entry.savedStateHandle[KEY_RESTORED_FROM_ARCHIVE] = false
@@ -148,13 +150,20 @@ fun KimiNavHost(toolContentStore: ToolContentStore) {
                 },
             )
         }
-        composable<Search> {
+        composable<Search> { entry ->
+            val route = entry.toRoute<Search>()
             SearchScreen(
                 onNavigateBack = { navController.popBackStack() },
                 // A hit opens its session's chat; jump-to-message is out of scope.
+                // Scoped (ticket 147): every hit is the current session's, and the
+                // chat is right below — a tap just returns to it.
                 onOpenSession = { hit ->
-                    navController.navigate(Chat(hit.sessionId, hit.sessionTitle)) {
-                        launchSingleTop = true
+                    if (route.sessionId != null) {
+                        navController.popBackStack()
+                    } else {
+                        navController.navigate(Chat(hit.sessionId, hit.sessionTitle)) {
+                            launchSingleTop = true
+                        }
                     }
                 },
             )
@@ -212,6 +221,13 @@ fun KimiNavHost(toolContentStore: ToolContentStore) {
                 // Ticket 149: the overflow's "Files changed" opens the turn's list.
                 onNavigateToTurnChanges = { sessionId, turnId ->
                     navController.navigate(TurnChanges(sessionId, turnId)) {
+                        launchSingleTop = true
+                    }
+                },
+                // Ticket 147: the top bar's magnifier opens the search screen scoped
+                // to this session.
+                onNavigateToSearch = { sessionId, sessionTitle ->
+                    navController.navigate(Search(sessionId, sessionTitle)) {
                         launchSingleTop = true
                     }
                 },
