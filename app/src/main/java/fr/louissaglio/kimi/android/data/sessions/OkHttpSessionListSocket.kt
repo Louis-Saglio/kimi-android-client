@@ -1,6 +1,7 @@
 package fr.louissaglio.kimi.android.data.sessions
 
 import android.util.Log
+import fr.louissaglio.kimi.android.data.network.SocketStallWatchdog
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import java.io.IOException
 import java.util.UUID
@@ -57,7 +58,8 @@ class OkHttpSessionListSocket @Inject constructor(
     // Same rationale as SessionSocket: protocol pings keep the socket alive through
     // dead NAT routes; the 0.35.0 app-level heartbeat (docs/server-api.md, Heartbeat)
     // is answered in handleFrame. The read timeout stays disabled so an idle
-    // connection is not cut.
+    // connection is not cut — a silently-stalled socket is the stall watchdog's job
+    // (ticket 152, see runConnection).
     private val socketClient = client.newBuilder()
         .readTimeout(0, TimeUnit.SECONDS)
         .pingInterval(20, TimeUnit.SECONDS)
@@ -117,6 +119,9 @@ class OkHttpSessionListSocket @Inject constructor(
         onEvent: suspend (SessionListEvent) -> Unit,
     ) {
         val signals = Channel<Signal>(Channel.UNLIMITED)
+        // One watchdog per connection (ticket 152): the timer and the server_hello
+        // heartbeat value reset across reconnects by construction.
+        val watchdog = SocketStallWatchdog(TAG)
         val webSocket = socketClient.newWebSocket(
             Request.Builder().url(url).build(),
             object : WebSocketListener() {
@@ -155,8 +160,9 @@ class OkHttpSessionListSocket @Inject constructor(
                 var idJob: Job? = null
                 try {
                     while (true) {
-                        when (val signal = signals.receive()) {
+                        when (val signal = watchdog.receive(signals)) {
                             Signal.Opened -> {
+                                watchdog.onOpen()
                                 onOpen()
                                 // Follow the loaded ids for the life of this connection:
                                 // the first emission subscribes the current set in ONE
@@ -172,7 +178,7 @@ class OkHttpSessionListSocket @Inject constructor(
                                     }
                                 }
                             }
-                            is Signal.Text -> handleFrame(webSocket, signal.text, subscribed, onEvent)
+                            is Signal.Text -> handleFrame(webSocket, signal.text, subscribed, watchdog, onEvent)
                             Signal.Closed -> return@coroutineScope
                             is Signal.Failed -> throw IOException("WebSocket failed", signal.cause)
                         }
@@ -192,6 +198,7 @@ class OkHttpSessionListSocket @Inject constructor(
         webSocket: WebSocket,
         text: String,
         subscribed: Set<String>,
+        watchdog: SocketStallWatchdog,
         onEvent: suspend (SessionListEvent) -> Unit,
     ) {
         val frame = try {
@@ -271,8 +278,12 @@ class OkHttpSessionListSocket @Inject constructor(
             "ping" -> frame.payload?.get("nonce")?.jsonPrimitive?.contentOrNull
                 ?.let { webSocket.send(pongFrame(it)) }
                 ?: Log.w(TAG, "Dropping 'ping' frame without a nonce")
-            // server_hello and every other event type: ignored, but logged so a server
-            // rename shows up during development.
+            // server_hello (docs/server-api.md, WebSocket): heartbeat_ms sets the stall
+            // watchdog's threshold (3× — ticket 152); the rest of the payload is unused.
+            "server_hello" -> frame.decodePayload<ServerHelloPayload>()
+                ?.heartbeatMs?.let { watchdog.onServerHello(it) }
+            // Every other event type: ignored, but logged so a server rename shows up
+            // during development.
             else -> Log.d(TAG, "Ignoring '${frame.type}' frame")
         }
     }

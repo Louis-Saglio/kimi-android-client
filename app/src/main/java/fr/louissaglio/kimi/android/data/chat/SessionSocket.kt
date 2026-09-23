@@ -2,6 +2,7 @@ package fr.louissaglio.kimi.android.data.chat
 
 import android.util.Log
 import fr.louissaglio.kimi.android.data.DataError
+import fr.louissaglio.kimi.android.data.network.SocketStallWatchdog
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import java.io.IOException
 import java.util.UUID
@@ -49,7 +50,8 @@ class SessionSocket @Inject constructor(
     // Protocol-level WS pings keep the socket alive through dead NAT routes; the
     // 0.35.0 app-level heartbeat (docs/server-api.md, Heartbeat) is answered in
     // handleFrame. The read timeout stays disabled so an idle stream is not cut
-    // (the shared client sets 30 s for REST).
+    // (the shared client sets 30 s for REST) — a silently-stalled socket is the
+    // stall watchdog's job (ticket 152, see runConnection).
     private val socketClient = client.newBuilder()
         .readTimeout(0, TimeUnit.SECONDS)
         .pingInterval(20, TimeUnit.SECONDS)
@@ -146,7 +148,10 @@ class SessionSocket @Inject constructor(
     /**
      * Runs one socket connection until it closes or fails. Listener callbacks (OkHttp
      * threads) feed a channel consumed in this coroutine, so [onOpen]/[onEvent] run
-     * sequentially on the collector's context.
+     * sequentially on the collector's context. The stall watchdog (ticket 152) rides
+     * the same channel: inbound silence past 3× `heartbeat_ms` unwinds the connection
+     * as an ordinary failure, so the reconnect loop (backoff, cursor resume, the
+     * collector's REST resync) treats a stalled socket exactly like a dropped one.
      */
     private suspend fun FlowCollector<SocketEvent>.runConnection(
         url: HttpUrl,
@@ -162,6 +167,7 @@ class SessionSocket @Inject constructor(
         // emission → full markdown re-parse), so a frame burst can only ever queue
         // cheap unparsed strings here, never unbounded expensive downstream work.
         val signals = Channel<Signal>(Channel.UNLIMITED)
+        val watchdog = SocketStallWatchdog(TAG)
         val webSocket = socketClient.newWebSocket(
             Request.Builder().url(url).build(),
             object : WebSocketListener() {
@@ -189,13 +195,14 @@ class SessionSocket @Inject constructor(
         )
         try {
             while (true) {
-                when (val signal = signals.receive()) {
+                when (val signal = watchdog.receive(signals)) {
                     Signal.Opened -> {
+                        watchdog.onOpen()
                         onOpen()
                         webSocket.send(subscribeFrame(sessionId, cursor))
                     }
                     is Signal.Text ->
-                        handleFrame(webSocket, signal.text, sessionId, onCursor, onResyncRequired, onEvent)
+                        handleFrame(webSocket, signal.text, sessionId, watchdog, onCursor, onResyncRequired, onEvent)
                     Signal.Closed -> return
                     is Signal.Failed -> throw IOException("WebSocket failed", signal.cause)
                 }
@@ -211,6 +218,7 @@ class SessionSocket @Inject constructor(
         webSocket: WebSocket,
         text: String,
         sessionId: String,
+        watchdog: SocketStallWatchdog,
         onCursor: (Cursor) -> Unit,
         onResyncRequired: suspend () -> Unit,
         onEvent: suspend (SessionEvent) -> Unit,
@@ -402,8 +410,12 @@ class SessionSocket @Inject constructor(
             "ping" -> frame.payload?.get("nonce")?.jsonPrimitive?.contentOrNull
                 ?.let { webSocket.send(pongFrame(it)) }
                 ?: Log.w(TAG, "Dropping 'ping' frame without a nonce")
-            // server_hello and events we don't render yet: ignored, but logged so a
-            // server rename shows up during development.
+            // server_hello (docs/server-api.md, WebSocket): heartbeat_ms sets the stall
+            // watchdog's threshold (3× — ticket 152); the rest of the payload is unused.
+            "server_hello" -> frame.decodePayload<ServerHelloPayload>()
+                ?.heartbeatMs?.let { watchdog.onServerHello(it) }
+            // Events we don't render yet: ignored, but logged so a server rename shows
+            // up during development.
             else -> Log.d(TAG, "Ignoring '${frame.type}' frame")
         }
     }

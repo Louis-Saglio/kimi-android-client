@@ -247,6 +247,16 @@ data class AckPayload(
     @SerialName("resync_required") val resyncRequired: List<String> = emptyList(),
 )
 
+/**
+ * `payload` of the `server_hello` frame (docs/server-api.md, WebSocket); only
+ * `heartbeat_ms` is consumed — the stall watchdog's idle threshold is 3× it
+ * (ticket 152).
+ */
+@Serializable
+data class ServerHelloPayload(
+    @SerialName("heartbeat_ms") val heartbeatMs: Long? = null,
+)
+
 @Serializable
 data class DeltaPayload(val delta: String = "")
 

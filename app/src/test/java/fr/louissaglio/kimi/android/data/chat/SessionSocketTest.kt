@@ -5,6 +5,7 @@ import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.webSocketUpgradeResponse
 import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
+import kotlin.concurrent.thread
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -20,6 +21,7 @@ import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -494,6 +496,193 @@ class SessionSocketTest {
                 SocketEvent.Event(SessionEvent.AssistantDelta("untagged")),
             ),
             emitted.filterIsInstance<SocketEvent.Event>(),
+        )
+    }
+
+    @Test
+    fun `inbound silence past three heartbeats drops the socket and reconnects with resync`() = runBlocking {
+        // Ticket 152 — the 0.38.0 anomaly: a subscribed socket stalls silently (no
+        // close frame, no events, not even heartbeat pings) while REST shows the run
+        // completing. Silence past 3x heartbeat_ms must be treated as a drop: close,
+        // backoff reconnect, cursor resume, and the Reconnected the collector's REST
+        // resync rides on.
+        val secondFrames = CopyOnWriteArrayList<String>()
+        val emitted = CopyOnWriteArrayList<SocketEvent>()
+        server.enqueue(
+            webSocketUpgradeResponse(
+                object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: Response) {
+                        // 50 ms heartbeat → the stall threshold is 150 ms of silence.
+                        webSocket.send("""{"type":"server_hello","payload":{"heartbeat_ms":50}}""")
+                        // One cursor-carrying frame, then silence forever — the stall.
+                        webSocket.send(
+                            """{"type":"turn.started","seq":5,"epoch":"ep_1","session_id":"session_1",""" +
+                                """"timestamp":"2026-09-23T00:00:00.000Z","payload":{"type":"turn.started","turnId":0}}""",
+                        )
+                    }
+                },
+            ),
+        )
+        server.enqueue(
+            webSocketUpgradeResponse(
+                object : WebSocketListener() {
+                    override fun onMessage(webSocket: WebSocket, text: String) {
+                        secondFrames += text
+                    }
+                },
+            ),
+        )
+        coroutineScope {
+            val job = launch { socket.observe(settings(), "session_1").collect { emitted += it } }
+            try {
+                // The reconnect follows the first backoff step (1 s) after the stall.
+                awaitCondition(timeoutMs = 10_000) { secondFrames.isNotEmpty() }
+            } finally {
+                job.cancel()
+            }
+        }
+
+        assertEquals(
+            listOf(
+                SocketEvent.Connected,
+                SocketEvent.Event(SessionEvent.TurnStarted()),
+                SocketEvent.Disconnected,
+                SocketEvent.Reconnected(5, "ep_1"),
+            ),
+            emitted,
+        )
+        // The resubscribe carries the stored cursor, so the stalled window replays.
+        assertEquals(1, secondFrames.size)
+        assertTrue("""{"seq":5,"epoch":"ep_1"}""" in secondFrames.single().substringAfter("\"cursors\":", ""))
+    }
+
+    @Test
+    fun `any inbound frame resets the stall watchdog`() = runBlocking {
+        // Frames dripping every 150 ms against a 300 ms threshold (100 ms heartbeat):
+        // over two full threshold windows of traffic, no drop may happen.
+        val emitted = CopyOnWriteArrayList<SocketEvent>()
+        server.enqueue(
+            webSocketUpgradeResponse(
+                object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: Response) {
+                        webSocket.send("""{"type":"server_hello","payload":{"heartbeat_ms":100}}""")
+                        thread(isDaemon = true) {
+                            repeat(5) {
+                                Thread.sleep(150)
+                                webSocket.send(
+                                    """{"type":"assistant.delta","seq":2,"epoch":"ep_1","volatile":true,"offset":0,""" +
+                                        """"session_id":"session_1","timestamp":"2026-09-23T00:00:00.000Z",""" +
+                                        """"payload":{"type":"assistant.delta","turnId":1,"delta":"d",""" +
+                                        """"agentId":"main","sessionId":"session_1"}}""",
+                                )
+                            }
+                        }
+                    }
+                },
+            ),
+        )
+        coroutineScope {
+            val job = launch { socket.observe(settings(), "session_1").collect { emitted += it } }
+            try {
+                awaitCondition { emitted.count { it is SocketEvent.Event } >= 5 }
+            } finally {
+                job.cancel()
+            }
+        }
+
+        // Still the one connection — every drip re-armed the watchdog.
+        assertEquals(1, server.requestCount)
+        assertEquals(
+            listOf(SocketEvent.Connected) + List(5) { SocketEvent.Event(SessionEvent.AssistantDelta("d")) },
+            emitted,
+        )
+    }
+
+    @Test
+    fun `server pings alone keep the socket alive`() = runBlocking {
+        // The heartbeat ping IS an inbound frame: pings every 150 ms (and nothing
+        // else) against the 300 ms threshold must never trip the watchdog.
+        val clientFrames = CopyOnWriteArrayList<String>()
+        server.enqueue(
+            webSocketUpgradeResponse(
+                object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: Response) {
+                        webSocket.send("""{"type":"server_hello","payload":{"heartbeat_ms":100}}""")
+                        thread(isDaemon = true) {
+                            repeat(5) {
+                                Thread.sleep(150)
+                                webSocket.send("""{"type":"ping","payload":{"nonce":"n$it"}}""")
+                            }
+                        }
+                    }
+
+                    override fun onMessage(webSocket: WebSocket, text: String) {
+                        clientFrames += text
+                    }
+                },
+            ),
+        )
+        coroutineScope {
+            val job = launch { socket.observe(settings(), "session_1").collect {} }
+            try {
+                // The subscribe plus the pong answering each ping of the drip.
+                awaitCondition { clientFrames.size >= 6 }
+            } finally {
+                job.cancel()
+            }
+        }
+
+        assertEquals(1, server.requestCount)
+        assertEquals("""{"type":"pong","payload":{"nonce":"n4"}}""", clientFrames[5])
+    }
+
+    @Test
+    fun `the watchdog re-arms across reconnects`() = runBlocking {
+        // Each connection delivers one frame and then stalls: the reconnect must carry
+        // a fresh watchdog, so the second stall fires too and a third connection opens.
+        val thirdFrames = CopyOnWriteArrayList<String>()
+        val emitted = CopyOnWriteArrayList<SocketEvent>()
+        fun stallAfterOneFrame(seq: Long) = object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                webSocket.send("""{"type":"server_hello","payload":{"heartbeat_ms":50}}""")
+                webSocket.send(
+                    """{"type":"turn.started","seq":$seq,"epoch":"ep_1","session_id":"session_1",""" +
+                        """"timestamp":"2026-09-23T00:00:00.000Z","payload":{"type":"turn.started","turnId":0}}""",
+                )
+            }
+        }
+        server.enqueue(webSocketUpgradeResponse(stallAfterOneFrame(seq = 5)))
+        server.enqueue(webSocketUpgradeResponse(stallAfterOneFrame(seq = 6)))
+        server.enqueue(
+            webSocketUpgradeResponse(
+                object : WebSocketListener() {
+                    override fun onMessage(webSocket: WebSocket, text: String) {
+                        thirdFrames += text
+                    }
+                },
+            ),
+        )
+        coroutineScope {
+            val job = launch { socket.observe(settings(), "session_1").collect { emitted += it } }
+            try {
+                // Stall (150 ms) + 1 s backoff, then stall + 2 s backoff.
+                awaitCondition(timeoutMs = 15_000) { thirdFrames.isNotEmpty() }
+            } finally {
+                job.cancel()
+            }
+        }
+
+        assertEquals(
+            listOf(
+                SocketEvent.Connected,
+                SocketEvent.Event(SessionEvent.TurnStarted()),
+                SocketEvent.Disconnected,
+                SocketEvent.Reconnected(5, "ep_1"),
+                SocketEvent.Event(SessionEvent.TurnStarted()),
+                SocketEvent.Disconnected,
+                SocketEvent.Reconnected(6, "ep_1"),
+            ),
+            emitted,
         )
     }
 }

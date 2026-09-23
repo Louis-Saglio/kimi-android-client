@@ -144,6 +144,14 @@ data class SessionListWsFrame(
     val payload: JsonObject? = null,
 )
 
+/** `payload` of the `server_hello` frame (docs/server-api.md, WebSocket); only
+ * `heartbeat_ms` is consumed — the stall watchdog's idle threshold is 3× it
+ * (ticket 152). */
+@Serializable
+data class ServerHelloPayload(
+    @SerialName("heartbeat_ms") val heartbeatMs: Long? = null,
+)
+
 @Serializable
 data class WorkChangedPayload(
     val busy: Boolean = false,

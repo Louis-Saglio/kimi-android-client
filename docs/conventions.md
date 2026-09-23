@@ -2,7 +2,13 @@
 
 - `data/network/` — `ApiClient` is the shared HTTP scaffold (URL building,
   401/HTTP/IO → `DataError`, envelope unwrap). Every REST call goes through it;
-  never hand-roll `Request.Builder` in a repository.
+  never hand-roll `Request.Builder` in a repository. `SocketStallWatchdog`
+  (ticket 152) is the shared stalled-socket detection both WebSockets run: one
+  instance per connection, armed at socket open, fed `heartbeat_ms` from each
+  connection's `server_hello`; inbound silence past 3× it unwinds the connection
+  as an ordinary failure, so the existing reconnect loop (backoff, cursor resume,
+  the collector's REST resync) treats a silently-stalled socket exactly like a
+  dropped one.
 - `data/chat/` — `ChatRepository` is a thin facade over `ChatApi` (REST verbs),
   `SessionSocket` (WebSocket, reconnect, per-session resume cursor held at
   instance level so it survives the ON_STOP/ON_START collection restarts —

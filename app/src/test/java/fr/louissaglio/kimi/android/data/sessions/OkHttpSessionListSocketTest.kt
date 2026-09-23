@@ -397,6 +397,40 @@ class OkHttpSessionListSocketTest {
         assertEquals(1, events.count { it == SessionListEvent.Reconnected })
     }
 
+    @Test
+    fun `inbound silence past three heartbeats drops the socket and reconnects`() = runBlocking {
+        // The shared stall watchdog (ticket 152) rides this socket too: a stalled list
+        // connection is closed, and the backoff reconnect's resubscribe + Reconnected
+        // drive the ViewModel's silent REST re-sync.
+        sessionIds.value = linkedSetOf("session_1")
+        val secondFrames = CopyOnWriteArrayList<String>()
+        val events = CopyOnWriteArrayList<SessionListEvent>()
+        server.enqueue(
+            webSocketUpgradeResponse(
+                object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: Response) {
+                        // 50 ms heartbeat → the stall threshold is 150 ms of silence.
+                        webSocket.send("""{"type":"server_hello","payload":{"heartbeat_ms":50}}""")
+                        // Then silence forever — the stall.
+                    }
+                },
+            ),
+        )
+        server.enqueue(webSocketUpgradeResponse(recordingListener(secondFrames)))
+        coroutineScope {
+            val job = launch { socket.observe(settings(), sessionIds).collect { events += it } }
+            try {
+                // The reconnect follows the first backoff step (1 s) after the stall.
+                awaitCondition(timeoutMs = 10_000) { secondFrames.isNotEmpty() }
+            } finally {
+                job.cancel()
+            }
+        }
+
+        assertEquals(setOf("session_1"), subscribeSessionIds(secondFrames.single()))
+        assertEquals(1, events.count { it == SessionListEvent.Reconnected })
+    }
+
     private fun workChangedFrame(sessionId: String, busy: Boolean, pendingInteraction: String): String =
         """{"type":"event.session.work_changed","seq":9,"epoch":"ep_1","session_id":"$sessionId",""" +
             """"timestamp":"2026-08-02T00:00:00.000Z","payload":{"type":"event.session.work_changed",""" +
