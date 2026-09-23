@@ -30,6 +30,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -58,6 +59,7 @@ import fr.louissaglio.kimi.android.data.chat.GrepResultParser
 import fr.louissaglio.kimi.android.data.chat.ToolDetailFields
 import fr.louissaglio.kimi.android.data.chat.ToolPayload
 import fr.louissaglio.kimi.android.data.chat.ToolPreview
+import fr.louissaglio.kimi.android.data.chat.agentResumeCallOf
 import fr.louissaglio.kimi.android.ui.common.formatFileSize
 import fr.louissaglio.kimi.android.ui.common.icons.ClockIcon
 import fr.louissaglio.kimi.android.ui.common.icons.DocumentIcon
@@ -115,6 +117,8 @@ internal fun ToolGroupCard(
     onOpenFileContent: (toolCallId: String, payload: ToolPayload, output: String) -> Unit = { _, _, _ -> },
     swarmMembers: Map<String, List<SubagentStreamStore.SubagentState>> = emptyMap(),
     onOpenSwarm: (String) -> Unit = {},
+    /** Ticket 158: the spawn row's "Next step" Continue (the composer prefill). */
+    onContinueSubagent: (String) -> Unit = {},
 ) {
     val status = when {
         group.tools.any { it.status == ToolStatus.Running } -> ToolStatus.Running
@@ -150,7 +154,7 @@ internal fun ToolGroupCard(
             group.tools.forEachIndexed { index, tool ->
                 // 1dp outlineVariant hairline between rows, like the web's row separators.
                 if (index > 0) HorizontalDivider()
-                ToolRow(tool, onOpenSubagent, onOpenJob, onQuestionRowTapped, onOpenEditDiff, onOpenFileContent, swarmMembers, onOpenSwarm)
+                ToolRow(tool, onOpenSubagent, onOpenJob, onQuestionRowTapped, onOpenEditDiff, onOpenFileContent, swarmMembers, onOpenSwarm, onContinueSubagent)
             }
         }
     }
@@ -457,6 +461,9 @@ internal fun ToolRow(
     onOpenFileContent: (toolCallId: String, payload: ToolPayload, output: String) -> Unit = { _, _, _ -> },
     swarmMembers: Map<String, List<SubagentStreamStore.SubagentState>> = emptyMap(),
     onOpenSwarm: (String) -> Unit = {},
+    /** Ticket 158: the spawn row's "Next step" Continue — invoked with the
+     * composer prefill (the hint's suggested `Agent(resume=…)` call text). */
+    onContinueSubagent: (String) -> Unit = {},
 ) {
     val swarmMemberList = swarmMembers[activity.id].orEmpty()
     if (activity.name == AGENT_SWARM_TOOL_NAME && swarmMemberList.isNotEmpty()) {
@@ -466,7 +473,22 @@ internal fun ToolRow(
     // Ticket 157: an `Agent` spawn witnessed with its `agent_call` display renders
     // as the dedicated spawn row — title, prompt preview, badge, deep-link tap.
     activity.agentCall?.let { agentCall ->
-        AgentSpawnRow(activity, agentCall, onOpenSubagent, onOpenJob)
+        Column(Modifier.fillMaxWidth()) {
+            AgentSpawnRow(activity, agentCall, onOpenSubagent, onOpenJob)
+            // Ticket 158: a settled spawn whose result carried continuation copy
+            // shows the "Next step" section under the row — the copy verbatim plus
+            // the Continue action that pre-fills the composer with the hint's
+            // suggested `Agent(resume=…)` call.
+            if (activity.resumeHint != null || activity.nextStep != null) {
+                AgentNextStepSection(
+                    nextStep = activity.nextStep,
+                    resumeHint = activity.resumeHint,
+                    prefill = activity.agentResumePrefill(),
+                    onContinue = onContinueSubagent,
+                    modifier = Modifier.padding(bottom = 4.dp),
+                )
+            }
+        }
         return
     }
     val detailColor = MaterialTheme.colorScheme.onSurfaceVariant
@@ -973,6 +995,13 @@ internal fun ChatItem.ToolActivity.agentSpawnTap(): AgentSpawnTap? {
     }
 }
 
+/** The spawn row's composer prefill (ticket 158): the `resume_hint:` block's
+ * suggested `Agent(resume="agent-N", prompt="…")` call text (AgentResults),
+ * verbatim; null when the result carried no hint or the hint no recognizable
+ * call — the "Next step" section's Continue action then never shows. */
+internal fun ChatItem.ToolActivity.agentResumePrefill(): String? =
+    resumeHint?.let(::agentResumeCallOf)
+
 /** The `agent_call` spawn row (ticket 157): the dedicated row for an `Agent` spawn
  * witnessed with its typed display — the title names the sub-agent type, the prompt
  * previews in up to two prose lines, and a background spawn earns the "Background"
@@ -1062,6 +1091,47 @@ private fun AgentSpawnRow(
                     .clickable { onOpenJob(tap.taskId) },
                 tint = detailColor,
             )
+        }
+    }
+}
+
+/** The "Next step" section of a settled `Agent` run (ticket 158): the parsed
+ * `next_step:`/`resume_hint:` result blocks verbatim (docs/server-api.md,
+ * Sub-agents), plus the Continue action that pre-fills the composer with the
+ * hint's suggested `Agent(resume=…)` call text — the user reviews and sends,
+ * and the server executes it as the next prompt's tool call (no dedicated
+ * resume endpoint exists). Rendered by the spawn row (under the row) and the
+ * finished sub-agent page (above the dock); absent entirely when the result
+ * carried no continuation copy, so hint-less results render exactly as before. */
+@Composable
+internal fun AgentNextStepSection(
+    nextStep: String?,
+    resumeHint: String?,
+    prefill: String?,
+    onContinue: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.small, modifier = modifier) {
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = "Next step",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            nextStep?.let { copy ->
+                Text(copy, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            resumeHint?.let { copy ->
+                Text(copy, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (prefill != null) {
+                TextButton(onClick = { onContinue(prefill) }, modifier = Modifier.align(Alignment.End)) {
+                    Text("Continue")
+                }
+            }
         }
     }
 }

@@ -59,6 +59,15 @@
   sub-agent", previews the prompt and badges a background spawn; the tap follows
   the spawn's kind — the sub-agent page (foreground, the 045 link) or the job
   screen (background, the result's `task_id: agent-…` head, the 096 treatment).
+  Ticket 158 adds `AgentResults` — the `Agent` result's continuation blocks
+  (0.43.0's foreground `resume_hint:`, 0.31.0's background `next_step:`/
+  `resume_hint:`), parsed verbatim onto the sub-agent record (independently of the
+  status precedence — the call's result is their only carrier) and, via `enriched`,
+  onto the spawn row: the finished sub-agent page (pinned above the dock) and a
+  settled spawn row (under the row) show the shared "Next step" section, whose
+  Continue pre-fills the chat composer with the hint's suggested
+  `Agent(resume="agent-N", prompt="…")` call — from the page, riding a nav result
+  on the chat entry's SavedStateHandle. Hint-less results render exactly as before.
   Anything still
   falling back to the plain generic table is by design (unknown/future/MCP tools). `ReadOutputs` (the
   Read output's trailing `<system>…</system>` status block lifted into the file

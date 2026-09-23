@@ -89,6 +89,11 @@ fun SubagentScreen(
     /** Ticket 120: a parsed `Read`/`Write` row opens the file content screen, exactly
      * like the chat's rows — payload and output snapshot ride along. */
     onNavigateToFileContent: (toolCallId: String, payload: ToolPayload, output: String) -> Unit = { _, _, _ -> },
+    /** Ticket 158: the "Next step" section's Continue — invoked with the composer
+     * prefill (the hint's suggested `Agent(resume=…)` call text). The page has no
+     * composer of its own, so the nav host pops back to the chat, where the
+     * prefill lands in its input. */
+    onContinueWithResume: (String) -> Unit = {},
     viewModel: SubagentViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -134,6 +139,7 @@ fun SubagentScreen(
         onOpenJob = onOpenJob,
         onOpenEditDiff = onNavigateToEditDiff,
         onOpenFileContent = onNavigateToFileContent,
+        onContinueWithResume = onContinueWithResume,
         onDetachToBackground = viewModel::onDetachToBackground,
         onRetry = viewModel::onRetry,
         onHistoryTopReached = viewModel::onHistoryTopReached,
@@ -152,6 +158,9 @@ internal fun SubagentContent(
     onOpenJob: (String) -> Unit = {},
     onOpenEditDiff: (toolCallId: String, payload: ToolPayload.Edit) -> Unit = { _, _ -> },
     onOpenFileContent: (toolCallId: String, payload: ToolPayload, output: String) -> Unit = { _, _, _ -> },
+    /** The "Next step" section's Continue (ticket 158), offered while the record
+     *  is finished with continuation copy — invoked with the composer prefill. */
+    onContinueWithResume: (String) -> Unit = {},
     /** The overflow's "To background" (ticket 138), offered while the record says
      * the member is detachable. */
     onDetachToBackground: () -> Unit = {},
@@ -222,15 +231,30 @@ internal fun SubagentContent(
             )
         },
         bottomBar = {
-            // The sub-agent's own todos/jobs — the chat's dock, minus the affordance
-            // REST `/tasks` cannot back for a sub-agent (cancel).
-            TodoJobsDock(
-                todos = uiState.todos,
-                jobs = uiState.jobs,
-                items = uiState.items,
-                onOpenSubagent = onOpenSubagent,
-                onOpenJob = onOpenJob,
-            )
+            Column {
+                // Ticket 158: a finished run whose result carried continuation
+                // copy shows the "Next step" section pinned above the dock —
+                // the copy verbatim plus the Continue action that pre-fills
+                // the chat's composer with the hint's suggested resume call.
+                if (uiState.hasNextStep) {
+                    AgentNextStepSection(
+                        nextStep = uiState.nextStep,
+                        resumeHint = uiState.resumeHint,
+                        prefill = uiState.resumePrefill,
+                        onContinue = onContinueWithResume,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                    )
+                }
+                // The sub-agent's own todos/jobs — the chat's dock, minus the
+                // affordance REST `/tasks` cannot back for a sub-agent (cancel).
+                TodoJobsDock(
+                    todos = uiState.todos,
+                    jobs = uiState.jobs,
+                    items = uiState.items,
+                    onOpenSubagent = onOpenSubagent,
+                    onOpenJob = onOpenJob,
+                )
+            }
         },
     ) { innerPadding ->
         Box(Modifier.fillMaxSize().padding(innerPadding)) {
@@ -250,6 +274,9 @@ internal fun SubagentContent(
                     onOpenJob = onOpenJob,
                     onOpenEditDiff = onOpenEditDiff,
                     onOpenFileContent = onOpenFileContent,
+                    // Ticket 158: a nested spawn row's Continue takes the same
+                    // pop-back-to-composer route as the page's own section.
+                    onContinueSubagent = onContinueWithResume,
                     isLoadingMoreHistory = uiState.isLoadingMoreHistory,
                     onHistoryTopReached = onHistoryTopReached,
                 )

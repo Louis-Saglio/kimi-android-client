@@ -20,6 +20,9 @@ import fr.louissaglio.kimi.android.data.chat.TodoParser
 import fr.louissaglio.kimi.android.data.chat.TranscriptPage
 import fr.louissaglio.kimi.android.data.chat.TranscriptState
 import fr.louissaglio.kimi.android.data.chat.TranscriptTurn
+import fr.louissaglio.kimi.android.data.chat.agentNextStepOf
+import fr.louissaglio.kimi.android.data.chat.agentResumeCallOf
+import fr.louissaglio.kimi.android.data.chat.agentResumeHintOf
 import fr.louissaglio.kimi.android.data.chat.bashDescriptionOf
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.di.StreamCoalesceWindowMillis
@@ -147,6 +150,15 @@ class SubagentStreamStore @Inject constructor(
         /** A backfilled `not_started` swarm member (ticket 136): it never spawned, so
          * no sub-agent page exists for it — the roster row is not clickable. */
         val ghost: Boolean = false,
+        /** The `resume_hint:` block of the run's `Agent` result (ticket 158 —
+         * 0.43.0 foreground results, 0.31.0 background stubs; docs/server-api.md,
+         * Sub-agents): the orchestrator's continuation copy, verbatim. Null when
+         * the result carried none — the page and the spawn row then render
+         * exactly as before. */
+        val resumeHint: String? = null,
+        /** The `next_step:` block of a background spawn's result stub (ticket 158)
+         * — what happens next automatically. Null on foreground results. */
+        val nextStep: String? = null,
     ) {
 
         /** True while the swarm roster row offers its stop action (ticket 137): the
@@ -168,6 +180,13 @@ class SubagentStreamStore @Inject constructor(
          * members, background members and ghosts never show it. */
         val detachable: Boolean
             get() = stoppable && !runInBackground
+
+        /** The composer prefill behind the "Next step" section's Continue action
+         * (ticket 158): the hint's suggested `Agent(resume="agent-N", prompt="…")`
+         * call text, verbatim. Null when the hint carries no recognizable call —
+         * the Continue action then never shows. */
+        val resumePrefill: String?
+            get() = resumeHint?.let(::agentResumeCallOf)
 
         /** The swarm roster row's one-line activity (ticket 136), null when the row
          * shows nothing: while Working, the last non-blank line of the live
@@ -257,6 +276,13 @@ class SubagentStreamStore @Inject constructor(
         /** A backfilled `not_started` swarm member (ticket 136): the record exists
          * only so the roster row can render — no page, no transcript, a synthetic id. */
         var ghost: Boolean = false
+
+        /** The run's `Agent` result's `resume_hint:`/`next_step:` blocks (ticket 158):
+         *  the call's result is their only carrier, so they land from
+         *  [applyAgentCall] regardless of the status precedence (a live-pinned
+         *  record still gets them); a newer result's parse overwrites. */
+        var resumeHint: String? = null
+        var nextStep: String? = null
 
         /** The sub-agent's own background tasks, keyed by task id (live-only — REST
          * `/tasks` never serves them; a transcript `task` origin heals the terminal
@@ -390,7 +416,7 @@ class SubagentStreamStore @Inject constructor(
             return SubagentState(
                 id, name, description, runInBackground, status, resultSummary, error,
                 hasMoreTurns, promptBubble + timeline.items(), timeline.todos(), jobs.values.toList(),
-                swarmIndex, taskId, model, thinkingEffort, suspendReason, ghost,
+                swarmIndex, taskId, model, thinkingEffort, suspendReason, ghost, resumeHint, nextStep,
             )
         }
     }
@@ -703,6 +729,8 @@ class SubagentStreamStore @Inject constructor(
             record.runInBackground = agentRunInBackground(argsJson)
             record.prompt = agentArg(argsJson, "prompt")
             record.parentToolCallId = toolCallId
+            record.resumeHint = resultText?.let { agentResumeHintOf(AGENT_TOOL_NAME, it) }
+            record.nextStep = resultText?.let { agentNextStepOf(AGENT_TOOL_NAME, it) }
             val summary = resultText?.let { resultSummarySection(it) }
             record.applyStatus(statusFromResult(resultText, rowStatus), StatusSource.Result, summary = summary)
             // The result summary stands in as the final assistant bubble until the
@@ -726,6 +754,13 @@ class SubagentStreamStore @Inject constructor(
             }
             if (existing.parentToolCallId == null) existing.parentToolCallId = toolCallId
             if (resultText != null) {
+                // The continuation blocks (ticket 158) land independently of the
+                // status precedence: the call's result is their only carrier, and
+                // it arrives even when a live lifecycle frame already pinned the
+                // status (the watched run settles before the main transcript's
+                // tool.result is mined).
+                agentResumeHintOf(AGENT_TOOL_NAME, resultText)?.let { existing.resumeHint = it }
+                agentNextStepOf(AGENT_TOOL_NAME, resultText)?.let { existing.nextStep = it }
                 existing.applyStatus(
                     statusFromResult(resultText, rowStatus),
                     StatusSource.Result,
@@ -1122,12 +1157,17 @@ class SubagentStreamStore @Inject constructor(
             ?.trim()
             ?.takeIf { it.isNotBlank() }
 
-    /** The `[summary]` section of a completed run's result text; absent while running. */
+    /** The `[summary]` section of a completed run's result text; absent while running.
+     *  The section ends at the trailing continuation blocks (0.43.0's `resume_hint:`,
+     *  0.31.0's `next_step:` — ticket 158): they are parsed separately and never
+     *  render as part of the summary. */
     private fun resultSummarySection(output: String): String? {
         val lines = output.lines()
         val marker = lines.indexOf("[summary]")
         if (marker < 0) return null
-        return lines.drop(marker + 1).joinToString("\n").trim().takeIf { it.isNotBlank() }
+        return lines.drop(marker + 1)
+            .takeWhile { !it.startsWith("resume_hint: ") && !it.startsWith("next_step: ") }
+            .joinToString("\n").trim().takeIf { it.isNotBlank() }
     }
 
     /** One string argument of the `Agent` call's args JSON. */

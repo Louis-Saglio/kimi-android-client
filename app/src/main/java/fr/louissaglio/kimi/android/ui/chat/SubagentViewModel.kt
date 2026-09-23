@@ -86,7 +86,22 @@ class SubagentViewModel internal constructor(
         val taskId: String? = null,
         val detachable: Boolean = false,
         val detaching: Boolean = false,
-    )
+        /** Ticket 158: the run's continuation copy (its `Agent` result's
+         * `resume_hint:`/`next_step:` blocks, verbatim) and the composer prefill
+         * behind the "Next step" section's Continue action — [resumePrefill] is
+         * the hint's suggested `Agent(resume="agent-N", prompt="…")` call text.
+         * All null when the result carried no hint: nothing renders then. */
+        val resumeHint: String? = null,
+        val nextStep: String? = null,
+        val resumePrefill: String? = null,
+    ) {
+
+        /** The "Next step" section's gate (ticket 158): the finished page only —
+         *  the run settled AND its result carried continuation copy. */
+        val hasNextStep: Boolean
+            get() = (status == SubagentStatus.Completed || status == SubagentStatus.Failed ||
+                status == SubagentStatus.Cancelled) && (resumeHint != null || nextStep != null)
+    }
 
     /** One-shot snackbars (the ChatViewModel.Effect pattern). */
     sealed interface Effect {
@@ -166,6 +181,9 @@ class SubagentViewModel internal constructor(
                         jobs = entry?.jobs.orEmpty(),
                         taskId = entry?.taskId,
                         detachable = entry?.detachable == true,
+                        resumeHint = entry?.resumeHint,
+                        nextStep = entry?.nextStep,
+                        resumePrefill = entry?.resumePrefill,
                     )
                 }
                 maybeReconcile(entry?.status)

@@ -87,6 +87,11 @@ fun ChatScreen(
     /** Ticket 127: a successful fork opens the forked session's chat (same
      * argument hand-off as the session list's navigation). */
     onNavigateToChat: (session: Session) -> Unit = {},
+    /** Ticket 158: the composer prefill handed back by a sub-agent page's
+     * Continue (a nav result on this entry's SavedStateHandle — KimiNavHost);
+     * consumed once into the composer's text. */
+    resumePrefill: String? = null,
+    onResumePrefillConsumed: () -> Unit = {},
     viewModel: ChatViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -127,6 +132,14 @@ fun ChatScreen(
     // ticket 097 — same page count) of it is open.
     LifecycleEventEffect(Lifecycle.Event.ON_START) { viewModel.onScreenStarted() }
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) { viewModel.onScreenStopped() }
+    // Ticket 158: a sub-agent page's Continue pops back with the composer prefill
+    // as a nav result — land it in the composer's text and consume it once.
+    LaunchedEffect(resumePrefill) {
+        if (resumePrefill != null) {
+            viewModel.onInputChange(resumePrefill)
+            onResumePrefillConsumed()
+        }
+    }
     // History attachments (ticket 034): images resolve their bytes inline (base64) or
     // via /files; tapping a thumbnail opens the full-screen viewer, tapping a file
     // chip routes through the ViewModel, which downloads, caches and emits OpenFile.
@@ -148,6 +161,9 @@ fun ChatScreen(
     val onOpenSubagent = remember(onNavigateToSubagent, sessionId) {
         { subagentId: String -> onNavigateToSubagent(sessionId, subagentId) }
     }
+    // Ticket 158: a spawn row's "Next step" Continue pre-fills the composer —
+    // the same setter the composer's own text field drives.
+    val onContinueSubagent = remember(viewModel) { viewModel::onInputChange }
     // Swarm cards (ticket 134) open their roster screen by the call's toolCallId.
     val onOpenSwarm = remember(onNavigateToSwarm, sessionId) {
         { toolCallId: String -> onNavigateToSwarm(sessionId, toolCallId) }
@@ -215,6 +231,7 @@ fun ChatScreen(
         onOpenAttachment = onOpenAttachment,
         loadImageBytes = loadImageBytes,
         onOpenSubagent = onOpenSubagent,
+        onContinueSubagent = onContinueSubagent,
         onOpenJob = onOpenJob,
         onOpenEditDiff = onNavigateToEditDiff,
         onOpenFileContent = onNavigateToFileContent,
@@ -295,6 +312,8 @@ private fun ChatContent(
     onOpenAttachment: (ChatMessage.Part.Attachment) -> Unit,
     loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray?,
     onOpenSubagent: (String) -> Unit = {},
+    /** Ticket 158: a spawn row's "Next step" Continue — the composer prefill. */
+    onContinueSubagent: (String) -> Unit = {},
     onOpenJob: (String) -> Unit = {},
     onOpenEditDiff: (toolCallId: String, payload: ToolPayload.Edit) -> Unit = { _, _ -> },
     onOpenFileContent: (toolCallId: String, payload: ToolPayload, output: String) -> Unit = { _, _, _ -> },
@@ -516,6 +535,7 @@ private fun ChatContent(
                     onOpenAttachment = onOpenAttachment,
                     loadImageBytes = loadImageBytes,
                     onOpenSubagent = onOpenSubagent,
+                    onContinueSubagent = onContinueSubagent,
                     onOpenJob = onOpenJob,
                     onOpenEditDiff = onOpenEditDiff,
                     onOpenFileContent = onOpenFileContent,

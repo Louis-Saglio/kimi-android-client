@@ -52,4 +52,33 @@ class AgentSpawnTapTest {
 
         assertNull(row.agentSpawnTap())
     }
+
+    // The "Next step" section's Continue (ticket 158) pre-fills the composer with
+    // the hint's suggested call — parsed from the row's own `resume_hint:` block.
+
+    @Test
+    fun `the spawn row's prefill is the hint's suggested resume call`() {
+        val row = ChatItem.ToolActivity(
+            "tool_1",
+            "Agent",
+            ToolStatus.Done,
+            agentCall = AgentCallDisplay("explore", "Reply ok", background = false),
+            resumeHint = "Continue with Agent(resume=\"agent-12\", prompt=\"...\"). Use agent_id only.",
+        )
+
+        assertEquals("Agent(resume=\"agent-12\", prompt=\"...\")", row.agentResumePrefill())
+    }
+
+    @Test
+    fun `a hint without a resume call offers no prefill`() {
+        val row = ChatItem.ToolActivity(
+            "tool_1",
+            "Agent",
+            ToolStatus.Done,
+            agentCall = AgentCallDisplay("explore", "Reply ok", background = false),
+            resumeHint = "The subagent retains its prior context.",
+        )
+
+        assertNull(row.agentResumePrefill())
+    }
 }

@@ -11,6 +11,8 @@ import fr.louissaglio.kimi.android.data.chat.TodoParser
 import fr.louissaglio.kimi.android.data.chat.ToolPayloads
 import fr.louissaglio.kimi.android.data.chat.TranscriptFrame
 import fr.louissaglio.kimi.android.data.chat.TranscriptTurn
+import fr.louissaglio.kimi.android.data.chat.agentNextStepOf
+import fr.louissaglio.kimi.android.data.chat.agentResumeHintOf
 import fr.louissaglio.kimi.android.data.chat.agentTaskIdOf
 import fr.louissaglio.kimi.android.data.chat.bashTaskIdOf
 import fr.louissaglio.kimi.android.data.chat.bashTimeoutOf
@@ -944,6 +946,8 @@ class ChatTimeline(
  * from the result's `task_id: bash-…` first line, [ChatItem.ToolActivity.agentTaskId]
  * from the `task_id: agent-…` first line of a background spawn's result (ticket 157),
  * [ChatItem.ToolActivity.subagentId] from the `agent_id:` result marker,
+ * [ChatItem.ToolActivity.resumeHint]/[ChatItem.ToolActivity.nextStep] from the
+ * result's continuation blocks (ticket 158),
  * [ChatItem.ToolActivity.timeoutSeconds]/[ChatItem.ToolActivity.timeoutDisabled]
  * from the call input's timeout knobs. All
  * four row construction/update sites in [ChatTimeline] route through it (the history
@@ -962,6 +966,8 @@ internal fun ChatItem.ToolActivity.enriched(
         subagentId = subagentId ?: agentResultSubagentId(name, output),
         bashTaskId = bashTaskId ?: bashTaskIdOf(name, output),
         agentTaskId = agentTaskId ?: agentTaskIdOf(name, output),
+        resumeHint = resumeHint ?: agentResumeHintOf(name, output),
+        nextStep = nextStep ?: agentNextStepOf(name, output),
         timeoutSeconds = timeoutSeconds ?: timeout?.seconds,
         timeoutDisabled = timeoutDisabled || (timeout?.disabled == true),
     )

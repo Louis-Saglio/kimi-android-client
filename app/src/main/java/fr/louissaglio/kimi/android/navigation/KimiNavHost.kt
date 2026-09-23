@@ -130,9 +130,17 @@ fun KimiNavHost(toolContentStore: ToolContentStore) {
         }
         // sessionId/title/cwd reach the ViewModel through its SavedStateHandle;
         // the screen itself needs nothing from the route.
-        composable<Chat> {
+        composable<Chat> { entry ->
+            // Ticket 158: a sub-agent page's Continue pops back with the composer
+            // prefill riding this entry's SavedStateHandle (the 132 nav-result
+            // pattern); the screen consumes it once into the composer's text.
+            val resumePrefill by entry.savedStateHandle
+                .getStateFlow<String?>(KEY_RESUME_PREFILL, null)
+                .collectAsStateWithLifecycle()
             ChatScreen(
                 onNavigateBack = { navController.popBackStack() },
+                resumePrefill = resumePrefill,
+                onResumePrefillConsumed = { entry.savedStateHandle[KEY_RESUME_PREFILL] = null },
                 onNavigateToSubagent = { sessionId, subagentId ->
                     navController.navigate(Subagent(sessionId, subagentId)) {
                         launchSingleTop = true
@@ -210,6 +218,13 @@ fun KimiNavHost(toolContentStore: ToolContentStore) {
                         launchSingleTop = true
                     }
                 },
+                // Ticket 158: Continue pops back to the chat, the composer prefill
+                // riding the chat entry's SavedStateHandle (the 132 nav-result
+                // pattern).
+                onContinueWithResume = { prefill ->
+                    navController.previousBackStackEntry?.savedStateHandle?.set(KEY_RESUME_PREFILL, prefill)
+                    navController.popBackStack()
+                },
             )
         }
         composable<JobDetail> {
@@ -248,3 +263,7 @@ fun KimiNavHost(toolContentStore: ToolContentStore) {
 /** Nav-result flag for the archived screen's restores (ticket 132), keyed on the
  * session list entry's SavedStateHandle. */
 private const val KEY_RESTORED_FROM_ARCHIVE = "restored_from_archive"
+
+/** Nav-result composer prefill from a sub-agent page's Continue (ticket 158),
+ * keyed on the chat entry's SavedStateHandle. */
+private const val KEY_RESUME_PREFILL = "resume_prefill"

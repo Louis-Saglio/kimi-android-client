@@ -84,6 +84,9 @@ internal fun MessageList(
     swarmMembers: Map<String, List<SubagentStreamStore.SubagentState>> = emptyMap(),
     /** Invoked with the toolCallId when a swarm card is tapped (ticket 134). */
     onOpenSwarm: (String) -> Unit = {},
+    /** Ticket 158: a spawn row's "Next step" Continue — invoked with the composer
+     * prefill (the hint's suggested `Agent(resume=…)` call text). */
+    onContinueSubagent: (String) -> Unit = {},
     /** Top-anchored history pagination (ticket 046 on the sub-agent page; the 043
      * mechanics): a small overlay spinner shows while an older page loads and
      * [onHistoryTopReached] fires when the scroll position nears the top. Prepending
@@ -188,7 +191,7 @@ internal fun MessageList(
                     is ChatItem.ToolGroup ->
                         ToolGroupCard(
                             item, onOpenSubagent, onOpenJob, onQuestionRowTapped, onOpenEditDiff, onOpenFileContent,
-                            swarmMembers, onOpenSwarm,
+                            swarmMembers, onOpenSwarm, onContinueSubagent,
                         )
                     is ChatItem.CompactionDivider -> CompactionDividerRow(item)
                     is ChatItem.TurnEnd -> TurnEndFooter(item.label)
@@ -197,7 +200,7 @@ internal fun MessageList(
                     is ChatItem.ToolActivity ->
                         ToolRow(
                             item, onOpenSubagent, onOpenJob, onQuestionRowTapped, onOpenEditDiff, onOpenFileContent,
-                            swarmMembers, onOpenSwarm,
+                            swarmMembers, onOpenSwarm, onContinueSubagent,
                         )
                 }
             }

@@ -303,6 +303,116 @@ class SubagentStreamStoreTest {
         assertTrue(store.linksFor(SESSION_ID).isEmpty())
     }
 
+    // --- The result's continuation blocks (ticket 158) ---------------------------------
+
+    @Test
+    fun `a foreground result's resume hint is parsed with its suggested resume call`() = runBlocking {
+        // Verbatim 0.43.0 foreground result (docs/server-api.md, Sub-agents): the
+        // `stop_reason:` line and the trailing `resume_hint:` block.
+        store.applyAgentCall(
+            SESSION_ID,
+            toolCallId = "tool_1",
+            argsJson = AGENT_ARGS,
+            resultText = "agent_id: agent-71\nactual_subagent_type: explore\nstatus: completed\nstop_reason: completed\n\n" +
+                "[summary]\nthe final report\n\n" +
+                "resume_hint: Continue with Agent(resume=\"agent-71\", prompt=\"...\"). Use agent_id only; " +
+                "do not set subagent_type. The subagent retains its prior context; redo any unfinished tool call " +
+                "if its result was lost.",
+            rowStatus = ToolStatus.Done,
+        )
+
+        val state = entry("agent-71")!!
+        assertEquals(SubagentStatus.Completed, state.status)
+        // The trailing block never leaks into the summary.
+        assertEquals("the final report", state.resultSummary)
+        assertNull(state.nextStep)
+        assertEquals(
+            "Continue with Agent(resume=\"agent-71\", prompt=\"...\"). Use agent_id only; " +
+                "do not set subagent_type. The subagent retains its prior context; redo any unfinished tool call " +
+                "if its result was lost.",
+            state.resumeHint,
+        )
+        // The composer prefill: the hint's suggested call text, verbatim.
+        assertEquals("Agent(resume=\"agent-71\", prompt=\"...\")", state.resumePrefill)
+    }
+
+    @Test
+    fun `a background result's next step and resume hint are parsed`() = runBlocking {
+        // Verbatim 0.31.0 background stub (docs/server-api.md, Sub-agents).
+        store.applyAgentCall(
+            SESSION_ID,
+            toolCallId = "tool_1",
+            argsJson = AGENT_ARGS,
+            resultText = "task_id: agent-7noib8bb\nstatus: running\nagent_id: agent-13\n" +
+                "actual_subagent_type: explore\nautomatic_notification: true\n\n" +
+                "description: doc-verify-bg\n\n" +
+                "next_step: The completion arrives automatically in a later turn — do NOT wait, poll, " +
+                "or call TaskOutput on it; ...\n\n" +
+                "resume_hint: To continue or recover this same subagent later, call " +
+                "Agent(resume=\"agent-1\", prompt=\"...\"). The parameter is agent_id (\"agent-1\"), " +
+                "NOT task_id ...",
+            rowStatus = ToolStatus.Done,
+        )
+
+        val state = entry("agent-13")!!
+        assertEquals(SubagentStatus.Working, state.status)
+        assertEquals(
+            "The completion arrives automatically in a later turn — do NOT wait, poll, " +
+                "or call TaskOutput on it; ...",
+            state.nextStep,
+        )
+        assertEquals(
+            "To continue or recover this same subagent later, call Agent(resume=\"agent-1\", prompt=\"...\"). " +
+                "The parameter is agent_id (\"agent-1\"), NOT task_id ...",
+            state.resumeHint,
+        )
+        assertEquals("Agent(resume=\"agent-1\", prompt=\"...\")", state.resumePrefill)
+    }
+
+    @Test
+    fun `a result without continuation blocks parses none`() = runBlocking {
+        // Pre-0.43.0 foreground result: no `resume_hint:` block — the page and the
+        // spawn row render exactly as before (no "Next step" section).
+        store.applyAgentCall(
+            SESSION_ID,
+            toolCallId = "tool_1",
+            argsJson = AGENT_ARGS,
+            resultText = "agent_id: agent-12\nactual_subagent_type: explore\nstatus: completed\n\n[summary]\nthe final report",
+            rowStatus = ToolStatus.Done,
+        )
+
+        val state = entry("agent-12")!!
+        assertNull(state.resumeHint)
+        assertNull(state.nextStep)
+        assertNull(state.resumePrefill)
+    }
+
+    @Test
+    fun `a result's continuation blocks heal the live-pinned record`() = runBlocking {
+        // The watched run settles live (subagent.completed pins the status); the
+        // Agent call's result is mined afterwards from the main transcript — the
+        // blocks land even though the status write itself is rejected (the Live pin).
+        store.apply(SESSION_ID, spawned("agent-12"))
+        store.apply(SESSION_ID, SessionEvent.SubagentStarted("agent-12"))
+        store.apply(SESSION_ID, SessionEvent.SubagentCompleted("agent-12", "the summary"))
+
+        store.applyAgentCall(
+            SESSION_ID,
+            toolCallId = "tool_1",
+            argsJson = AGENT_ARGS,
+            resultText = "agent_id: agent-12\nstatus: completed\nstop_reason: completed\n\n" +
+                "[summary]\nthe summary\n\n" +
+                "resume_hint: Continue with Agent(resume=\"agent-12\", prompt=\"...\").",
+            rowStatus = ToolStatus.Done,
+        )
+
+        val state = entry("agent-12")!!
+        assertEquals(SubagentStatus.Completed, state.status)
+        assertEquals("the summary", state.resultSummary)
+        assertEquals("Continue with Agent(resume=\"agent-12\", prompt=\"...\").", state.resumeHint)
+        assertEquals("Agent(resume=\"agent-12\", prompt=\"...\")", state.resumePrefill)
+    }
+
     // --- The prompt field (ticket 091) --------------------------------------------------
 
     @Test

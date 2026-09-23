@@ -220,6 +220,50 @@ class SubagentViewModelTest {
     }
 
     @Test
+    fun `a finished sub-agent's resume hint flows into the prefill payload`() = runBlocking {
+        // Ticket 158: the Agent call's result (mined into the store from the main
+        // transcript) carries the `resume_hint:` block — the "Next step" section
+        // shows its copy and Continue hands its suggested call to the composer.
+        store.applyAgentCall(
+            "session_1",
+            toolCallId = "tool_1",
+            argsJson = """{"subagent_type":"explore","description":"doc-verify","prompt":"Reply ok"}""",
+            resultText = "agent_id: agent-12\nactual_subagent_type: explore\nstatus: completed\nstop_reason: completed\n\n" +
+                "[summary]\nthe final report\n\n" +
+                "resume_hint: Continue with Agent(resume=\"agent-12\", prompt=\"...\"). " +
+                "Use agent_id only; do not set subagent_type.",
+            rowStatus = ToolStatus.Done,
+        )
+
+        val viewModel = newViewModel("agent-12")
+        awaitState(viewModel.uiState) { it.resumePrefill != null }
+
+        val state = viewModel.uiState.value
+        assertEquals(SubagentStatus.Completed, state.status)
+        assertEquals(
+            "Continue with Agent(resume=\"agent-12\", prompt=\"...\"). " +
+                "Use agent_id only; do not set subagent_type.",
+            state.resumeHint,
+        )
+        assertEquals("Agent(resume=\"agent-12\", prompt=\"...\")", state.resumePrefill)
+        assertTrue(state.hasNextStep)
+
+        // A record without a hint gates the section off — "finished" alone is not
+        // enough (results without a hint render exactly as before).
+        store.applyAgentCall(
+            "session_1",
+            toolCallId = "tool_2",
+            argsJson = """{"subagent_type":"explore","description":"survey","prompt":"Reply ok"}""",
+            resultText = "agent_id: agent-13\nstatus: completed\n\n[summary]\ndone",
+            rowStatus = ToolStatus.Done,
+        )
+        val hintless = newViewModel("agent-13")
+        awaitState(hintless.uiState) { it.status == SubagentStatus.Completed }
+        assertNull(hintless.uiState.value.resumePrefill)
+        assertFalse(hintless.uiState.value.hasNextStep)
+    }
+
+    @Test
     fun `the page registers itself while visible`() = runBlocking {
         val viewModel = newViewModel("agent-12")
 

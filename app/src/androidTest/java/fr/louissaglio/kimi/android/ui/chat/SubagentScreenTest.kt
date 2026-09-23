@@ -15,9 +15,9 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** Semantics tests for the sub-agent page's "To background" overflow (ticket 138).
- * SubagentContent takes a plain UiState, so no store and no Hilt is involved (the
- * SwarmScreenTest pattern). */
+/** Semantics tests for the sub-agent page's "To background" overflow (ticket 138)
+ * and its "Next step" section (ticket 158). SubagentContent takes a plain UiState,
+ * so no store and no Hilt is involved (the SwarmScreenTest pattern). */
 @RunWith(AndroidJUnit4::class)
 class SubagentScreenTest {
 
@@ -34,6 +34,69 @@ class SubagentScreenTest {
         taskId = "agent-t1",
         detachable = true,
     )
+
+    /** A settled run whose `Agent` result carried the 0.43.0 `resume_hint:` block
+     *  (ticket 158): the ViewModel maps the store entry's hint and its suggested
+     *  call into the section's copy and the Continue's composer prefill. */
+    private fun finishedState() = SubagentViewModel.UiState(
+        subagentId = "agent-12",
+        sessionId = "session_1",
+        name = "explore",
+        description = "doc-verify",
+        status = SubagentStatus.Completed,
+        items = listOf(ChatItem.AssistantMessage("m1", "the final report", thinking = "")),
+        resumeHint = "Continue with Agent(resume=\"agent-12\", prompt=\"...\"). Use agent_id only.",
+        resumePrefill = "Agent(resume=\"agent-12\", prompt=\"...\")",
+    )
+
+    @Test
+    fun aFinishedSubagentShowsTheNextStepSectionAndContinuePrefillsTheComposer() {
+        var prefill: String? = null
+        composeTestRule.setContent {
+            KimiTheme {
+                SubagentContent(
+                    uiState = finishedState(),
+                    onNavigateBack = {},
+                    onContinueWithResume = { prefill = it },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("Next step").assertIsDisplayed()
+        composeTestRule
+            .onNodeWithText("Continue with Agent(resume=\"agent-12\", prompt=\"...\"). Use agent_id only.")
+            .assertIsDisplayed()
+
+        composeTestRule.onNodeWithText("Continue").performClick()
+        assertEquals("Agent(resume=\"agent-12\", prompt=\"...\")", prefill)
+    }
+
+    @Test
+    fun aResultWithoutAHintShowsNoNextStepSection() {
+        val state = mutableStateOf(
+            // A finished run whose result carried no hint (pre-0.43.0 results render
+            // exactly as before).
+            finishedState().copy(resumeHint = null, nextStep = null, resumePrefill = null),
+        )
+        composeTestRule.setContent {
+            KimiTheme {
+                SubagentContent(
+                    uiState = state.value,
+                    onNavigateBack = {},
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("Next step").assertDoesNotExist()
+        composeTestRule.onNodeWithText("Continue").assertDoesNotExist()
+
+        // The section is the finished page's affordance: a hint on a still-running
+        // member shows nothing either.
+        composeTestRule.runOnIdle {
+            state.value = finishedState().copy(status = SubagentStatus.Working)
+        }
+        composeTestRule.onNodeWithText("Next step").assertDoesNotExist()
+    }
 
     @Test
     fun toBackgroundShowsInTheOverflowOnlyWhileDetachable() {

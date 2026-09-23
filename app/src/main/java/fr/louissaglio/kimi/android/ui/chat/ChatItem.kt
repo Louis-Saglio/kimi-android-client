@@ -69,6 +69,9 @@ sealed interface ChatItem {
      * carry no display, so committed rows fall back to the generic treatment.
      * [agentTaskId] links a background spawn's row to its job screen (ticket 157) —
      * parsed from the result's `task_id: agent-…` first line like [bashTaskId].
+     * [resumeHint]/[nextStep] are the result's `resume_hint:`/`next_step:`
+     * continuation blocks (ticket 158 — AgentResults), the spawn row's "Next step"
+     * section copy; null on hint-less results, which render exactly as before.
      * [timeoutSeconds]/[timeoutDisabled] are the call input's timeout knobs
      * (ticket 097) — the job screen's budget display derives
      * from them (REST never exposes the timeout). All three link/budget fields are
@@ -87,6 +90,8 @@ sealed interface ChatItem {
         val bashTaskId: String? = null,
         val agentCall: AgentCallDisplay? = null,
         val agentTaskId: String? = null,
+        val resumeHint: String? = null,
+        val nextStep: String? = null,
         val timeoutSeconds: Int? = null,
         val timeoutDisabled: Boolean = false,
     ) : ChatItem
