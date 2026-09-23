@@ -40,6 +40,23 @@ fun SessionEvent.isSubagentScoped(): Boolean = when (this) {
 
 /** Events of one session, parsed from the WebSocket stream (docs/server-api.md). */
 sealed interface SessionEvent {
+    /** `prompt.submitted` (docs/server-api.md — ticket 154): the submission echo. It
+     * needs no UI of its own — the optimistic local echo already shows the bubble —
+     * so it is parsed for correlation only. Only the main agent's submissions fire
+     * it (a sub-agent's internal prompts never do). */
+    data class PromptSubmitted(val promptId: String) : SessionEvent
+
+    /** `prompt.queued` (ticket 154): the prompt waits server-side while the agent is
+     * busy. [queueLength] is the queue size at submission — the local echo bubble
+     * shows it as "Queued #N" until the prompt starts. */
+    data class PromptQueued(val promptId: String, val queueLength: Int) : SessionEvent
+
+    /** `prompt.started` (0.39.0 — ticket 154): the prompt actually began executing —
+     * its echo bubble flips back to the normal in-flight look. Fires per agent, so a
+     * sub-agent's frame routes to its stream store like its other turn frames
+     * (ticket 045). */
+    data class PromptStarted(val promptId: String, override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
+
     data class TurnStarted(override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
 
     /** [interruptReason] (0.31.1 — ticket 155) says why the turn stopped early; null on

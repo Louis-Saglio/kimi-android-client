@@ -82,6 +82,14 @@ class ChatTimeline(
      * result marker only exists once the result is committed too. */
     private val subagentLinks = mutableMapOf<String, String>()
 
+    /** Uncommitted local echoes (ticket 154): message id → the optimistic bubble of a
+     * prompt this client sent, awaiting its server commit. A refetch that finds the
+     * id in history drops it (committed — the canonical row renders); any other
+     * re-appends the stored row, so a queued prompt's bubble survives the running
+     * turn's turn-end refetch (its message cannot be in history before its own turn
+     * commits). */
+    private val localEchoes = mutableMapOf<String, ChatItem.UserMessage>()
+
     fun items(): List<ChatItem> = rows.toList()
 
     /** Live calls win over history (they are newer) until the turn-end refetch
@@ -256,6 +264,18 @@ class ChatTimeline(
         rows.addAll(0, fresh)
         liveStart = fresh.size
         reapplySubagentLinks()
+        if (localEchoes.isNotEmpty()) {
+            // Echo survival (ticket 154): an echo whose message this refetch committed
+            // is done — the canonical row renders. Any other is re-appended at the
+            // committed tail (insertion order = send order): its prompt is still
+            // queued or running, so history cannot show it yet.
+            val committedIds = fresh.mapTo(mutableSetOf()) { it.id }
+            val echoes = localEchoes.iterator()
+            while (echoes.hasNext()) {
+                val (id, echo) = echoes.next()
+                if (id in committedIds) echoes.remove() else appendCommitted(echo)
+            }
+        }
         if (!keepLive) {
             rows.subList(liveStart, rows.size).clear()
             liveTodos = null
@@ -409,6 +429,12 @@ class ChatTimeline(
             is SessionEvent.ToolCallProgress ->
                 if (event.toolCallId !in todoCallIds) appendToolProgress(event.toolCallId, event.chunk)
             is SessionEvent.ContextSpliced -> event.messages.forEach(::appendSpliced)
+            // Prompt lifecycle (ticket 154): the queued mark lands on the optimistic
+            // local echo; started flips it back to the normal in-flight look. Both
+            // no-op when the id names no echo (e.g. a prompt queued from another
+            // client). Submitted is correlation-only — no row effect.
+            is SessionEvent.PromptQueued -> onPromptQueued(event.promptId, event.queueLength)
+            is SessionEvent.PromptStarted -> onPromptStarted(event.promptId)
             // TurnEnded: the ViewModel refetches history instead; the early-stop footer
             // arrives through onTurnEnded (ticket 155).
             else -> Unit
@@ -497,7 +523,23 @@ class ChatTimeline(
         // otherwise fall into the steer-echo text dedup and could surface as a bubble.
         if (message.originKind == ORIGIN_KIND_COMPACTION_SUMMARY) return
         if (message.id.isNotBlank()) {
-            if ((0 until liveStart).any { rows[it].id == message.id }) return
+            val index = (0 until liveStart).indexOfFirst { rows[it].id == message.id }
+            if (index >= 0) {
+                // Dedup — a reconnect replay or a racing refetch must not add a
+                // second bubble — with one upgrade (ticket 154): a local echo heals
+                // IN PLACE, the server message replacing the optimistic row
+                // (canonical content, its timestamp, the queued mark cleared).
+                if (message.id in localEchoes) {
+                    val healed = mutableListOf<ChatItem>()
+                    flatten(healed, message, updateTodos = true)
+                    val row = healed.filterIsInstance<ChatItem.UserMessage>().firstOrNull()
+                    if (row != null) {
+                        rows[index] = row
+                        localEchoes[message.id] = row
+                    }
+                }
+                return
+            }
             val fresh = mutableListOf<ChatItem>()
             flatten(fresh, message, updateTodos = true)
             fresh.forEach(::appendCommitted)
@@ -514,6 +556,50 @@ class ChatTimeline(
             return
         }
         appendCommitted(ChatItem.UserMessage("spliced_${syntheticSpliceCount++}", text, attachments, images, message.createdAt))
+    }
+
+    /**
+     * The optimistic echo of a just-sent prompt (ticket 154): committed at once so the
+     * bubble shows without waiting for the socket's `context.spliced` — for a prompt
+     * queued while the agent is busy that splice arrives only when the queued turn
+     * starts. The server message carries the same id (the ACK's `prompt_id` ==
+     * `user_message_id` == the splice's message id), so the splice heals this row in
+     * place ([appendSpliced]) and the turn-end refetch replaces it with the canonical
+     * committed row. [ChatViewModel] drives the mark/clear through [apply].
+     */
+    fun appendLocalEcho(
+        id: String,
+        text: String,
+        attachments: List<ChatMessage.Part.Attachment>,
+        images: List<ChatMessage.Part.Image>,
+    ) {
+        if (text.isBlank() && attachments.isEmpty() && images.isEmpty()) return
+        val echo = ChatItem.UserMessage(id, text, attachments, images)
+        localEchoes[id] = echo
+        appendCommitted(echo)
+    }
+
+    /** `prompt.queued` (ticket 154): the echo shows its queue position ("Queued #N").
+     * Only one frame per prompt is expected; a later frame wins. No-op when the id
+     * names no local echo (a prompt queued from another client has none). */
+    private fun onPromptQueued(promptId: String, queueLength: Int) {
+        healLocalEcho(promptId) { it.copy(queued = queueLength) }
+    }
+
+    /** `prompt.started` (ticket 154): the prompt began executing — its echo flips back
+     * to the normal in-flight look. */
+    private fun onPromptStarted(promptId: String) {
+        healLocalEcho(promptId) { it.copy(queued = null) }
+    }
+
+    /** In-place update of the local echo [promptId] (row and registry together), so a
+     * mark/clear survives the refetches that rebuild the committed rows. */
+    private fun healLocalEcho(promptId: String, update: (ChatItem.UserMessage) -> ChatItem.UserMessage) {
+        val echo = localEchoes[promptId] ?: return
+        val healed = update(echo)
+        localEchoes[promptId] = healed
+        val index = rows.indexOfFirst { it.id == promptId }
+        if (index >= 0) rows[index] = healed
     }
 
     /** Deltas extend the last LIVE bubble; after a tool row a new bubble starts, so a

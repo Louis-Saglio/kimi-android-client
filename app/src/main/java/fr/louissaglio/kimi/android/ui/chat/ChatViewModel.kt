@@ -760,17 +760,34 @@ class ChatViewModel internal constructor(
                 chatRepository.sendPrompt(settings, sessionId, text, uploaded)
             }
             result
-                .onSuccess {
+                .onSuccess { promptId ->
                     // The server bound the session to the sent model/effort/permission
                     // mode: its reports describe the pick from here on and may sync again.
                     pendingModelPick = false
                     pendingEffortPick = false
                     pendingPermissionPick = false
-                    // No local echo: the user message arrives inline in the socket's
-                    // context.spliced frame (docs/server-api.md), the reply via the
-                    // streaming events.
+                    // The optimistic local echo (ticket 154): the bubble shows at once
+                    // — for a prompt queued while the agent is busy, the context.spliced
+                    // echo arrives only when the queued turn starts. The splice heals
+                    // the row in place (the ACK's prompt id == the message id); a
+                    // refetch replaces it once the message commits. The reply streams
+                    // as before.
+                    timeline.appendLocalEcho(
+                        promptId,
+                        text,
+                        uploaded.filterNot { it.isImage }
+                            .map { ChatMessage.Part.Attachment(it.name, it.mediaType, it.sizeBytes, it.id) },
+                        uploaded.filter { it.isImage }
+                            .map { ChatMessage.Part.Image(base64Data = null, fileId = it.id) },
+                    )
                     uiState.update {
-                        it.copy(inputText = "", attachments = emptyList(), isSending = false, isWorking = true)
+                        it.copy(
+                            inputText = "",
+                            attachments = emptyList(),
+                            isSending = false,
+                            isWorking = true,
+                            items = timeline.items(),
+                        )
                     }
                 }
                 .onFailure { error ->

@@ -267,6 +267,24 @@ data class TurnStepPayload(
     val stepId: String = "",
 )
 
+// --- prompt.* lifecycle (docs/server-api.md — ticket 154) ----------------------
+
+/** `prompt.submitted` payload: the submission echo. Only [promptId] is consumed
+ * (correlation with the local echo bubble); status/content/userMessageId/createdAt
+ * stay ignored. */
+@Serializable
+data class PromptSubmittedPayload(val promptId: String = "")
+
+/** `prompt.queued` payload: the prompt waits server-side while the agent is busy.
+ * [queueLength] is the queue size at submission — the echo bubble's "Queued #N". */
+@Serializable
+data class PromptQueuedPayload(val promptId: String = "", val queueLength: Int = 0)
+
+/** `prompt.started` payload (0.39.0): the prompt actually began executing. The
+ * emitting agent rides the envelope peek like every transcript frame. */
+@Serializable
+data class PromptStartedPayload(val promptId: String = "")
+
 /** `context.spliced` payload: full message objects, decoded with the history MessageDto
  * (its extra fields — toolCalls — are ignored; origin IS decoded, ticket 056). */
 @Serializable

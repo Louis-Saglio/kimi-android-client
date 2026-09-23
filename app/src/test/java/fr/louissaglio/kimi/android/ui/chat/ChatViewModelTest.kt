@@ -1056,6 +1056,38 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     }
 
     @Test
+    fun `queued prompt bubble shows Queued #N until prompt started clears it`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        viewModel.onInputChange("second prompt")
+        viewModel.onSend()
+        // The ACK's prompt id lands the optimistic local echo at once — no splice yet
+        // (ticket 154: a queued prompt's splice arrives only when its turn starts).
+        awaitState(viewModel.uiState) { it.items?.any { item -> item.id == "msg_1" } == true }
+
+        socket.send(promptQueuedFrame(promptId = "msg_1", queueLength = 1))
+        awaitState(viewModel.uiState) { (it.items?.firstOrNull() as? ChatItem.UserMessage)?.queued == 1 }
+
+        // The running turn completes: the turn.ended refetch must NOT drop the queued
+        // bubble — its message is not committed to history yet.
+        socket.send(turnEndedFrame(reason = "completed"))
+        awaitRequest("/messages")
+        delay(300)
+        assertEquals(
+            1,
+            (viewModel.uiState.value.items?.firstOrNull() as? ChatItem.UserMessage)?.queued,
+        )
+
+        // The queued prompt's own turn starts: prompt.started flips the bubble back
+        // to the normal in-flight look.
+        socket.send(promptStartedFrame(promptId = "msg_1"))
+        awaitState(viewModel.uiState) { (it.items?.firstOrNull() as? ChatItem.UserMessage)?.queued == null }
+    }
+
+    @Test
     fun `sending while busy steers the queued prompt into the running turn`() = runBlocking {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()

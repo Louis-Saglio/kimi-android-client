@@ -66,7 +66,8 @@ class ChatRepository @Inject constructor(
     /**
      * Sends a user prompt (`POST /api/v1/sessions/{id}/prompts`). The response only
      * acknowledges the prompt: the user message and the agent's reply arrive over the
-     * WebSocket (docs/server-api.md), so success carries no payload.
+     * WebSocket (docs/server-api.md). Success carries the ACK's prompt id — equal to
+     * the user message id, so it keys the chat's optimistic local echo (ticket 154).
      * [attachments] (already uploaded, ticket 033) go into the content array before the
      * text item; [text] may be blank when attachments are present. Success records
      * [sessionId] in the [SessionActivityStore] so the session list bumps its row.
@@ -76,7 +77,7 @@ class ChatRepository @Inject constructor(
         sessionId: String,
         text: String,
         attachments: List<FileMeta> = emptyList(),
-    ): Result<Unit> {
+    ): Result<String> {
         val model = promptModel(settings, sessionId)
         return chatApi.postPrompt(
             settings,
@@ -87,23 +88,23 @@ class ChatRepository @Inject constructor(
             promptThinking(settings, sessionId, model),
             promptPermissionMode(sessionId),
         )
-            .map { }
             .onSuccess { activity.record(sessionId) }
     }
 
     /**
      * Steers a message into the running turn (docs/server-api.md, Steer): the prompt is
      * posted as usual — while busy the server queues it — then `prompts:steer` injects the
-     * queued prompt into the active turn. The steered user message echoes over the
-     * WebSocket (context.spliced) like a regular one, so success carries no payload.
-     * Success records [sessionId] in the [SessionActivityStore] like [sendPrompt].
+     * queued prompt into the active turn. Success carries the posted prompt's id like
+     * [sendPrompt] (the echo's key); the steered user message echoes over the
+     * WebSocket (context.spliced) like a regular one. Success records [sessionId] in the
+     * [SessionActivityStore] like [sendPrompt].
      */
     suspend fun steer(
         settings: ServerSettings,
         sessionId: String,
         text: String,
         attachments: List<FileMeta> = emptyList(),
-    ): Result<Unit> {
+    ): Result<String> {
         val model = promptModel(settings, sessionId)
         val promptId = chatApi.postPrompt(
             settings,
@@ -116,6 +117,7 @@ class ChatRepository @Inject constructor(
         )
             .getOrElse { return Result.failure(it) }
         return chatApi.postSteer(settings, sessionId, promptId)
+            .map { promptId }
             .onSuccess { activity.record(sessionId) }
     }
 

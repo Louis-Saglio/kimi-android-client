@@ -280,6 +280,17 @@ class SessionSocket @Inject constructor(
             "event.question.answered", "event.question.dismissed" ->
                 frame.decodePayload<QuestionResolvedPayload>()
                     ?.let { onEvent(SessionEvent.QuestionResolved(it.questionId)) }
+            // Prompt lifecycle (docs/server-api.md — ticket 154): submitted is parsed
+            // for correlation only (the local echo already shows the bubble); queued
+            // drives the echo's "Queued #N"; started flips it back to the in-flight
+            // look. Only started fires per agent — its agentId stamp routes a
+            // sub-agent's frame to the sub-agent stream store like its turn frames.
+            "prompt.submitted" -> frame.decodePayload<PromptSubmittedPayload>()
+                ?.let { onEvent(SessionEvent.PromptSubmitted(it.promptId)) }
+            "prompt.queued" -> frame.decodePayload<PromptQueuedPayload>()
+                ?.let { onEvent(SessionEvent.PromptQueued(it.promptId, it.queueLength)) }
+            "prompt.started" -> frame.decodePayload<PromptStartedPayload>()
+                ?.let { onEvent(SessionEvent.PromptStarted(it.promptId, agentId)) }
             "turn.started" -> onEvent(SessionEvent.TurnStarted(agentId))
             "turn.ended" -> {
                 val payload = frame.decodePayload<TurnEndedPayload>()

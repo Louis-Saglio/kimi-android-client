@@ -199,6 +199,38 @@ class SessionSocketTest {
     }
 
     @Test
+    fun `prompt lifecycle frames parse into prompt events`() = runBlocking {
+        // Verbatim frames (docs/server-api.md — ticket 154): prompt.submitted carries
+        // the 2.0.0 clientMetadata echo (:2898), prompt.queued the 0.39.1 verification
+        // log's shape (promptId + queueLength), prompt.started the 0.39.0 addition
+        // (:930). The submitted/queued envelope session ids read "session_1" so the
+        // default subscription accepts them.
+        val emitted = runSocketEvents(
+            """{"type":"prompt.submitted","seq":22,"session_id":"session_1",""" +
+                """"payload":{"type":"prompt.submitted","time":1789673445307,"agentId":"main",""" +
+                """"promptId":"msg_01M2RDK5XQN21NFQPNV3D3W14X","userMessageId":"msg_01M2RDK5XQN21NFQPNV3D3W14X",""" +
+                """"status":"running","content":[{"type":"text","text":"Reply with exactly: meta-ok"}],""" +
+                """"clientMetadata":[{"client":"doc-verify-200","index":1}],""" +
+                """"createdAt":"2026-09-17T19:30:45.307Z","sessionId":"session_1"}}""",
+            """{"type":"prompt.queued","seq":40,"session_id":"session_1",""" +
+                """"payload":{"type":"prompt.queued","time":1787945685036,"agentId":"main",""" +
+                """"promptId":"msg_01M14XW4135M2B3JJQ8VB8FXG5","queueLength":1,"sessionId":"session_1"}}""",
+            """{"type":"prompt.started","seq":52,"session_id":"session_1",""" +
+                """"payload":{"type":"prompt.started","time":1787945698703,"agentId":"main",""" +
+                """"promptId":"msg_01M14XW4135M2B3JJQ8VB8FXG5","sessionId":"session_1"}}""",
+        )
+
+        assertEquals(
+            listOf(
+                SocketEvent.Event(SessionEvent.PromptSubmitted("msg_01M2RDK5XQN21NFQPNV3D3W14X")),
+                SocketEvent.Event(SessionEvent.PromptQueued("msg_01M14XW4135M2B3JJQ8VB8FXG5", 1)),
+                SocketEvent.Event(SessionEvent.PromptStarted("msg_01M14XW4135M2B3JJQ8VB8FXG5")),
+            ),
+            emitted.filterIsInstance<SocketEvent.Event>(),
+        )
+    }
+
+    @Test
     fun `an approval request frame carries the asking agent id from the payload stamp`() = runBlocking {
         // Verbatim 0.33.0 capture of a SUB-AGENT's request — the legacy
         // event.approval.requested at protocol-verify-0.33.0/ws-s1.jsonl:535 (the v2

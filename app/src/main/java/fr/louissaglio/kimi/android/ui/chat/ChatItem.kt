@@ -16,13 +16,17 @@ sealed interface ChatItem {
     /** [attachments] are the non-image files recovered from the server's notice text,
      * [images] the inlined image parts (ticket 034); both empty for plain messages.
      * [createdAt] is the server timestamp, shown as a caption under the bubble
-     * (ticket 039); null on live spliced messages until the turn-end refetch. */
+     * (ticket 039); null on live spliced messages until the turn-end refetch.
+     * [queued] is the prompt's queue position while it waits server-side (ticket 154):
+     * set on the optimistic local echo by `prompt.queued`, cleared by `prompt.started`
+     * (or when the splice heals the echo) — the caption shows "Queued #N" while set. */
     data class UserMessage(
         override val id: String,
         val text: String,
         val attachments: List<ChatMessage.Part.Attachment> = emptyList(),
         val images: List<ChatMessage.Part.Image> = emptyList(),
         val createdAt: Instant? = null,
+        val queued: Int? = null,
     ) : ChatItem
 
     data class AssistantMessage(

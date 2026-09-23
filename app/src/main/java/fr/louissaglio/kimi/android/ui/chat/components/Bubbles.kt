@@ -100,7 +100,7 @@ private fun CopyableMessage(
  * dropdown menu (M3 touch idiom) with a Copy entry — [CopyableMessage] — and the server
  * timestamp shows as a subtle caption under the bubble, right-aligned with it. The
  * caption swaps to a green "✓ Copied" for a moment after a copy; [AssistantBubble]
- * shares the idiom. */
+ * shares the idiom. A queued prompt's echo instead captions "Queued #N" (ticket 154). */
 @Composable
 internal fun UserBubble(
     message: ChatItem.UserMessage,
@@ -142,6 +142,9 @@ internal fun UserBubble(
             }
             val caption = when {
                 copied -> "✓ Copied"
+                // The queued prompt's sub-state (ticket 154) outranks the timestamp:
+                // it says where the prompt is, not when it was sent.
+                message.queued != null -> "Queued #${message.queued}"
                 message.createdAt != null -> formatTimestamp(message.createdAt)
                 else -> null
             }

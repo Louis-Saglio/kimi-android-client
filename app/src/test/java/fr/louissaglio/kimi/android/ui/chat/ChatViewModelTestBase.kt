@@ -553,6 +553,20 @@ abstract class ChatViewModelTestBase {
             """"deleteCount":0,"messages":[{"role":"user","content":[{"type":"text","text":"$text"}],""" +
             """"toolCalls":[],"origin":{"kind":"user"},"id":"$id"}],"agentId":"main","sessionId":"session_1"}}"""
 
+    /** `prompt.queued` (ticket 154): the prompt waits server-side while the agent is
+     * busy; [queueLength] is the queue size at submission (0.39.1 verification log). */
+    protected fun promptQueuedFrame(promptId: String, queueLength: Int): String =
+        """{"type":"prompt.queued","seq":40,"epoch":"ep_1","session_id":"session_1",""" +
+            """"timestamp":"2026-08-28T19:34:45.036Z","payload":{"type":"prompt.queued",""" +
+            """"time":1787945685036,"agentId":"main","promptId":"$promptId","queueLength":$queueLength,""" +
+            """"sessionId":"session_1"}}"""
+
+    /** `prompt.started` (0.39.0 — ticket 154): the prompt actually began executing. */
+    protected fun promptStartedFrame(promptId: String): String =
+        """{"type":"prompt.started","seq":52,"epoch":"ep_1","session_id":"session_1",""" +
+            """"timestamp":"2026-08-28T19:34:58.703Z","payload":{"type":"prompt.started",""" +
+            """"time":1787945698703,"agentId":"main","promptId":"$promptId","sessionId":"session_1"}}"""
+
     /** Steer echo shape: the spliced steered message carries no id (docs/server-api.md). */
     protected fun steerEchoSplicedFrame(text: String): String =
         """{"type":"context.spliced","seq":12,"epoch":"ep_1","session_id":"session_1",""" +
