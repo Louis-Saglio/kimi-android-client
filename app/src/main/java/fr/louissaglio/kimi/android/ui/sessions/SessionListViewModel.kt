@@ -12,6 +12,7 @@ import fr.louissaglio.kimi.android.data.sessions.SessionListCache
 import fr.louissaglio.kimi.android.data.sessions.SessionListEvent
 import fr.louissaglio.kimi.android.data.sessions.SessionListSocket
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
+import fr.louissaglio.kimi.android.data.sessions.UnreadSessionsStore
 import fr.louissaglio.kimi.android.data.sessions.Workspace
 import fr.louissaglio.kimi.android.data.sessions.isAwaitingInteraction
 import fr.louissaglio.kimi.android.data.sessions.workspaceLabelsFor
@@ -36,6 +37,7 @@ class SessionListViewModel @Inject constructor(
     private val activityStore: SessionActivityStore,
     private val sessionListSocket: SessionListSocket,
     private val sessionListCache: SessionListCache,
+    private val unreadStore: UnreadSessionsStore,
     private val modelsRepository: ModelsRepository,
 ) : ViewModel() {
 
@@ -66,6 +68,8 @@ class SessionListViewModel @Inject constructor(
         val isCreating: Boolean = false,
         /** Null while unknown/failed/empty — the dialog then falls back to a plain text field. */
         val workspaces: List<Workspace>? = null,
+        /** Sessions with a finished turn not yet opened (ticket 145) — the row's blue dot. */
+        val unreadIds: Set<String> = emptySet(),
     ) {
         /**
          * cwd → disambiguated workspace label for the row supporting line (ticket 114).
@@ -154,6 +158,11 @@ class SessionListViewModel @Inject constructor(
                 if (state.sessions == null) state.copy(sessions = cached.sessions, hasMore = cached.hasMore) else state
             }
         }
+        viewModelScope.launch {
+            unreadStore.unreadIds(settingsRepository.current().serverUrl).collect { ids ->
+                uiState.update { it.copy(unreadIds = ids) }
+            }
+        }
         // The one writer covering every mutation path (initial load, refresh, paging,
         // socket patches, archive drops, activity bumps, create-insert): debounced so
         // bursts collapse into a single write, collected on IO so disk writes never
@@ -207,6 +216,11 @@ class SessionListViewModel @Inject constructor(
         socketJob = null
     }
 
+    /** Opening a session clears its unread dot (ticket 145) — the web's selectSession rule. */
+    fun clearUnread(sessionId: String) {
+        viewModelScope.launch { unreadStore.clear(settingsRepository.current().serverUrl, sessionId) }
+    }
+
     /**
      * Collects the sessions-list socket for the life of the screen (ticket 087): rows
      * patch in place on work_changed / meta.updated, the archived row drops out on the
@@ -241,11 +255,20 @@ class SessionListViewModel @Inject constructor(
             // The connection dropped and came back: events in the gap are lost, so
             // re-sync the whole list once — the only automatic refresh left (ticket 112).
             SessionListEvent.Reconnected -> silentRefresh()
-            is SessionListEvent.WorkChanged -> patchRow(event.sessionId) {
-                it.copy(
-                    isRunning = event.busy,
-                    isAwaitingInteraction = isAwaitingInteraction(event.pendingInteraction),
-                )
+            is SessionListEvent.WorkChanged -> {
+                val wasRunning = findRow(event.sessionId)?.isRunning == true
+                patchRow(event.sessionId) {
+                    it.copy(
+                        isRunning = event.busy,
+                        isAwaitingInteraction = isAwaitingInteraction(event.pendingInteraction),
+                    )
+                }
+                // A running row going idle on "completed" finished unseen (ticket 145).
+                // The socket only runs while the list is visible, so no chat can be
+                // open on it — the web's not-the-active-session rule is structural here.
+                if (wasRunning && !event.busy && event.lastTurnReason == "completed") {
+                    unreadStore.mark(settingsRepository.current().serverUrl, event.sessionId)
+                }
             }
             is SessionListEvent.MetaUpdated -> patchRow(event.sessionId) {
                 // Same blank-title rule as the REST mapping: fall back to the cwd.
@@ -318,6 +341,13 @@ class SessionListViewModel @Inject constructor(
                 },
             )
         }
+    }
+
+    /** The row of [sessionId] in either loaded list, null when unknown — the read half of [patchRow]'s mode-agnostic lookup. */
+    private fun findRow(sessionId: String): Session? {
+        val state = uiState.value
+        return state.sessions?.firstOrNull { it.id == sessionId }
+            ?: state.groups?.firstNotNullOfOrNull { group -> group.sessions.firstOrNull { it.id == sessionId } }
     }
 
     /**

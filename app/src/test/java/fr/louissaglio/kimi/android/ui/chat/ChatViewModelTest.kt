@@ -1139,6 +1139,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             snapshotSync,
             Chat("session_1", title = "Fix the bug", cwd = "/home/ubuntu/kimi-android-client"),
             todoParser = testTodoParser(),
+            unreadStore = unreadStore,
         )
 
         assertEquals("Fix the bug", seeded.uiState.value.sessionTitle)
@@ -1156,6 +1157,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             snapshotSync,
             Chat("session_1", cwd = "/home/ubuntu/kimi-android-client"),
             todoParser = testTodoParser(),
+            unreadStore = unreadStore,
         )
 
         assertEquals("kimi-android-client", seeded.uiState.value.sessionTitle)
@@ -1247,6 +1249,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             snapshotSync,
             Chat("session_1"),
             todoParser = testTodoParser(),
+            unreadStore = unreadStore,
         )
         startedViewModels += recreated
         recreated.onScreenStarted()
@@ -1279,6 +1282,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             snapshotSync,
             Chat("session_1"),
             todoParser = testTodoParser(),
+            unreadStore = unreadStore,
         )
         startedViewModels += recreated
         recreated.onScreenStarted()
@@ -1346,7 +1350,13 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         awaitState(viewModel.uiState) { it.sessionModel == "deepseek/deepseek-v4-pro" }
         assertEquals("low", viewModel.uiState.value.sessionEffort)
 
-        // Persisted: the next prompt carries the server-reported values.
+        // Persisted: the next prompt carries the server-reported values. The
+        // write-through lands off the seed's call stack (syncServerSessionModel
+        // launches it) — poll until it commits, like the agent-status test below.
+        withTimeout(5_000) {
+            while (dataStore.data.first()[stringPreferencesKey("effort_for_session_session_1")] != "low") delay(10)
+        }
+
         viewModel.onInputChange("hi")
         viewModel.onSend()
         val body = awaitRequest("/prompts").body!!.utf8()
@@ -1484,6 +1494,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             snapshotSync,
             Chat("session_1"),
             todoParser = testTodoParser(),
+            unreadStore = unreadStore,
         )
         startedViewModels += recreated
         recreated.onScreenStarted()

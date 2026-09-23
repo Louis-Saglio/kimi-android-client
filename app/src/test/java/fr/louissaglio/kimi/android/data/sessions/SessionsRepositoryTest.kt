@@ -416,7 +416,7 @@ class SessionsRepositoryTest {
         assertEquals(42, spike.total)
         assertEquals(4, spike.sessions.size)
         // v2 mapping: epoch-ms updated_at, cwd from the item's workspace, and the
-        // activity.status state space — running → dot, approval/question → badge,
+        // activity.status state space — running → spinner, approval/question → badge,
         // idle → neither.
         assertEquals(
             Session(

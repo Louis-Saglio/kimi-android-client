@@ -151,7 +151,10 @@ fun SessionsScreen(
         snackbarHostState = snackbarHostState,
         onNavigateToSettings = onNavigateToSettings,
         onNavigateToArchived = onNavigateToArchived,
-        onSessionClick = onNavigateToChat,
+        onSessionClick = { session ->
+            viewModel.clearUnread(session.id)
+            onNavigateToChat(session)
+        },
         onRetry = viewModel::onRetry,
         onPullToRefresh = viewModel::onPullToRefresh,
         onEndReached = viewModel::onEndReached,
@@ -409,6 +412,7 @@ private fun SessionList(
             SessionRow(
                 session,
                 workspaceLabel = session.cwd?.let(uiState.workspaceLabels::get),
+                hasUnread = session.id in uiState.unreadIds,
                 onClick = { onSessionClick(session) },
                 onFork = { onForkSession(session) },
                 onArchive = { onArchiveSession(session.id) },
@@ -459,6 +463,7 @@ private fun GroupedSessionList(
                     SessionRow(
                         session,
                         workspaceLabel = null,
+                        hasUnread = session.id in uiState.unreadIds,
                         onClick = { onSessionClick(session) },
                         onFork = { onForkSession(session) },
                         onArchive = { onArchiveSession(session.id) },
@@ -590,6 +595,7 @@ private fun GroupFooter(
 internal fun SessionRow(
     session: Session,
     workspaceLabel: String?,
+    hasUnread: Boolean,
     onClick: () -> Unit,
     onFork: () -> Unit,
     onArchive: () -> Unit,
@@ -624,16 +630,24 @@ internal fun SessionRow(
             )
         },
         trailingContent = {
+            // Web parity (ticket 145): running is a spinner; the blue dot is the
+            // web's unread marker — a turn finished that the user hasn't opened yet.
             when {
                 // A pending interaction reads as "needs me" and wins over "working": a
                 // session blocked on an approval or question is not making progress.
                 session.isAwaitingInteraction -> NeedsAttentionBadge()
-                session.isRunning -> Box(
+                session.isRunning -> CircularProgressIndicator(
+                    modifier = Modifier
+                        .size(14.dp)
+                        .semantics { contentDescription = "Session running" },
+                    strokeWidth = 2.dp,
+                )
+                hasUnread -> Box(
                     Modifier
-                        .size(10.dp)
+                        .size(7.dp)
                         .clip(CircleShape)
                         .background(MaterialTheme.colorScheme.primary)
-                        .semantics { contentDescription = "Session running" },
+                        .semantics { contentDescription = "Session has unread activity" },
                 )
             }
         },
@@ -736,7 +750,9 @@ private fun SessionsContentPreview() {
                 sessions = listOf(
                     Session("session_1", "Build an Android clone", "/home/ubuntu/kimi-android-client", Instant.now(), isRunning = true, isAwaitingInteraction = true),
                     Session("session_2", null, "/tmp/spike", Instant.now(), isRunning = false, isAwaitingInteraction = false),
+                    Session("session_3", "Nightly protocol drift check", "/home/ubuntu/kimi-android-client", Instant.now(), isRunning = true, isAwaitingInteraction = false),
                 ),
+                unreadIds = setOf("session_2"),
             ),
             snackbarHostState = remember { SnackbarHostState() },
             onNavigateToSettings = {},

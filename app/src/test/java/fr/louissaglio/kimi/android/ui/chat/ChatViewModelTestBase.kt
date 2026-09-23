@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.lifecycle.viewModelScope
 import fr.louissaglio.kimi.android.data.attachments.AttachmentStore
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
+import fr.louissaglio.kimi.android.data.sessions.UnreadSessionsStore
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
 import fr.louissaglio.kimi.android.navigation.Chat
@@ -20,6 +21,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.io.path.createTempDirectory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -69,6 +71,7 @@ abstract class ChatViewModelTestBase {
     protected lateinit var viewModel: ChatViewModel
     protected lateinit var settingsRepository: SettingsRepository
     protected lateinit var dataStore: FakePreferencesDataStore
+    protected val unreadStore = UnreadSessionsStore(createTempDirectory("chat-view-model-unread-test").toFile(), Json { ignoreUnknownKeys = true })
 
     /** 0 ms window: sub-agent frames apply on arrival, no flush timer involved.
      * Shares the test's ChatRepository/SnapshotSync (the production singleton
@@ -433,6 +436,7 @@ abstract class ChatViewModelTestBase {
             snapshotSync,
             Chat("session_1"),
             todoParser = testTodoParser(),
+            unreadStore = unreadStore,
             // The suite asserts per-event application: 0 publishes every delta on
             // arrival (the pre-conflation behavior), no timer involved.
             streamCoalesceWindowMillis = 0,
@@ -472,6 +476,7 @@ abstract class ChatViewModelTestBase {
         snapshotSync,
         Chat("session_1"),
         todoParser = testTodoParser(),
+        unreadStore = unreadStore,
         streamCoalesceWindowMillis = streamCoalesceWindowMillis,
     ).also { startedViewModels += it }
 

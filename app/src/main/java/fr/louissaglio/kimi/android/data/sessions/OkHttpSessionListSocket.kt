@@ -245,7 +245,14 @@ class OkHttpSessionListSocket @Inject constructor(
         when (frame.type) {
             "event.session.work_changed" -> frame.decodePayload<WorkChangedPayload>()?.let { payload ->
                 frame.sessionId?.let { sessionId ->
-                    onEvent(SessionListEvent.WorkChanged(sessionId, payload.busy, payload.pendingInteraction))
+                    onEvent(
+                        SessionListEvent.WorkChanged(
+                            sessionId,
+                            payload.busy,
+                            payload.pendingInteraction,
+                            payload.lastTurnReason,
+                        ),
+                    )
                 }
             }
             "session.meta.updated" -> frame.decodePayload<SessionMetaUpdatedPayload>()?.let { payload ->

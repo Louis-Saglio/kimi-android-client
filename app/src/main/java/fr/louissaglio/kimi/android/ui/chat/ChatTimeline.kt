@@ -2,6 +2,7 @@ package fr.louissaglio.kimi.android.ui.chat
 
 import fr.louissaglio.kimi.android.data.chat.AGENT_TOOL_NAME
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
+import fr.louissaglio.kimi.android.data.chat.InFlightTurn
 import fr.louissaglio.kimi.android.data.chat.ORIGIN_KIND_COMPACTION_SUMMARY
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.Todo
@@ -204,6 +205,36 @@ class ChatTimeline(
         val head = mutableListOf<ChatItem>()
         fresh.forEach { flatten(head, it) }
         prependCommitted(head)
+    }
+
+    /**
+     * The snapshot cold start's in-flight turn seed (ticket 144): the resume-cursor
+     * replay covers only frames AFTER the snapshot's watermark, so the running turn's
+     * pre-watermark tail — the aggregated assistant/thinking text and the still-running
+     * tools — must be restored from the bundle, or a cold open of a busy session shows
+     * a gap between the last committed message and the live stream. The aggregated
+     * text predates the still-running tools (they are running AT the watermark), so
+     * the bubble seeds first and the tools tail it — a delta arriving after a tool row
+     * then opens a fresh bubble, the ordinary live rule. Seeded rows are ordinary live
+     * rows: post-watermark frames upsert/heal them in place and the turn-end refetch
+     * replaces them with the canonical committed turn.
+     */
+    fun seedInFlight(turn: InFlightTurn) {
+        if (turn.assistantText.isNotBlank() || turn.thinkingText.isNotBlank()) {
+            rows += ChatItem.AssistantMessage(
+                id = "live_${liveBubbleCount++}",
+                text = turn.assistantText,
+                thinking = turn.thinkingText,
+            )
+        }
+        turn.runningTools.forEach { tool ->
+            if (isTodoCall(tool.toolCallId, tool.name)) {
+                // Same rule as a live TodoList call: no row, the widget mirrors it.
+                todoParser.of(tool.name, tool.input)?.let { liveTodos = it }
+            } else {
+                upsertTool(tool.toolCallId, tool.name, ToolStatus.Running, tool.preview, input = tool.input, args = tool.args)
+            }
+        }
     }
 
     // --- The committed/live boundary ---------------------------------------------------

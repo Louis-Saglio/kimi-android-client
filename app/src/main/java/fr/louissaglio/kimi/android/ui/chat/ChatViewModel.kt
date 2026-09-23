@@ -27,6 +27,7 @@ import fr.louissaglio.kimi.android.data.chat.agentTaskIdOf
 import fr.louissaglio.kimi.android.data.chat.isSubagentScoped
 import fr.louissaglio.kimi.android.data.sessions.Session
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
+import fr.louissaglio.kimi.android.data.sessions.UnreadSessionsStore
 import fr.louissaglio.kimi.android.data.sessions.displayName
 import fr.louissaglio.kimi.android.data.sessions.displayNameFor
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
@@ -55,6 +56,7 @@ class ChatViewModel internal constructor(
     private val snapshotSync: SnapshotSync,
     private val routeArgs: Chat,
     private val todoParser: TodoParser,
+    private val unreadStore: UnreadSessionsStore,
     // Default mirrors the DI value (AppModule) for direct construction in tests;
     // pass 0 to publish every delta immediately (the pre-conflation behavior).
     @StreamCoalesceWindowMillis
@@ -76,6 +78,7 @@ class ChatViewModel internal constructor(
         snapshotSync: SnapshotSync,
         savedStateHandle: SavedStateHandle,
         todoParser: TodoParser,
+        unreadStore: UnreadSessionsStore,
         @StreamCoalesceWindowMillis streamCoalesceWindowMillis: Long,
     ) : this(
         chatRepository,
@@ -86,6 +89,7 @@ class ChatViewModel internal constructor(
         snapshotSync,
         savedStateHandle.toRoute<Chat>(),
         todoParser,
+        unreadStore,
         streamCoalesceWindowMillis,
     )
 
@@ -504,7 +508,9 @@ class ChatViewModel internal constructor(
      * `resync_required` rebuild. The live tail survives per the snapshot's busy (the
      * same polarity as ticket 048's status check — a finished turn has no legitimate
      * live rows); a turn event landing mid-fetch forces keep-live (it is newer than
-     * the snapshot). The roster and the snapshot's `Agent` calls already reached the
+     * the snapshot). The in-flight turn's pre-watermark tail seeds from the bundle
+     * (ticket 144) — the resume-cursor replay only covers frames after the watermark.
+     * The roster and the snapshot's `Agent` calls already reached the
      * store inside [SnapshotSync]'s fetch — here the rebuilt timeline's rows are
      * mined and the store's links re-driven onto them (ticket 091).
      */
@@ -513,7 +519,13 @@ class ChatViewModel internal constructor(
         // Any coalesced text must apply BEFORE the replace wipes/dedups the live rows
         // (ticket 062; mirrors the history pager's applyNewest).
         deltaCoalescer.flush()
-        timeline.replaceHistory(snapshot.messages.items, keepLive = snapshot.busy || turnStale)
+        val keepLive = snapshot.busy || turnStale
+        timeline.replaceHistory(snapshot.messages.items, keepLive = keepLive)
+        // The in-flight turn's pre-watermark tail (ticket 144): the resume-cursor
+        // replay covers only frames AFTER the snapshot's watermark, so without this
+        // seed a cold open of a busy session shows a gap between the last committed
+        // message and the live stream.
+        if (keepLive) snapshot.inFlightTurn?.let(timeline::seedInFlight)
         oldestHistoryId = snapshot.messages.items.firstOrNull()?.id
         mineAgentRowsIntoStore()
         uiState.update {
@@ -671,6 +683,9 @@ class ChatViewModel internal constructor(
      * socket. Also fires when the app returns to the foreground. */
     fun onScreenStarted() {
         screenVisible.value = true
+        // The web clears a session's unread marker when it becomes the visible session
+        // (ticket 145 backstop: a process-death restore lands here without a list tap).
+        viewModelScope.launch { unreadStore.clear(settingsRepository.current().serverUrl, sessionId) }
         if (coldStartDone) {
             resyncHistoryAfterDrop()
             questions.seed()

@@ -503,8 +503,10 @@ data class SubagentRosterEntryDto(
     @SerialName("thinking_effort") val thinkingEffort: String? = null,
 )
 
-/** The active turn's live tail; decoded for completeness, never consumed (ticket 085,
- * out of scope). `running_tools` entries also carry a `description` — ignored. */
+/** The active turn's live tail: the ONLY carrier of the turn's pre-watermark content
+ * (the resume-cursor replay covers frames after the watermark only, and the turn's
+ * messages commit to history at its end), so the cold start seeds the live tail from
+ * it (ticket 144). `running_tools` entries also carry a `description` — ignored. */
 @Serializable
 data class InFlightTurnDto(
     @SerialName("turn_id") val turnId: Long = 0,
@@ -519,7 +521,9 @@ data class RunningToolDto(
     @SerialName("tool_call_id") val toolCallId: String = "",
     val name: String = "",
     val args: JsonObject? = null,
-    val display: JsonObject? = null,
+    // Same shape as tool.call.started's display (the 0.31.1 verbatim capture,
+    // docs/server-api.md): it feeds the seeded row's preview.
+    val display: ToolInputDisplayDto? = null,
 )
 
 // --- GET /api/v1/sessions/{id}/transcript (docs/server-api.md, Transcript) -----------

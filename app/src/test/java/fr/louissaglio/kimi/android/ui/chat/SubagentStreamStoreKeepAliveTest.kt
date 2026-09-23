@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.lifecycle.viewModelScope
 import fr.louissaglio.kimi.android.data.attachments.AttachmentStore
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
+import fr.louissaglio.kimi.android.data.sessions.UnreadSessionsStore
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
 import fr.louissaglio.kimi.android.navigation.Chat
@@ -17,6 +18,7 @@ import fr.louissaglio.kimi.android.testutil.testSubagentStreamStore
 import fr.louissaglio.kimi.android.testutil.webSocketUpgradeResponse
 import fr.louissaglio.kimi.android.testutil.testTodoParser
 import java.util.concurrent.CopyOnWriteArrayList
+import kotlin.io.path.createTempDirectory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -30,6 +32,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
+import kotlinx.serialization.json.Json
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
@@ -65,6 +68,7 @@ class SubagentStreamStoreKeepAliveTest {
     private lateinit var store: SubagentStreamStore
     private lateinit var settingsRepository: SettingsRepository
     private lateinit var dataStore: FakePreferencesDataStore
+    private val unreadStore = UnreadSessionsStore(createTempDirectory("subagent-keep-alive-unread-test").toFile(), Json { ignoreUnknownKeys = true })
 
     /** Shared by the store and the ChatViewModel (the production singleton shape):
      * one SessionSocket, one cursor map — the hand-off resumes, never replays twice. */
@@ -342,6 +346,7 @@ class SubagentStreamStoreKeepAliveTest {
         snapshotSync,
         Chat("session_1"),
         todoParser = testTodoParser(),
+        unreadStore = unreadStore,
         streamCoalesceWindowMillis = 0,
     ).also { startedViewModels += it }
 

@@ -225,7 +225,11 @@
   and mines the snapshot's messages page + `in_flight_turn.running_tools` for
   `Agent` calls (`applyAgentCall` — chat-independent, so the page-on-top restore
   recovers prompts/links too), and hands the chat-side bundle (history page,
-  busy, pending approvals/questions) to the calling ChatViewModel. The bundle's
+  busy, pending approvals/questions, and since ticket 144 the in-flight turn's
+  pre-watermark live tail — the aggregated text/thinking plus the still-running
+  tools, seeded as ordinary live rows the post-watermark replay then
+  extends/heals, closing the gap between the last committed message and the
+  live stream on a busy cold open) to the calling ChatViewModel. The bundle's
   `session.usage` carries the real fill since 0.38.0 (a 0 limit still maps to
   null), and every cold start re-reads /status regardless: the session's bound
   model/effort (107) is served only there, and the ring converges on the live

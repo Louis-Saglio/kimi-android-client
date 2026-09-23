@@ -8,6 +8,7 @@ import fr.louissaglio.kimi.android.data.sessions.SessionActivityStore
 import fr.louissaglio.kimi.android.data.sessions.SessionListCache
 import fr.louissaglio.kimi.android.data.sessions.SessionListEvent
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
+import fr.louissaglio.kimi.android.data.sessions.UnreadSessionsStore
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
 import fr.louissaglio.kimi.android.fakes.FakeSessionListSocket
@@ -60,6 +61,8 @@ class SessionListViewModelTest {
     private lateinit var modelsRepository: ModelsRepository
     private lateinit var cacheDir: File
     private lateinit var sessionListCache: SessionListCache
+    private lateinit var unreadDir: File
+    private lateinit var unreadStore: UnreadSessionsStore
 
     @Before
     fun setUp() {
@@ -76,6 +79,8 @@ class SessionListViewModelTest {
         modelsRepository = testModelsRepository()
         cacheDir = createTempDirectory("session-list-view-model-test").toFile()
         sessionListCache = SessionListCache(cacheDir, Json { ignoreUnknownKeys = true })
+        unreadDir = createTempDirectory("session-list-unread-test").toFile()
+        unreadStore = UnreadSessionsStore(unreadDir, Json { ignoreUnknownKeys = true })
         viewModel = createViewModel()
     }
 
@@ -88,6 +93,7 @@ class SessionListViewModelTest {
         appScope.cancel()
         server.close()
         cacheDir.deleteRecursively()
+        unreadDir.deleteRecursively()
     }
 
     private fun createViewModel(): SessionListViewModel = SessionListViewModel(
@@ -96,6 +102,7 @@ class SessionListViewModelTest {
         activityStore,
         fakeSocket,
         sessionListCache,
+        unreadStore,
         modelsRepository,
     )
 
@@ -721,7 +728,7 @@ class SessionListViewModelTest {
     // --- Live socket patches (ticket 087, FakeSessionListSocket) ---
 
     @Test
-    fun `a work_changed event lights the running dot and clears it, without any refresh`() = runBlocking {
+    fun `a work_changed event lights the running indicator and clears it, without any refresh`() = runBlocking {
         server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1", "session_2")))
         viewModel.onScreenStarted()
         awaitState(viewModel.uiState) { it.sessions != null }
@@ -755,6 +762,52 @@ class SessionListViewModelTest {
 
         fakeSocket.events.tryEmit(SessionListEvent.WorkChanged("session_1", busy = false, pendingInteraction = "none"))
         awaitState(viewModel.uiState) { !it.sessions!![0].isAwaitingInteraction && !it.sessions[0].isRunning }
+    }
+
+    @Test
+    fun `a completed turn end marks the session unread, an abort does not`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1", "session_2")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+
+        fakeSocket.events.tryEmit(SessionListEvent.WorkChanged("session_1", busy = true, pendingInteraction = "none"))
+        awaitState(viewModel.uiState) { it.sessions!![0].isRunning }
+        fakeSocket.events.tryEmit(SessionListEvent.WorkChanged("session_2", busy = true, pendingInteraction = "none"))
+        awaitState(viewModel.uiState) { it.sessions!![1].isRunning }
+
+        fakeSocket.events.tryEmit(
+            SessionListEvent.WorkChanged("session_1", busy = false, pendingInteraction = "none", lastTurnReason = "completed"),
+        )
+        awaitState(viewModel.uiState) { "session_1" in it.unreadIds }
+
+        fakeSocket.events.tryEmit(
+            SessionListEvent.WorkChanged("session_2", busy = false, pendingInteraction = "none", lastTurnReason = "cancelled"),
+        )
+        awaitState(viewModel.uiState) { !it.sessions!![1].isRunning }
+        assertEquals(setOf("session_1"), viewModel.uiState.value.unreadIds)
+
+        // The mark is written through to disk — cold-start parity with the web's localStorage.
+        assertEquals(setOf("session_1"), unreadStore.unreadIds(server.url("/").toString()).value)
+    }
+
+    @Test
+    fun `opening a session clears its unread marker`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+
+        fakeSocket.events.tryEmit(SessionListEvent.WorkChanged("session_1", busy = true, pendingInteraction = "none"))
+        awaitState(viewModel.uiState) { it.sessions!![0].isRunning }
+        fakeSocket.events.tryEmit(
+            SessionListEvent.WorkChanged("session_1", busy = false, pendingInteraction = "none", lastTurnReason = "completed"),
+        )
+        awaitState(viewModel.uiState) { "session_1" in it.unreadIds }
+
+        viewModel.clearUnread("session_1")
+
+        awaitState(viewModel.uiState) { it.unreadIds.isEmpty() }
     }
 
     @Test

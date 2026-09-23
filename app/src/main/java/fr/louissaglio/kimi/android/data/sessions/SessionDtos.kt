@@ -145,6 +145,8 @@ data class WorkChangedPayload(
     val busy: Boolean = false,
     /** Server runtime state: "none" | "approval" | "question" (docs/server-api.md). */
     @SerialName("pending_interaction") val pendingInteraction: String = "none",
+    /** Present on the idle frame at turn end: "completed" | "cancelled" (docs/server-api.md). */
+    @SerialName("last_turn_reason") val lastTurnReason: String? = null,
 )
 
 /** `session.meta.updated`: the title rides at the payload top level (the `patch`

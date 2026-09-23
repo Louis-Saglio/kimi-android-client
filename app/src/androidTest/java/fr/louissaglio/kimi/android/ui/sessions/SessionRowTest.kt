@@ -21,7 +21,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** Semantics tests for the session-row status indicators (tickets 016/087), the supporting line (114) and the long-press full-name dialog (117). */
+/** Semantics tests for the session-row status indicators (tickets 016/087/145), the supporting line (114) and the long-press full-name dialog (117). */
 @RunWith(AndroidJUnit4::class)
 class SessionRowTest {
 
@@ -32,6 +32,7 @@ class SessionRowTest {
         title: String? = "A session",
         isRunning: Boolean = false,
         isAwaitingInteraction: Boolean = false,
+        hasUnread: Boolean = false,
         cwd: String? = "/tmp/spike",
         workspaceLabel: String? = null,
         updatedAt: Instant = Instant.now(),
@@ -51,6 +52,7 @@ class SessionRowTest {
                         isAwaitingInteraction = isAwaitingInteraction,
                     ),
                     workspaceLabel = workspaceLabel,
+                    hasUnread = hasUnread,
                     onClick = onClick,
                     onFork = onFork,
                     onArchive = onArchive,
@@ -60,7 +62,7 @@ class SessionRowTest {
     }
 
     @Test
-    fun pendingInteractionShowsNeedsAttentionBadgeNotRunningDot() {
+    fun pendingInteractionShowsNeedsAttentionBadgeNotSpinner() {
         row(isRunning = true, isAwaitingInteraction = true)
 
         composeTestRule.onNodeWithContentDescription("Needs attention").assertIsDisplayed()
@@ -68,19 +70,38 @@ class SessionRowTest {
     }
 
     @Test
-    fun noPendingInteractionShowsNoBadge() {
+    fun idleSessionShowsNoIndicator() {
         row(isRunning = false, isAwaitingInteraction = false)
 
         composeTestRule.onNodeWithContentDescription("Needs attention").assertDoesNotExist()
         composeTestRule.onNodeWithContentDescription("Session running").assertDoesNotExist()
+        composeTestRule.onNodeWithContentDescription("Session has unread activity").assertDoesNotExist()
     }
 
     @Test
-    fun busyWithoutInteractionShowsRunningDotOnly() {
+    fun busyWithoutInteractionShowsSpinnerOnly() {
         row(isRunning = true, isAwaitingInteraction = false)
 
         composeTestRule.onNodeWithContentDescription("Session running").assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription("Needs attention").assertDoesNotExist()
+        composeTestRule.onNodeWithContentDescription("Session has unread activity").assertDoesNotExist()
+    }
+
+    @Test
+    fun unreadSessionShowsDot() {
+        row(hasUnread = true)
+
+        composeTestRule.onNodeWithContentDescription("Session has unread activity").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Session running").assertDoesNotExist()
+        composeTestRule.onNodeWithContentDescription("Needs attention").assertDoesNotExist()
+    }
+
+    @Test
+    fun runningWinsOverUnread() {
+        row(isRunning = true, hasUnread = true)
+
+        composeTestRule.onNodeWithContentDescription("Session running").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Session has unread activity").assertDoesNotExist()
     }
 
     @Test

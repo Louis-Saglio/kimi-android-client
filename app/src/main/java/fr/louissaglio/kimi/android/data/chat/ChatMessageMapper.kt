@@ -189,7 +189,17 @@ class ChatMessageMapper @Inject constructor(json: Json) {
                 turnId = turn.turnId,
                 assistantText = turn.assistantText,
                 thinkingText = turn.thinkingText,
-                runningTools = turn.runningTools.map { RunningTool(it.toolCallId, it.name, it.args, it.display) },
+                runningTools = turn.runningTools.map { tool ->
+                    // The same renderings a live tool.call.started row gets (ticket
+                    // 144): the seeded row is indistinguishable from a witnessed one.
+                    RunningTool(
+                        toolCallId = tool.toolCallId,
+                        name = tool.name,
+                        args = tool.args,
+                        preview = preview(ToolCallPayload(tool.toolCallId, tool.name, tool.args, tool.display)),
+                        input = formatDetail(tool.args),
+                    )
+                },
                 currentPromptId = turn.currentPromptId,
             )
         },

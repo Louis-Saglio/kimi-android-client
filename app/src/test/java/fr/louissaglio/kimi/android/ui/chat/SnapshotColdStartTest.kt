@@ -32,9 +32,10 @@ class SnapshotColdStartTest : ChatViewModelTestBase() {
         subagents: String = "[]",
         pendingApprovals: String = "[]",
         pendingQuestions: String = "[]",
+        inFlightTurn: String = "null",
     ): String = """{"code":0,"msg":"success","data":{"as_of_seq":42,"epoch":"ep_snap",""" +
         """"session":{"id":"session_1","busy":$busy,"usage":{"context_tokens":0,"context_limit":0}},""" +
-        """"messages":$messages,"in_flight_turn":null,"subagents":$subagents,""" +
+        """"messages":$messages,"in_flight_turn":$inFlightTurn,"subagents":$subagents,""" +
         """"pending_approvals":$pendingApprovals,"pending_questions":$pendingQuestions},"request_id":"r"}"""
 
     @Test
@@ -75,6 +76,96 @@ class SnapshotColdStartTest : ChatViewModelTestBase() {
         assertEquals("explore", entry.name)
         assertEquals("doc-verify", entry.description)
         assertEquals(SubagentStatus.Working, entry.status)
+    }
+
+    @Test
+    fun `cold open seeds the in-flight turn's pre-watermark live tail`() = runBlocking {
+        // The reported bug (Louis, 2026-09-16): opening a LIVE session showed the
+        // history, a gap, then the live stream. The resume-cursor replay covers only
+        // frames AFTER the snapshot's watermark and the turn's messages commit to
+        // history at its end, so the turn's pre-watermark tail — streamed text,
+        // thinking, still-running tools — exists only in the bundle's in_flight_turn.
+        statusBody = """{"code":0,"msg":"success","data":{"busy":true,"context_tokens":0,""" +
+            """"max_context_tokens":1048576,"context_usage":0.0},"request_id":"r"}"""
+        snapshotBody = snapshotBundle(
+            busy = true,
+            messages = """{"items":[""" +
+                """{"id":"msg_1","session_id":"session_1","role":"user",""" +
+                """"content":[{"type":"text","text":"run sleep 60"}],""" +
+                """"created_at":"2026-09-16T10:00:00.000Z"}],"has_more":false}""",
+            // Verbatim 0.31.1 busy shape (docs/server-api.md, Session snapshot).
+            inFlightTurn = """{"turn_id":1,"assistant_text":"Working on it.",""" +
+                """"thinking_text":"Let me see.",""" +
+                """"running_tools":[{"tool_call_id":"tool_bash","name":"Bash",""" +
+                """"args":{"command":"sleep 60","timeout":90},"description":"Running: sleep 60",""" +
+                """"display":{"kind":"command","command":"sleep 60","cwd":"/tmp","language":"bash"}}],""" +
+                """"current_prompt_id":"msg_1"}""",
+        )
+
+        viewModel.onScreenStarted()
+
+        // The seeded tail stitches onto the history page: user bubble, the aggregated
+        // text/thinking bubble, then the still-running tool row (running AT the
+        // watermark — the tail's newest activity).
+        awaitState(viewModel.uiState) { state ->
+            state.items?.map(ChatItem::id) == listOf("msg_1", "live_0", "tool_bash")
+        }
+        val items = viewModel.uiState.value.items!!
+        val bubble = items.filterIsInstance<ChatItem.AssistantMessage>().single()
+        assertEquals("Working on it.", bubble.text)
+        assertEquals("Let me see.", bubble.thinking)
+        val tool = items.filterIsInstance<ChatItem.ToolGroup>().single().tools.single()
+        assertEquals("Bash", tool.name)
+        assertEquals(ToolStatus.Running, tool.status)
+        assertEquals("sleep 60", tool.preview)
+        assertTrue(viewModel.uiState.value.isWorking)
+    }
+
+    @Test
+    fun `post-watermark frames extend and heal the seeded in-flight tail`() = runBlocking {
+        // The seed's continuation contract: the replay/live stream lands on ordinary
+        // live rows — a result heals the seeded tool row in place (no duplicate), and
+        // a delta after a tool row opens a fresh bubble (the ordinary live rule).
+        statusBody = """{"code":0,"msg":"success","data":{"busy":true,"context_tokens":0,""" +
+            """"max_context_tokens":1048576,"context_usage":0.0},"request_id":"r"}"""
+        snapshotBody = snapshotBundle(
+            busy = true,
+            messages = """{"items":[""" +
+                """{"id":"msg_1","session_id":"session_1","role":"user",""" +
+                """"content":[{"type":"text","text":"run sleep 60"}],""" +
+                """"created_at":"2026-09-16T10:00:00.000Z"}],"has_more":false}""",
+            inFlightTurn = """{"turn_id":1,"assistant_text":"Working on it.","thinking_text":"",""" +
+                """"running_tools":[{"tool_call_id":"tool_bash","name":"Bash",""" +
+                """"args":{"command":"sleep 60","timeout":90},"description":"Running: sleep 60",""" +
+                """"display":{"kind":"command","command":"sleep 60","cwd":"/tmp","language":"bash"}}],""" +
+                """"current_prompt_id":"msg_1"}""",
+        )
+
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { state ->
+            state.items?.map(ChatItem::id) == listOf("msg_1", "live_0", "tool_bash")
+        }
+
+        socket.send(
+            """{"type":"tool.result","seq":43,"epoch":"ep_snap","session_id":"session_1",""" +
+                """"timestamp":"2026-09-16T10:00:05.000Z","payload":{"type":"tool.result","turnId":1,""" +
+                """"toolCallId":"tool_bash","output":"done","is_error":false,""" +
+                """"agentId":"main","sessionId":"session_1"}}""",
+        )
+        socket.send(assistantDeltaFrame(" All set.", 44))
+
+        awaitState(viewModel.uiState) { state ->
+            state.items?.map(ChatItem::id) == listOf("msg_1", "live_0", "tool_bash", "live_1")
+        }
+        val items = viewModel.uiState.value.items!!
+        val tool = items.filterIsInstance<ChatItem.ToolGroup>().single().tools.single()
+        assertEquals(ToolStatus.Done, tool.status)
+        assertEquals("done", tool.output)
+        assertEquals(
+            listOf("Working on it.", " All set."),
+            items.filterIsInstance<ChatItem.AssistantMessage>().map { it.text },
+        )
     }
 
     @Test

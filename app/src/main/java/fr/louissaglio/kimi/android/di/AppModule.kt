@@ -17,6 +17,7 @@ import fr.louissaglio.kimi.android.data.network.BearerTokenInterceptor
 import fr.louissaglio.kimi.android.data.sessions.OkHttpSessionListSocket
 import fr.louissaglio.kimi.android.data.sessions.SessionListCache
 import fr.louissaglio.kimi.android.data.sessions.SessionListSocket
+import fr.louissaglio.kimi.android.data.sessions.UnreadSessionsStore
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -81,6 +82,12 @@ object AppModule {
     @Singleton
     fun provideSessionListCache(@ApplicationContext context: Context, json: Json): SessionListCache =
         SessionListCache(File(context.filesDir, "session-list-cache"), json)
+
+    /** Same ready-made-dir split as the session list cache above (ticket 145). */
+    @Provides
+    @Singleton
+    fun provideUnreadSessionsStore(@ApplicationContext context: Context, json: Json): UnreadSessionsStore =
+        UnreadSessionsStore(File(context.filesDir, "unread-sessions"), json)
 
     @Provides
     @Singleton

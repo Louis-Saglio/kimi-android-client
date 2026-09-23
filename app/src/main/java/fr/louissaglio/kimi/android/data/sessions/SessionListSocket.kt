@@ -42,14 +42,20 @@ sealed interface SessionListEvent {
     data object Reconnected : SessionListEvent
 
     /**
-     * `event.session.work_changed` (docs/server-api.md): the busy dot and the
-     * needs-me badge state of one session.
+     * `event.session.work_changed` (docs/server-api.md): the running spinner, the
+     * needs-me badge and the unread marker (ticket 145) of one session.
      */
     data class WorkChanged(
         val sessionId: String,
         val busy: Boolean,
         /** Server runtime state: "none" | "approval" | "question". */
         val pendingInteraction: String,
+        /**
+         * Turn-end reason on the idle frame ("completed" | "cancelled"), null on busy
+         * frames. The unread marker (ticket 145) marks a session only when a running
+         * row goes idle with "completed" — an abort is the user's own doing.
+         */
+        val lastTurnReason: String? = null,
     ) : SessionListEvent
 
     /** `session.meta.updated` (docs/server-api.md): [title] is the patched title. */

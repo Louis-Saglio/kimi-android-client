@@ -28,9 +28,11 @@ data class SessionSnapshot(
     val pendingQuestions: List<PendingQuestion>,
     /** The foreground sub-agent roster at the watermark. */
     val subagents: List<SubagentRosterEntry>,
-    /** The in-flight turn's live tail. Decoded for completeness only — NOT consumed
-     * (ticket 085, out of scope): the in-flight content reaches the timeline via the
-     * messages page plus live frames. */
+    /** The in-flight turn's live tail: the ONLY carrier of the turn's pre-watermark
+     * content — the resume-cursor replay covers frames after the watermark and the
+     * turn's messages commit to history at its end, so a cold open of a busy session
+     * seeds its live tail from here (ticket 144) instead of showing a gap between the
+     * last committed message and the live stream. */
     val inFlightTurn: InFlightTurn?,
 )
 
@@ -77,7 +79,7 @@ data class SubagentRosterEntry(
  * `status:"killed"` (ticket 135). */
 enum class SubagentRosterPhase { Queued, Working, Suspended, Completed, Failed, Cancelled, Unknown }
 
-/** The active turn's live tail (verified 0.31.1 shape); decoded, never consumed. */
+/** The active turn's live tail (verified 0.31.1 shape). */
 data class InFlightTurn(
     val turnId: Long,
     val assistantText: String,
@@ -86,11 +88,13 @@ data class InFlightTurn(
     val currentPromptId: String,
 )
 
-/** One still-running tool call of the in-flight turn; [args]/[display] stay raw —
- * nothing consumes them. */
+/** One still-running tool call of the in-flight turn; [preview]/[input] are the row
+ * renderings derived at the mapping boundary (the same ones a live `tool.call.started`
+ * carries), [args] stays raw for the typed payload. */
 data class RunningTool(
     val toolCallId: String,
     val name: String,
     val args: JsonObject?,
-    val display: JsonObject?,
+    val preview: String,
+    val input: String,
 )
