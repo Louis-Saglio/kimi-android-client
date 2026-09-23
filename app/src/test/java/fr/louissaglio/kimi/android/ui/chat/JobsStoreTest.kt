@@ -84,13 +84,16 @@ class JobsStoreTest {
                 """{"code":0,"msg":"success","data":{"items":[""" +
                     """{"id":"agent-7noib8bb","session_id":"session_1","kind":"subagent",""" +
                     """"description":"doc-verify-bg","status":"completed",""" +
+                    """"run_in_background":true,""" +
                     """"created_at":"2026-07-28T03:40:08.039Z","started_at":"2026-07-28T03:40:08.039Z",""" +
                     """"completed_at":"2026-07-28T03:40:22.372Z"},""" +
                     """{"id":"proc-9xk2","session_id":"session_1","kind":"bash",""" +
                     """"description":"sleep 1000","status":"running",""" +
+                    """"run_in_background":true,""" +
                     """"created_at":"2026-07-28T03:41:00.000Z","started_at":"2026-07-28T03:41:00.000Z"},""" +
                     """{"id":"tool_q1","session_id":"session_1","kind":"tool",""" +
                     """"description":"Pick an option","status":"running",""" +
+                    """"run_in_background":true,""" +
                     """"created_at":"2026-07-28T03:42:00.000Z","started_at":"2026-07-28T03:42:00.000Z"}""" +
                     """]},"request_id":"r"}""",
             ),
@@ -100,7 +103,7 @@ class JobsStoreTest {
         awaitCondition { uiState.jobs.isNotEmpty() }
 
         // Terminal jobs linger (the sheet shows them); kind "tool" was filtered at the
-        // mapping boundary. REST carries no agentId — none was linked yet.
+        // mapping boundary. No agent_id on the fixtures — nothing is linked yet.
         assertEquals(
             listOf(
                 Job(
@@ -192,7 +195,8 @@ class JobsStoreTest {
             MockResponse(body =
                 """{"code":0,"msg":"success","data":{"items":[""" +
                     """{"id":"bash-1","session_id":"session_1","kind":"bash","description":"doc-verify",""" +
-                    """"status":"failed","created_at":"2026-07-28T03:41:00.000Z",""" +
+                    """"status":"failed","run_in_background":true,""" +
+                    """"created_at":"2026-07-28T03:41:00.000Z",""" +
                     """"started_at":"2026-07-28T03:41:00.000Z","completed_at":"2026-07-28T03:41:05.000Z"}""" +
                     """]},"request_id":"r"}""",
             ),
@@ -209,13 +213,14 @@ class JobsStoreTest {
     @Test
     fun `a live event heals the sub-agent link a REST-seeded job lacks`() = runBlocking {
         // A terminal REST entry (a background sub-agent that finished while the
-        // session was away — a RUNNING unknown one would now be filtered as a
-        // foreground ghost, ticket 101): REST carries no agentId.
+        // session was away — a RUNNING run_in_background:false one would be filtered
+        // as a foreground ghost, ticket 162): the fixture carries no agent_id.
         server.enqueue(
             MockResponse(body =
                 """{"code":0,"msg":"success","data":{"items":[""" +
                     """{"id":"agent-7noib8bb","session_id":"session_1","kind":"subagent",""" +
                     """"description":"doc-verify-bg","status":"completed",""" +
+                    """"run_in_background":true,""" +
                     """"created_at":"2026-07-28T03:40:08.039Z","started_at":"2026-07-28T03:40:08.039Z",""" +
                     """"completed_at":"2026-07-28T03:40:22.372Z"}""" +
                     """]},"request_id":"r"}""",
@@ -240,18 +245,21 @@ class JobsStoreTest {
     }
 
     @Test
-    fun `a REST-seeded running subagent unknown to the background set is filtered as foreground`() = runBlocking {
-        // Ticket 101: since server 0.34.0 a RUNNING foreground sub-agent is listed
-        // by REST /tasks; unknown to the WS/marker background set, it is a ghost —
-        // no job row. The bash entry is unaffected.
+    fun `REST seed lists only background-flagged tasks - a foreground sub-agent stays out`() = runBlocking {
+        // Since 0.39.0 every REST task carries run_in_background (docs/server-api.md):
+        // a RUNNING foreground sub-agent lists with false and is never a job row.
+        // The flag replaces ticket 101's known-background set — no live task.* frame
+        // or result marker is needed to classify the seed.
         server.enqueue(
             MockResponse(body =
                 """{"code":0,"msg":"success","data":{"items":[""" +
                     """{"id":"agent-fg1","session_id":"session_1","kind":"subagent",""" +
                     """"description":"explore the repo","status":"running",""" +
+                    """"run_in_background":false,""" +
                     """"created_at":"2026-08-06T10:00:00.000Z","started_at":"2026-08-06T10:00:00.000Z"},""" +
                     """{"id":"bash-1","session_id":"session_1","kind":"bash",""" +
                     """"description":"sleep 1000","status":"running",""" +
+                    """"run_in_background":true,""" +
                     """"created_at":"2026-08-06T10:01:00.000Z","started_at":"2026-08-06T10:01:00.000Z"}""" +
                     """]},"request_id":"r"}""",
             ),
@@ -262,50 +270,32 @@ class JobsStoreTest {
 
         assertEquals(listOf("bash-1"), uiState.jobs.map { it.taskId })
 
-        // The same id once learned via a task.started frame (background
-        // classification) survives the next seed.
-        store.onStarted(taskInfo(taskId = "agent-bg1", status = TaskInfo.Status.Running, agentId = "agent-13"))
+        // A background sub-agent whose task.started predates the subscription is kept
+        // by the flag alone — the cold-start case the WS/marker heuristic could only
+        // cover partially.
         server.enqueue(
             MockResponse(body =
                 """{"code":0,"msg":"success","data":{"items":[""" +
                     """{"id":"agent-fg1","session_id":"session_1","kind":"subagent",""" +
                     """"description":"explore the repo","status":"running",""" +
+                    """"run_in_background":false,""" +
                     """"created_at":"2026-08-06T10:00:00.000Z","started_at":"2026-08-06T10:00:00.000Z"},""" +
                     """{"id":"agent-bg1","session_id":"session_1","kind":"subagent",""" +
                     """"description":"doc-verify-bg","status":"running",""" +
+                    """"run_in_background":true,""" +
                     """"created_at":"2026-08-06T10:02:00.000Z","started_at":"2026-08-06T10:02:00.000Z"},""" +
                     """{"id":"bash-1","session_id":"session_1","kind":"bash",""" +
                     """"description":"sleep 1000","status":"running",""" +
+                    """"run_in_background":true,""" +
                     """"created_at":"2026-08-06T10:01:00.000Z","started_at":"2026-08-06T10:01:00.000Z"}""" +
                     """]},"request_id":"r"}""",
             ),
         )
+
         store.seed()
-        awaitCondition { uiState.jobs.any { it.taskId == "agent-bg1" && it.description == "doc-verify-bg" } }
+        awaitCondition { uiState.jobs.any { it.taskId == "agent-bg1" } }
 
         assertEquals(setOf("bash-1", "agent-bg1"), uiState.jobs.map { it.taskId }.toSet())
-    }
-
-    @Test
-    fun `an Agent result task_id marker marks the id as background for the seed`() = runBlocking {
-        // Ticket 101: on a re-entered session the task.started predates the
-        // subscription — the history row's `task_id: agent-…` stub is the background
-        // proof that keeps the still-running sub-agent's job row.
-        store.onBackgroundTaskId("agent-bg1")
-        server.enqueue(
-            MockResponse(body =
-                """{"code":0,"msg":"success","data":{"items":[""" +
-                    """{"id":"agent-bg1","session_id":"session_1","kind":"subagent",""" +
-                    """"description":"doc-verify-bg","status":"running",""" +
-                    """"created_at":"2026-08-06T10:02:00.000Z","started_at":"2026-08-06T10:02:00.000Z"}""" +
-                    """]},"request_id":"r"}""",
-            ),
-        )
-
-        store.seed()
-        awaitCondition { uiState.jobs.isNotEmpty() }
-
-        assertEquals(listOf("agent-bg1"), uiState.jobs.map { it.taskId })
     }
 
     @Test

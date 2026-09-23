@@ -328,6 +328,7 @@ class ChatMessageMapper @Inject constructor(json: Json) {
             kind = kind,
             description = dto.description,
             status = status,
+            runInBackground = dto.runInBackground,
             createdAt = createdAt,
             startedAt = startedAt,
             completedAt = parseInstant(dto.completedAt),

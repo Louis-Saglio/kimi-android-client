@@ -917,6 +917,7 @@ class SubagentStreamStoreTest {
         kind = kind,
         description = "bg",
         status = status,
+        runInBackground = true,
         createdAt = Instant.ofEpochMilli(1785210101939),
         startedAt = Instant.ofEpochMilli(1785210101939),
         agentId = agentId,

@@ -70,18 +70,6 @@ internal class JobsStore(
      * task.started/task.terminated has already overtaken. */
     private val seedGuard = SeedGuard()
 
-    /** Task ids known to be BACKGROUND (ticket 101): learned from live
-     * `task.started`/`task.terminated` frames and from `Agent` tool-result
-     * `task_id:` markers (fed via [onBackgroundTaskId]). Since server 0.34.0 a
-     * RUNNING foreground sub-agent is listed by REST `/tasks` too (and dropped
-     * once terminal, never emitting `task.*` frames); a running subagent-kind
-     * entry whose id is unknown to this set is foreground and filtered out of
-     * the seed — the sub-agent roster/page is its UI home. Terminal subagent
-     * entries are kept unfiltered: REST drops foreground tasks once terminal,
-     * so a terminal listing is necessarily a background job that finished while
-     * the session was away. */
-    private val knownBackgroundTaskIds = mutableSetOf<String>()
-
     /** The cold-start / `resync_required` REST sync (unfiltered — terminal tasks stay
      * listed, so recently finished jobs linger in the sheet). REST is authoritative
      * for what it returns; a live event landing mid-fetch makes the whole apply
@@ -97,18 +85,16 @@ internal class JobsStore(
                     updateState { current ->
                         current.copy(
                             jobs = tasks
-                                .filter { task ->
-                                    // A running subagent unknown to the background set is a
-                                    // foreground sub-agent (ticket 101) — never a job row.
-                                    task.kind != BackgroundTask.Kind.Subagent ||
-                                        task.status != BackgroundTask.Status.Running ||
-                                        task.id in knownBackgroundTaskIds
-                                }
+                                // run_in_background rides every task since 0.39.0
+                                // (ticket 162): a listed foreground sub-agent carries
+                                // false — never a job row (the sub-agent roster/page
+                                // is its UI home).
+                                .filter { it.runInBackground }
                                 .map { task ->
                                     val existing = current.jobs.firstOrNull { it.taskId == task.id }
-                                    // REST carries no agentId (the verbatim shape) and
-                                    // collapses timed_out to failed: keep the link and the
-                                    // timed-out flag a live event already recorded.
+                                    // Keep the page link and the timed-out flag a live
+                                    // event already recorded: REST collapses timed_out
+                                    // to failed and may omit agent_id.
                                     task.toJob(
                                         agentId = task.agentId ?: existing?.agentId,
                                         timedOut = existing?.timedOut == true,
@@ -125,7 +111,6 @@ internal class JobsStore(
      * sheet's navigation handle; first writer wins. */
     fun onStarted(info: TaskInfo) {
         seedGuard.bump()
-        knownBackgroundTaskIds += info.taskId
         upsert(info.toJob())
     }
 
@@ -137,15 +122,7 @@ internal class JobsStore(
      * upserts (the start was missed). */
     fun onTerminated(info: TaskInfo) {
         seedGuard.bump()
-        knownBackgroundTaskIds += info.taskId
         upsert(info.toJob())
-    }
-
-    /** Records a background task id learned from an `Agent` tool-result `task_id:`
-     * marker (ticket 101 — the marker is the only background proof on a re-entered
-     * session whose `task.started` predates the subscription). */
-    fun onBackgroundTaskId(taskId: String) {
-        knownBackgroundTaskIds += taskId
     }
 
     /**

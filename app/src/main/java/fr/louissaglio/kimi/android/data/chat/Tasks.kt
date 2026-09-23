@@ -16,9 +16,11 @@ import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * One background task as REST `/tasks` serves it: [kind] and [status] use the REST
- * wire vocabulary (the core one is already mapped server-side). [agentId] links a
- * sub-agent task to the WS sub-agent id for navigation; absent on bash tasks and on
- * servers whose REST shape does not carry it (it arrives via `task.started` instead).
+ * wire vocabulary (the core one is already mapped server-side). [runInBackground]
+ * (0.39.0) is the wire flag verbatim — `false` on a listed foreground sub-agent,
+ * which the jobs seed filters out (ticket 162). [agentId] links a sub-agent task
+ * to the WS sub-agent id for navigation (subagent-kind tasks carry it since
+ * 0.36.1); absent on bash tasks — the link then arrives via `task.started`.
  * [command] rides on bash-kind tasks; [outputPreview]/[outputBytes] arrive only on a
  * get-with-output read (ticket 096's job screen) — the stored stdout/stderr tail,
  * live while a bash task runs. [model]/[thinkingEffort] ride on subagent-kind tasks
@@ -30,6 +32,7 @@ data class BackgroundTask(
     val kind: Kind,
     val description: String,
     val status: Status,
+    val runInBackground: Boolean,
     val createdAt: Instant,
     val startedAt: Instant,
     val completedAt: Instant? = null,
@@ -91,22 +94,6 @@ fun bashTaskIdOf(toolName: String, output: String): String? {
     val id = TASK_ID.find(output.lineSequence().firstOrNull().orEmpty())
         ?.groupValues?.get(1)
     return id?.takeIf { it.startsWith("bash-") }
-}
-
-/**
- * The task id of a background `Agent`/`AgentSwarm` call (ticket 101; AgentSwarm added
- * in 134 so background swarm members keep their page links in the jobs seed): its
- * result stub's FIRST line is `task_id: agent-…` (docs/server-api.md — same wire
- * format as the bash stub, the `agent-` prefix distinguishing the two). JobsStore
- * learns the id into its known-background set, so the REST `/tasks` seed keeps the
- * still-running background sub-agent whose `task.started` predates the subscription
- * instead of filtering it as a foreground ghost.
- */
-fun agentTaskIdOf(toolName: String, output: String): String? {
-    if (toolName != AGENT_TOOL_NAME && toolName != AGENT_SWARM_TOOL_NAME) return null
-    val id = TASK_ID.find(output.lineSequence().firstOrNull().orEmpty())
-        ?.groupValues?.get(1)
-    return id?.takeIf { it.startsWith("agent-") }
 }
 
 /** The harness's kill budget for a background Bash call whose input sets no explicit

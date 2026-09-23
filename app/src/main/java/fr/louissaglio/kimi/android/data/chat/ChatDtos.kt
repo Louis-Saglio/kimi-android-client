@@ -351,11 +351,15 @@ data class TaskListData(
     val items: List<TaskDto> = emptyList(),
 )
 
-/** One REST task object; thinner than the WS/snapshot shape (no subagent_type, no
- * parent_tool_call_id, created_at == started_at). Times are ISO-8601 strings.
- * [command] rides on bash-kind tasks; [outputPreview]/[outputBytes] only on a
- * get-with-output read (ticket 096). [model]/[thinkingEffort] ride on subagent-kind
- * tasks (0.34.0 — the swarm aggregate's shared-model line, ticket 135). */
+/** One REST task object; created_at == started_at. Times are ISO-8601 strings.
+ * [runInBackground] rides every task since 0.39.0 (list and get, running and
+ * terminal; `false` on a listed foreground sub-agent) — the jobs seed's foreground
+ * filter (ticket 162). The shape also carries `subagent_type` and
+ * `parent_tool_call_id` (since 0.36.1; `parent_tool_call_id` on bash-kind tasks
+ * since 0.39.0), not decoded here. [command] rides on bash-kind tasks;
+ * [outputPreview]/[outputBytes] only on a get-with-output read (ticket 096).
+ * [model]/[thinkingEffort] ride on subagent-kind tasks (0.34.0 — the swarm
+ * aggregate's shared-model line, ticket 135). */
 @Serializable
 data class TaskDto(
     val id: String = "",
@@ -364,9 +368,9 @@ data class TaskDto(
     val status: String = "",
     @SerialName("created_at") val createdAt: String? = null,
     @SerialName("started_at") val startedAt: String? = null,
+    @SerialName("run_in_background") val runInBackground: Boolean = false,
     @SerialName("completed_at") val completedAt: String? = null,
-    // Not in the documented verbatim shape; decoded defensively for servers that carry
-    // it — the sub-agent page link otherwise arrives via task.started's info.agentId.
+    // Subagent-kind tasks carry it since 0.36.1 (docs/server-api.md); bash tasks never do.
     @SerialName("agent_id") val agentId: String? = null,
     val command: String? = null,
     @SerialName("output_preview") val outputPreview: String? = null,

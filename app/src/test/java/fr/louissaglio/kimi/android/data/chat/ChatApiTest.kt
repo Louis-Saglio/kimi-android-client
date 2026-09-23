@@ -38,14 +38,17 @@ class ChatApiTest {
                     // Verbatim task object (docs/server-api.md, REST /tasks).
                     """{"id":"agent-7noib8bb","session_id":"session_1","kind":"subagent",""" +
                     """"description":"doc-verify-bg","status":"completed",""" +
+                    """"run_in_background":true,""" +
                     """"created_at":"2026-07-28T03:40:08.039Z","started_at":"2026-07-28T03:40:08.039Z",""" +
                     """"completed_at":"2026-07-28T03:40:22.372Z"},""" +
                     """{"id":"proc-9xk2","session_id":"session_1","kind":"bash",""" +
                     """"description":"sleep 1000","status":"running",""" +
+                    """"run_in_background":true,""" +
                     """"created_at":"2026-07-28T03:41:00.000Z","started_at":"2026-07-28T03:41:00.000Z"},""" +
                     // Question flows surface as question cards in chat — never as jobs.
                     """{"id":"tool_q1","session_id":"session_1","kind":"tool",""" +
                     """"description":"Pick an option","status":"running",""" +
+                    """"run_in_background":true,""" +
                     """"created_at":"2026-07-28T03:42:00.000Z","started_at":"2026-07-28T03:42:00.000Z"}""" +
                     """]},"request_id":"r"}""",
             ),
@@ -60,6 +63,7 @@ class ChatApiTest {
                     kind = BackgroundTask.Kind.Subagent,
                     description = "doc-verify-bg",
                     status = BackgroundTask.Status.Completed,
+                    runInBackground = true,
                     createdAt = Instant.parse("2026-07-28T03:40:08.039Z"),
                     startedAt = Instant.parse("2026-07-28T03:40:08.039Z"),
                     completedAt = Instant.parse("2026-07-28T03:40:22.372Z"),
@@ -69,6 +73,7 @@ class ChatApiTest {
                     kind = BackgroundTask.Kind.Bash,
                     description = "sleep 1000",
                     status = BackgroundTask.Status.Running,
+                    runInBackground = true,
                     createdAt = Instant.parse("2026-07-28T03:41:00.000Z"),
                     startedAt = Instant.parse("2026-07-28T03:41:00.000Z"),
                 ),
@@ -125,6 +130,7 @@ class ChatApiTest {
             MockResponse(body =
                 """{"code":0,"msg":"success","data":{"id":"bash-xbje00tt","kind":"bash",""" +
                     """"description":"tick counter loop","status":"completed",""" +
+                    """"run_in_background":true,""" +
                     """"created_at":"2026-08-05T10:00:00.000Z","started_at":"2026-08-05T10:00:00.000Z",""" +
                     """"completed_at":"2026-08-05T10:02:00.000Z","command":"for i in …",""" +
                     """"output_preview":"tick 118\ntick 119\n","output_bytes":18},""" +
@@ -141,6 +147,7 @@ class ChatApiTest {
                 kind = BackgroundTask.Kind.Bash,
                 description = "tick counter loop",
                 status = BackgroundTask.Status.Completed,
+                runInBackground = true,
                 createdAt = Instant.parse("2026-08-05T10:00:00.000Z"),
                 startedAt = Instant.parse("2026-08-05T10:00:00.000Z"),
                 completedAt = Instant.parse("2026-08-05T10:02:00.000Z"),
