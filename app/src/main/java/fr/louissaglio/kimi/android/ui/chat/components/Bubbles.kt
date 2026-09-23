@@ -193,6 +193,20 @@ internal fun AssistantBubble(message: ChatItem.AssistantMessage) {
     }
 }
 
+/** Turn-end footer (ticket 155): one muted line closing a turn that stopped early,
+ * its [label] the `turn.ended.interruptReason` copy (ChatTimeline.turnEndCopy). The
+ * bubble captions' treatment (labelSmall, onSurfaceVariant) — the interrupted state
+ * has no other visual mark; only this line differentiates the stop reasons. */
+@Composable
+internal fun TurnEndFooter(label: String) {
+    Text(
+        text = label,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 2.dp),
+    )
+}
+
 /** material-icons-core has no copy icon: two overlapping outlined sheets, the
  * front one filled with the chat background so the strokes do not cross. */
 @Composable

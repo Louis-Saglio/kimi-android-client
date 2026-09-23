@@ -191,6 +191,7 @@ internal fun MessageList(
                             swarmMembers, onOpenSwarm,
                         )
                     is ChatItem.CompactionDivider -> CompactionDividerRow(item)
+                    is ChatItem.TurnEnd -> TurnEndFooter(item.label)
                     // Bare rows are not produced by ChatTimeline anymore (ticket 037) but
                     // stay renderable for tests and previews.
                     is ChatItem.ToolActivity ->

@@ -101,9 +101,19 @@ sealed interface ChatItem {
         val tokensAfter: Long? = null,
         val summary: String? = null,
     ) : ChatItem
+
+    /** The turn-end footer (ticket 155): one muted line closing a turn that stopped
+     * early, its [label] the `turn.ended.interruptReason` copy ("Cancelled", "Stopped:
+     * max steps", …). Only the newest ended turn carries one — a constant id reset in
+     * place like [CompactionDivider]; the next turn.started removes it. */
+    data class TurnEnd(override val id: String, val label: String) : ChatItem
 }
 
 /** LazyColumn key of the live compaction divider (ticket 056): one constant — the
  * server runs one compaction per session at a time, and a new run resets the previous
  * run's done row in place instead of stacking a second key (ChatTimeline). */
 const val LIVE_COMPACTION_DIVIDER_ID = "compaction_live"
+
+/** LazyColumn key of the turn-end footer (ticket 155): one constant — only the newest
+ * ended turn's footer shows, reset in place on a successive early stop (ChatTimeline). */
+const val TURN_END_ROW_ID = "turn_end"

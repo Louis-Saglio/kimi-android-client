@@ -999,7 +999,18 @@ class ChatViewModel internal constructor(
                 // A turn that ends takes its pending approvals with it (e.g. abort) — but
                 // not its questions: a pending question survives turn.ended and is
                 // re-derived from the questions endpoint instead of being cleared here.
-                uiState.update { it.copy(isWorking = false, stepRetry = null, pendingApprovals = emptyList()) }
+                // The early-stop footer (ticket 155) lands now; the refetch below
+                // re-appends it over the canonical rows.
+                timeline.onTurnEnded(event.interruptReason)
+                uiState.update {
+                    it.copy(
+                        isWorking = false,
+                        stepRetry = null,
+                        pendingApprovals = emptyList(),
+                        items = timeline.items(),
+                        todos = timeline.todos(),
+                    )
+                }
                 // Replace live rows with the canonical committed turn.
                 refreshHistory(clearLive = true)
                 questions.refresh()

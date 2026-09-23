@@ -235,8 +235,11 @@ data class ToolProgressUpdateDto(
     val text: String = "",
 )
 
+/** `turn.ended` payload. [interruptReason] (0.31.1, docs/server-api.md — ticket 155)
+ * says why a turn stopped early ("user_cancelled" on a REST `:abort`, else
+ * "aborted"/"max_steps"/"error"/"filtered"/"blocked"); null on a completed turn. */
 @Serializable
-data class TurnEndedPayload(val reason: String = "")
+data class TurnEndedPayload(val reason: String = "", val interruptReason: String? = null)
 
 /** `turn.step.retrying` payload (docs/server-api.md, 0.31.0 — ticket 058): the step's
  * LLM call failed ([errorName]/[errorMessage]/[statusCode]) and attempt [nextAttempt]

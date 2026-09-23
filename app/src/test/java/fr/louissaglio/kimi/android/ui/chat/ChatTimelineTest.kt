@@ -14,6 +14,8 @@ import java.time.Instant
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ChatTimelineTest {
@@ -2335,5 +2337,58 @@ class ChatTimelineTest {
 
         val tool = (timeline.items().single() as ChatItem.ToolGroup).tools.single()
         assertEquals(ToolPayload.Edit("/tmp/spike/a.txt", "one", "two", replaceAll = false), tool.payload)
+    }
+
+    // Ticket 155: the turn-end footer's copy per `turn.ended.interruptReason`.
+    @Test
+    fun `interrupt reason maps to its turn-end footer copy`() {
+        assertEquals("Cancelled", turnEndCopy("user_cancelled"))
+        assertEquals("Aborted", turnEndCopy("aborted"))
+        assertEquals("Stopped: max steps", turnEndCopy("max_steps"))
+        assertEquals("Stopped: error", turnEndCopy("error"))
+        assertEquals("Stopped: filtered", turnEndCopy("filtered"))
+        assertEquals("Stopped: blocked", turnEndCopy("blocked"))
+        // Absent or unknown (the ignore-unknown rule): no footer — today's behavior.
+        assertNull(turnEndCopy(null))
+        assertNull(turnEndCopy("some_future_reason"))
+    }
+
+    @Test
+    fun `an early stop appends the footer and the turn-end refetch keeps it`() {
+        val timeline = testChatTimeline()
+
+        timeline.onTurnEnded("max_steps")
+        assertEquals(listOf(ChatItem.TurnEnd(TURN_END_ROW_ID, "Stopped: max steps")), timeline.items())
+
+        // The ViewModel's turn-end refetch replaces the rows wholesale; the footer is
+        // re-appended from the recorded reason — history itself carries none.
+        timeline.replaceHistory(listOf(userMessage("msg_1", "hi")), keepLive = false)
+        assertEquals(
+            listOf(
+                ChatItem.UserMessage("msg_1", "hi"),
+                ChatItem.TurnEnd(TURN_END_ROW_ID, "Stopped: max steps"),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `the next turn start clears the footer`() {
+        val timeline = testChatTimeline()
+        timeline.onTurnEnded("user_cancelled")
+
+        timeline.apply(SessionEvent.TurnStarted())
+
+        assertTrue(timeline.items().isEmpty())
+    }
+
+    @Test
+    fun `a completed or unknown-reason turn end adds no footer`() {
+        val timeline = testChatTimeline()
+
+        timeline.onTurnEnded(null)
+        timeline.onTurnEnded("some_future_reason")
+
+        assertTrue(timeline.items().isEmpty())
     }
 }

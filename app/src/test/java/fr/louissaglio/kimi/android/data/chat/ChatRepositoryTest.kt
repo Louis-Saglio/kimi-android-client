@@ -2066,6 +2066,36 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun `turn ended interruptReason decodes onto the event`() = runBlocking {
+        // 0.31.1 (docs/server-api.md, turn.started / turn.ended — ticket 155): an early
+        // stop carries interruptReason next to the always-"cancelled" reason. The
+        // user_cancelled payload is the verbatim abort round-trip capture; the other
+        // values share its shape.
+        fun frame(interruptReason: String) =
+            """{"type":"turn.ended","seq":26,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-07-28T03:37:38.980Z","payload":{"type":"turn.ended","turnId":1,""" +
+                """"reason":"cancelled","durationMs":5030,"interruptReason":"$interruptReason",""" +
+                """"agentId":"main","sessionId":"session_1"}}"""
+
+        val emitted = runSocketEvents(
+            frame("user_cancelled"),
+            frame("aborted"),
+            frame("max_steps"),
+            frame("error"),
+            frame("filtered"),
+            frame("blocked"),
+            eventCount = 6,
+        )
+
+        assertEquals(
+            listOf("user_cancelled", "aborted", "max_steps", "error", "filtered", "blocked").map { reason ->
+                SocketEvent.Event(SessionEvent.TurnEnded("cancelled", "main", reason))
+            },
+            emitted.filterIsInstance<SocketEvent.Event>(),
+        )
+    }
+
+    @Test
     fun `subagent lifecycle frames decode to their events`() = runBlocking {
         // Verbatim subagent.spawned/completed payloads from the 2026-07-28 0.29.2
         // capture (docs/server-api.md, Sub-agents); started/failed/suspended share the

@@ -41,7 +41,14 @@ fun SessionEvent.isSubagentScoped(): Boolean = when (this) {
 /** Events of one session, parsed from the WebSocket stream (docs/server-api.md). */
 sealed interface SessionEvent {
     data class TurnStarted(override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
-    data class TurnEnded(val reason: String, override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
+
+    /** [interruptReason] (0.31.1 — ticket 155) says why the turn stopped early; null on
+     * a completed turn. The chat's turn footer differentiates its copy on it. */
+    data class TurnEnded(
+        val reason: String,
+        override val agentId: String = MAIN_AGENT_ID,
+        val interruptReason: String? = null,
+    ) : SessionEvent, AgentScopedEvent
 
     /** `turn.step.retrying` (0.31.0 — ticket 058): the step's LLM call failed and
      * attempt [nextAttempt] of [maxAttempts] starts after a backoff. Transient status

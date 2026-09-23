@@ -68,6 +68,12 @@ class ChatTimeline(
     private var committedTodos: List<Todo>? = null
     private var liveTodos: List<Todo>? = null
 
+    /** Copy of the newest ended turn's footer (ticket 155), null when the last
+     * `turn.ended` carried no known `interruptReason`. Set by [onTurnEnded]; the row
+     * itself is re-appended by every full replace (the turn-end refetch wipes the live
+     * tail it first lands in) and dropped when the next turn starts. */
+    private var turnEndLabel: String? = null
+
     /** Tool-call id → linked sub-agent (ticket 045), learned live (spawned, or a
      * background run's early result) and re-driven from the store's session link
      * registry by ChatViewModel after every store-affecting apply (ticket 091 — the
@@ -242,7 +248,9 @@ class ChatTimeline(
     /** A refetch replaces the committed prefix wholesale: [fresh] is canonical. With
      * [keepLive] the live tail survives minus the rows the server has since committed
      * ([pruneCoveredLiveRows] — the ONE live-vs-committed merge); without it the tail
-     * is cleared: history is the canonical rendering of the finished turn. */
+     * is cleared: history is the canonical rendering of the finished turn. The turn-end
+     * footer (ticket 155) is then re-appended at the tail — the history page carries no
+     * interrupt reason, so the row only lives here. */
     private fun replaceCommitted(fresh: List<ChatItem>, keepLive: Boolean) {
         rows.subList(0, liveStart).clear()
         rows.addAll(0, fresh)
@@ -251,9 +259,10 @@ class ChatTimeline(
         if (!keepLive) {
             rows.subList(liveStart, rows.size).clear()
             liveTodos = null
-            return
+        } else {
+            pruneCoveredLiveRows()
         }
-        pruneCoveredLiveRows()
+        appendTurnEndRow()
     }
 
     /** Older pages insert before the loaded rows; the boundary shifts with them.
@@ -363,6 +372,14 @@ class ChatTimeline(
                 // Same clear as the rows: the previous turn's todo calls are committed
                 // (history-backed) or irrelevant now (sub-agent page renders no widget).
                 liveTodos = null
+                // The footer closed the PREVIOUS turn (ticket 155) — a new one starts
+                // clean. Removal keeps the committed/live boundary like compactionFailed.
+                turnEndLabel = null
+                val turnEndIndex = rows.indexOfFirst { it.id == TURN_END_ROW_ID }
+                if (turnEndIndex >= 0) {
+                    rows.removeAt(turnEndIndex)
+                    if (turnEndIndex < liveStart) liveStart--
+                }
             }
             is SessionEvent.AssistantDelta -> appendDelta(event.delta, thinking = false)
             is SessionEvent.ThinkingDelta -> appendDelta(event.delta, thinking = true)
@@ -392,9 +409,32 @@ class ChatTimeline(
             is SessionEvent.ToolCallProgress ->
                 if (event.toolCallId !in todoCallIds) appendToolProgress(event.toolCallId, event.chunk)
             is SessionEvent.ContextSpliced -> event.messages.forEach(::appendSpliced)
-            // TurnEnded: the ViewModel refetches history instead.
+            // TurnEnded: the ViewModel refetches history instead; the early-stop footer
+            // arrives through onTurnEnded (ticket 155).
             else -> Unit
         }
+    }
+
+    /**
+     * `turn.ended` (ticket 155): records WHY the turn stopped early — the footer copy
+     * derived from the 0.31.1 `interruptReason` — and shows the footer at once, ahead
+     * of the ViewModel's canonical refetch (which re-appends it via [replaceCommitted]).
+     * A completed turn (no/unknown reason) adds nothing: today's behavior. Main-chat
+     * timeline only — the sub-agent page's terminal states are a separate surface.
+     */
+    fun onTurnEnded(interruptReason: String?) {
+        if (!historyBacked) return
+        turnEndLabel = turnEndCopy(interruptReason)
+        appendTurnEndRow()
+    }
+
+    /** Upserts the footer row at the tail under one constant id (the compaction
+     * divider's reset-in-place idiom); no-op while no early stop is recorded. */
+    private fun appendTurnEndRow() {
+        val label = turnEndLabel ?: return
+        val row = ChatItem.TurnEnd(TURN_END_ROW_ID, label)
+        val index = rows.indexOfFirst { it.id == TURN_END_ROW_ID }
+        if (index >= 0) rows[index] = row else rows += row
     }
 
     /**
@@ -828,6 +868,21 @@ internal fun ChatItem.ToolActivity.enriched(
 
 /** Line prefix of the linkage marker in an `Agent` call's result text. */
 private const val AGENT_ID_PREFIX = "agent_id: "
+
+/** The turn-end footer's copy per the 0.31.1 `turn.ended.interruptReason`
+ * (docs/server-api.md — ticket 155): a user abort reads "Cancelled" (the copy every
+ * early stop wore before the reason existed); the server's own stops say which. Null
+ * — absent or unknown, the app's ignore-unknown rule — means no footer: today's
+ * behavior for a turn that simply completed. */
+internal fun turnEndCopy(interruptReason: String?): String? = when (interruptReason) {
+    "user_cancelled" -> "Cancelled"
+    "aborted" -> "Aborted"
+    "max_steps" -> "Stopped: max steps"
+    "error" -> "Stopped: error"
+    "filtered" -> "Stopped: filtered"
+    "blocked" -> "Stopped: blocked"
+    else -> null
+}
 
 /** The `agent_id:` linkage marker of an `Agent` call's result text (the version-pinned
  * wire format — first line for foreground runs, after the task fields for background
