@@ -218,6 +218,100 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     }
 
     @Test
+    fun `activity phases reduce to the status line`() = runBlocking {
+        // Ticket 148: the agent.status.updated phase variant drives the line above
+        // the composer — what the bare isWorking signal cannot tell apart.
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+
+        socket.send(turnStartedFrame())
+        awaitState(viewModel.uiState) { it.isWorking }
+
+        socket.send(agentPhaseFrame("running"))
+        awaitState(viewModel.uiState) { it.activityStatus != null }
+        assertEquals(
+            ChatViewModel.ActivityStatus("Thinking…", Instant.ofEpochMilli(1784777223312)),
+            viewModel.uiState.value.activityStatus,
+        )
+
+        socket.send(agentPhaseFrame("tool_call", name = "Bash"))
+        awaitState(viewModel.uiState) { it.activityStatus?.text == "Running Bash…" }
+
+        // A tool_call without the name falls back to the generic label.
+        socket.send(agentPhaseFrame("tool_call"))
+        awaitState(viewModel.uiState) { it.activityStatus?.text == "Running tool…" }
+
+        socket.send(agentPhaseFrame("retrying"))
+        awaitState(viewModel.uiState) { it.activityStatus?.text == "Retrying…" }
+
+        socket.send(agentPhaseFrame("awaiting_approval"))
+        awaitState(viewModel.uiState) { it.activityStatus?.text == "Waiting for approval" }
+
+        socket.send(agentPhaseFrame("idle"))
+        awaitState(viewModel.uiState) { it.activityStatus == null }
+    }
+
+    @Test
+    fun `interrupted and ended phases clear the status line`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+
+        socket.send(turnStartedFrame())
+        awaitState(viewModel.uiState) { it.isWorking }
+        socket.send(agentPhaseFrame("tool_call", name = "Bash"))
+        awaitState(viewModel.uiState) { it.activityStatus != null }
+
+        // interrupted → null: the abort UI owns that moment, the line must not linger.
+        socket.send(agentPhaseFrame("interrupted", since = null))
+        awaitState(viewModel.uiState) { it.activityStatus == null }
+
+        socket.send(agentPhaseFrame("running"))
+        awaitState(viewModel.uiState) { it.activityStatus != null }
+
+        // ended → null as well (the terminal kinds carry `at`, no elapsed readout).
+        socket.send(agentPhaseFrame("ended", since = null))
+        awaitState(viewModel.uiState) { it.activityStatus == null }
+
+        // And a turn end clears whatever phase was last shown, however the frames
+        // interleave with the phase stream.
+        socket.send(agentPhaseFrame("running"))
+        awaitState(viewModel.uiState) { it.activityStatus != null }
+        socket.send(turnEndedFrame(reason = "completed"))
+        awaitState(viewModel.uiState) { it.activityStatus == null }
+    }
+
+    @Test
+    fun `an unknown phase kind leaves the status line untouched`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+
+        socket.send(agentPhaseFrame("tool_call", name = "Bash"))
+        awaitState(viewModel.uiState) { it.activityStatus != null }
+
+        // The historical streaming kind (removed in 0.43.0): the frame drops at the
+        // mapper, so the line keeps showing the last KNOWN phase.
+        socket.send(agentPhaseFrame("streaming"))
+        delay(200)
+        assertEquals("Running Bash…", viewModel.uiState.value.activityStatus?.text)
+    }
+
+    @Test
+    fun `a model and usage frame shows no status line`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+
+        socket.send(agentStatusUsageFrame(25050, 1048576))
+        // The frame was processed once its context usage lands; the phase-less variant
+        // must leave the status line alone.
+        awaitState(viewModel.uiState) { it.contextUsage == ContextUsage(25050, 1048576) }
+        assertNull(viewModel.uiState.value.activityStatus)
+    }
+
+    @Test
     fun `a turn that ended while the screen was away leaves no ghost live rows`() = runBlocking {
         // Louis's report (ticket 048): the stream is watched, the app backgrounds
         // mid-turn, the agent finishes while away, the app comes back.

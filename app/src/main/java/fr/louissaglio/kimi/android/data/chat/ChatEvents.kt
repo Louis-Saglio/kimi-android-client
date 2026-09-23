@@ -1,6 +1,7 @@
 package fr.louissaglio.kimi.android.data.chat
 
 import fr.louissaglio.kimi.android.data.DataError
+import java.time.Instant
 import kotlinx.serialization.json.JsonObject
 
 /** Payload tag of the main agent (docs/server-api.md, Sub-agents): every transcript
@@ -230,6 +231,16 @@ sealed interface SessionEvent {
         override val agentId: String = MAIN_AGENT_ID,
     ) : SessionEvent, AgentScopedEvent
 
+    /** The agent's live activity phase (agent.status.updated, phase variant — ticket
+     * 148): thinking, running a tool, backing off, waiting on the user. Emitted only
+     * when the frame carries a phase of a KNOWN kind — the model/usage variant emits
+     * nothing here, and an unknown kind drops the frame at the mapper (the
+     * ignore-unknown rule), leaving the displayed status untouched. */
+    data class AgentStatusUpdated(
+        val phase: AgentPhase,
+        override val agentId: String = MAIN_AGENT_ID,
+    ) : SessionEvent, AgentScopedEvent
+
     /** `compaction.started` (docs/server-api.md, Compact — ticket 056): the server
      * began summarizing the session — no turn events, compaction is not a turn. */
     data class CompactionStarted(val trigger: String, val instruction: String?) : SessionEvent
@@ -270,6 +281,20 @@ data class ContextUsage(
     val usedTokens: Long,
     val maxTokens: Long,
 )
+
+/** The agent's live activity phase (`agent.status.updated`, phase variant —
+ * docs/server-api.md, ticket 148). [since] is the phase's start (epoch ms on the wire),
+ * present on the ACTIVE kinds only — `ended`/`interrupted` carry `at` instead, not
+ * decoded: no elapsed readout exists for them. [toolName] rides [Kind.ToolCall] only. */
+data class AgentPhase(
+    val kind: Kind,
+    val since: Instant? = null,
+    val toolName: String? = null,
+) {
+    /** The 2.0.2 kind vocabulary (docs/server-api.md); `streaming` was removed in
+     * 0.43.0 — the phase stays [Running] while tokens stream. */
+    enum class Kind { Idle, Running, ToolCall, Retrying, AwaitingApproval, Interrupted, Ended }
+}
 
 /** Snapshot of `GET /api/v1/sessions/{id}/status` (ticket 041): [busy] is the mid-turn
  * flag; [contextUsage] is null only when the success envelope carried no data object.

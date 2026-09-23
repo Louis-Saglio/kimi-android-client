@@ -199,6 +199,108 @@ class SessionSocketTest {
     }
 
     @Test
+    fun `agent status phase frames parse into activity phase events`() = runBlocking {
+        // Verbatim phase-variant captures (docs/server-api.md:4815-4836 — ticket 148),
+        // plus the inline interrupted one (:4786). idle/retrying were never captured;
+        // their frames keep the captured shape. The pre-split approvalId == toolCallId
+        // in the awaiting_approval capture is its era; only the kind is consumed.
+        val emitted = runSocketEvents(
+            """{"type":"agent.status.updated","seq":5,"volatile":true,"session_id":"session_1",""" +
+                """"payload":{"type":"agent.status.updated",""" +
+                """"phase":{"kind":"running","turnId":0,"step":0,"stepId":"","since":1784777223312},""" +
+                """"agentId":"main","sessionId":"session_1"}}""",
+            """{"type":"agent.status.updated","seq":6,"volatile":true,"session_id":"session_1",""" +
+                """"payload":{"type":"agent.status.updated",""" +
+                """"phase":{"kind":"tool_call","turnId":0,"step":1,""" +
+                """"toolCallId":"tool_RMgBIy1asIorg1eV8P3ZhHiL","name":"Bash","since":1784777308442},""" +
+                """"agentId":"main","sessionId":"session_1"}}""",
+            """{"type":"agent.status.updated","seq":7,"volatile":true,"session_id":"session_1",""" +
+                """"payload":{"type":"agent.status.updated",""" +
+                """"phase":{"kind":"retrying","turnId":0,"step":1,"stepId":"","since":1784777250000},""" +
+                """"agentId":"main","sessionId":"session_1"}}""",
+            """{"type":"agent.status.updated","seq":8,"volatile":true,"session_id":"session_1",""" +
+                """"payload":{"type":"agent.status.updated",""" +
+                """"phase":{"kind":"awaiting_approval","turnId":0,"step":1,""" +
+                """"approval":{"approvalId":"tool_RMgBIy1asIorg1eV8P3ZhHiL",""" +
+                """"toolCallId":"tool_RMgBIy1asIorg1eV8P3ZhHiL"},"since":1784777258760},""" +
+                """"agentId":"main","sessionId":"session_1"}}""",
+            """{"type":"agent.status.updated","seq":9,"volatile":true,"session_id":"session_1",""" +
+                """"payload":{"type":"agent.status.updated",""" +
+                """"phase":{"kind":"interrupted","turnId":2,"step":1,"reason":"aborted","at":1784777310000},""" +
+                """"agentId":"main","sessionId":"session_1"}}""",
+            """{"type":"agent.status.updated","seq":20,"volatile":true,"session_id":"session_1",""" +
+                """"payload":{"type":"agent.status.updated",""" +
+                """"phase":{"kind":"ended","turnId":0,"reason":"completed","durationMs":91353,"at":1784777314665},""" +
+                """"agentId":"main","sessionId":"session_1"}}""",
+            """{"type":"agent.status.updated","seq":21,"volatile":true,"session_id":"session_1",""" +
+                """"payload":{"type":"agent.status.updated",""" +
+                """"phase":{"kind":"idle"},""" +
+                """"agentId":"main","sessionId":"session_1"}}""",
+        )
+
+        assertEquals(
+            listOf(
+                SocketEvent.Event(
+                    SessionEvent.AgentStatusUpdated(
+                        AgentPhase(AgentPhase.Kind.Running, Instant.ofEpochMilli(1784777223312)),
+                    ),
+                ),
+                SocketEvent.Event(
+                    SessionEvent.AgentStatusUpdated(
+                        AgentPhase(AgentPhase.Kind.ToolCall, Instant.ofEpochMilli(1784777308442), toolName = "Bash"),
+                    ),
+                ),
+                SocketEvent.Event(
+                    SessionEvent.AgentStatusUpdated(
+                        AgentPhase(AgentPhase.Kind.Retrying, Instant.ofEpochMilli(1784777250000)),
+                    ),
+                ),
+                SocketEvent.Event(
+                    SessionEvent.AgentStatusUpdated(
+                        AgentPhase(AgentPhase.Kind.AwaitingApproval, Instant.ofEpochMilli(1784777258760)),
+                    ),
+                ),
+                // The terminal kinds carry `at`, not `since`: no elapsed readout.
+                SocketEvent.Event(SessionEvent.AgentStatusUpdated(AgentPhase(AgentPhase.Kind.Interrupted))),
+                SocketEvent.Event(SessionEvent.AgentStatusUpdated(AgentPhase(AgentPhase.Kind.Ended))),
+                SocketEvent.Event(SessionEvent.AgentStatusUpdated(AgentPhase(AgentPhase.Kind.Idle))),
+            ),
+            emitted.filterIsInstance<SocketEvent.Event>(),
+        )
+    }
+
+    @Test
+    fun `an unknown phase kind and the model usage variant emit no activity phase event`() = runBlocking {
+        // The `streaming` capture (docs/server-api.md:4819) is the historical kind —
+        // removed in 0.43.0, unknown today: the frame drops at the mapper. The
+        // model/usage variant carries no phase at all (it keeps emitting its own
+        // events). One deliverable frame + the settle prove both produced nothing.
+        val emitted = runSocketEvents(
+            """{"type":"agent.status.updated","seq":7,"volatile":true,"session_id":"session_1",""" +
+                """"payload":{"type":"agent.status.updated",""" +
+                """"phase":{"kind":"streaming","turnId":0,"step":1,"stepId":"","stream":"thinking","since":1784777223312},""" +
+                """"agentId":"main","sessionId":"session_1"}}""",
+            """{"type":"agent.status.updated","seq":8,"volatile":true,"session_id":"session_1",""" +
+                """"payload":{"type":"agent.status.updated",""" +
+                """"phase":{"kind":"running","turnId":0,"step":0,"stepId":"","since":1784777223312},""" +
+                """"agentId":"main","sessionId":"session_1"}}""",
+            eventCount = 1,
+            settleMillis = 200,
+        )
+
+        assertEquals(
+            listOf(
+                SocketEvent.Event(
+                    SessionEvent.AgentStatusUpdated(
+                        AgentPhase(AgentPhase.Kind.Running, Instant.ofEpochMilli(1784777223312)),
+                    ),
+                ),
+            ),
+            emitted.filterIsInstance<SocketEvent.Event>(),
+        )
+    }
+
+    @Test
     fun `prompt lifecycle frames parse into prompt events`() = runBlocking {
         // Verbatim frames (docs/server-api.md — ticket 154): prompt.submitted carries
         // the 2.0.0 clientMetadata echo (:2898), prompt.queued the 0.39.1 verification

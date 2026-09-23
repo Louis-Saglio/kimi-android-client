@@ -61,6 +61,7 @@ import fr.louissaglio.kimi.android.ui.common.ErrorState
 import fr.louissaglio.kimi.android.ui.common.LoadingState
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 import java.time.Instant
+import kotlinx.coroutines.delay
 
 @Composable
 fun ChatScreen(
@@ -477,6 +478,21 @@ private fun ChatContent(
                     onOpenJob = onOpenJob,
                     onCancelJob = onCancelJob,
                 )
+                // Live activity phase (ticket 148): the status line — spinner, label,
+                // elapsed — shows what the generic working state cannot ("thinking" vs
+                // "running a tool" vs "waiting for my approval"). The 1 s ticker runs
+                // only while a phase is on screen (the null-status frame removes the
+                // whole block, ticker included).
+                uiState.activityStatus?.let { status ->
+                    var now by remember { mutableStateOf(Instant.now()) }
+                    LaunchedEffect(Unit) {
+                        while (true) {
+                            delay(1_000)
+                            now = Instant.now()
+                        }
+                    }
+                    ActivityStatusLine(status, now)
+                }
                 ChatInputBar(
                     text = uiState.inputText,
                     isSending = uiState.isSending,

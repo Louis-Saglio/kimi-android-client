@@ -421,6 +421,27 @@ class ChatMessageMapper @Inject constructor(json: Json) {
         )
     }
 
+    /** `agent.status.updated` phase object → domain (ticket 148): the 2.0.2 kind
+     * vocabulary; an unknown kind drops the frame with a Log.w (the ignore-unknown
+     * rule), never crash. `since` is epoch ms on the wire, absent on the terminal
+     * kinds (they carry `at`). */
+    fun toDomain(dto: AgentPhaseDto): AgentPhase? {
+        val kind = when (dto.kind) {
+            "idle" -> AgentPhase.Kind.Idle
+            "running" -> AgentPhase.Kind.Running
+            "tool_call" -> AgentPhase.Kind.ToolCall
+            "retrying" -> AgentPhase.Kind.Retrying
+            "awaiting_approval" -> AgentPhase.Kind.AwaitingApproval
+            "interrupted" -> AgentPhase.Kind.Interrupted
+            "ended" -> AgentPhase.Kind.Ended
+            else -> {
+                Log.w(TAG, "Dropping agent phase with unknown kind '${dto.kind}'")
+                return null
+            }
+        }
+        return AgentPhase(kind, dto.since?.let(Instant::ofEpochMilli), dto.name)
+    }
+
     private fun parseInstant(value: String?): Instant? =
         value?.let { runCatching { Instant.parse(it) }.getOrNull() }
 

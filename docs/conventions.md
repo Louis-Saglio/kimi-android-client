@@ -231,6 +231,15 @@
   the composer, the sub-agent page as its bottom bar — there with a null cancel
   callback only (REST `/tasks:cancel` is main-agent-only): bash rows open the
   job screen's store-backed mode (ticket 098), wired exactly like the chat's.
+  The live activity status line (ticket 148) is smaller than a collaborator and
+  follows the 058 `StepRetry` precedent: the socket maps `agent.status.updated`'s
+  phase variant to `SessionEvent.AgentStatusUpdated` (domain `AgentPhase` — the
+  seven 2.0.2 kinds; unknown kinds drop at the mapper), the ViewModel reduces it
+  to `UiState.activityStatus` (label + the phase's `since`; `interrupted`/
+  `idle`/`ended` → null, a turn end clears), and `ActivityStatusLine`
+  (ui/chat/components) renders it directly above the composer — spinner leading
+  icon, elapsed `mm:ss` ticking from a 1 s ticker that lives only while a phase
+  is shown.
 - Cold start / resync (085, freshness model 091): `GET .../snapshot` is the single
   entry point — `SnapshotSync` (ui/chat, session-scoped singleton like the store, so
   the page-on-top restore path with no ChatViewModel runs the same rebuild) owns the

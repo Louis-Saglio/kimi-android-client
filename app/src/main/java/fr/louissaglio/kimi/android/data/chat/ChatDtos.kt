@@ -116,7 +116,7 @@ data class SessionStatusData(
 /**
  * `agent.status.updated` payload (docs/server-api.md, volatile). Two variants share the
  * event type: the model/usage one carries [contextTokens]/[maxContextTokens], the phase
- * one carries `phase` — its null token fields must not clobber the stored values.
+ * one carries [phase] — its null token fields must not clobber the stored values.
  */
 @Serializable
 data class AgentStatusUpdatedPayload(
@@ -125,6 +125,35 @@ data class AgentStatusUpdatedPayload(
     // Model/usage variant only (ticket 107): the session's bound model and effort.
     val model: String? = null,
     val thinkingEffort: String? = null,
+    // Phase variant only (ticket 148): the agent's live activity.
+    val phase: AgentPhaseDto? = null,
+)
+
+/** `phase` of the agent.status.updated phase variant (docs/server-api.md — ticket 148):
+ * every field beyond [kind] fills only for its own kind — [since] (epoch ms) rides the
+ * ACTIVE kinds, [name]/[toolCallId] the tool_call kind, [approval] awaiting_approval;
+ * `ended`/`interrupted` carry `at` instead of [since] (not decoded — no elapsed readout
+ * exists for them). The `streaming` kind was removed in 0.43.0 (the phase stays
+ * `running` while tokens stream). */
+@Serializable
+data class AgentPhaseDto(
+    val kind: String = "",
+    val turnId: Long? = null,
+    val step: Int? = null,
+    val stepId: String? = null,
+    val since: Long? = null,
+    val name: String? = null,
+    val toolCallId: String? = null,
+    val approval: AgentPhaseApprovalDto? = null,
+)
+
+/** awaiting_approval's inline approval; this ticket consumes the kind only, never the
+ * ids ([approvalId] is the dedicated `approval_<uuid>` since 0.39.0, distinct from
+ * [toolCallId]). */
+@Serializable
+data class AgentPhaseApprovalDto(
+    val approvalId: String? = null,
+    val toolCallId: String? = null,
 )
 
 /** `data` of `GET /api/v1/config` (and the POST's echo): the app consumes the

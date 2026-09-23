@@ -1218,9 +1218,10 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun `agent status usage frame emits the context usage and the session model, phase frame emits nothing`() = runBlocking {
-        // Verbatim 0.29.0 shapes (docs/server-api.md, Agent status). The settle wait
-        // covers the phase frame: it must arrive and still produce no event.
+    fun `agent status usage frame emits the context usage and the session model, phase frame emits the activity phase`() = runBlocking {
+        // Verbatim 0.29.0 shapes (docs/server-api.md, Agent status). The phase frame
+        // leaves the token fields null — nothing clobbers the stored usage — and,
+        // since ticket 148, surfaces the agent's live activity.
         val emitted = runSocketEvents(
             """{"type":"agent.status.updated","seq":2,"epoch":"ep_1","volatile":true,""" +
                 """"session_id":"session_1","timestamp":"2026-07-26T00:00:00.000Z",""" +
@@ -1232,7 +1233,7 @@ class ChatRepositoryTest {
                 """"payload":{"type":"agent.status.updated",""" +
                 """"phase":{"kind":"running","turnId":0,"step":0,"stepId":"",""" +
                 """"since":1784777223312},"agentId":"main","sessionId":"session_1"}}""",
-            eventCount = 2,
+            eventCount = 3,
             settleMillis = 200,
         )
 
@@ -1240,6 +1241,11 @@ class ChatRepositoryTest {
             listOf(
                 SocketEvent.Event(SessionEvent.ContextUsageUpdated(ContextUsage(25050, 1048576))),
                 SocketEvent.Event(SessionEvent.SessionModelUpdated("kimi-code/k3", "high")),
+                SocketEvent.Event(
+                    SessionEvent.AgentStatusUpdated(
+                        AgentPhase(AgentPhase.Kind.Running, Instant.ofEpochMilli(1784777223312)),
+                    ),
+                ),
             ),
             emitted.filterIsInstance<SocketEvent.Event>(),
         )

@@ -608,6 +608,18 @@ abstract class ChatViewModelTestBase {
             """"phase":{"kind":"running","turnId":0,"step":0,"stepId":"","since":1784777223312},""" +
             """"agentId":"main","sessionId":"session_1"}}"""
 
+    /** Parameterized phase variant of agent.status.updated (docs/server-api.md —
+     * ticket 148): [name] rides the tool_call kind only; the terminal kinds carry
+     * `at` instead of `since` (pass [since] = null for them). */
+    protected fun agentPhaseFrame(kind: String, name: String? = null, since: Long? = 1784777223312L): String =
+        """{"type":"agent.status.updated","seq":32,"epoch":"ep_1","volatile":true,""" +
+            """"session_id":"session_1","timestamp":"2026-07-26T00:00:02.000Z",""" +
+            """"payload":{"type":"agent.status.updated",""" +
+            """"phase":{"kind":"$kind","turnId":0,"step":1,"stepId":"",""" +
+            (if (name != null) """"toolCallId":"tool_1","name":"$name",""" else "") +
+            (if (since != null) """"since":$since""" else """"at":1784777314665""") +
+            """},"agentId":"main","sessionId":"session_1"}}"""
+
     /** Verbatim 0.29.2 subagent.spawned (docs/server-api.md, Sub-agents). */
     protected fun subagentSpawnedFrame(id: String = "agent-12"): String =
         """{"type":"subagent.spawned","seq":19,"epoch":"ep_1","session_id":"session_1",""" +

@@ -307,9 +307,14 @@ class SessionSocket @Inject constructor(
             "turn.step.completed" -> frame.decodePayload<TurnStepPayload>()
                 ?.let { onEvent(SessionEvent.StepCompleted(it.step, agentId)) }
             // Volatile (docs/server-api.md): the model/usage variant carries the token
-            // counts; the phase variant has them null and emits nothing (ticket 041).
+            // counts; the phase variant has them null and emits nothing for them
+            // (ticket 041) — it carries the agent's live activity instead (ticket 148).
             "agent.status.updated" -> frame.decodePayload<AgentStatusUpdatedPayload>()
                 ?.let { payload ->
+                    // Phase variant: an unknown kind drops at the mapper, so a stale
+                    // status line is never clobbered by something we cannot render.
+                    payload.phase?.let { mapper.toDomain(it) }
+                        ?.let { onEvent(SessionEvent.AgentStatusUpdated(it, agentId)) }
                     val used = payload.contextTokens
                     val max = payload.maxContextTokens
                     if (used != null && max != null) {

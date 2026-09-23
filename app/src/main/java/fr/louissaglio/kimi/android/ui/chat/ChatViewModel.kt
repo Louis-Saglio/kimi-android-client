@@ -10,6 +10,7 @@ import fr.louissaglio.kimi.android.data.attachments.AttachmentStore
 import fr.louissaglio.kimi.android.data.toUserMessage
 import fr.louissaglio.kimi.android.data.chat.AGENT_SWARM_TOOL_NAME
 import fr.louissaglio.kimi.android.data.chat.AGENT_TOOL_NAME
+import fr.louissaglio.kimi.android.data.chat.AgentPhase
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
@@ -33,6 +34,7 @@ import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.di.StreamCoalesceWindowMillis
 import fr.louissaglio.kimi.android.navigation.Chat
 import fr.louissaglio.kimi.android.ui.common.formatTokenCount
+import java.time.Instant
 import javax.inject.Inject
 import kotlinx.coroutines.Job as CoroutineJob
 import kotlinx.coroutines.channels.Channel
@@ -119,6 +121,14 @@ class ChatViewModel internal constructor(
         val errorMessage: String,
     )
 
+    /** The agent's live activity reduced for the status line above the composer
+     * (ticket 148): [text] is the phase's label, [since] its start for the elapsed
+     * readout — null when the phase carried none (the terminal kinds carry `at`). */
+    data class ActivityStatus(
+        val text: String,
+        val since: Instant? = null,
+    )
+
     /** [items] is null until the first load lands; [error] is shown only when there is nothing to display. */
     data class UiState(
         /** The session this screen shows; [sessionLabel] falls back to it until the title loads. */
@@ -133,6 +143,9 @@ class ChatViewModel internal constructor(
         val isReconnecting: Boolean = false,
         /** The in-flight step's LLM retry, if any (ticket 058); transient status line. */
         val stepRetry: StepRetry? = null,
+        /** The agent's live activity phase (ticket 148), shown as the status line
+         * directly above the composer; null while idle/ended/interrupted or unknown. */
+        val activityStatus: ActivityStatus? = null,
         val inputText: String = "",
         val isSending: Boolean = false,
         /** Attachments staged above the input, in pick order (ticket 033). */
@@ -1023,6 +1036,7 @@ class ChatViewModel internal constructor(
                     it.copy(
                         isWorking = false,
                         stepRetry = null,
+                        activityStatus = null,
                         pendingApprovals = emptyList(),
                         items = timeline.items(),
                         todos = timeline.todos(),
@@ -1085,6 +1099,11 @@ class ChatViewModel internal constructor(
                 contextUsageSeedGuard.bump()
                 uiState.update { it.copy(contextUsage = event.contextUsage) }
             }
+            // Same frame family, phase variant (ticket 148): the agent's live activity,
+            // reduced to the status line's model. Sub-agent frames route to the store
+            // before ever reaching here.
+            is SessionEvent.AgentStatusUpdated ->
+                uiState.update { it.copy(activityStatus = event.phase.toActivityStatus()) }
             // Same frame family, session-scope fields: the live model/effort binding.
             is SessionEvent.SessionModelUpdated ->
                 syncServerSessionModel(event.model, event.thinkingEffort)
@@ -1334,4 +1353,16 @@ class ChatViewModel internal constructor(
                 }
         }
     }
+}
+
+/** Phase → status-line reduction (ticket 148): the active kinds label themselves (a
+ * tool call names its tool), `interrupted` maps to null — the abort UI owns that
+ * moment — and `idle`/`ended` clear the line. */
+internal fun AgentPhase.toActivityStatus(): ChatViewModel.ActivityStatus? = when (kind) {
+    AgentPhase.Kind.Running -> ChatViewModel.ActivityStatus("Thinking…", since)
+    AgentPhase.Kind.ToolCall ->
+        ChatViewModel.ActivityStatus(toolName?.let { "Running $it…" } ?: "Running tool…", since)
+    AgentPhase.Kind.Retrying -> ChatViewModel.ActivityStatus("Retrying…", since)
+    AgentPhase.Kind.AwaitingApproval -> ChatViewModel.ActivityStatus("Waiting for approval", since)
+    AgentPhase.Kind.Interrupted, AgentPhase.Kind.Idle, AgentPhase.Kind.Ended -> null
 }
