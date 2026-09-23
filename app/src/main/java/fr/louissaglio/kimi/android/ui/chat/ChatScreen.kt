@@ -428,6 +428,9 @@ private fun ChatContent(
                         QuestionCard(
                             question = question,
                             queueSize = uiState.pendingQuestions.size,
+                            // Ticket 156: a sub-agent's question badges itself with the
+                            // asking member's name, exactly like an approval (139).
+                            subagentName = uiState.subagentNames[question.agentId],
                             step = uiState.questionStep,
                             selections = uiState.questionSelections,
                             otherTexts = uiState.questionOtherTexts,

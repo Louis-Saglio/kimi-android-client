@@ -188,7 +188,10 @@ sealed interface SessionEvent {
     data class ApprovalResolved(val approvalId: String) : SessionEvent
 
     /** The agent asks the user a structured question (event.question.requested); the
-     * payload carries the full question inline — there is no detail endpoint to fetch. */
+     * payload carries the full question inline — there is no detail endpoint to fetch.
+     * The question's [PendingQuestion.agentId] is the ASKING agent (2.0.2 — ticket
+     * 156), presentation only like an approval's: the request resolves through the
+     * session-level questions route whoever asked, so this stays main-chat-routed. */
     data class QuestionRequested(val question: PendingQuestion) : SessionEvent
 
     /** The question was answered or dismissed — by this client or another one

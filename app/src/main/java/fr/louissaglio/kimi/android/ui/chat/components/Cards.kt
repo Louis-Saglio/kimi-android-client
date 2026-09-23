@@ -109,6 +109,7 @@ internal fun ApprovalCard(
 internal fun QuestionCard(
     question: PendingQuestion,
     queueSize: Int,
+    subagentName: String? = null,
     step: Int,
     selections: Map<String, Set<String>>,
     otherTexts: Map<String, String>,
@@ -171,6 +172,19 @@ internal fun QuestionCard(
                             tint = MaterialTheme.colorScheme.onSecondaryContainer,
                         )
                     }
+                }
+            }
+            // Ticket 156 (the approval badge's idiom, 139 — byte-identical): a
+            // sub-agent's question names the asking member — the record's
+            // name/description from the store, or the plain fallback while the record
+            // has not landed (the request can race ahead of subagent.spawned).
+            if (question.agentId != MAIN_AGENT_ID) {
+                Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.small) {
+                    Text(
+                        text = if (subagentName != null) "Sub-agent · $subagentName" else "Sub-agent",
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                    )
                 }
             }
             Column(

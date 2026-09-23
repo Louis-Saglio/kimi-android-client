@@ -193,8 +193,8 @@ class ChatViewModel internal constructor(
          * reads them), live from the store's registry; the swarm card reads its own
          * id and only renders while the list is non-empty. */
         val swarmMembers: Map<String, List<SubagentStreamStore.SubagentState>> = emptyMap(),
-        /** subagentId → display name for the approval card's sub-agent badge
-         * (ticket 139), live from the store; a request whose record has not landed
+        /** subagentId → display name for the approval/question cards' sub-agent badge
+         * (tickets 139/156), live from the store; a request whose record has not landed
          * yet is absent — the card falls back to a plain "Sub-agent" label. */
         val subagentNames: Map<String, String> = emptyMap(),
         /** True while older history exists (scroll-to-top loads it, ticket 043). */

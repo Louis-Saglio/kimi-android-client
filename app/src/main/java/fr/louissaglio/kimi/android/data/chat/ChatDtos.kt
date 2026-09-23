@@ -299,11 +299,14 @@ data class ApprovalRequestedPayload(
     val action: String = "",
     @SerialName("tool_input_display") val toolInputDisplay: ToolInputDisplayDto? = null,
     /** The ASKING agent (0.33.0 — ticket 139): "main", or the sub-agent's id for a
-     * swarm member's request. Stamped on the live WS frame's payload; the snapshot's
-     * `pending_approvals` items carry NO stamp (verified upstream at 0.43.1 —
-     * kap-server's toWireApproval), so a cold-open request decodes as "main" until
-     * upstream stamps the snapshot items too. */
+     * swarm member's request. This is the camelCase spelling the live WS frame's
+     * payload stamps; the socket reads it. */
     val agentId: String = MAIN_AGENT_ID,
+    /** The same asking agent, snake_case spelling (2.0.2 — ticket 156): the snapshot's
+     * `pending_approvals` items and the `/approvals?status=pending` poll items stamp
+     * `agent_id` only (the 2.0.2 WS frame carries both spellings, equal). The
+     * snapshot mapping reads this one — decode per surface, never rename. */
+    @SerialName("agent_id") val agentIdSnakeCase: String = MAIN_AGENT_ID,
 )
 
 /** `tool_input_display` of an approval request; only `command` (kind "command") is consumed. */
@@ -331,6 +334,12 @@ data class QuestionRequestedPayload(
     @SerialName("question_id") val questionId: String = "",
     @SerialName("tool_call_id") val toolCallId: String = "",
     val questions: List<QuestionItemDto> = emptyList(),
+    /** The ASKING agent (2.0.2 — ticket 156), optional in the schema: the pending
+     * poll's items, the snapshot's `pending_questions` items and the live frame all
+     * stamp snake_case `agent_id`; absent = the main agent. Unlike approvals there is
+     * no camelCase twin to decode — the frame's trailing `agentId` is the envelope
+     * mirror, not the asker. */
+    @SerialName("agent_id") val agentId: String? = null,
 )
 
 @Serializable

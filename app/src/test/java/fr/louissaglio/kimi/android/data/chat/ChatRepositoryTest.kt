@@ -1745,6 +1745,59 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun `pending question items decode the 2_0_2 agent_id stamp`() = runBlocking {
+        // Verbatim 2.0.2 pending-poll item (docs/server-api.md, the 2.0.2 drift
+        // block — ticket 156): the poll's items gained the optional snake_case
+        // `agent_id`. The second entry is the same shape stamped with a member's
+        // id — a sub-agent's question names the asking member.
+        server.enqueue(
+            MockResponse(body =
+                """
+                {"code":0,"msg":"success","data":{"items":[
+                  {"question_id":"question_be59fa0e-0fe6-4437-b407-29cc6b7dd723","session_id":"session_...",
+                   "questions":[{"id":"q_0","question":"Cake or pie?",
+                                 "options":[{"id":"opt_0_0","label":"Cake"},{"id":"opt_0_1","label":"Pie"}],
+                                 "header":"Dessert","allow_other":true}],
+                   "created_at":"2026-09-19T19:32:06.261Z","agent_id":"main","turn_id":1,
+                   "tool_call_id":"tool_5gF7ty3rd1ssoctEgV3yoPuQ"},
+                  {"question_id":"question_q2","session_id":"session_...",
+                   "questions":[{"id":"q_0","question":"Cake or pie?","options":[],"allow_other":false}],
+                   "created_at":"2026-09-19T19:32:06.261Z","agent_id":"agent-1","turn_id":1,
+                   "tool_call_id":"tool_q2"}
+                ]},"request_id":"01KX"}
+                """.trimIndent(),
+            ),
+        )
+
+        val questions = repository.getPendingQuestions(settings(), "session_1").getOrThrow()
+
+        assertEquals(listOf("main", "agent-1"), questions.map { it.agentId })
+    }
+
+    @Test
+    fun `question requested frame decodes the 2_0_2 agent_id stamp`() = runBlocking {
+        // The 0.38.0 verbatim frame (docs/server-api.md, "Core event payloads") plus
+        // its documented 2.0.2 drift: the frame's payload gained the optional
+        // snake_case `agent_id` (ticket 156). The trailing camelCase `agentId` is
+        // the envelope mirror every payload carries, NOT the asker — unlike
+        // approvals, the asking member decodes from the snake_case stamp only.
+        val emitted = runSocketEvents(
+            """{"type":"event.question.requested","seq":10,"epoch":"ep_1","session_id":"session_1",""" +
+                """"timestamp":"2026-08-20T19:33:45.150Z","payload":{"type":"event.question.requested",""" +
+                """"question_id":"question_a38aaf28-7dfe-489d-bca3-ea43c93b86fa","agent_id":"agent-12",""" +
+                """"session_id":"session_1","turn_id":0,""" +
+                """"tool_call_id":"tool_EwFXscDF0HraGfTelCTRdRe9",""" +
+                """"questions":[{"id":"q_0","question":"Pick a color?",""" +
+                """"options":[{"id":"opt_0_0","label":"Red"},{"id":"opt_0_1","label":"Blue"}],""" +
+                """"allow_other":true}],""" +
+                """"created_at":"2026-08-20T19:33:45.150Z","agentId":"main","sessionId":"session_1"}}""",
+        )
+
+        val event = emitted.filterIsInstance<SocketEvent.Event>().single().event
+        assertEquals("agent-12", (event as SessionEvent.QuestionRequested).question.agentId)
+    }
+
+    @Test
     fun `answerQuestion posts the per-item answers keyed by item id`() = runBlocking {
         server.enqueue(
             MockResponse(body = 

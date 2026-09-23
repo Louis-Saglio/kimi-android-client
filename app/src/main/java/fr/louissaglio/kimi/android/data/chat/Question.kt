@@ -7,11 +7,15 @@ package fr.louissaglio.kimi.android.data.chat
  * before): answer/dismiss route by [questionId], while [toolCallId] links the
  * request to its transcript tool row. One request carries one or more structured
  * items to answer.
+ *
+ * [agentId] is the ASKING agent (2.0.2 — ticket 156): "main", or the sub-agent's
+ * id — the card's sub-agent badge reads it exactly like an approval's (139's idiom).
  */
 data class PendingQuestion(
     val questionId: String,
     val toolCallId: String,
     val items: List<Item>,
+    val agentId: String = MAIN_AGENT_ID,
 ) {
     data class Item(
         val id: String,

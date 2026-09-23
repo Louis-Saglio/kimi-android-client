@@ -22,7 +22,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /** Semantics tests for the question card: read-only mode (ticket 089), multi-select
- * checkbox rows (090) and the unchanged single-select radio path. */
+ * checkbox rows (090), the unchanged single-select radio path, and the sub-agent
+ * badge (156 — the approval badge's idiom, 139). */
 @RunWith(AndroidJUnit4::class)
 class QuestionCardTest {
 
@@ -72,6 +73,7 @@ class QuestionCardTest {
         question: PendingQuestion,
         selections: Map<String, Set<String>>,
         isSubmittable: Boolean,
+        subagentName: String? = null,
         readOnly: Boolean = false,
         note: String? = null,
         onOptionPicked: (String, String) -> Unit = { _, _ -> },
@@ -83,6 +85,7 @@ class QuestionCardTest {
                 QuestionCard(
                     question = question,
                     queueSize = 1,
+                    subagentName = subagentName,
                     step = 0,
                     selections = selections,
                     otherTexts = emptyMap(),
@@ -179,5 +182,29 @@ class QuestionCardTest {
         composeTestRule.onAllNodes(checkboxes)[1].assertIsOff().assertIsNotEnabled()
         composeTestRule.onAllNodes(checkboxes)[2].assertIsOn().assertIsNotEnabled()
         composeTestRule.onNodeWithText("Question from Kimi · answered").assertIsDisplayed()
+    }
+
+    @Test
+    fun subagentQuestionShowsTheMemberNameBadge() {
+        card(question.copy(agentId = "agent-1"), emptyMap(), isSubmittable = false, subagentName = "explore")
+
+        composeTestRule.onNodeWithText("Sub-agent · explore").assertIsDisplayed()
+    }
+
+    @Test
+    fun subagentQuestionWithoutAStoreRecordShowsThePlainBadge() {
+        card(question.copy(agentId = "agent-1"), emptyMap(), isSubmittable = false)
+
+        composeTestRule.onNodeWithText("Sub-agent").assertIsDisplayed()
+    }
+
+    @Test
+    fun mainAgentQuestionShowsNoBadge() {
+        card(question, emptyMap(), isSubmittable = false)
+
+        composeTestRule.onNodeWithText("Sub-agent").assertDoesNotExist()
+        // The rest of the card is unchanged.
+        composeTestRule.onNodeWithText("Question from Kimi").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Red or blue?").assertIsDisplayed()
     }
 }

@@ -173,10 +173,13 @@ class SnapshotColdStartTest : ChatViewModelTestBase() {
     fun `cold open renders the snapshot's pending approval card`() = runBlocking {
         // The first REST read approvals ever had (ticket 085): the item is the legacy
         // event.approval.requested shape verbatim — the same card the live event shows.
+        // 2.0.2 stamps the asking agent snake_case (ticket 156): a sub-agent's
+        // cold-open request resolves through it, no more hard-defaulted "main".
         snapshotBody = snapshotBundle(
             pendingApprovals = """[{"approval_id":"ap_1","session_id":"session_1","turn_id":0,""" +
                 """"tool_call_id":"ap_1","tool_name":"Bash","action":"Running: sleep 90",""" +
                 """"tool_input_display":{"kind":"command","command":"sleep 90"},""" +
+                """"agent_id":"agent-1",""" +
                 """"created_at":"2026-08-01T10:00:00.000Z","expires_at":"2026-08-01T10:01:00.000Z"}]""",
         )
 
@@ -184,7 +187,7 @@ class SnapshotColdStartTest : ChatViewModelTestBase() {
 
         awaitState(viewModel.uiState) { it.pendingApprovals.isNotEmpty() }
         assertEquals(
-            listOf(ChatViewModel.PendingApproval("ap_1", "Bash", "sleep 90")),
+            listOf(ChatViewModel.PendingApproval("ap_1", "Bash", "sleep 90", agentId = "agent-1")),
             viewModel.uiState.value.pendingApprovals,
         )
     }
@@ -193,10 +196,12 @@ class SnapshotColdStartTest : ChatViewModelTestBase() {
     fun `cold open renders the snapshot's pending question card`() = runBlocking {
         // Same shape as the /questions poll's items (verified live, ticket 085) — the
         // same card the live event.question.requested shows. 0.38.0 dual ids (106):
-        // a dedicated question_<uuid> id plus the distinct tool_call_id.
+        // a dedicated question_<uuid> id plus the distinct tool_call_id. 2.0.2 adds
+        // the optional agent_id stamp (ticket 156) — a sub-agent's question carries
+        // its asking member for the card's badge.
         snapshotBody = snapshotBundle(
             pendingQuestions = """[{"question_id":"question_q1","session_id":"session_1","turn_id":0,""" +
-                """"tool_call_id":"tool_q1",""" +
+                """"tool_call_id":"tool_q1","agent_id":"agent-1",""" +
                 """"questions":[{"id":"q_0","question":"Red or blue?","header":"Color",""" +
                 """"options":[{"id":"opt_0_0","label":"red"},{"id":"opt_0_1","label":"blue"}],""" +
                 """"allow_other":false}],"created_at":"2026-08-01T10:00:00.000Z"}]""",
@@ -208,6 +213,7 @@ class SnapshotColdStartTest : ChatViewModelTestBase() {
         val question = viewModel.uiState.value.pendingQuestions.single()
         assertEquals("question_q1", question.questionId)
         assertEquals("tool_q1", question.toolCallId)
+        assertEquals("agent-1", question.agentId)
         assertEquals("Red or blue?", question.items.single().text)
     }
 

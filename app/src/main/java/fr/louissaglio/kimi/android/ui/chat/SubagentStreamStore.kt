@@ -436,10 +436,10 @@ class SubagentStreamStore @Inject constructor(
         states.map { it[sessionId]?.get(subagentId) }.distinctUntilChanged()
 
     /** subagentId → display name (the record's subagent name, else its description)
-     * for every known member of the session (ticket 139): the approval card's
-     * sub-agent badge resolves the asking member from here. Records with neither
-     * field are absent — the badge falls back to a plain "Sub-agent". Live: a name
-     * landing after the request (the spawned frame can lag it) republishes. */
+     * for every known member of the session (ticket 139): the approval and question
+     * cards' sub-agent badges resolve the asking member from here. Records with
+     * neither field are absent — the badge falls back to a plain "Sub-agent". Live:
+     * a name landing after the request (the spawned frame can lag it) republishes. */
     fun displayNames(sessionId: String): Flow<Map<String, String>> =
         states.map { bySession ->
             bySession[sessionId].orEmpty()

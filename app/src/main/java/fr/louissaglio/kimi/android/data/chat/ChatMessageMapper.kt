@@ -64,6 +64,8 @@ class ChatMessageMapper @Inject constructor(json: Json) {
                 multiSelect = item.multiSelect,
             )
         },
+        // The stamp is optional on the wire; absent = the main agent (ticket 156).
+        agentId = payload.agentId ?: MAIN_AGENT_ID,
     )
 
     fun toDomain(dto: MessageDto): ChatMessage {
@@ -161,7 +163,9 @@ class ChatMessageMapper @Inject constructor(json: Json) {
             hasMore = dto.messages?.hasMore == true,
         ),
         pendingApprovals = dto.pendingApprovals.map {
-            SnapshotApproval(it.approvalId, it.toolName, summary(it), it.agentId)
+            // The snapshot items stamp the asking agent snake_case (2.0.2 — ticket
+            // 156); the WS frame's camelCase twin stays the socket's decode.
+            SnapshotApproval(it.approvalId, it.toolName, summary(it), it.agentIdSnakeCase)
         },
         pendingQuestions = dto.pendingQuestions.map { toDomain(it) },
         subagents = dto.subagents.map { entry ->

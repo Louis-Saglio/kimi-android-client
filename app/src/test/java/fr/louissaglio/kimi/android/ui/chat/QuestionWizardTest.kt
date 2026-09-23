@@ -58,6 +58,40 @@ class QuestionWizardTest : ChatViewModelTestBase() {
     }
 
     @Test
+    fun `a sub-agent's question queues with its asking agent and the badge name resolves from the store`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+
+        // The member's identity lands first (subagent.spawned → the store), then its
+        // question arrives stamped with its id (ticket 156): it queues like any
+        // question — the stamp is presentation only (the card's sub-agent badge,
+        // 139's idiom on the question surface).
+        socket.send(subagentSpawnedFrame())
+        socket.send(questionRequestedFrame(id = "tool_q1", agentId = "agent-12"))
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
+        assertEquals("agent-12", viewModel.uiState.value.pendingQuestions.single().agentId)
+        // The badge's name is the store record's subagent name.
+        awaitState(viewModel.uiState) { it.subagentNames["agent-12"] == "explore" }
+    }
+
+    @Test
+    fun `a sub-agent question racing ahead of its record queues without a badge name, which the late spawn heals`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+
+        // The question can arrive before subagent.spawned (ticket 156): the card must
+        // not wait for the record — no badge name, the plain "Sub-agent" fallback.
+        socket.send(questionRequestedFrame(id = "tool_q1", agentId = "agent-1"))
+        awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
+        assertEquals("agent-1", viewModel.uiState.value.pendingQuestions.single().agentId)
+        assertNull(viewModel.uiState.value.subagentNames["agent-1"])
+
+        // The late spawned frame lands the record — the badge gains its name live.
+        socket.send(subagentSpawnedFrame(id = "agent-1"))
+        awaitState(viewModel.uiState) { it.subagentNames["agent-1"] == "explore" }
+    }
+
+    @Test
     fun `questions poll in flight does not clear a question that just arrived`() = runBlocking {
         // The cold start owns the first start's question state (ticket 085), so the
         // guarded /questions seed this exercises runs on the within-process resume.
@@ -576,11 +610,13 @@ class QuestionWizardTest : ChatViewModelTestBase() {
 
     /** Verbatim shape (docs/server-api.md, "Core event payloads"). Since 0.38.0
      * `question_id` is a dedicated `question_<uuid>` id distinct from `tool_call_id`
-     * (ticket 106) — [toolCallId] defaults to the pre-0.38.0 equality. */
-    private fun questionRequestedFrame(id: String, toolCallId: String = id): String =
+     * (ticket 106) — [toolCallId] defaults to the pre-0.38.0 equality. [agentId] is
+     * the 2.0.2 snake_case asking-agent stamp (ticket 156). */
+    private fun questionRequestedFrame(id: String, toolCallId: String = id, agentId: String = "main"): String =
         """{"type":"event.question.requested","seq":9,"epoch":"ep_1","session_id":"session_1",""" +
             """"timestamp":"2026-07-20T06:06:49.808Z","payload":{"type":"event.question.requested",""" +
             """"question_id":"$id","session_id":"session_1","turn_id":0,"tool_call_id":"$toolCallId",""" +
+            """"agent_id":"$agentId",""" +
             """"questions":[{"id":"q_0","question":"Red or blue?","header":"Color",""" +
             """"options":[{"id":"opt_0_0","label":"red","description":"warm color"},""" +
             """{"id":"opt_0_1","label":"blue","description":"cool color"}],"allow_other":true}],""" +
