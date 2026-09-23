@@ -1816,6 +1816,93 @@ class SessionListViewModelTest {
         assertTrue(viewModel.uiState.value.sessions!!.isEmpty())
     }
 
+    @Test
+    fun `delete success removes the row from the flat list and its group with no snackbar`() = runBlocking {
+        // Both modes loaded at once (ticket 115), same setup as the archive test:
+        // the flat page holds session_1 and session_2, the grouped fetch's
+        // workspace /tmp/a holds session_1 and session_3.
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1", "session_2")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+        server.enqueue(MockResponse(body = groupsBody("/tmp/a" to listOf("session_1", "session_3"))))
+        viewModel.onViewModeToggle()
+        awaitState(viewModel.uiState) { it.groups != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+
+        server.enqueue(MockResponse(body = DELETE_BODY))
+        val effects = CopyOnWriteArrayList<SessionListViewModel.Effect>()
+        val effectJob = launch { viewModel.effects.collect { effects += it } }
+        try {
+            viewModel.onDeleteSession("session_1")
+
+            awaitState(viewModel.uiState) { state ->
+                state.sessions?.map { it.id } == listOf("session_2") &&
+                    state.groups?.single()?.sessions?.map { it.id } == listOf("session_3")
+            }
+            val request = server.takeRequest(5, TimeUnit.SECONDS)!!
+            assertEquals("POST", request.method)
+            assertEquals("/api/v1/sessions/session_1:delete", request.target)
+            // Delete is final (no undo snackbar, ticket 151): the gone row is the
+            // only feedback, so no effect at all — and no refresh follows.
+            delay(300)
+            assertTrue(effects.isEmpty())
+            assertEquals(3, server.requestCount)
+        } finally {
+            effectJob.cancel()
+        }
+    }
+
+    @Test
+    fun `an already-deleted session drops the row without an error effect`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1", "session_2")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+        // 40401: another client deleted first — the end state is the requested one,
+        // so the row drops like a success and no error toast shows (ticket 151).
+        server.enqueue(
+            MockResponse(body =
+                """{"code":40401,"msg":"session session_1 does not exist","data":null,"request_id":"r"}""",
+            ),
+        )
+        val effects = CopyOnWriteArrayList<SessionListViewModel.Effect>()
+        val effectJob = launch { viewModel.effects.collect { effects += it } }
+        try {
+            viewModel.onDeleteSession("session_1")
+
+            awaitState(viewModel.uiState) { it.sessions?.map { s -> s.id } == listOf("session_2") }
+            assertEquals("/api/v1/sessions/session_1:delete", server.takeRequest(5, TimeUnit.SECONDS)!!.target)
+            delay(300)
+            assertTrue(effects.isEmpty())
+        } finally {
+            effectJob.cancel()
+        }
+    }
+
+    @Test
+    fun `a failed delete keeps the row and emits DeleteFailed with the server message`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+        server.enqueue(
+            MockResponse(body = """{"code":50001,"msg":"boom","data":null,"request_id":"r"}"""),
+        )
+        val effects = CopyOnWriteArrayList<SessionListViewModel.Effect>()
+        val effectJob = launch { viewModel.effects.collect { effects += it } }
+        try {
+            viewModel.onDeleteSession("session_1")
+
+            awaitCondition { effects.isNotEmpty() }
+            assertEquals(SessionListViewModel.Effect.DeleteFailed("boom"), effects.single())
+            assertEquals(listOf("session_1"), viewModel.uiState.value.sessions!!.map { it.id })
+            assertEquals("POST", server.takeRequest(5, TimeUnit.SECONDS)!!.method)
+        } finally {
+            effectJob.cancel()
+        }
+    }
+
     /**
      * Puts the screen in grouped mode with [body] answered to the grouped fetch,
      * drains that request, and runs ON_START — with groups on screen it fires no
@@ -1937,6 +2024,9 @@ class SessionListViewModelTest {
 
         /** The `:archive` success envelope (verified live 2026-09-14 on 0.42.0 — ticket 131). */
         const val ARCHIVE_BODY = """{"code":0,"msg":"success","data":{"archived":true},"request_id":"r"}"""
+
+        /** The `:delete` success envelope (verified live 2026-09-09 on 0.42.0 — ticket 151). */
+        const val DELETE_BODY = """{"code":0,"msg":"success","data":{"deleted":true},"request_id":"r"}"""
 
         const val WORKSPACES_BODY = """
             {"code":0,"msg":"success","data":{"items":[

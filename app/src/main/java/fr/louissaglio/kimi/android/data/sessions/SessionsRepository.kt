@@ -158,6 +158,19 @@ class SessionsRepository @Inject constructor(
         }
 
     /**
+     * Deletes a session via `POST /api/v1/sessions/{id}:delete` (docs/server-api.md —
+     * ticket 151; the route is new in 0.42.0). Deletion is final — the server has no
+     * restore — and a running session's background work is drained server-side first,
+     * so the call can take a moment. An unknown id answers envelope 40401, which the
+     * caller treats as an already-gone success. Same error-boundary contract as
+     * [listSessions].
+     */
+    suspend fun deleteSession(settings: ServerSettings, sessionId: String): Result<Boolean> =
+        api.post(settings, "/api/v1/sessions/$sessionId:delete", api.jsonBody {}) { responseBody ->
+            json.decodeFromString<Envelope<SessionDeleteData>>(responseBody).toResult().map { it.deleted }
+        }
+
+    /**
      * Fetches the known workspaces via `GET /api/v1/workspaces` (docs/server-api.md),
      * sorted by `last_opened_at` descending — the server order is not relied upon.
      * Same error-boundary contract as [listSessions].

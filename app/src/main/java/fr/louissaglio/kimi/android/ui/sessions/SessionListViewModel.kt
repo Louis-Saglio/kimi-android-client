@@ -3,6 +3,7 @@ package fr.louissaglio.kimi.android.ui.sessions
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.chat.ModelsRepository
 import fr.louissaglio.kimi.android.data.toUserMessage
 import fr.louissaglio.kimi.android.data.sessions.Session
@@ -119,6 +120,10 @@ class SessionListViewModel @Inject constructor(
 
         /** The undo's restore POST failed: the session stays archived, the server's message shows. */
         data class RestoreFailed(val message: String) : Effect
+
+        /** The delete POST failed (ticket 151): the row stays, the server's message shows.
+         * Never 40401 — an already-deleted session drops its row like a success. */
+        data class DeleteFailed(val message: String) : Effect
     }
 
     val uiState: StateFlow<UiState>
@@ -710,6 +715,30 @@ class SessionListViewModel @Inject constructor(
     }
 
     /**
+     * Deletes [sessionId] after the row dialog's confirmation (ticket 151). Deletion
+     * is final — the server has no restore — so unlike archive there is no undo: on
+     * success the row drops out of the flat list AND its workspace group (the same
+     * [removeRow] removal the archive paths and, once ticket 126 lands,
+     * event.session.deleted run), and no snackbar follows — the gone row is the
+     * feedback. A 40401 answer means another client already deleted it: the row
+     * drops the same way, with no error toast — the end state is the requested one.
+     * Any other failure keeps the row and shows the server's message.
+     */
+    fun onDeleteSession(sessionId: String) {
+        viewModelScope.launch {
+            sessionsRepository.deleteSession(settingsRepository.current(), sessionId)
+                .onSuccess { removeRow(sessionId) }
+                .onFailure { error ->
+                    if (error is DataError.Api && error.code == SESSION_NOT_FOUND_CODE) {
+                        removeRow(sessionId)
+                    } else {
+                        _effects.send(Effect.DeleteFailed(error.toUserMessage()))
+                    }
+                }
+        }
+    }
+
+    /**
      * Sorted insert shared by the fork (ticket 128) and the event.session.created
      * upsert (ticket 129): the lists are updated_at-descending and the fork inherits
      * the source's `updated_at`, so landing it behind the rows at least as recent puts
@@ -905,6 +934,10 @@ class SessionListViewModel @Inject constructor(
     companion object {
         private const val DEFAULT_NEW_SESSION_CWD = "/home/ubuntu"
         private const val CACHE_WRITE_DEBOUNCE_MS = 500L
+
+        /** The server's unknown-session envelope code (docs/server-api.md): on delete
+         * it reads as already-gone success, not an error (ticket 151). */
+        private const val SESSION_NOT_FOUND_CODE = 40401
 
         /** Sessions per group page: the grouped fetch's group.page_size and each
          * show-more expansion (ticket 116). Internal so the screen can place the

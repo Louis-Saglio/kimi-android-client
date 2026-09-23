@@ -11,17 +11,22 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performSemanticsAction
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import fr.louissaglio.kimi.android.data.sessions.Session
 import fr.louissaglio.kimi.android.ui.common.formatTimestamp
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 import java.time.Instant
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** Semantics tests for the session-row status indicators (tickets 016/087/145/159), the supporting line (114) and the long-press full-name dialog (117). */
+/** Semantics tests for the session-row status indicators (tickets 016/087/145/159), the supporting line (114), the long-press full-name dialog (117) and the delete confirmation (151). */
 @RunWith(AndroidJUnit4::class)
 class SessionRowTest {
 
@@ -40,6 +45,7 @@ class SessionRowTest {
         onClick: () -> Unit = {},
         onFork: () -> Unit = {},
         onArchive: () -> Unit = {},
+        onDelete: () -> Unit = {},
     ) {
         composeTestRule.setContent {
             KimiTheme {
@@ -58,6 +64,7 @@ class SessionRowTest {
                     onClick = onClick,
                     onFork = onFork,
                     onArchive = onArchive,
+                    onDelete = onDelete,
                 )
             }
         }
@@ -185,5 +192,60 @@ class SessionRowTest {
 
         assertTrue(clicked)
         composeTestRule.onNode(isDialog()).assertDoesNotExist()
+    }
+
+    @Test
+    fun deleteConfirmRemovesTheRow() {
+        // Stateful stand-in for the ViewModel (ticket 151): the confirm callback is
+        // what drops the row, so the harness wires it to the row's removal.
+        composeTestRule.setContent {
+            KimiTheme {
+                var deleted by remember { mutableStateOf(false) }
+                if (!deleted) {
+                    SessionRow(
+                        Session(
+                            id = "session_1",
+                            title = "A session",
+                            cwd = "/tmp/spike",
+                            updatedAt = Instant.now(),
+                            isRunning = false,
+                            isAwaitingInteraction = false,
+                        ),
+                        workspaceLabel = null,
+                        hasUnread = false,
+                        onClick = {},
+                        onFork = {},
+                        onArchive = {},
+                        onDelete = { deleted = true },
+                    )
+                }
+            }
+        }
+
+        composeTestRule.onNode(hasClickAction()).performSemanticsAction(SemanticsActions.OnLongClick)
+        composeTestRule.onNode(hasText("Delete") and hasAnyAncestor(isDialog())).performClick()
+
+        // The full-name dialog swaps to the confirmation before anything fires.
+        composeTestRule
+            .onNodeWithText("Delete session \"A session\"? This cannot be undone.")
+            .assertIsDisplayed()
+        composeTestRule.onNode(hasText("Delete") and hasAnyAncestor(isDialog())).performClick()
+
+        composeTestRule.onNodeWithText("A session").assertDoesNotExist()
+        composeTestRule.onNode(isDialog()).assertDoesNotExist()
+    }
+
+    @Test
+    fun deleteCancelLeavesTheRow() {
+        var deleteCalled = false
+        row(onDelete = { deleteCalled = true })
+
+        composeTestRule.onNode(hasClickAction()).performSemanticsAction(SemanticsActions.OnLongClick)
+        composeTestRule.onNode(hasText("Delete") and hasAnyAncestor(isDialog())).performClick()
+        composeTestRule.onNodeWithText("Cancel").performClick()
+
+        assertFalse(deleteCalled)
+        composeTestRule.onNode(isDialog()).assertDoesNotExist()
+        composeTestRule.onNodeWithText("A session").assertIsDisplayed()
     }
 }

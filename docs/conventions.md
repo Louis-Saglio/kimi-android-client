@@ -107,7 +107,7 @@
   REST-cancellable — docs/server-api.md, Background lifecycle). Domain:
   `BackgroundTask`/`TaskInfo` in `data/chat/Tasks.kt` — kind `tool` (question
   flows) is filtered out at the mapping boundary.
-- `data/sessions/` — `SessionsRepository` (list/get/create/fork/archive/restore REST
+- `data/sessions/` — `SessionsRepository` (list/get/create/fork/archive/restore/delete REST
   facade; ticket 132 adds `listArchivedSessions` — the v1 list with
   `archived_only=true&exclude_empty=true` and the same `before_id` cursor, rows
   carrying the `archived_at` the live-list mapping drops), the 087
@@ -155,7 +155,8 @@
   `SettingsRepository` (flat default, re-read on every screen start); the live
   socket machinery patches rows by id inside their group (groups never reorder),
   and the activity bump / create-insert / fork-insert / created-upsert (ticket 129) /
-  archive-drop are mode-aware in the ViewModel; the fork inherits the source's `updated_at` (ticket 127), so
+  archive-drop / delete-drop (ticket 151 — final, no undo; a 40401 answer drops the
+  row like a success) are mode-aware in the ViewModel; the fork inherits the source's `updated_at` (ticket 127), so
   its insert (ticket 128, from the long-press row dialog) lands at the sorted
   position next to the source, not at the top like create.
 - `data/attachments/` — `AttachmentStore` owns all platform file I/O (content

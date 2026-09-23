@@ -39,6 +39,12 @@ data class SessionArchiveData(
     val archived: Boolean = false,
 )
 
+/** `POST /api/v1/sessions/{id}:delete` answer (docs/server-api.md — ticket 151). */
+@Serializable
+data class SessionDeleteData(
+    val deleted: Boolean = false,
+)
+
 @Serializable
 data class SessionMetadataDto(
     val cwd: String? = null,

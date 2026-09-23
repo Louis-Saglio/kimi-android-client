@@ -21,6 +21,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MoreVert
@@ -139,6 +140,10 @@ fun SessionsScreen(
                     snackbarHostState.showSnackbar(effect.message)
                 is SessionListViewModel.Effect.RestoreFailed ->
                     snackbarHostState.showSnackbar(effect.message)
+                // Ticket 151: delete has no undo — a failure is the only snackbar the
+                // flow emits (success and already-gone 40401 just drop the row).
+                is SessionListViewModel.Effect.DeleteFailed ->
+                    snackbarHostState.showSnackbar(effect.message)
             }
         }
     }
@@ -171,6 +176,7 @@ fun SessionsScreen(
         onCreateSessionConfirm = viewModel::onCreateSessionConfirm,
         onForkSession = viewModel::onForkSession,
         onArchiveSession = viewModel::onArchiveSession,
+        onDeleteSession = viewModel::onDeleteSession,
     )
 }
 
@@ -196,6 +202,7 @@ private fun SessionsContent(
     onCreateSessionConfirm: () -> Unit,
     onForkSession: (Session) -> Unit,
     onArchiveSession: (String) -> Unit,
+    onDeleteSession: (String) -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -277,8 +284,9 @@ private fun SessionsContent(
                     onNewSessionClick,
                     onForkSession,
                     onArchiveSession,
+                    onDeleteSession,
                 )
-                else -> SessionList(uiState, onSessionClick, onEndReached, onForkSession, onArchiveSession)
+                else -> SessionList(uiState, onSessionClick, onEndReached, onForkSession, onArchiveSession, onDeleteSession)
             }
         }
         if (uiState.showCreateDialog) {
@@ -396,6 +404,7 @@ private fun SessionList(
     onEndReached: () -> Unit,
     onForkSession: (Session) -> Unit,
     onArchiveSession: (String) -> Unit,
+    onDeleteSession: (String) -> Unit,
 ) {
     val sessions = uiState.sessions.orEmpty()
     val listState = rememberLazyListState()
@@ -418,6 +427,7 @@ private fun SessionList(
                 onClick = { onSessionClick(session) },
                 onFork = { onForkSession(session) },
                 onArchive = { onArchiveSession(session.id) },
+                onDelete = { onDeleteSession(session.id) },
             )
         }
         if (uiState.isLoadingMore || uiState.loadMoreError != null) {
@@ -446,6 +456,7 @@ private fun GroupedSessionList(
     onNewSessionClick: (String?) -> Unit,
     onForkSession: (Session) -> Unit,
     onArchiveSession: (String) -> Unit,
+    onDeleteSession: (String) -> Unit,
 ) {
     LazyColumn(modifier = Modifier.fillMaxSize()) {
         uiState.groups.orEmpty().forEach { group ->
@@ -469,6 +480,7 @@ private fun GroupedSessionList(
                         onClick = { onSessionClick(session) },
                         onFork = { onForkSession(session) },
                         onArchive = { onArchiveSession(session.id) },
+                        onDelete = { onDeleteSession(session.id) },
                         modifier = Modifier.padding(start = 16.dp),
                     )
                 }
@@ -601,17 +613,33 @@ internal fun SessionRow(
     onClick: () -> Unit,
     onFork: () -> Unit,
     onArchive: () -> Unit,
+    onDelete: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // The row ellipsizes the name to one line; long-press reveals it whole (ticket
-    // 117) and offers the fork (ticket 128) and archive (ticket 131) actions.
+    // 117) and offers the fork (ticket 128), archive (ticket 131) and delete
+    // (ticket 151) actions.
     var fullNameShown by remember { mutableStateOf(false) }
+    // Delete is the one action that asks again (ticket 151): archive has its undo
+    // snackbar, deletion has none server-side.
+    var deleteConfirmShown by remember { mutableStateOf(false) }
     if (fullNameShown) {
         SessionFullNameDialog(
             session = session,
             onFork = onFork,
             onArchive = onArchive,
+            onDelete = { deleteConfirmShown = true },
             onDismiss = { fullNameShown = false },
+        )
+    }
+    if (deleteConfirmShown) {
+        DeleteSessionConfirmDialog(
+            session = session,
+            onConfirm = {
+                deleteConfirmShown = false
+                onDelete()
+            },
+            onDismiss = { deleteConfirmShown = false },
         )
     }
     ListItem(
@@ -666,13 +694,16 @@ internal fun SessionRow(
 /**
  * The long-press row dialog (ticket 117): the full selectable name, then one action
  * row per session action — Fork (ticket 128), Archive (ticket 131, the undo
- * snackbar's entry point). Actions dismiss the dialog before firing.
+ * snackbar's entry point), Delete (ticket 151, the destructive one — it swaps to a
+ * confirmation dialog instead of firing directly). Actions dismiss the dialog
+ * before firing.
  */
 @Composable
 private fun SessionFullNameDialog(
     session: Session,
     onFork: () -> Unit,
     onArchive: () -> Unit,
+    onDelete: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
@@ -706,10 +737,47 @@ private fun SessionFullNameDialog(
                         onArchive()
                     },
                 )
+                // Delete stays enabled too: a running session's work is drained
+                // server-side first (docs/server-api.md — the call may take a moment).
+                DialogActionRow(
+                    icon = Icons.Filled.Delete,
+                    label = "Delete",
+                    destructive = true,
+                    onClick = {
+                        onDismiss()
+                        onDelete()
+                    },
+                )
             }
         },
         confirmButton = {
             TextButton(onClick = onDismiss) { Text("Close") }
+        },
+    )
+}
+
+/**
+ * Delete's second step (ticket 151): deletion is final — the server has no restore
+ * and the app offers no undo — so unlike archive the action confirms first. The
+ * confirm button carries the destructive error color (the job screen's Stop
+ * precedent).
+ */
+@Composable
+private fun DeleteSessionConfirmDialog(
+    session: Session,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        text = { Text("Delete session \"${session.displayName}\"? This cannot be undone.") },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text("Delete", color = MaterialTheme.colorScheme.error)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
         },
     )
 }
@@ -720,9 +788,15 @@ private fun DialogActionRow(
     label: String,
     onClick: () -> Unit,
     enabled: Boolean = true,
+    destructive: Boolean = false,
 ) {
-    // onSurface at 38% is the M3 disabled content color.
-    val color = if (enabled) LocalContentColor.current else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+    // onSurface at 38% is the M3 disabled content color; destructive actions take
+    // the scheme's error color.
+    val color = when {
+        !enabled -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+        destructive -> MaterialTheme.colorScheme.error
+        else -> LocalContentColor.current
+    }
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -793,6 +867,7 @@ private fun SessionsContentPreview() {
             onCreateSessionConfirm = {},
             onForkSession = {},
             onArchiveSession = {},
+            onDeleteSession = {},
         )
     }
 }

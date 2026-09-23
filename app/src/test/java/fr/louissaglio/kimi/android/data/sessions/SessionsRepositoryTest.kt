@@ -358,6 +358,48 @@ class SessionsRepositoryTest {
     }
 
     @Test
+    fun `delete posts to the delete endpoint and maps the deleted flag`() = runBlocking {
+        // Verbatim 0.42.0 capture (docs/server-api.md, verified live 2026-09-09).
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"deleted":true},"request_id":"01M2FSTW4QJCB0KY2JQ5ZNTH7Z"}""",
+            ),
+        )
+
+        val result = repository.deleteSession(settings(), "session_bfc5feb1")
+
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/sessions/session_bfc5feb1:delete", request.target)
+        assertEquals("{}", request.body!!.utf8())
+        assertTrue(result.getOrThrow())
+    }
+
+    @Test
+    fun `delete surfaces the unknown-session envelope as Api error`() = runBlocking {
+        server.enqueue(
+            MockResponse(body =
+                """{"code":40401,"msg":"session session_nope does not exist","data":null,"request_id":"01KX"}""",
+            ),
+        )
+
+        val error = repository.deleteSession(settings(), "session_nope").exceptionOrNull()
+
+        assertEquals(DataError.Api(40401, "session session_nope does not exist"), error)
+    }
+
+    @Test
+    fun `delete surfaces a generic envelope code as Api error`() = runBlocking {
+        server.enqueue(
+            MockResponse(body = """{"code":50001,"msg":"boom","data":null,"request_id":"01KX"}"""),
+        )
+
+        val error = repository.deleteSession(settings(), "session_1").exceptionOrNull()
+
+        assertEquals(DataError.Api(50001, "boom"), error)
+    }
+
+    @Test
     fun `archived list sends archived_only and exclude_empty and parses archived_at`() = runBlocking {
         // Wire shape verified live on 0.42.0 (2026-09-14 — ticket 132): archived rows
         // carry archived:true and an ISO archived_at.
