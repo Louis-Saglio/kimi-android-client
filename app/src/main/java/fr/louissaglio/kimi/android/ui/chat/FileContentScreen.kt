@@ -99,28 +99,37 @@ fun FileContentScreen(
                         )
                     }
                 }
-                Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth().weight(1f),
-                ) {
-                    Box(
-                        Modifier
-                            .fillMaxSize()
-                            .verticalScroll(rememberScrollState())
-                            .horizontalScroll(rememberScrollState())
-                            .padding(horizontal = 10.dp, vertical = 8.dp),
-                    ) {
-                        SelectionContainer {
-                            Text(
-                                text = content,
-                                style = MaterialTheme.typography.bodySmall,
-                                fontFamily = FontFamily.Monospace,
-                                softWrap = false,
-                            )
-                        }
-                    }
-                }
+                SelectableCodeBlock(content, Modifier.fillMaxWidth().weight(1f))
+            }
+        }
+    }
+}
+
+/** The verbatim monospace content block of the file viewers (ticket 120's idiom,
+ * shared with ticket 150's before/after viewer): [content] verbatim in a selectable
+ * block scrollable on both axes — a line never wraps: past the viewport it scrolls
+ * horizontally instead. */
+@Composable
+internal fun SelectableCodeBlock(content: String, modifier: Modifier = Modifier) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = MaterialTheme.shapes.small,
+        modifier = modifier,
+    ) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+        ) {
+            SelectionContainer {
+                Text(
+                    text = content,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    softWrap = false,
+                )
             }
         }
     }

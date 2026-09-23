@@ -16,6 +16,7 @@ import fr.louissaglio.kimi.android.ui.chat.SubagentScreen
 import fr.louissaglio.kimi.android.ui.chat.SwarmScreen
 import fr.louissaglio.kimi.android.ui.chat.ToolContentStore
 import fr.louissaglio.kimi.android.ui.chat.TurnChangesRoute
+import fr.louissaglio.kimi.android.ui.chat.TurnFileContentRoute
 import fr.louissaglio.kimi.android.ui.sessions.ArchivedSessionsScreen
 import fr.louissaglio.kimi.android.ui.sessions.SessionsScreen
 import fr.louissaglio.kimi.android.ui.settings.SettingsScreen
@@ -94,6 +95,12 @@ data class FileContent(val toolCallId: String)
  * time; the list itself is fetched from the file-history route, nothing is staged. */
 @Serializable
 data class TurnChanges(val sessionId: String, val turnId: Int)
+
+/** One file's before/after viewer for a turn (ticket 150), opened from the
+ * [TurnChanges] list: ids plus the file's server-local absolute path — the content
+ * route's query param — so the screen can fetch both phases without staging. */
+@Serializable
+data class TurnFileContent(val sessionId: String, val turnId: Int, val path: String)
 
 @Composable
 fun KimiNavHost(toolContentStore: ToolContentStore) {
@@ -270,8 +277,20 @@ fun KimiNavHost(toolContentStore: ToolContentStore) {
             val staged = remember { toolContentStore.consume(route.toolCallId) }
             FileContentRoute(route.toolCallId, staged, onNavigateBack = { navController.popBackStack() })
         }
-        composable<TurnChanges> {
-            TurnChangesRoute(onNavigateBack = { navController.popBackStack() })
+        composable<TurnChanges> { entry ->
+            val route = entry.toRoute<TurnChanges>()
+            TurnChangesRoute(
+                onNavigateBack = { navController.popBackStack() },
+                // Ticket 150: a comparable row opens the file's before/after viewer.
+                onOpenFile = { change ->
+                    navController.navigate(TurnFileContent(route.sessionId, route.turnId, change.path)) {
+                        launchSingleTop = true
+                    }
+                },
+            )
+        }
+        composable<TurnFileContent> {
+            TurnFileContentRoute(onNavigateBack = { navController.popBackStack() })
         }
     }
 }

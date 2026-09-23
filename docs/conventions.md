@@ -13,7 +13,10 @@
   `FileHistoryApi` (the turn file-history REST routes, ticket 149 —
   `GET .../file-history/changes?turn_id=N` → domain `TurnFileChanges`/`FileChange`;
   `turn_id` is the main transcript's ordinal, and `binary`/`oversize` rows have no
-  comparable content),
+  comparable content; ticket 150 adds
+  `GET .../file-history/content?turn_id=N&path=<p>&phase=start|end` → domain
+  `FileContent?` — null when the file did not exist at that phase, the path
+  URL-encoded as the query param),
   `SessionSocket` (WebSocket, reconnect, per-session resume cursor held at
   instance level so it survives the ON_STOP/ON_START collection restarts —
   ticket 048; a refused cursor acks as `resync_required` → snapshot re-sync,
@@ -220,7 +223,15 @@
   through the store: it fetches from `FileHistoryApi`, and is entered from the chat
   overflow's "Files changed", which resolves the session's newest main turn at tap
   time from the main transcript's ordinals (message history carries no turn ids,
-  so no per-turn timeline affordance exists).
+  so no per-turn timeline affordance exists). A comparable row's tap opens the
+  before/after viewer (ticket 150 — `TurnFileContent` route (session/turn/path,
+  nothing staged), `TurnFileContentRoute`/`TurnFileContentScreen` in ui/chat, the
+  same route/stateless split): both phases fetch in parallel on open with a
+  per-side error/retry, a Before/After segmented toggle (the ModelPickerSheet
+  idiom, After the default) switches instantly, and the text rides the 120
+  monospace body, extracted as the shared `SelectableCodeBlock`; a null side
+  renders "File did not exist yet"/"File deleted" per tab, a `binary: true`
+  side a placeholder.
 - Chat feature collaborators (the 065 `DeltaCoalescer` pattern, generalized by
   072): a cohesive chat feature gets an `internal` class in `ui/chat`
   (`DeltaCoalescer`, `SeedGuard`, `ChatAttachments`, `QuestionWizard`,

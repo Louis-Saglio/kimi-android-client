@@ -58,7 +58,7 @@ fun TurnChangesRoute(
  * of the counts and is not clickable — there is no comparable content for it. A
  * turn with nothing recorded (`recorded: false` included) shows the empty state.
  * Tapping a normal row reports through [onOpenFile] — the before/after viewer's
- * hook (ticket 150); until that screen exists the hook is a no-op.
+ * hook (ticket 150), wired in KimiNavHost to the file's TurnFileContent screen.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

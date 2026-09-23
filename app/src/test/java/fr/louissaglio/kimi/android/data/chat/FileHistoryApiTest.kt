@@ -11,6 +11,7 @@ import mockwebserver3.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -100,5 +101,69 @@ class FileHistoryApiTest {
         val error = repository.getFileChanges(settings(), "session_1", 0).exceptionOrNull()
 
         assertTrue((error as? DataError.Api)?.code == 40401)
+    }
+
+    @Test
+    fun `getContent maps both phases with the path URL-encoded`() = runBlocking {
+        // docs/server-api.md, Turn file history: {content:{version, content?,
+        // binary?} | null} — the path rides as an encoded query param (ticket 150).
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"content":{"version":3,"content":"before text"}},"request_id":"01KX"}""",
+            ),
+        )
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"content":{"version":4,"content":"after text"}},"request_id":"01KX"}""",
+            ),
+        )
+
+        val before = repository.getFileContent(settings(), "session_1", 2, "/home/ubuntu/spike/notes.txt", FilePhase.Start)
+            .getOrThrow()
+        val after = repository.getFileContent(settings(), "session_1", 2, "/home/ubuntu/spike/notes.txt", FilePhase.End)
+            .getOrThrow()
+
+        assertEquals(
+            "/api/v1/sessions/session_1/file-history/content?turn_id=2" +
+                "&path=%2Fhome%2Fubuntu%2Fspike%2Fnotes.txt&phase=start",
+            server.takeRequest().target,
+        )
+        assertEquals(
+            "/api/v1/sessions/session_1/file-history/content?turn_id=2" +
+                "&path=%2Fhome%2Fubuntu%2Fspike%2Fnotes.txt&phase=end",
+            server.takeRequest().target,
+        )
+        assertEquals(FileContent(version = 3, content = "before text", binary = false), before)
+        assertEquals(FileContent(version = 4, content = "after text", binary = false), after)
+    }
+
+    @Test
+    fun `getContent maps a null content to a null snapshot`() = runBlocking {
+        // A file that did not exist at the phase answers {"content":null}
+        // (docs/server-api.md) — an added file's start, a deleted file's end.
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"content":null},"request_id":"01KX"}""",
+            ),
+        )
+
+        val snapshot = repository.getFileContent(settings(), "session_1", 2, "/tmp/new.txt", FilePhase.Start).getOrThrow()
+
+        assertNull(snapshot)
+    }
+
+    @Test
+    fun `getContent maps a binary snapshot without text`() = runBlocking {
+        // A binary file's snapshot carries no content string — the viewer renders
+        // its placeholder, no further fetch.
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"content":{"version":1,"binary":true}},"request_id":"01KX"}""",
+            ),
+        )
+
+        val snapshot = repository.getFileContent(settings(), "session_1", 2, "/tmp/logo.png", FilePhase.End).getOrThrow()
+
+        assertEquals(FileContent(version = 1, content = null, binary = true), snapshot)
     }
 }

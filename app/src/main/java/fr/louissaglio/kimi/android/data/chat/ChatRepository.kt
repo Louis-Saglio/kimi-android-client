@@ -269,6 +269,19 @@ class ChatRepository @Inject constructor(
     suspend fun getFileChanges(settings: ServerSettings, sessionId: String, turnId: Int): Result<TurnFileChanges> =
         fileHistory.getChanges(settings, sessionId, turnId)
 
+    /** One file's snapshot at one phase of a turn (`GET .../file-history/content?
+     * turn_id=N&path=<p>&phase=start|end` — ticket 150). A null success means the
+     * file did not exist at that phase; the before/after viewer renders its
+     * placeholder for it. */
+    suspend fun getFileContent(
+        settings: ServerSettings,
+        sessionId: String,
+        turnId: Int,
+        path: String,
+        phase: FilePhase,
+    ): Result<FileContent?> =
+        fileHistory.getContent(settings, sessionId, turnId, path, phase)
+
     /** Seeds the socket's resume cursor from a snapshot watermark (ticket 085), so the
      * session's next subscribe resumes exactly where the bundle was taken. */
     fun seedSessionCursor(sessionId: String, seq: Long, epoch: String) =
