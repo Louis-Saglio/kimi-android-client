@@ -408,8 +408,8 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         // The subscribe ack refuses the resume (replay buffer overrun,
         // docs/server-api.md): the missed window heals from a fresh snapshot fetch
         // (ticket 085) — the /messages refetch of the 048 path stays out of it.
-        // The placeholder bundle's /status convergence re-read (web parity) is the
-        // ring's, not the 048 pair's busy check.
+        // The snapshot apply's unconditional /status re-read (the 107 model sync)
+        // is not the 048 pair's busy check.
         socket.send(
             """{"type":"ack","id":"c_1","code":0,"msg":"success","payload":{"accepted":[],""" +
                 """"not_found":[],"resync_required":["session_1"],"cursors":{}}}""",
@@ -756,37 +756,30 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     }
 
     @Test
-    fun `the cold start seeds the ring from status when the snapshot usage is the placeholder`() = runBlocking {
-        // The reported bug (Louis, 2026-08-05): opening a past session showed a fake
-        // 0/0 ring until the next message's agent.status.updated. Since 0.32.0 the
-        // snapshot's session.usage is the server's all-zero placeholder on every read
-        // path (live-verified busy + idle) — mapped to "unknown", the ring converges
-        // from a /status re-read instead (web parity). The harness's default snapshot
-        // carries the placeholder; only /status serves the real fill below.
-        statusBody =
-            """{"code":0,"msg":"success","data":{"busy":false,"context_tokens":25050,""" +
-            """"max_context_tokens":1048576,"context_usage":0.0239},"request_id":"r"}"""
-
-        viewModel.onScreenStarted()
-        awaitRequest("/status")
-        awaitState(viewModel.uiState) { it.contextUsage != null }
-
-        assertEquals(ContextUsage(25050, 1048576), viewModel.uiState.value.contextUsage)
-    }
-
-    @Test
-    fun `a non-placeholder snapshot usage still seeds the status for the model sync`() = runBlocking {
-        // Since 0.38.0 the bundle carries a REAL fill, so gating the /status re-read
-        // on a placeholder bundle skipped it on every session that has run turns —
-        // and with it the ticket-107 model sync: sessions bound from the web client
-        // showed the server default on the chip (Louis, 2026-09-01). The seed now
-        // runs on every cold start; the bundle's fill applies and the seed's fresh
-        // read confirms it.
+    fun `a snapshot with real usage rings immediately`() = runBlocking {
+        // Ticket 161: the bundle's usage has been real since 0.38.0 and is the
+        // cold-start ring's authority — it paints from the snapshot alone, with
+        // no /status round trip. The seed's GET is parked so nothing but the
+        // bundle can set the ring here.
         snapshotBody = """{"code":0,"msg":"success","data":{"as_of_seq":1,"epoch":"ep_1",""" +
             """"session":{"id":"session_1","busy":false,""" +
             """"usage":{"context_tokens":25050,"context_limit":1048576}},""" +
             """"messages":{"items":[],"has_more":false},"in_flight_turn":null,"subagents":[],""" +
             """"pending_approvals":[],"pending_questions":[]},"request_id":"r"}"""
+        statusResponseGate = CountDownLatch(1)
+
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.contextUsage == ContextUsage(25050, 1048576) }
+
+        statusResponseGate!!.countDown()
+    }
+
+    @Test
+    fun `the status seed fills the ring and syncs the model on every cold start`() = runBlocking {
+        // Ticket 107: the session's bound model/effort is served only by /status,
+        // so the seed runs on EVERY cold start — and with an unknown-limit bundle
+        // (the harness default: a zero limit maps to "unknown") the ring's fill
+        // rides the same read.
         statusBody = """{"code":0,"msg":"success","data":{"busy":false,""" +
             """"model":"kimi-code/kimi-for-coding","thinking_level":"low",""" +
             """"context_tokens":25050,"max_context_tokens":1048576,"context_usage":0.0239},"request_id":"r"}"""
@@ -794,14 +787,14 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         viewModel.onScreenStarted()
         awaitRequest("/status")
 
-        assertEquals(ContextUsage(25050, 1048576), viewModel.uiState.value.contextUsage)
+        awaitState(viewModel.uiState) { it.contextUsage == ContextUsage(25050, 1048576) }
         awaitState(viewModel.uiState) { it.sessionModel == "kimi-code/kimi-for-coding" }
         assertEquals("low", viewModel.uiState.value.sessionEffort)
     }
 
     @Test
     fun `a live usage frame overtakes the cold-start status seed`() = runBlocking {
-        // Same guard as the 048 seed: the placeholder-triggered /status GET races the
+        // Same guard as the 048 seed: the cold-start /status GET races the
         // live stream (it is still in flight when the socket subscribes) — a frame
         // landing first is newer, so the late response is dropped, not applied.
         statusBody =
@@ -823,8 +816,8 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     fun `usage frames grow the ring live, phase frames leave it untouched`() = runBlocking {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
-        // The cold-start /status seed plants the baseline (the bundle's usage is the
-        // server's placeholder; /status always carries the counts).
+        // The cold-start /status seed plants the baseline (the harness bundle's
+        // usage carries a zero limit — "unknown" — so the first fill rides the seed).
         awaitState(viewModel.uiState) { it.contextUsage != null }
         assertEquals(ContextUsage(0, 1048576), viewModel.uiState.value.contextUsage)
 

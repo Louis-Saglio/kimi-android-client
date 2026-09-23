@@ -18,14 +18,14 @@ import org.junit.Test
  * `GET .../snapshot` is the single cold-start entry point — history, busy state,
  * pending approvals/questions, the sub-agent roster and the resume cursor all
  * arrive in the one bundle the gate fetches before the first socket subscribe
- * (the ring's context fill converges from /status: the bundle's usage is the
- * server's all-zero placeholder since 0.32.0).
+ * (the ring's context fill seeds from the bundle's real usage, ticket 161).
  */
 class SnapshotColdStartTest : ChatViewModelTestBase() {
 
     /** A /snapshot body with the 085 acceptance knobs; watermark seq 42 / "ep_snap"
-     * stands out from the harness's default (derived) watermark. The usage is the
-     * server's all-zero placeholder — the live-verified 0.32.0 wire shape. */
+     * stands out from the harness's default (derived) watermark. The usage carries
+     * a zero limit — the "unknown" wire case, so the ring's fill converges from the
+     * /status re-read. */
     private fun snapshotBundle(
         messages: String = """{"items":[],"has_more":false}""",
         busy: Boolean = false,
@@ -46,9 +46,10 @@ class SnapshotColdStartTest : ChatViewModelTestBase() {
         // parent_tool_call_id is the linkage: the Agent row is tappable (opens the
         // page) and the store entry seeded Working, all before any result lands.
         //
-        // The snapshot says the session is mid-turn; the /status convergence re-read
-        // (fired because the bundle's usage is the all-zero placeholder) must agree —
-        // the default busy:false would race the apply and flip isWorking back off.
+        // The snapshot says the session is mid-turn; the /status seed of the
+        // cold-start apply (fired on every cold start for the 107 model sync) must
+        // agree — the default busy:false would race the apply and flip isWorking
+        // back off.
         statusBody = """{"code":0,"msg":"success","data":{"busy":true,"context_tokens":0,""" +
             """"max_context_tokens":1048576,"context_usage":0.0},"request_id":"r"}"""
         snapshotBody = snapshotBundle(

@@ -39,7 +39,7 @@ gate.
 
 ## Acceptance criteria
 
-- [ ] Updated unit tests pass; existing suite green.
+- [x] Updated unit tests pass; existing suite green.
 - [ ] On device: cold-open a busy session — the context ring shows real
       usage from the snapshot alone (verify no `/status` call fires for
       the seed via Logcat).

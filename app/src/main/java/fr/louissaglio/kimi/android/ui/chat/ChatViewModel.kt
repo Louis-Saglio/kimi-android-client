@@ -451,7 +451,8 @@ class ChatViewModel internal constructor(
      * The one cold start of this chat open: awaits the session's snapshot sync and
      * applies its outcome. A [SnapshotSync.Outcome.Fresh] bundle IS the initial load
      * (history, busy state, pending approvals/questions — a /status re-read follows
-     * for the session's bound model/effort and the ring's live fill); an
+     * for the session's bound model/effort, ticket 107; the context ring seeds from
+     * the bundle itself, ticket 161); an
      * [SnapshotSync.Outcome.AlreadyFresh] join means the session synced since it was
      * last left (page-on-top restore, or the chat → page → chat round trip) — the
      * within-process resume set (ticket 048) heals instead, and the sub-agent row
@@ -556,12 +557,9 @@ class ChatViewModel internal constructor(
         }
         questions.applySnapshot(snapshot.pendingQuestions, guards.questions)
         // /status re-read on EVERY cold start: the session's bound model/effort
-        // (ticket 107) is served only there. Gating this seed on a placeholder
-        // bundle usage stopped working when 0.38.0 made the bundle's usage real —
-        // the gate would now skip the seed on every session that has run turns,
-        // and with it the model sync (Louis, 2026-09-01). The ring converges on
-        // the live value the same way; the seed's guard drops the late response
-        // when a live usage frame overtakes it.
+        // (ticket 107) is served only there. The ring no longer waits on it — the
+        // bundle's real usage seeds it directly (ticket 161); the seed's guard
+        // drops the late response when a live usage frame overtakes it.
         seedSessionStatus()
         // The subscribe resuming exactly at this watermark needs no resync — this
         // apply already healed everything up to it.

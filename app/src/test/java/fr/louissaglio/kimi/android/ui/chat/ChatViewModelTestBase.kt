@@ -121,11 +121,11 @@ abstract class ChatViewModelTestBase {
      * The served `/snapshot` body (ticket 085 — the cold-start bundle, fetched before
      * the session's first socket subscribe). When null (the default), the body is
      * DERIVED from [messagesBody] and [statusBody]: the snapshot is the cold-start
-     * history source now (busy derives from [statusBody]; the wire usage is the
-     * server's placeholder, so the ring converges from the /status re-read), and
-     * tests seeding those see them at first start without snapshot-specific setup.
-     * Set explicitly to exercise the roster, pending approvals/questions, or the
-     * watermark.
+     * history source now (busy derives from [statusBody]; its usage carries a zero
+     * limit — "unknown" — so the ring's fill converges from the /status re-read),
+     * and tests seeding those see them at first start without snapshot-specific
+     * setup. Set explicitly to exercise the roster, pending approvals/questions, or
+     * the watermark.
      */
     @Volatile
     protected var snapshotBody: String? = null
@@ -139,13 +139,12 @@ abstract class ChatViewModelTestBase {
 
     /** The default snapshot: [messagesBody]'s page + [statusBody]'s busy, empty roster
      * and pending lists, watermark seq 1 — read at response time, like the other
-     * bodies. The usage is the server's all-zero placeholder: since 0.32.0
-     * (live-verified busy + idle) the snapshot's session.usage is zeroed on every
-     * read path, so the ring's fill converges from the /status re-read instead of the
-     * bundle. The server serves the SAME page in opposite orders (live-verified on
-     * 0.31.1, 2026-08-02): `/messages` items are newest-first, the snapshot's
-     * OLDEST-first — tests seed [messagesBody] in `/messages` wire order, so the
-     * derivation flips it. */
+     * bodies. The usage carries a zero limit — the "unknown" wire case (0.38.0 made
+     * `context_limit` optional; absent decodes to the same 0), so the ring's fill
+     * converges from the /status re-read. The server serves the SAME page in
+     * opposite orders (live-verified on 0.31.1, 2026-08-02): `/messages` items are
+     * newest-first, the snapshot's OLDEST-first — tests seed [messagesBody] in
+     * `/messages` wire order, so the derivation flips it. */
     private fun defaultSnapshotBody(): String {
         val messagesData = testJson.parseToJsonElement(messagesBody).jsonObject.getValue("data").jsonObject
         val oldestFirst = JsonArray(messagesData["items"]?.jsonArray?.reversed().orEmpty())

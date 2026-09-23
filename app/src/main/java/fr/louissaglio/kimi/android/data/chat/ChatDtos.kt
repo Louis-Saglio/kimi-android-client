@@ -468,10 +468,11 @@ data class SnapshotData(
 
 /** The snapshot's rich `session` object; only [busy] and the context fill of [usage]
  * are consumed (usage carries `context_tokens`/`context_limit` — not the /status
- * `max_context_tokens` naming). The usage was the server's all-zero placeholder from
- * 0.32.0 until 0.38.0 made it real (docs/server-api.md) — a 0 limit still means
- * "unknown", never a real fill, so the mapper drops it and the ring converges from
- * the /status seed and the WS agent.status.updated stream. */
+ * `max_context_tokens` naming). The usage has been real since 0.38.0 and seeds the
+ * cold-start ring directly (ticket 161); the same server version made
+ * `total_cost_usd`/`context_limit`/`turn_count` optional — the snapshot omits cost
+ * and turn count (never decoded here), and an absent limit decodes to 0, the
+ * "unknown" marker the mapper drops like an explicit 0 (100's rule). */
 @Serializable
 data class SnapshotSessionDto(
     val busy: Boolean = false,

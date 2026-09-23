@@ -16,9 +16,10 @@ data class SessionSnapshot(
     val asOfSeq: Long,
     val epoch: String,
     /** From the `session` object: the mid-turn flag and the context window fill.
-     * [contextUsage] is null when the wire usage's limit is 0 ("unknown"); the
-     * bundle's usage has been real since 0.38.0, and the /status seed plus the WS
-     * agent.status.updated stream keep it converging on the live value. */
+     * [contextUsage] seeds the ring directly on cold start (real since 0.38.0,
+     * ticket 161); it is null when the wire usage's limit is 0 or absent
+     * ("unknown"), and the /status seed plus the WS agent.status.updated stream
+     * keep the ring converging on the live value from there. */
     val busy: Boolean,
     val contextUsage: ContextUsage?,
     /** The newest history page (same message DTOs + `has_more` as `/messages`). */

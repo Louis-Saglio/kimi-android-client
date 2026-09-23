@@ -230,10 +230,11 @@
   tools, seeded as ordinary live rows the post-watermark replay then
   extends/heals, closing the gap between the last committed message and the
   live stream on a busy cold open) to the calling ChatViewModel. The bundle's
-  `session.usage` carries the real fill since 0.38.0 (a 0 limit still maps to
-  null), and every cold start re-reads /status regardless: the session's bound
-  model/effort (107) is served only there, and the ring converges on the live
-  value (seed-guarded — web parity: kimi-web does the same).
+  `session.usage` is real since 0.38.0 and seeds the context ring directly on
+  cold start (161 — a 0 or absent limit still maps to null, "unknown"), and
+  every cold start still re-reads /status: the session's bound model/effort
+  (107) is served only there, and the same response refreshes the ring
+  (seed-guarded against live agent.status.updated frames).
   The fetch is cached per session only until the session is LEFT:
   `SubagentStreamStore.release` calls `SnapshotSync.forget`, so the next entry
   re-fetches (one cheap GET per entry — no process-lifetime cache of mutable server

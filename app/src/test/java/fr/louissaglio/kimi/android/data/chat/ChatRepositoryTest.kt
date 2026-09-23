@@ -216,26 +216,48 @@ class ChatRepositoryTest {
         assertTrue(snapshot.messages.hasMore)
         assertEquals(7, snapshot.asOfSeq)
         assertEquals("ep_1", snapshot.epoch)
-        // A real (non-placeholder) usage maps through — the pre-0.32.0 wire shape.
+        // The bundle's real usage maps through — the cold-start ring's authority
+        // (real since 0.38.0, ticket 161).
         assertEquals(ContextUsage(0, 1048576), snapshot.contextUsage)
     }
 
     @Test
-    fun `snapshot placeholder usage maps to no context usage`() = runBlocking {
-        // 0.32.0 (live-verified busy + idle, 2026-08-05): the snapshot's session.usage
-        // is the server's all-zero placeholder on every read path — "unknown", never a
-        // real 0/0 fill (web parity: kimi-web's isPlaceholderSessionUsage). Applied
-        // as-is it showed a fake 0/0 ring on cold open until the next live frame; the
-        // real fill only comes from /status and the WS agent.status.updated stream.
+    fun `snapshot usage without the optional fields renders unknown`() = runBlocking {
+        // 0.38.0 made `total_cost_usd`/`context_limit`/`turn_count` optional and the
+        // snapshot omits cost and turn count entirely (docs/server-api.md, Session
+        // snapshot): an absent limit decodes to the "unknown" marker, never a real
+        // fill — no ContextUsage may reach the ring (ticket 161).
         server.enqueue(
             MockResponse(body =
                 """
                 {"code":0,"msg":"success","data":{
                   "as_of_seq":7,"epoch":"ep_1",
                   "session":{"id":"session_1","busy":false,
-                    "usage":{"input_tokens":0,"output_tokens":0,"cache_read_tokens":0,
-                             "cache_creation_tokens":0,"total_cost_usd":0,
-                             "context_tokens":0,"context_limit":0,"turn_count":0}},
+                    "usage":{"context_tokens":25050}},
+                  "messages":{"items":[],"has_more":false},
+                  "in_flight_turn":null,"subagents":[],
+                  "pending_approvals":[],"pending_questions":[]},
+                 "request_id":"01KX"}
+                """.trimIndent(),
+            ),
+        )
+
+        val snapshot = repository.getSnapshot(settings(), "session_1").getOrThrow()
+
+        assertNull(snapshot.contextUsage)
+    }
+
+    @Test
+    fun `snapshot usage with a zero context limit renders unknown`() = runBlocking {
+        // 100's zero/unknown rule on the snapshot path: 0 is the engine's unknown
+        // marker, never a real limit — no ContextUsage may reach the ring.
+        server.enqueue(
+            MockResponse(body =
+                """
+                {"code":0,"msg":"success","data":{
+                  "as_of_seq":7,"epoch":"ep_1",
+                  "session":{"id":"session_1","busy":false,
+                    "usage":{"context_tokens":25050,"context_limit":0}},
                   "messages":{"items":[],"has_more":false},
                   "in_flight_turn":null,"subagents":[],
                   "pending_approvals":[],"pending_questions":[]},
