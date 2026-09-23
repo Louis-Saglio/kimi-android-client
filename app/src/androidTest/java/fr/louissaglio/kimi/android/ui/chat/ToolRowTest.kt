@@ -11,6 +11,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import fr.louissaglio.kimi.android.data.chat.AgentCallDisplay
 import fr.louissaglio.kimi.android.data.chat.ToolPayload
 import fr.louissaglio.kimi.android.data.chat.ToolPreview
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
@@ -1842,5 +1843,37 @@ class ToolRowTest {
         composeTestRule.onNodeWithTag("swarmBarSegmentPending", useUnmergedTree = true).assertDoesNotExist()
         composeTestRule.onNodeWithTag("swarmBarSegmentWorking", useUnmergedTree = true).assertDoesNotExist()
         composeTestRule.onNodeWithTag("swarmModelLine", useUnmergedTree = true).assertDoesNotExist()
+    }
+
+    // --- Ticket 157: agent_call spawn rows --------------------------------------------
+
+    /** A witnessed `Agent` spawn row: the parsed display rides the row (the raw args
+     * preview stays behind — the spawn row must show the prompt, not the JSON wall). */
+    private fun agentSpawnRow(background: Boolean) = ChatItem.ToolActivity(
+        "tool_1",
+        "Agent",
+        ToolStatus.Running,
+        preview = """{"subagent_type":"explore","prompt":"Reply with the single word: ok"}""",
+        agentCall = AgentCallDisplay("explore", "Reply with the single word: ok", background),
+    )
+
+    @Test
+    fun agentSpawnRowShowsNamePromptAndBackgroundBadge() {
+        toolRow(agentSpawnRow(background = true))
+
+        composeTestRule.onNodeWithText("explore sub-agent").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Reply with the single word: ok").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Background").assertIsDisplayed()
+        // The dedicated row never expands — the spawn's deep link owns the tap.
+        composeTestRule.onNodeWithContentDescription("Expand tool details").assertDoesNotExist()
+    }
+
+    @Test
+    fun foregroundAgentSpawnRowShowsNameAndPromptWithoutTheBadge() {
+        toolRow(agentSpawnRow(background = false))
+
+        composeTestRule.onNodeWithText("explore sub-agent").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Reply with the single word: ok").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Background").assertDoesNotExist()
     }
 }

@@ -330,11 +330,17 @@ data class ApprovalRequestedPayload(
     @SerialName("agent_id") val agentIdSnakeCase: String = MAIN_AGENT_ID,
 )
 
-/** `tool_input_display` of an approval request; only `command` (kind "command") is consumed. */
+/** `tool_input_display` of an approval request; only `command` (kind "command") is consumed.
+ * On a `tool.call.started` the same shape carries the `agent_call` kind instead (an
+ * `Agent` spawn, 0.31.0 — docs/server-api.md, Sub-agents): [agentName]/[prompt] feed
+ * the spawn row (ticket 157), [background] marks a background spawn. */
 @Serializable
 data class ToolInputDisplayDto(
     val kind: String = "",
     val command: String? = null,
+    @SerialName("agent_name") val agentName: String? = null,
+    val prompt: String? = null,
+    val background: Boolean = false,
 )
 
 @Serializable

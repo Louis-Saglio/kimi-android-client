@@ -89,11 +89,14 @@ data class InFlightTurn(
 
 /** One still-running tool call of the in-flight turn; [preview]/[input] are the row
  * renderings derived at the mapping boundary (the same ones a live `tool.call.started`
- * carries), [args] stays raw for the typed payload. */
+ * carries), [args] stays raw for the typed payload. [agentCall] is the parsed
+ * `agent_call` display (ticket 157) — the running_tools entry carries the same
+ * display shape, so a cold-opened busy spawn seeds the same row a witnessed one gets. */
 data class RunningTool(
     val toolCallId: String,
     val name: String,
     val args: JsonObject?,
     val preview: String,
     val input: String,
+    val agentCall: AgentCallDisplay? = null,
 )

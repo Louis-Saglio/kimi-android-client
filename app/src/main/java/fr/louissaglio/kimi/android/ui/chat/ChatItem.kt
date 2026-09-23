@@ -1,5 +1,6 @@
 package fr.louissaglio.kimi.android.ui.chat
 
+import fr.louissaglio.kimi.android.data.chat.AgentCallDisplay
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.ToolPayload
 import java.time.Instant
@@ -62,8 +63,14 @@ sealed interface ChatItem {
      * it — the swarm card navigates by the tool call id the row already holds.
      * [bashTaskId] links a background `Bash` row to its job screen (ticket 096) —
      * parsed from the result's `task_id: bash-…` first line; like the sub-agent link,
-     * a linked row never expands. [timeoutSeconds]/[timeoutDisabled] are the call
-     * input's timeout knobs (ticket 097) — the job screen's budget display derives
+     * a linked row never expands. [agentCall] is the parsed `agent_call` display of a
+     * witnessed `Agent` spawn (ticket 157): it switches the row to the dedicated spawn
+     * row ("{name} sub-agent", prompt preview, "Background" badge) — history parts
+     * carry no display, so committed rows fall back to the generic treatment.
+     * [agentTaskId] links a background spawn's row to its job screen (ticket 157) —
+     * parsed from the result's `task_id: agent-…` first line like [bashTaskId].
+     * [timeoutSeconds]/[timeoutDisabled] are the call input's timeout knobs
+     * (ticket 097) — the job screen's budget display derives
      * from them (REST never exposes the timeout). All three link/budget fields are
      * derived by the ONE enrichment pass every row path routes through
      * ([enriched], ticket 098). */
@@ -78,6 +85,8 @@ sealed interface ChatItem {
         val payload: ToolPayload? = null,
         val subagentId: String? = null,
         val bashTaskId: String? = null,
+        val agentCall: AgentCallDisplay? = null,
+        val agentTaskId: String? = null,
         val timeoutSeconds: Int? = null,
         val timeoutDisabled: Boolean = false,
     ) : ChatItem

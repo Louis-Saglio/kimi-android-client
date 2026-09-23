@@ -51,6 +51,16 @@ class ChatMessageMapper @Inject constructor(json: Json) {
         return payload.display?.command?.takeIf { it.isNotBlank() } ?: ToolPreview.of(payload.name, payload.args)
     }
 
+    /** The `agent_call` display's typed model (ticket 157 — 0.31.0, docs/server-api.md,
+     * Sub-agents): the spawn row's title/preview/badge source. Null for the `command`
+     * kind and any unknown kind, and for an `agent_call` without a usable agent name —
+     * those rows keep the generic treatment. */
+    fun agentCall(display: ToolInputDisplayDto?): AgentCallDisplay? {
+        if (display?.kind != "agent_call") return null
+        val name = display.agentName?.takeIf { it.isNotBlank() } ?: return null
+        return AgentCallDisplay(name, display.prompt.orEmpty(), display.background)
+    }
+
     fun toDomain(payload: QuestionRequestedPayload): PendingQuestion = PendingQuestion(
         questionId = payload.questionId,
         toolCallId = payload.toolCallId,
@@ -230,6 +240,7 @@ class ChatMessageMapper @Inject constructor(json: Json) {
                         args = tool.args,
                         preview = preview(ToolCallPayload(tool.toolCallId, tool.name, tool.args, tool.display)),
                         input = formatDetail(tool.args),
+                        agentCall = agentCall(tool.display),
                     )
                 },
                 currentPromptId = turn.currentPromptId,

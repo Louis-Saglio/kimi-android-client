@@ -86,14 +86,29 @@ private val TASK_ID = Regex("""task_id:\s*(\S+)""")
  * (docs/server-api.md, REST /tasks) — the real output lives in the task store, so the
  * row navigates to the job screen instead of expanding. History carries the same
  * text, so live and re-entered sessions link alike. The `bash-` prefix requirement is
- * the guard that keeps background **Agent** results (`task_id: agent-…`) untouched —
- * those rows already navigate via their subagentId.
+ * the guard that keeps background **Agent** results (`task_id: agent-…`) for
+ * [agentTaskIdOf] (ticket 157).
  */
 fun bashTaskIdOf(toolName: String, output: String): String? {
     if (toolName != "Bash") return null
     val id = TASK_ID.find(output.lineSequence().firstOrNull().orEmpty())
         ?.groupValues?.get(1)
     return id?.takeIf { it.startsWith("bash-") }
+}
+
+/**
+ * The row→job link of a background `Agent` spawn (ticket 157): its result is the
+ * immediate plain-text stub whose FIRST line is `task_id: agent-…` (docs/server-api.md,
+ * Sub-agents — the background result contract's head; a foreground result starts at
+ * `agent_id:` and never carries the line), so the spawn row's tap opens the job
+ * screen for the task. History repeats the same text, so a re-entered session links
+ * alike. The `agent-` prefix requirement mirrors [bashTaskIdOf]'s `bash-` guard.
+ */
+fun agentTaskIdOf(toolName: String, output: String): String? {
+    if (toolName != AGENT_TOOL_NAME) return null
+    val id = TASK_ID.find(output.lineSequence().firstOrNull().orEmpty())
+        ?.groupValues?.get(1)
+    return id?.takeIf { it.startsWith("agent-") }
 }
 
 /** The harness's kill budget for a background Bash call whose input sets no explicit

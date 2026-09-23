@@ -256,7 +256,7 @@ class SessionSocket @Inject constructor(
                     onEvent(
                         SessionEvent.ToolCallStarted(
                             it.toolCallId, it.name, mapper.preview(it), mapper.formatDetail(it.args), it.args,
-                            it.description, agentId,
+                            it.description, agentId, agentCall = mapper.agentCall(it.display),
                         ),
                     )
                 }

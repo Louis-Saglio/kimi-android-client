@@ -38,6 +38,18 @@ fun SessionEvent.isSubagentScoped(): Boolean = when (this) {
     else -> false
 }
 
+/** The `agent_call` rendering of a `tool.call.started` display (0.31.0 —
+ * docs/server-api.md, Sub-agents — ticket 157): the typed model of an `Agent`
+ * spawn's display, carried to the row that titles itself "{[agentName]} sub-agent",
+ * previews [prompt] and badges a [background] spawn. History `tool_use` parts carry
+ * no display, so this exists only on rows witnessed live (or seeded from the
+ * in-flight snapshot). */
+data class AgentCallDisplay(
+    val agentName: String,
+    val prompt: String,
+    val background: Boolean,
+)
+
 /** Events of one session, parsed from the WebSocket stream (docs/server-api.md). */
 sealed interface SessionEvent {
     /** `prompt.submitted` (docs/server-api.md — ticket 154): the submission echo. It
@@ -95,7 +107,9 @@ sealed interface SessionEvent {
      * action the preview prefers (ticket 153). [args] is the raw arguments object
      * (ticket 118), rendered by the expanded row as a key/value table
      * (ToolDetailFields); [input] is the same arguments pretty-printed —
-     * the expanded row's fallback when no object args exist. */
+     * the expanded row's fallback when no object args exist. [agentCall] is the
+     * parsed `agent_call` display (ticket 157) — the spawn row's model, null for
+     * every other call. */
     data class ToolCallStarted(
         val toolCallId: String,
         val name: String,
@@ -104,6 +118,7 @@ sealed interface SessionEvent {
         val args: JsonObject? = null,
         val description: String? = null,
         override val agentId: String = MAIN_AGENT_ID,
+        val agentCall: AgentCallDisplay? = null,
     ) : SessionEvent, AgentScopedEvent
 
     /** [output] is the full result text, shown by the expanded row (ticket 023). */

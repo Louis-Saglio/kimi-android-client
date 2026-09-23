@@ -389,6 +389,53 @@ class ChatMessageMapperTest {
         )
     }
 
+    // --- agent_call display parsing (ticket 157) ----------------------------------
+
+    @Test
+    fun `an agent call display parses into the spawn row's model`() {
+        // Doc-verbatim (docs/server-api.md, Sub-agents — 0.31.0):
+        // {"kind":"agent_call","agent_name":"explore","prompt":"..."}.
+        val display = wireJson.decodeFromString(
+            ToolInputDisplayDto.serializer(),
+            """{"kind":"agent_call","agent_name":"explore",""" +
+                """"prompt":"Reply with the single word: ok"}""",
+        )
+
+        assertEquals(
+            AgentCallDisplay("explore", "Reply with the single word: ok", background = false),
+            mapper.agentCall(display),
+        )
+    }
+
+    @Test
+    fun `a background agent call display parses with the flag set`() {
+        // A background spawn adds "background":true (docs/server-api.md, Sub-agents).
+        val display = wireJson.decodeFromString(
+            ToolInputDisplayDto.serializer(),
+            """{"kind":"agent_call","agent_name":"explore",""" +
+                """"prompt":"Reply with the single word: ok","background":true}""",
+        )
+
+        assertEquals(
+            AgentCallDisplay("explore", "Reply with the single word: ok", background = true),
+            mapper.agentCall(display),
+        )
+    }
+
+    @Test
+    fun `the command kind and unknown kinds parse to no agent call`() {
+        // Unknown-kind tolerance is untouched: only kind "agent_call" parses.
+        assertNull(mapper.agentCall(ToolInputDisplayDto(kind = "command", command = "ls")))
+        assertNull(mapper.agentCall(ToolInputDisplayDto(kind = "future_kind")))
+        assertNull(mapper.agentCall(null))
+    }
+
+    @Test
+    fun `an agent call display without a usable name parses to nothing`() {
+        assertNull(mapper.agentCall(ToolInputDisplayDto(kind = "agent_call", prompt = "Reply ok")))
+        assertNull(mapper.agentCall(ToolInputDisplayDto(kind = "agent_call", agentName = " ", prompt = "Reply ok")))
+    }
+
     private fun transcript(vararg frames: TranscriptFrameDto): TranscriptData = TranscriptData(
         agentId = "agent-1",
         items = listOf(

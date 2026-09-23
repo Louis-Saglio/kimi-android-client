@@ -1,6 +1,7 @@
 package fr.louissaglio.kimi.android.ui.chat
 
 import fr.louissaglio.kimi.android.data.chat.AGENT_TOOL_NAME
+import fr.louissaglio.kimi.android.data.chat.AgentCallDisplay
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.InFlightTurn
 import fr.louissaglio.kimi.android.data.chat.ORIGIN_KIND_COMPACTION_SUMMARY
@@ -10,6 +11,7 @@ import fr.louissaglio.kimi.android.data.chat.TodoParser
 import fr.louissaglio.kimi.android.data.chat.ToolPayloads
 import fr.louissaglio.kimi.android.data.chat.TranscriptFrame
 import fr.louissaglio.kimi.android.data.chat.TranscriptTurn
+import fr.louissaglio.kimi.android.data.chat.agentTaskIdOf
 import fr.louissaglio.kimi.android.data.chat.bashTaskIdOf
 import fr.louissaglio.kimi.android.data.chat.bashTimeoutOf
 import kotlinx.serialization.json.JsonObject
@@ -246,7 +248,10 @@ class ChatTimeline(
                 // Same rule as a live TodoList call: no row, the widget mirrors it.
                 todoParser.of(tool.name, tool.input)?.let { liveTodos = it }
             } else {
-                upsertTool(tool.toolCallId, tool.name, ToolStatus.Running, tool.preview, input = tool.input, args = tool.args)
+                upsertTool(
+                    tool.toolCallId, tool.name, ToolStatus.Running, tool.preview,
+                    input = tool.input, args = tool.args, agentCall = tool.agentCall,
+                )
             }
         }
     }
@@ -411,7 +416,10 @@ class ChatTimeline(
                     // The todo state comes from the call's input, not its result.
                     todoParser.of(event.name, event.input)?.let { liveTodos = it }
                 } else {
-                    upsertTool(event.toolCallId, event.name, ToolStatus.Running, event.preview, input = event.input, args = event.args)
+                    upsertTool(
+                        event.toolCallId, event.name, ToolStatus.Running, event.preview,
+                        input = event.input, args = event.args, agentCall = event.agentCall,
+                    )
                 }
             is SessionEvent.ToolCallResult ->
                 if (event.toolCallId in todoCallIds) Unit
@@ -643,6 +651,7 @@ class ChatTimeline(
         output: String = "",
         replaceOutput: Boolean = false,
         args: JsonObject? = null,
+        agentCall: AgentCallDisplay? = null,
     ) {
         var found = false
         healTool(toolCallId) { existing ->
@@ -656,8 +665,10 @@ class ChatTimeline(
                 output = if (replaceOutput) output else existing.output.ifBlank { output },
                 args = mergedArgs,
                 // The typed payload (ticket 119) follows the args' first-writer-wins
-                // rule, derived from the row's EFFECTIVE name/args.
+                // rule, derived from the row's EFFECTIVE name/args. The spawn row's
+                // display (ticket 157) follows the same rule.
                 payload = existing.payload ?: ToolPayloads.of(mergedName, mergedArgs),
+                agentCall = existing.agentCall ?: agentCall,
                 status = status,
             )
         }
@@ -667,6 +678,7 @@ class ChatTimeline(
                     toolCallId, name, status, preview, input, output,
                     args = args,
                     payload = ToolPayloads.of(name, args),
+                    agentCall = agentCall,
                 ),
             )
         }
@@ -929,9 +941,11 @@ class ChatTimeline(
  * The ONE tool-row enrichment (ticket 098 — the root fix for transcript-backed rows
  * losing their links): every [ChatItem.ToolActivity] field computable from the call's
  * name/input and a result text is derived HERE — [ChatItem.ToolActivity.bashTaskId]
- * from the result's `task_id: bash-…` first line, [ChatItem.ToolActivity.subagentId]
- * from the `agent_id:` result marker, [ChatItem.ToolActivity.timeoutSeconds]/
- * [ChatItem.ToolActivity.timeoutDisabled] from the call input's timeout knobs. All
+ * from the result's `task_id: bash-…` first line, [ChatItem.ToolActivity.agentTaskId]
+ * from the `task_id: agent-…` first line of a background spawn's result (ticket 157),
+ * [ChatItem.ToolActivity.subagentId] from the `agent_id:` result marker,
+ * [ChatItem.ToolActivity.timeoutSeconds]/[ChatItem.ToolActivity.timeoutDisabled]
+ * from the call input's timeout knobs. All
  * four row construction/update sites in [ChatTimeline] route through it (the history
  * flatten's result branch, the transcript-turn flatten, the live `ToolCallResult`
  * handling, and [ChatTimeline]'s orphan completion), so no row path can forget a
@@ -947,6 +961,7 @@ internal fun ChatItem.ToolActivity.enriched(
     return copy(
         subagentId = subagentId ?: agentResultSubagentId(name, output),
         bashTaskId = bashTaskId ?: bashTaskIdOf(name, output),
+        agentTaskId = agentTaskId ?: agentTaskIdOf(name, output),
         timeoutSeconds = timeoutSeconds ?: timeout?.seconds,
         timeoutDisabled = timeoutDisabled || (timeout?.disabled == true),
     )

@@ -49,6 +49,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import fr.louissaglio.kimi.android.data.chat.AGENT_SWARM_TOOL_NAME
+import fr.louissaglio.kimi.android.data.chat.AgentCallDisplay
 import fr.louissaglio.kimi.android.data.chat.BashOutputs
 import fr.louissaglio.kimi.android.data.chat.EditDiffs
 import fr.louissaglio.kimi.android.data.chat.FetchUrlOutputs
@@ -427,6 +428,14 @@ private data class SwarmBarSegment(val tag: String, val color: Color, val count:
  * screen, and the row never expands inline. A wait-any `WaitFor` (no task_id)
  * and `TaskList` keep the generic expansion.
  *
+ * An `Agent` row witnessed with the `agent_call` display (ticket 157 — 0.31.0,
+ * docs/server-api.md, Sub-agents) renders as the dedicated spawn row instead:
+ * the title "{agent_name} sub-agent", the prompt as a two-line prose preview and
+ * a "Background" badge on a background spawn. It never expands — the tap and the
+ * trailing chevron follow the spawn's kind: a foreground spawn opens the
+ * sub-agent page (the 045 link), a background one the job screen (the result's
+ * `task_id: agent-…` head, the 096 treatment).
+ *
  * The meta tools (ticket 125) are lean tuned rows — nothing navigates away and
  * the generic key/value table stays (only `ExitPlanMode` adds its option labels
  * as a chips row above it). `Skill` previews the invocation (name + args —
@@ -452,6 +461,12 @@ internal fun ToolRow(
     val swarmMemberList = swarmMembers[activity.id].orEmpty()
     if (activity.name == AGENT_SWARM_TOOL_NAME && swarmMemberList.isNotEmpty()) {
         SwarmCard(activity, swarmMemberList, onOpenSwarm)
+        return
+    }
+    // Ticket 157: an `Agent` spawn witnessed with its `agent_call` display renders
+    // as the dedicated spawn row — title, prompt preview, badge, deep-link tap.
+    activity.agentCall?.let { agentCall ->
+        AgentSpawnRow(activity, agentCall, onOpenSubagent, onOpenJob)
         return
     }
     val detailColor = MaterialTheme.colorScheme.onSurfaceVariant
@@ -935,6 +950,118 @@ internal fun ToolRow(
                     }
                 }
             }
+        }
+    }
+}
+
+/** Where an `agent_call` spawn row's tap navigates (ticket 157): the spawn's own deep
+ * link — the sub-agent page for a foreground spawn (the 045 link, learned from
+ * `subagent.spawned`/roster as today), the job screen for a background one (the 096
+ * link — the spawn result's `task_id: agent-…` head). Null while the link is unknown:
+ * the row is inert then, like any unlinked row. */
+internal sealed interface AgentSpawnTap {
+    data class Subagent(val subagentId: String) : AgentSpawnTap
+    data class Job(val taskId: String) : AgentSpawnTap
+}
+
+internal fun ChatItem.ToolActivity.agentSpawnTap(): AgentSpawnTap? {
+    val call = agentCall ?: return null
+    return if (call.background) {
+        agentTaskId?.let(AgentSpawnTap::Job)
+    } else {
+        subagentId?.let(AgentSpawnTap::Subagent)
+    }
+}
+
+/** The `agent_call` spawn row (ticket 157): the dedicated row for an `Agent` spawn
+ * witnessed with its typed display — the title names the sub-agent type, the prompt
+ * previews in up to two prose lines, and a background spawn earns the "Background"
+ * badge (the "one-shot" badge's shape). The row never expands: the tap and the
+ * trailing chevron follow [agentSpawnTap] — the sub-agent page for a foreground
+ * spawn, the job screen for a background one. The generic tool glyph leads, like
+ * every row without a per-tool icon. */
+@Composable
+private fun AgentSpawnRow(
+    activity: ChatItem.ToolActivity,
+    agentCall: AgentCallDisplay,
+    onOpenSubagent: (String) -> Unit,
+    onOpenJob: (String) -> Unit,
+) {
+    val detailColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val tap = activity.agentSpawnTap()
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            // M3: the whole row is the tap target, at least 48dp tall.
+            .heightIn(min = 48.dp)
+            .clickable(enabled = tap != null) {
+                when (val target = tap) {
+                    is AgentSpawnTap.Subagent -> onOpenSubagent(target.subagentId)
+                    is AgentSpawnTap.Job -> onOpenJob(target.taskId)
+                    null -> Unit
+                }
+            },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Icon(
+            imageVector = Icons.Filled.Build,
+            contentDescription = null,
+            modifier = Modifier.size(14.dp),
+            tint = detailColor,
+        )
+        Text(
+            text = "${agentCall.agentName} sub-agent",
+            style = MaterialTheme.typography.labelMedium,
+            color = detailColor,
+        )
+        if (agentCall.prompt.isNotBlank()) {
+            Text(
+                text = agentCall.prompt,
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.labelMedium,
+                // The prompt is prose (the WebSearch query's rule, ticket 122) and
+                // earns a second line — the spawn row exists to make it readable.
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                color = detailColor,
+            )
+        } else {
+            Spacer(Modifier.weight(1f))
+        }
+        if (agentCall.background) {
+            // The background spawn flag (ticket 157), the "one-shot" badge's shape.
+            Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.small) {
+                Text(
+                    text = "Background",
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
+        }
+        ToolStatusIcon(activity.status, runningDescription = "Tool running", modifier = Modifier.size(12.dp))
+        if (tap is AgentSpawnTap.Subagent) {
+            // The linked rows' open affordance (the bare clickable Icon, not an
+            // IconButton): the whole row navigates on tap anyway.
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = "Open sub-agent",
+                modifier = Modifier
+                    .size(16.dp)
+                    .clickable { onOpenSubagent(tap.subagentId) },
+                tint = detailColor,
+            )
+        }
+        if (tap is AgentSpawnTap.Job) {
+            // The background-linked rows' open affordance (tickets 096/124).
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = "Open job",
+                modifier = Modifier
+                    .size(16.dp)
+                    .clickable { onOpenJob(tap.taskId) },
+                tint = detailColor,
+            )
         }
     }
 }

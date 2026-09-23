@@ -51,7 +51,15 @@
   preview, ExitPlanMode's fixed "Plan ready for review" label + option-label chips
   above the generic args table). Ticket 135 adds `AgentSwarm` — the swarm call's
   `description` label plus its expected member total (the `items` /
-  `resume_agent_ids` count), feeding the swarm card's aggregate. Anything still
+  `resume_agent_ids` count), feeding the swarm card's aggregate. Ticket 157 adds
+  the `Agent` spawn row — the one display-driven row (the 0.31.0
+  `tool.call.started` display, kind `agent_call`, carries
+  `agent_name`/`prompt`/`background`; history parts carry no display, so only
+  witnessed or snapshot-seeded rows get it): the row titles itself "{agent_name}
+  sub-agent", previews the prompt and badges a background spawn; the tap follows
+  the spawn's kind — the sub-agent page (foreground, the 045 link) or the job
+  screen (background, the result's `task_id: agent-…` head, the 096 treatment).
+  Anything still
   falling back to the plain generic table is by design (unknown/future/MCP tools). `ReadOutputs` (the
   Read output's trailing `<system>…</system>` status block lifted into the file
   screen's caption chip — end-anchored, tolerant fallback; `BashOutputs` does the

@@ -330,10 +330,11 @@ class ChatTimelineTest {
     }
 
     @Test
-    fun `a background agent result does not link the row to a job`() {
+    fun `a background agent result links its agent task id but never the bash one`() {
         // Background Agent results also start with `task_id:` but an agent-… id
-        // (docs/server-api.md): those rows navigate via subagentId and must NOT be
-        // re-linked — the bash- prefix requirement is the guard (ticket 096).
+        // (docs/server-api.md): the bash- prefix requirement keeps bashTaskId null
+        // (ticket 096) — the id lands on the row's agentTaskId instead (ticket 157),
+        // the spawn row's own job-screen link.
         val output = "task_id: agent-7noib8bb\nstatus: running\nagent_id: agent-13\nactual_subagent_type: explore\n"
         val timeline = testChatTimeline()
         timeline.apply(SessionEvent.TurnStarted())
@@ -348,6 +349,7 @@ class ChatTimelineTest {
                         "tool_1", "Agent", ToolStatus.Done, "doc-verify-bg",
                         output = output,
                         subagentId = "agent-13",
+                        agentTaskId = "agent-7noib8bb",
                     ),
                 ),
             ),
