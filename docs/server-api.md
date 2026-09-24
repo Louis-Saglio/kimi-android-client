@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-09-19
-(server version `2.0.2`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-09-24
+(server version `2.1.1`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
@@ -14,7 +14,8 @@ the workspace list used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `2.0.1`
+**Protocol history:** this document previously described server `2.0.2`
+(verified 2026-09-19; see git history), `2.0.1`
 (verified 2026-09-18; see git history), `2.0.0`
 (verified 2026-09-17; see git history), `0.43.1`
 (verified 2026-09-15; see git history), `0.43.0`
@@ -37,6 +38,120 @@ used are shown with each section. Secrets are redacted (`<token>`).
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
 that, `0.27.0` before that, and `0.23.3` before that.
+
+The drift from 2.0.2 to 2.1.1 is **additive-only on the wire — transcript
+steps renamed `timing` to `llmTiming` and now carry `usage` (cold fold
+included), `subagent.*` lifecycle events became durable journal records (they
+now ride the cursor-resume replay), task notifications gained a "Wall time:"
+prose prefix, and the config grew an `auto_session_title` boolean; nothing
+breaks the Android app**. The upstream diff between the two tags (28 commits,
+reviewed via the GitHub API; `packages/kap-server` touched in five files —
+`rest-config.ts`, the transcript service trio, `start.ts`) touched the
+client-facing wire in exactly these places:
+
+- **Transcript steps: `timing` → `llmTiming`, plus `usage`** (commit
+  `b428bfd0` — "include step timing and usage in cold-folded steps";
+  verified live 2026-09-24): every step of a warm transcript now carries
+  `usage:{inputOther,output,inputCacheRead,inputCacheCreation}` and
+  `llmTiming:{llmFirstTokenLatencyMs,llmStreamDurationMs}` where 2.0.2
+  shipped `timing` (same inner shape). The **cold fold now projects both
+  too** (source-derived: `foldFacts.ts` reads them off the journaled
+  `context.append_message` records — 2.1.1-written journals carry them
+  because sealed assistant messages now record usage/timing — and
+  `groupTurns.ts` ships them on cold steps). Verbatim 2.1.1 warm step
+  (frames trimmed):
+
+  ```json
+  {"kind":"step","stepId":"t0.1","turnId":"t0","ordinal":1,"state":"completed",
+   "usage":{"inputOther":10967,"output":300,"inputCacheRead":15360,"inputCacheCreation":0},
+   "llmTiming":{"llmFirstTokenLatencyMs":4217,"llmStreamDurationMs":6019},
+   "frames":[…]}
+  ```
+
+  The app parses only `kind`/`stepId`/`turnId`/`ordinal`/`state`/`frames`
+  off steps (`TranscriptStepDto`) — no ticket.
+- **`subagent.*` events are durable now** (commit `895e9d9b` — swarm member
+  restore; verified live 2026-09-24): `subagent.spawned`/`started`/
+  `completed`/`failed`/`cancelled` persist to the session journal, so a
+  **cursor-resume replay now delivers them** (a resume from seq 50 replayed
+  `subagent.spawned`/`started`/`cancelled` verbatim at seqs 68/69/84 — up
+  to 2.0.2 they were live-only, and the app healed misses from REST
+  `/tasks` + the roster). Same shapes, no new fields; the app parses the
+  events already, so the gain is automatic — no ticket. The same commit's
+  transcript fold marks a `running` sub-agent task whose member agent is
+  not live as **`state:"lost"`** in the transcript `tasks[]`
+  (`markLostSubagentTasks`; the app never reads transcript `tasks`).
+- **Task notifications gained a "Wall time:" prose prefix** (commit
+  `0dc4d4fb`; verified live 2026-09-24): `task.notified`'s `body` and the
+  `<notification>` history XML now open with `Wall time: N.NNN seconds`
+  (verbatim: `"body":"Wall time: 14.559 seconds\nBackground agent sleep
+  was stopped by user.…"`), and the task tools (`TaskList`/`TaskOutput`/
+  `TaskStop`/`WaitFor`) prepend the same header to their output text. The
+  app never parses `task.notified`, strips `<notification>` envelopes, and
+  links task rows from tool-call args — invisible. **The same header on
+  model-facing tool results is engine→LLM only** (the context projector
+  prepends it to Agent/AgentSwarm/Bash/FetchURL/Glob/Grep/WebSearch/MCP
+  results): verified live ABSENT from the wire — WS `tool.result.output`
+  and history `tool_result.output` are byte-identical to 2.0.2, and the
+  background `task_id:` stubs still head their results, so the app's
+  first-line stub parsers stay safe.
+- **New config boolean `auto_session_title`** (commit `6a52dd78`; the REST
+  schema accepts it on GET/POST `/api/v1/config`; upstream doc: "Whether
+  clients may automatically generate session titles"): **absent from this
+  server's GET projection when unset** (verified live — no key, and titles
+  generate by default; `session.meta.updated` re-verified). The app reads
+  only `default_model`/`thinking.effort`/`providers` off config — no
+  ticket.
+- **Behavioral, wire shape unchanged:** forked sessions without an
+  explicit title now inherit the source's `titleKind` instead of resetting
+  to `replaceable` (`994287ac` — the app never forks); cold transcript
+  reads drain the live wire first (`drainLiveWire` — fresher cold reads);
+  the `[tools]` config hot-reloads (`toolPolicyService`); a wireCache
+  stack overflow on large journals is fixed (`6a214b85`).
+- **Wire-invisible here:** tower protocol invariants + mission token usage
+  (`f7012aa2`/`65ae3e36` — flag `tower:false`), the
+  `KIMI_CODE_REPEAT_BREAKER` env switch (`a54e6f6a`), telemetry plugin
+  reporting (`0523bafb`), MCP OAuth `offline_access` (`e796bb5d`),
+  remote-control region picking (`b3212fd9` — out of scope), the
+  trust-boundary hardening add-then-revert pair (`6451f1e0`/`929403b6`),
+  the filesystem-watch default off-then-on pair (`f17a22eb`/`c7dd8412`),
+  CLI startup perf (`bb96d807`), and TUI/web-bundle churn.
+
+Everything else re-verified unchanged live on 2.1.1 (see the verification
+log): `/api/v1/meta` (only `server_version` differs), the config projection,
+sessions create/get/list (`last_seq` `1` on a fresh detail, `0` on the
+list), `40401` without `stack`, `/status`, the snapshot (top-level keys,
+real `session.usage`, busy `in_flight_turn`, the `pending_approvals` item
+with `agent_id`, empty roster once terminal), messages history
+(newest-first), prompts POST + ACK (`prompt_id` == `user_message_id`), the
+full round-trip skeleton (no `streaming` phase), prompt queueing + steer
+(the 2.0.1 message-identity set intact — a single steer reuses the queued
+id), mid-run and idle `:abort`, compact (instruction echo, wholesale splice
+with the id-less `compaction_summary` + `compaction_continuation`,
+`tokensAfter` == post-compact `context_tokens`, both `40910`s with
+`stack`), the questions flow end-to-end (pending poll with `agent_id`,
+answer → `resolved:true`, dismiss → `40909`, re-answer/re-dismiss `40902`,
+all `event.question.*` frames), the manual-approval round-trip
+(`tool_call_id` POST → `40404`, `approved` → both resolved frames, the
+snapshot item), files (upload, download 200, `Range` 206, delete → `40407`
+at HTTP 404, the `session_media` projection with `name` in the ACK AND
+history, the media copy surviving the upload's delete), the TodoList
+contract (verbatim `{"todos":[{status,title}]}`), foreground + background
+sub-agent lifecycles (spawned with `taskId`/`model`/`thinkingEffort:"max"`,
+completed with `resultSummary`/`usage`/`contextTokens`, the cancel sequence
+verbatim), REST `/tasks` list, the v2 grouped session table, the models
+catalog (10 entries), the lifecycle events (`event.session.created` at seq
+1, `event.session.deleted` with camelCase `sessionId`), and WS
+hello/subscribe/ack/cursor-resume (`protocol_version: 2`, `heartbeat_ms`
+10000; replay before the ack; future-seq cursor → standalone
+`resync_required` `epoch_changed` then the ack listing it; the
+heartbeat-timeout close re-observed). Tools-catalog content drift (host MCP
+config, not the release): 37 entries on an initialized agent, 36 on a fresh
+one — the same 28/27 builtins, 9 MCP tools (tavily lost `tavily_feedback`,
+back to 5; kiln 4). **App impact: none — every 2.1.1 change lands on
+payloads the app either never parses (transcript step extras,
+`task.notified`, the notification XML) or parses defensively (`subagent.*`
+events, whose new durability it exploits for free). No tickets filed.**
 
 The drift from 2.0.1 to 2.0.2 is **additive-only on the v2 surface — the
 interaction payloads (approvals and questions) gained an `agent_id` field
@@ -1672,6 +1787,13 @@ unchanged from 0.29.2):
   never-touched throwaway session); the per-session override is
   `POST .../sessions/{id}/profile` (see Sessions). The Settings default
   picker will consume it (ticket 142).
+- **`auto_session_title`** (new in 2.1.1, commit `6a52dd78`; verified live
+  2026-09-24): a boolean gating automatic AI session-title generation ("Whether
+  clients may automatically generate session titles" per the upstream doc).
+  **Absent from this server's GET projection when unset** — no key in `data`,
+  and titles generate by default (`session.meta.updated` on the first prompt
+  re-verified this run). The REST schema accepts it on both GET and POST.
+  The app reads no such field — no ticket.
 
 ## Sessions
 
@@ -2491,11 +2613,18 @@ Turn → step → frame structure (verbatim keys, running sub-agent capture):
   up to 0.38.0 the steered text never appeared in the transcript. Only the
   main agent's transcript is affected — steer targets the active main turn.
 - **Warm vs cold rebuild:** answers computed from the live session add
-  `startedAt`/`endedAt` on turns and steps, `finishReason`/`usage`/`timing` on
+  `startedAt`/`endedAt` on turns and steps, `finishReason`/`usage`/timing on
   steps, and `inputText`/`display`/`progress` on tool frames; the cold-session
   rebuild from persisted wire records ships only `turnId`/`ordinal`/`state`/
   `origin`/`steps` on turns and the core frame fields (`input`+`output` on
   finished tool frames). Treat every field outside the core set as optional.
+  **2.1.1 (commit `b428bfd0`; verified live 2026-09-24 on the warm path):**
+  the step timing field is renamed **`timing` → `llmTiming`**
+  (`{llmFirstTokenLatencyMs, llmStreamDurationMs}`, same inner shape) and
+  steps carry **`usage`** (`{inputOther, output, inputCacheRead,
+  inputCacheCreation}`) — and the **cold fold now projects both** from the
+  journaled records (2.1.1-written journals only; older journals still ship
+  neither). The app parses neither field.
   **0.31.1:** the engine now persists `turn.ended` records, so the cold
   rebuild also reports a turn's real terminal `state` (`"cancelled"` /
   `"failed"`; `"blocked"` folds into `"failed"`) plus `endedAt` / `durationMs`
@@ -3497,7 +3626,10 @@ advertised** — it is gated behind the `notify_user` experimental flag
 (`false` here, commit `f6a9c39e`). **2.0.0 (verified live 2026-09-17): 38
 entries on an initialized agent — the same 28 builtins plus 10 MCP tools
 (tavily gained `tavily_feedback`, now 6; kiln has 4) — and 37 on a fresh
-never-prompted session (27 builtins + the same 10 MCP).** Content drift from
+never-prompted session (27 builtins + the same 10 MCP).** **2.1.1 (verified
+live 2026-09-24): back to 37 entries on an initialized agent and 36 on a
+fresh one — the same 28/27 builtins, 9 MCP tools (tavily lost
+`tavily_feedback`, back to 5; kiln 4).** Content drift from
 this server's MCP config, not wire-shape drift; the builtin set is
 unchanged. Also re-observed this run: the 0.31.1
 liveness caveat below still holds verbatim — right after session create,
@@ -3661,6 +3793,12 @@ since 0.29.2 is called out inline (spawn-time status republication, the
 delivery, the Agent tool-result trailer, the 0.34.0 model/effort fields and
 the foreground task-store registration); fields not captured live are marked
 as upstream-schema-only (`packages/kap-server/src/protocol/events-zod.ts`).
+**2.1.1 (commit `895e9d9b`; verified live 2026-09-24):** the `subagent.*`
+lifecycle events are now **durable journal records** — a cursor-resume
+replay delivers them (a resume from seq 50 replayed `subagent.spawned`/
+`started`/`cancelled` at seqs 68/69/84); up to 2.0.2 they were live-only,
+so a disconnected client could only heal misses from REST `/tasks` and the
+snapshot roster. Same payload shapes.
 
 There are **two exposure paths**, chosen by the `Agent` call's
 `run_in_background` argument:
@@ -3994,6 +4132,10 @@ the optional `stopReason` on task `info`.
 `task.notified` (verbatim shape): `{"notificationType":"task.completed" |
 "task.killed","title":"...","body":"...","severity":"info" | "warning",
 "sourceKind":"background_task","sourceId":"<taskId>"}`.
+**2.1.1 (commit `0dc4d4fb`; verified live 2026-09-24):** the `body` — and the
+`<notification>` history XML alike — now opens with a
+`Wall time: N.NNN seconds` line (the task tools' output text prepends the
+same header). Prose, not shape; the app never parses either.
 
 Two **different** agent ids ride these frames: the payload-level `agentId`
 (`"main"` above) is the envelope stamp naming the **owning** agent — the one
@@ -5086,6 +5228,88 @@ session `40401`. The loopback-only debug xstate stream
 deployment** (verified live — handshake refused).
 
 ## Verification log
+
+- 2026-09-24 re-verification on `2.1.1` (server 2.0.2 → 2.1.1; throwaway
+  sessions `session_97ade091-…` / `session_36a02184-…` /
+  `session_e8f1813c-…` / `session_18e4c056-…` / `session_d80d9dd8-…` /
+  `session_a292eb77-…` created with `metadata.cwd=/home/ubuntu/spike`, all
+  `:delete`d after; guided by the nightly job's `pending-changelog.md` — 28
+  upstream commits between the tags, reviewed via the GitHub API; live
+  probes over REST + websocat against `127.0.0.1:58627`; the wire-relevant
+  commits are `b428bfd0` (transcript step `timing`→`llmTiming` + cold-fold
+  usage/timing), `895e9d9b` (durable `subagent.*` events + swarm restore +
+  transcript `lost` marking), `0dc4d4fb` ("Wall time:" headers),
+  `6a52dd78` (`auto_session_title` config), `994287ac` (fork `titleKind`)
+  and `6a214b85` (wireCache stack overflow); the rest is wire-invisible —
+  see the drift section above).
+  Drift found (all additive or prose; nothing breaks the Android app):
+  (a) transcript steps carry `usage` + renamed `llmTiming` — verified live
+      on the warm path (verbatim step in the drift section); the cold-fold
+      inclusion is source-derived (`foldFacts.ts`/`groupTurns.ts`); the
+      app parses neither field;
+  (b) `subagent.spawned`/`started`/`cancelled` are durable and now ride the
+      cursor-resume replay — verified live: a resume from seq 50 replayed
+      them at seqs 68/69/84; shapes unchanged;
+  (c) `task.notified` `body` and the `<notification>` history XML open with
+      `Wall time: N.NNN seconds` (verbatim `"Wall time: 14.559 seconds\n…"`
+      on a killed-agent notification; also on completed bash/agent); the
+      task tools' output text prepends the same header; the model-facing
+      tool-result header stays engine→LLM-only — WS `tool.result.output`
+      and history `tool_result.output` verified byte-clean of it, and the
+      background stubs still head with `task_id:` (live AND history);
+  (d) `auto_session_title` accepted by the config REST schema but absent
+      from this server's GET projection (titles on by default);
+  (e) tools-catalog content drift: 37 entries initialized / 36 fresh (was
+      38/37 on 2.0.2) — same 28/27 builtins, 9 MCP tools (tavily back to 5,
+      `tavily_feedback` gone; kiln 4) — host MCP config, not the release.
+  Re-verified unchanged, most byte-for-byte: `/api/v1/meta` (5 flags, 17
+  features — only `server_version` differs), config projection, sessions
+  create/get/list (`last_seq` `1` on a fresh detail, `0` on the list),
+  `40401` without `stack`, `/status`, the snapshot (top-level keys, real
+  `session.usage`, busy `in_flight_turn` with thinking text,
+  `pending_approvals` item with `agent_id`, empty roster once terminal),
+  messages history (newest-first; media parts with `name`), prompts POST +
+  ACK, one full prompt round-trip (the documented skeleton —
+  `session.meta.updated` → `prompt.submitted` → `turn.started` →
+  `context.spliced` → `prompt.started` → steps/deltas → `tool.*` →
+  `turn.ended` → `prompt.completed`), prompt queueing + steer
+  (`prompt.queued` `queueLength`, `prompt.steered` with `messageId` == the
+  queued id, `turn.steer` with the 2.0.1 identity set, `prompt.completed`
+  with the original id), mid-run `:abort` (`turn.step.interrupted` →
+  `turn.ended` `cancelled`/`user_cancelled` → interruption-reminder splice
+  → `prompt.aborted`) plus idle `:abort` `{"aborted":true}`, compact with
+  `{}` and with `{"instruction":…}` (instant empty ACK, instruction echo in
+  `compaction.started`, wholesale splice with the id-less
+  `compaction_summary` + `compaction_continuation`, `tokensAfter` 29431 ==
+  post-compaction `context_tokens`, both `40910`s with `stack`), the
+  questions flow end-to-end (pending poll with `agent_id`, `single` answer
+  → `{"resolved":true}`, dismiss `40909`, re-answer/re-dismiss `40902`,
+  all three `event.question.*` frames), the manual-approval round-trip
+  (`approval_<uuid>` ≠ `tool_call_id`, `tool_call_id` POST → `40404`,
+  `approved` → both resolved frames, the snapshot item), files (upload with
+  sniffed `media_type`, download 200, `Range` 206, delete, `40407` at HTTP
+  404 after delete, the image `session_media` projection with `name` in the
+  ACK echo AND history, the media copy surviving the upload's delete), the
+  TodoList contract (verbatim `{"todos":[{status,title}]}` + the
+  `todo_list` display), foreground + background sub-agent lifecycles
+  (`subagent.spawned` with `taskId`/`model`/`thinkingEffort:"max"`,
+  `subagent.completed` with `resultSummary`/`usage`/`contextTokens`, the
+  cancel sequence `prompt.aborted` → `subagent.cancelled` →
+  `task.terminated` `killed` → task-origin notification turn verbatim),
+  REST `/tasks` list, the v2 grouped session table, the models catalog (10
+  entries), the lifecycle events (`event.session.created` at seq 1,
+  `:delete` → `{"deleted":true}` + global `event.session.deleted` with
+  camelCase `sessionId`), and WS hello/subscribe/ack/cursor-resume
+  (`protocol_version: 2`, `heartbeat_ms` 10000; replay from seq 50
+  re-delivered 51+ in order before the ack; future-seq cursor → standalone
+  `resync_required` `epoch_changed` then the ack listing it; the
+  heartbeat-timeout close re-observed on a silent subscriber).
+  **App impact: none — every 2.1.1 change is additive on payloads the app
+  either ignores wholesale or parses defensively (`ignoreUnknownKeys`).
+  No tickets filed.**
+  Unit tests: `:app:testDebugUnitTest` green — 957 tests, 0 failures
+  (forced full re-run, `--rerun-tasks`; counts from the JUnit XML of that
+  execution).
 
 - 2026-09-19 re-verification on `2.0.2` (server 2.0.1 → 2.0.2; throwaway
   session `session_29a30643-…` created with `metadata.cwd=/home/ubuntu/spike`,
