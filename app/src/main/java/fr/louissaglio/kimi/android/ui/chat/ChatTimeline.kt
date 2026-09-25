@@ -576,6 +576,14 @@ class ChatTimeline(
      * `user_message_id` == the splice's message id), so the splice heals this row in
      * place ([appendSpliced]) and the turn-end refetch replaces it with the canonical
      * committed row. [ChatViewModel] drives the mark/clear through [apply].
+     *
+     * The splice can also BEAT the ACK: the server broadcasts `context.spliced` within
+     * milliseconds of writing the POST response, and the warm socket's dispatch can
+     * land before the REST continuation (verified on-device 2026-09-25, server 2.1.1 —
+     * splice applied 4ms before the ACK's echo, every send crashed on the duplicate
+     * LazyColumn key). The row is then already committed: adopt it as this echo's row
+     * (queued marks still heal in place, the refetch's echo survival still applies)
+     * instead of appending a twin.
      */
     fun appendLocalEcho(
         id: String,
@@ -584,6 +592,11 @@ class ChatTimeline(
         images: List<ChatMessage.Part.Image>,
     ) {
         if (text.isBlank() && attachments.isEmpty() && images.isEmpty()) return
+        val existing = rows.firstOrNull { it.id == id }
+        if (existing != null) {
+            if (existing is ChatItem.UserMessage) localEchoes[id] = existing
+            return
+        }
         val echo = ChatItem.UserMessage(id, text, attachments, images)
         localEchoes[id] = echo
         appendCommitted(echo)

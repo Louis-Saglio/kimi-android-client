@@ -964,6 +964,38 @@ class ChatTimelineTest {
     }
 
     @Test
+    fun `a splice that beats the prompt ACK leaves exactly one bubble`() {
+        val timeline = testChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted())
+
+        // Server 2.1.x ordering: the socket's context.spliced can land before the POST
+        // ACK's continuation — the echo must adopt the spliced row, not twin it
+        // (Louis's duplicate-key crash, 2026-09-25).
+        timeline.apply(SessionEvent.ContextSpliced(listOf(userMessage("msg_1", "hello"))))
+        timeline.appendLocalEcho("msg_1", "hello", emptyList(), emptyList())
+
+        assertEquals(
+            listOf(ChatItem.UserMessage("msg_1", "hello")),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `a splice-adopted echo still takes the queued mark`() {
+        val timeline = testChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted())
+
+        timeline.apply(SessionEvent.ContextSpliced(listOf(userMessage("msg_1", "hello"))))
+        timeline.appendLocalEcho("msg_1", "hello", emptyList(), emptyList())
+        timeline.apply(SessionEvent.PromptQueued("msg_1", 2))
+
+        assertEquals(
+            listOf(ChatItem.UserMessage("msg_1", "hello", queued = 2)),
+            timeline.items(),
+        )
+    }
+
+    @Test
     fun `context spliced ignores non-user messages`() {
         val timeline = testChatTimeline()
 
