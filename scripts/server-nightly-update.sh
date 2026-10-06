@@ -17,7 +17,8 @@
 # $STATE_DIR/pending-changelog.md, then launches a headless kimi agent
 # (scripts/protocol-update-prompt.md) that uses it to know exactly what
 # changed, re-verifies the wire protocol, rewrites docs/server-api.md, files
-# todo/ tickets for app breakage, and commits + pushes the result. State
+# todo/ tickets for app breakage and for new server capabilities the app
+# could use to improve itself, and commits + pushes the result. State
 # advances only after a successful agent run, so failures retry the next
 # night. Installed as
 # kimi-nightly-update.service/.timer — see /home/ubuntu/administration.md.
