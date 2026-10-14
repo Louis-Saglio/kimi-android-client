@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-09-24
-(server version `2.1.1`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-10-14
+(server version `2.2.0`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
@@ -14,7 +14,8 @@ the workspace list used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `2.0.2`
+**Protocol history:** this document previously described server `2.1.1`
+(verified 2026-09-24; see git history), `2.0.2`
 (verified 2026-09-19; see git history), `2.0.1`
 (verified 2026-09-18; see git history), `2.0.0`
 (verified 2026-09-17; see git history), `0.43.1`
@@ -38,6 +39,147 @@ used are shown with each section. Secrets are redacted (`<token>`).
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
 that, `0.27.0` before that, and `0.23.3` before that.
+
+The drift from 2.1.1 to 2.2.0 is **additive-only on the wire —
+`agent.status.updated` gained a `permission` variant that fires when the
+session's permission mode changes, history text parts gained an optional
+`meta` object, and the interruption injection's origin gained
+`ownerPromptId`; everything else is engine behavior or out of scope, and
+nothing breaks the Android app**. The upstream diff between the two tags
+(36 commits, reviewed via the GitHub API; `packages/kap-server` touched in
+five files — `prompts.ts`, `start.ts`, `coreEventMap.ts`,
+`transcriptService.ts`, plus the remote-control and fs-list routes)
+touched the client-facing wire in exactly these places:
+
+- **`agent.status.updated` gained an optional `permission` field** (commit
+  `a940f2ff` — "publish permission mode changes on agent.status.updated";
+  verified live 2026-10-14): the event now fires when the session's
+  permission mode changes (a `POST .../profile` write, or the engine's own
+  goal-start mode set), carrying the new mode next to the usual usage
+  block. Verbatim 2.2.0 frame, captured on a
+  `POST .../profile {"agent_config":{"permission_mode":"manual"}}` write
+  (usage buckets trimmed):
+
+  ```json
+  {"type":"agent.status.updated","seq":90,"volatile":true,
+   "payload":{"type":"agent.status.updated","time":1792006993469,"agentId":"main",
+              "permission":"manual",
+              "usage":{"byModel":{"kimi-code/k3":{"inputOther":16013,"output":1763,
+                                                 "inputCacheRead":202240,"inputCacheCreation":0}},
+                       "total":{...},"currentTurn":{...}},
+              "contextTokens":30317,"maxContextTokens":1048576,"model":"kimi-code/k3",
+              "sessionId":"session_..."}}
+  ```
+
+  The reverse write (`"auto"`) produced the twin frame. The app decodes
+  `agent.status.updated` with `ignoreUnknownKeys` and never modeled
+  `permission` — no breakage; ticket 165 consumes it to keep the chat
+  permission chip in sync live.
+- **History text parts gained an optional `meta` object** (commit
+  `06ebfc82` — UserPromptSubmit hook output folded into the prompt
+  message; source-derived, **not observed live** — this server runs no
+  UserPromptSubmit hooks and the run's prompts activated no skills):
+  `text` parts may now carry `meta: {source, contentType?, activationId?}`
+  marking skill-activation blocks and hook-injected text, and the
+  kap-server prompt snapshot projection filters those parts by
+  `meta.source` instead of the old positional prefix-slice (sessions with
+  hook injections no longer shift turns or lose replies). On a hook-less
+  server the wire is byte-identical; the app's `ContentPartDto` ignores
+  unknown fields — no ticket.
+- **The interruption injection's origin gained `ownerPromptId`** (commit
+  `e3bf50c0` — remove the interruption reminder when its turn is undone;
+  verified live 2026-10-14 in `GET .../messages`): the reminder's
+  `metadata.origin` now reads
+  `{"kind":"injection","variant":"interruption","ownerPromptId":"msg_..."}`
+  — the link the TUI undo path needs. Additive; the app reads only
+  `origin.kind`/`variant` off injections — no ticket.
+- **WaitFor capped at 90 s** (commit `20a2cea7`; engine behavior, wire
+  shape unchanged): longer timeouts are rejected, repeated waits are
+  discouraged, and a new incoming prompt ends the wait immediately (the
+  0.43.0 steer-interrupts-WaitFor rule generalized). WaitFor result prose
+  may differ; the app never parses it — no ticket.
+- **Behavioral — auto permission mode suppresses `AskUserQuestion`**
+  (first live observation 2026-10-14; pre-existing engine behavior made
+  visible by the config flip below): a session running `auto` permission
+  mode receives a model-facing reminder not to call `AskUserQuestion` —
+  this run's cake-or-pie prompt under `auto` completed without ever
+  surfacing a question, and the same prompt after switching the session to
+  `manual` surfaced the full questions flow. The questions wire contract
+  itself is unchanged (see the re-verification list) — auto sessions
+  simply produce no questions to answer.
+- **Config drift (not shape):** `default_permission_mode` reads
+  **`"auto"`** (was `"yolo"` on every previous verification) — fresh
+  sessions now start in auto mode (see the suppression above); a fresh
+  session's `/status` `permission` reads `"auto"`, `max_context_tokens`
+  still 262144. `default_model` still `kimi-code/k3-256k`,
+  `thinking.effort` still `"max"`. The models catalog still reads 10
+  entries with the same item shape.
+- **Tools-catalog content drift** (server/model-state, not the release's
+  wire): **36 entries on an initialized agent — 27 builtins + 9 MCP
+  tools** (2.1.1 had 28/37: `ReadMediaFile` is out of the catalog again);
+  `NotifyUser` still gated off (`notify_user: false`). See Tools.
+- **Wire-invisible here:** the opt-in NotifyUser progress display
+  (`0a3a2fba`/`7091138f`/`4fbe0654` — flag `notify_user: false`;
+  kap-server's host identity gained an engine-internal `uiCapabilities`
+  declaration), tower deterministic orchestration (`c9f01f07`/`09af3b48` —
+  flag `tower: false`), the remote-control device management + deletion
+  routes (`c69bd6c5`/`c1ec3725` — out of scope), `fs:list`
+  `allow_ignored_globs` (`5b936697` — fs routes out of scope),
+  forked-subagent agent-type parity and the prompt-cache-probe fork
+  report (`f0bc988b`/`fed19d24` — engine-internal), the media-tools
+  restore after session resume (`419aced0`), in-flight video-upload
+  cancellation (`c15638b0`), mid-turn progress notes (`7091138f` —
+  model-facing prose), the kaos MCP executor removal (`cbd75404` — config
+  validation), per-model survey overrides (`eec9bbd9` — TUI),
+  `KIMI_CODE_TRUST_WORKSPACE` + trust summaries (`1f6f0b1f`/`395d5372`),
+  `KIMI_CODE_LLM_HEADERS_TIMEOUT_MS` (`c151d5a3`), the max-tokens omission
+  fix (`21406fb4` — engine↔LLM), cron clearing at fork (`f409caa2`),
+  `kimi app` desktop launch (`242ac230`), and TUI/CI churn.
+
+Everything else re-verified unchanged live on 2.2.0 (see the verification
+log): `/api/v1/meta` (only `server_version` differs — same 5 flags, same
+17 features), the config projection, the models catalog (10 entries),
+sessions create/get/list (`last_seq` `1` on a fresh detail, `0` on the
+list), `40401` without `stack`, `/status`, the snapshot (top-level keys,
+real `session.usage`, busy `in_flight_turn` with `running_tools`, empty
+pending/roster lists, `messages` as `{items, has_more}`), messages history
+(newest-first), prompts POST + ACK (`prompt_id` == `user_message_id`), the
+full prompt round-trip skeleton (no `streaming` phase; the `date_change`
+AND `permission_mode` injections), prompt queueing + steer (the 2.0.1
+message-identity set intact — single-steer id reuse, `prompt.steered`
+before `turn.steer`), mid-run and idle `:abort` (full interrupted
+sequence; idle `{"aborted":true}`), compact with `{}` and
+`{"instruction":...}` (instant ACK, instruction echo, wholesale splice
+with the id-less `compaction_summary` + `compaction_continuation`,
+`tokensAfter` == post-compact `context_tokens`, both `40910`s with
+`stack`), the questions flow end-to-end (pending poll with `agent_id`,
+answer → `resolved:true`, re-answer `40902`, dismiss `40909` +
+`dismissed:true`, re-dismiss `40902`, all three `event.question.*`
+frames), the manual-approval round-trip (pending poll with `agent_id`,
+`tool_call_id` POST → `40404`, `approved` → both resolved frames), files
+(upload with sniffed `media_type`, download 200, `Range` 206, delete →
+`40407` at HTTP 404, the `session_media` projection with `name` in the ACK
+AND history, the media copy surviving the upload's delete), the TodoList
+contract (verbatim `{"todos":[{status,title}]}`), foreground + background
+sub-agent lifecycles (`subagent.spawned` with
+`taskId`/`model`/`thinkingEffort:"max"`, `subagent.completed` with
+`resultSummary`/`usage`/`contextTokens`, the cancel sequence verbatim —
+`subagent.cancelled` → `task.terminated` `"killed"` →
+`background.task.terminated` → `task.notified` `"task.killed"` with the
+"Wall time:" prefix), REST `/tasks` list/get `with_output`/`:cancel`
+(`40904` on an already-finished task), the v2 grouped session table
+(`groups[]`, `activity.model`), the per-agent transcript (completed steps
+carry `usage` + `llmTiming`), the tools catalog (36 entries), the
+lifecycle events (`event.session.created` at seq 1,
+`event.session.deleted` with camelCase `sessionId`), and WS
+hello/subscribe/ack/cursor-resume (`protocol_version: 2`, `heartbeat_ms`
+10000; replay from seq 290 re-delivered 291+ in order before the ack;
+future-seq cursor → standalone `resync_required` `epoch_changed` then the
+ack listing it; the heartbeat-timeout close re-observed — pings at +10 s
+and +20 s, close before +30 s). **App impact: none — every 2.2.0 change
+is additive on payloads the app parses with `ignoreUnknownKeys`, or
+engine-internal. One improvement ticket filed (165 — consume the new
+`permission` variant to keep the chat permission chip in sync live).**
 
 The drift from 2.0.2 to 2.1.1 is **additive-only on the wire — transcript
 steps renamed `timing` to `llmTiming` and now carry `usage` (cold fold
@@ -1786,7 +1928,10 @@ unchanged from 0.29.2):
   session's `/status` `permission` starts from it (`"yolo"` observed on a
   never-touched throwaway session); the per-session override is
   `POST .../sessions/{id}/profile` (see Sessions). The Settings default
-  picker will consume it (ticket 142).
+  picker will consume it (ticket 142). **2.2.0 (verified live
+  2026-10-14): it now reads `"auto"`** — config drift, not protocol;
+  fresh sessions start in auto mode, which suppresses the model's
+  `AskUserQuestion` calls (see Questions).
 - **`auto_session_title`** (new in 2.1.1, commit `6a52dd78`; verified live
   2026-09-24): a boolean gating automatic AI session-title generation ("Whether
   clients may automatically generate session titles" per the upstream doc).
@@ -2047,7 +2192,11 @@ capture, trimmed:
 - The write goes through to `/status`: a following GET on the same session
   reported `"permission":"manual"` (was `"yolo"` before the write — fresh
   sessions start from the server's `default_permission_mode`, see
-  `GET /api/v1/config` in Models).
+  `GET /api/v1/config` in Models). **2.2.0 (verified live 2026-10-14):**
+  the write also **pushes an `agent.status.updated` frame** carrying the
+  new mode as `"permission":"manual"` (plus the usual usage block) — see
+  WebSocket → Core event payloads; the engine's own mode sets ride the
+  same frame (commit `a940f2ff`).
 - Quirk: the response's `agent_config` does **not** echo the written
   `permission_mode` (stays `{"model":""}` in the capture) — `/status`'s
   `permission` is the read-back, not the session object.
@@ -2437,7 +2586,12 @@ call, tool result, assistant text):
 Roles observed: `user`, `assistant`, `tool`. Content is a list of parts; part
 types observed:
 
-- `{"type": "text", "text": "..."}` — user or assistant text.
+- `{"type": "text", "text": "..."}` — user or assistant text. **2.2.0
+  (additive, commit `06ebfc82`; source-derived, not observed live):** may
+  also carry an optional **`meta`** object (`{source, contentType?,
+  activationId?}`) marking skill-activation blocks and UserPromptSubmit
+  hook output — the kap-server projections filter those parts by
+  `meta.source`, so on a hook-less server they never appear.
 - `{"type": "thinking", "thinking": "..."}` — assistant reasoning (may be empty).
 - `{"type": "tool_use", "tool_call_id": "tool_...", "tool_name": "Bash", "input": {...}}` — assistant tool call.
 - `{"type": "tool_result", "tool_call_id": "tool_...", "output": "..."}` — in a
@@ -2485,7 +2639,12 @@ incomplete. The user's next message continues the conversation." — carrying
 `metadata.origin: {"kind":"injection","variant":"interruption"}` (verified
 live 2026-07-31: present in `GET .../messages` after each abort, and pushed
 live as a `context.spliced` echo right after `turn.ended`). It repeats per
-cancelled turn and persists in history. Sibling variant observed on **0.34.0**
+cancelled turn and persists in history. **2.2.0 (additive, commit
+`e3bf50c0`; verified live 2026-10-14):** the origin also carries
+**`ownerPromptId`** — the aborted prompt's id, the link the TUI undo path
+uses to drop the reminder with its turn
+(`{"kind":"injection","variant":"interruption","ownerPromptId":"msg_..."}`
+read straight out of `GET .../messages`). Sibling variant observed on **0.34.0**
 (2026-08-06): `{"kind":"injection","variant":"permission_mode"}` — a
 `<system-reminder>` user message injected when a turn runs under auto
 permission mode (additive; the same envelope-stripping rule covers it).
@@ -3420,6 +3579,12 @@ On 0.38.0 question ids are server-minted `question_<uuid>` strings (see step
    poll, snapshot item alike) also carries `agent_id`** (snake_case,
    optional in the schema, present on every 2.0.2 live capture — `"main"`
    or the asking sub-agent's id; verified live 2026-09-19).
+   **Auto-mode caveat (verified live 2026-10-14 on 2.2.0):** a session
+   running `auto` permission mode gets a model-facing reminder not to call
+   `AskUserQuestion` at all — under `auto` the tool call never happens and
+   no question surfaces (the turn just completes). The end-to-end flow
+   below was therefore re-verified with the session switched to `manual`;
+   the wire contract is unchanged in every step.
 2. While a question is pending, the session object shows
    `"pending_interaction": "question"`.
 3. Pending questions can also be polled —
@@ -3629,7 +3794,12 @@ entries on an initialized agent — the same 28 builtins plus 10 MCP tools
 never-prompted session (27 builtins + the same 10 MCP).** **2.1.1 (verified
 live 2026-09-24): back to 37 entries on an initialized agent and 36 on a
 fresh one — the same 28/27 builtins, 9 MCP tools (tavily lost
-`tavily_feedback`, back to 5; kiln 4).** Content drift from
+`tavily_feedback`, back to 5; kiln 4).** **2.2.0 (verified live
+2026-10-14): 36 entries on an initialized agent — 27 builtins + the same 9
+MCP tools — `ReadMediaFile` is out of the catalog again** (the catalog is
+resolved from the live agent's model/state; treat the builtin count as
+server/model-state-dependent, exactly like the 0.38.0 episode). `NotifyUser`
+still gated off (`notify_user: false`). Content drift from
 this server's MCP config, not wire-shape drift; the builtin set is
 unchanged. Also re-observed this run: the 0.31.1
 liveness caveat below still holds verbatim — right after session create,
@@ -4913,7 +5083,14 @@ all of them. Verbatim 0.37.2 frames
 (`turn.ended.reason` observed: `"completed"`, `"cancelled"` after abort.)
 
 **Agent status** (`agent.status.updated`, volatile) — two payload variants,
-both still present. **0.29.0 changes, all additive:** the model/usage variant
+both still present. **2.2.0, additive (commit `a940f2ff`; verified live
+2026-10-14):** the event gained an optional **`permission`** field and now
+fires when the session's permission mode changes (a `POST .../profile`
+write, or the engine's own goal-start mode set) — the frame carries the new
+mode next to the usual usage/model block (verbatim capture in the 2.2.0
+drift notes above and the Session profile section). The variant taxonomy is
+unchanged — treat `permission` like the model/effort fields: present only
+when the frame has something to say about it. **0.29.0 changes, all additive:** the model/usage variant
 can now carry `thinkingEffort`; the `phase` objects now carry `since` (epoch
 ms) on active phases; the `awaiting_approval` inline approval now carries both
 `approvalId` and `toolCallId` (**0.39.0:** `approvalId` is the dedicated
@@ -5229,6 +5406,116 @@ deployment** (verified live — handshake refused).
 
 ## Verification log
 
+- 2026-10-14 re-verification on `2.2.0` (server 2.1.1 → 2.2.0; throwaway
+  sessions `session_ec4c69c0-…` / `session_2796ca8f-…` created with
+  `metadata.cwd=/home/ubuntu/spike`, both `:delete`d after; the nightly
+  job's `pending-changelog.md` fetch FAILED (missing tag or network), so
+  the 36 upstream commits between the tags were enumerated and reviewed
+  directly via the GitHub compare/commits API; live probes over REST +
+  websocat against `127.0.0.1:58627`; the wire-relevant commits are
+  `a940f2ff` (`agent.status.updated` `permission`), `06ebfc82` (text-part
+  `meta` + hook folding), `e3bf50c0` (interruption-reminder
+  `ownerPromptId`), `20a2cea7` (WaitFor 90 s cap) — the rest is
+  wire-invisible here (NotifyUser/tower flags off, remote-control and
+  fs-list routes out of scope, TUI/CLI churn) — see the drift section
+  above).
+  Drift found (all additive or behavioral; nothing breaks the Android
+  app):
+  (a) `agent.status.updated` fires on permission-mode changes carrying
+      `"permission":"<mode>"` — verified live twice: `POST .../profile`
+      `{"agent_config":{"permission_mode":"manual"}}` pushed the frame at
+      seq 90 (verbatim in the drift section), the `"auto"` write pushed
+      its twin; the app never modeled the field (ignoreUnknownKeys) —
+      ticket 165 consumes it;
+  (b) the interruption `<system-reminder>` history entry's
+      `metadata.origin` carries `ownerPromptId` — verified live in
+      `GET .../messages` after an `:abort`
+      (`{"kind":"injection","variant":"interruption","ownerPromptId":"msg_01M4XYSMNQ3MCK6DFGQ2776DPG"}`);
+  (c) history text parts may carry `meta` (skill-activation /
+      UserPromptSubmit-hook markers) — source-derived only: this server
+      runs no such hooks and no skill prompts were sent, so nothing new
+      appeared on the wire;
+  (d) WaitFor capped at 90 s and ended early by new input — engine
+      behavior (wire shape unchanged; not probed live — the app never
+      parses WaitFor results);
+  (e) behavioral: `default_permission_mode` now reads `"auto"` (was
+      `"yolo"`), and under auto mode the model is reminded not to call
+      `AskUserQuestion` — verified live: a cake-or-pie prompt on an
+      `auto` session completed with zero question events; the same prompt
+      after `POST .../profile {"agent_config":{"permission_mode":"manual"}}`
+      surfaced the full questions flow (pending poll with `agent_id`,
+      answer → `{"resolved":true}`, re-answer `40902`, dismiss `40909` +
+      `dismissed:true`, re-dismiss `40902`, all three `event.question.*`
+      frames);
+  (f) tools-catalog content drift: 36 entries on an initialized agent —
+      27 builtins + 9 MCP tools (tavily 5, kiln 4); `ReadMediaFile` out of
+      the catalog again (2.1.1 had it, 28 builtins); `NotifyUser` still
+      gated off.
+  Re-verified unchanged, most byte-for-byte: `/api/v1/meta` (5 flags —
+  `notify_user`/`wait_for`/`subagent_fork`/`tower`/`tool-select`; 17
+  features — only `server_version` differs), the config projection
+  (`default_model` `kimi-code/k3-256k`, `thinking.effort` `"max"`,
+  providers redacted), the models catalog (10 entries), sessions
+  create/get/list (`last_seq` `1` on a fresh detail, `0` on the list),
+  `40401` without `stack`, `/status` (`thinking_level` `""` fresh,
+  `max_context_tokens` 262144, `permission` `"auto"`), the snapshot
+  (top-level keys `as_of_seq`/`epoch`/`in_flight_turn`/`messages`/
+  `pending_approvals`/`pending_questions`/`session`/`subagents`, real
+  `session.usage`, busy `in_flight_turn` with `running_tools`,
+  `messages:{items, has_more}`, empty roster once terminal), messages
+  history (newest-first, `has_more`), prompts POST + ACK (`prompt_id` ==
+  `user_message_id`, `content` echo, `created_at`), one full prompt
+  round-trip (the documented skeleton — `session.meta.updated` →
+  `prompt.submitted` → `turn.started` with `promptId` → `context.spliced`
+  (user message + `date_change` + `permission_mode` injections) →
+  `prompt.started` → steps → `tool.call.started`/`tool.result` →
+  `turn.step.completed` → `turn.ended` with `traceId` → idle
+  `work_changed` → `prompt.completed`; no `streaming` phase), prompt
+  queueing + steer (`prompt.queued` `queueLength`, `prompt.steered` with
+  the 2.0.1 `messageId` id-reuse, `context.spliced` then `turn.steer`
+  with `inTurn:true`/`promptIds`/`turnId`, same-turn continuation, one
+  `prompt.completed` with the original id), mid-run `:abort`
+  (`turn.step.interrupted` → `turn.ended` `cancelled`/`user_cancelled` →
+  interruption-reminder splice → `prompt.aborted`) plus idle `:abort`
+  `{"aborted":true}`, compact with `{}` AND `{"instruction":"keep the
+  todo plan"}` (instant empty ACK, `compaction.started` with the
+  instruction echo, wholesale `context.spliced` — id-less
+  `compaction_summary` + `compaction_continuation` injection —,
+  `compaction.completed` with the full `result` block, `tokensAfter`
+  29708 == post-compact `context_tokens`, both `40910`s with `stack`),
+  the manual-approval round-trip (pending poll item with `agent_id`,
+  `approval_<uuid>` ≠ `tool_call_id`, `tool_call_id` POST → `40404`,
+  `approved` → `event.approval.resolved` +
+  `permission.approval.resolved`), files (upload sniffed `media_type`,
+  download 200, `Range` 206, delete `{"deleted":true}`, `40407` at HTTP
+  404 after delete, the image `session_media` projection with `name` in
+  the ACK AND history, the media copy surviving the upload's delete —
+  session-media route 200 with the same 69 bytes), the TodoList contract
+  (verbatim `{"todos":[{status,title}]}` with the `todo_list` display),
+  foreground + background sub-agents (full lifecycles:
+  `subagent.spawned` with `taskId`/`model`/`thinkingEffort:"max"`,
+  `subagent.completed` with `resultSummary`/`usage`/`contextTokens`,
+  `task.started` → `background.task.started` → `task.terminated` →
+  `background.task.terminated` → `task.notified` with the "Wall time:"
+  prefix; the cancel sequence verbatim — `subagent.cancelled` →
+  `task.terminated` `"killed"` → `background.task.terminated` →
+  `task.notified` `"task.killed"`), REST `/tasks` list/get
+  `with_output`/`:cancel` (`{"cancelled":true}`; `40904` on an
+  already-finished task; REST `status:"cancelled"` after), the v2
+  grouped session table (`groups[]` + `total`, `activity.model`), the
+  workspaces list, the per-agent transcript (completed steps carry
+  `usage` + `llmTiming`), the tools catalog (36 entries), the session
+  lifecycle events (`event.session.created` at seq 1 on the new
+  session's own stream, `:delete` → `{"deleted":true}` + global
+  `event.session.deleted` with camelCase `sessionId`), and WS
+  hello/heartbeat/subscribe/ack/cursor-resume (`protocol_version: 2`,
+  `heartbeat_ms` 10000; replay from seq 290 re-delivered 291+ in order
+  before the ack; future-seq cursor → standalone `resync_required`
+  `epoch_changed` then the ack listing it; the heartbeat-timeout close
+  re-observed — pings at +10 s/+20 s after the last inbound frame, close
+  before +30 s; verification nit: websocat keeps its process alive on a
+  held-open stdin FIFO after the server closes, so liveness must be
+  judged by the close message / missing acks, not the process).
 - 2026-09-24 re-verification on `2.1.1` (server 2.0.2 → 2.1.1; throwaway
   sessions `session_97ade091-…` / `session_36a02184-…` /
   `session_e8f1813c-…` / `session_18e4c056-…` / `session_d80d9dd8-…` /
