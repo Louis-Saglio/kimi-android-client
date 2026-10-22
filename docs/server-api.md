@@ -1,20 +1,22 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-10-14
-(server version `2.2.0`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-10-22
+(server version `2.3.0`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
 sub-agents (foreground lifecycle + background task store), global message
-search, the tools catalog, plus
+search, the tools catalog, the client-configs proxy and the session-rating
+rules, plus
 the workspace list used by the mobile create-session flow. Explicitly skipped:
 `fs:*`, terminals, cron, goals, providers, skills.
 
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `2.1.1`
+**Protocol history:** this document previously described server `2.2.0`
+(verified 2026-10-14; see git history), `2.1.1`
 (verified 2026-09-24; see git history), `2.0.2`
 (verified 2026-09-19; see git history), `2.0.1`
 (verified 2026-09-18; see git history), `2.0.0`
@@ -39,6 +41,164 @@ used are shown with each section. Secrets are redacted (`<token>`).
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
 that, `0.27.0` before that, and `0.23.3` before that.
+
+The drift from 2.2.0 to 2.3.0 is **additive-only on the wire — three new
+routes (`:reload`, `/rating`, `/client_configs`), two new error codes
+(`40931` occupied / `40932` stale) riding a new cross-process session lock,
+one optional model-catalog field (`upgrade`), one optional field on
+`event.model_catalog.changed` (`retired_default`), and one config key
+(`disable_feedback_survey`); nothing breaks the Android app**. The nightly
+job's `pending-changelog.md` fetch failed again (missing tag or network), so
+the 33 upstream commits between the tags were enumerated from a blobless
+clone of the public repo (both annotated tags confirmed) and the 20 commits
+touching `packages/kap-server`/`packages/agent-core-v2` reviewed in full
+(the server's own API-surface snapshot gains exactly these three routes; no
+route or WS event type removed). The client-facing wire changed in exactly
+these places:
+
+- **Cross-process session occupancy lock** (commit `df0ff3c5` — the
+  release's biggest change; verified live 2026-10-22): a session now has a
+  lock file under `~/.kimi-code/locks/sessions/<id>.lock` while a process
+  works it, content `{version, token, pid, hostname, startedAt,
+  clientIdentity}`. A write against a session another process holds fails
+  with the new **40931 `SESSION_OCCUPIED`** — verbatim envelope, captured by
+  holding the session with a `kimi -p` CLI turn and then POSTing a server
+  prompt:
+
+  ```json
+  {"code":40931,"msg":"This session is in use by another Kimi Code process. Stop the session in that process or exit it, then try again.","data":null,"request_id":"01M5JKEA2ESGF2Y6C2W9FHGVEY","stack":"Error2: …","details":{"sessionId":"session_074efb5c-…","holder":{"version":1,"token":"368178:b549243e-…","pid":368178,"hostname":"vps-46783f51","startedAt":1792699474275,"clientIdentity":"kimi_code_cli"}}}
+  ```
+
+  Note the top-level **`details`** envelope field — the error transport
+  already carried one on Zod `40001`s; 2.3.0 exposes it on Error2
+  envelopes for 40931/40932 only. The lock is held only while a turn runs: an idle
+  session's lock file is gone, and after the CLI exited the same prompt POST
+  succeeded. The sibling code **40932 `SESSION_STALE`** fires when the
+  session's on-disk state moved under the holder — but kap-server wraps
+  prompt submit, skill activation and `:compact` in `reloadOnStale`: the
+  server closes+resumes the session and **retries internally, so those
+  routes never return 40932** (verified live: a `kimi -p` CLI turn appended
+  a turn to the session, then a server prompt POST answered `code:0` and ran
+  normally; the compact route's busy-40910 stack trace visibly passes
+  through `reloadOnStale`). Only `:undo` still surfaces 40932 after
+  reloading (not probed — the app has no undo). The WS error-code enum
+  (`kimiErrorCodeSchema`) gained `session.occupied` (registered retryable)
+  and `session.stale`. The Android error boundary preserves both codes as
+  `DataError.Api` — no decode breakage; ticket 168 adds the recovery UX.
+- **New route `POST /api/v1/sessions/{id}:reload`** (commit `18c6d642`;
+  verified live 2026-10-22 — see Sessions → Reload): closes+resumes the
+  session server-side (config/plugins/workspace catalogs reload; engine
+  change notifications then ride the session stream as ordinary messages).
+  Idle → `code:0` with the standard session DTO; busy (turn or compaction in
+  flight) → **40901** `Session "…" cannot be reloaded while a turn is
+  running` (with `stack`).
+- **New route `POST /api/v1/sessions/{id}/rating`** (commit `ce0834a8`;
+  verified live 2026-10-22 — see Session rating): the CLI/web feedback
+  surveys over REST — request union `{op:"evaluate",turn_id}` /
+  `{op:"shown"|"respond"|"abandon",appearance_id,…}`; every `evaluate` probe
+  here answered `{"appearance":null}` (four turn-id spellings, no error —
+  an unknown or non-latest turn id is not an error). No WS involvement.
+- **New route `POST /api/v1/client_configs`** (commit `3f80896a`; verified
+  live 2026-10-22 — see Client configs): server-proxied cloud client
+  configs, `{"name":"…"}` → `{"name", "config": <object>|null}`. The one
+  registered name, `model_switch_confirm`, answered `config:null` here (the
+  gate is off for this server); an unregistered name answers the same
+  `config:null`.
+- **Model-migration metadata** (commit `0327e8e9`; schema-derived — the
+  live catalog publishes neither): catalog items may carry optional
+  **`upgrade: {model, migration_markdown, retirement_at?}`** (the
+  replacement alias plus user-facing migration Markdown), and
+  `event.model_catalog.changed` may carry optional **`retired_default:
+  {from, to, from_display_name}`** (fired when the server's default model
+  was retired and auto-migrated). None of the 10 live catalog items has
+  `upgrade`; no `retired_default` frame observed. Tickets 166/167 consume
+  these.
+- **Config key `disable_feedback_survey`** (same rating commit; GET and
+  PATCH schemas): **absent from this server's GET projection when unset** —
+  verified live, no key in `data` (same pattern as `auto_session_title`).
+- **WS event-state eviction on close/archive** (commit `5710c549`;
+  source-derived, probed live): the broadcaster drops per-session WS event
+  state (and the on-disk session event journal) when a session closes or is
+  archived. Live on 2.3.0: an archived session answers subscribe with
+  **`not_found`** (pre-existing behavior), and after `:restore` a
+  cursor-resume from seq 200 **still replayed 201–230 in order before the
+  ack** — the eviction does not break journal replay on this deployment.
+  The replay also re-observed **`agent.disposed`** frames (payload `{type,
+  agentId, sessionId}`, no `time`) firing when the engine tears the main
+  agent down (the stale-reload and the archive each produced one) — an
+  engine-lifecycle event the app already ignores.
+- **Error-mapping additions** (the lock commit): `session.fork_active_turn`
+  → 40901, `compaction.unable` → the 40910 family, `file.not_found` →
+  40407, skill not-found/name/type errors → their own codes,
+  `validation.failed` → 40001 — paths that previously fell through to
+  50001. No live trigger exercised; all are envelopes the app already maps
+  generically.
+- **Content drift (not shape):** the tools catalog reads **37 entries on an
+  initialized agent — 28 builtins + 9 MCP** (2.2.0 had 36/27:
+  `ReadMediaFile` is back in the catalog; `select_tools` present as before);
+  `NotifyUser` still gated off. Plugin skills register under qualified
+  `pluginId:skillName` names (commit `3f0857eb` — the skills routes are out
+  of scope). The v2 session table's `activity.model` read `null` (not `""`)
+  for one never-opened session — a value nuance; the field stays optional.
+- **Wire-invisible here:** the default-workspace saga (`47002256`/
+  `e5e56bc5` added routes plus error 40930, `83c7909be` reverted the lot
+  within the release — net zero; the released tags skip 40930), the unified
+  upstream `/models` schema parse (`9f0693be` — managed-catalog contents
+  derive from `limit.context`/`modalities`/`reasoning`/`tools.dynamic_load`
+  now; the REST item shape is unchanged), MCP `default_deferred` config
+  (`f28c51c0`), `dangerous_command_guard=false` now suppressing all built-in
+  guard ask policies (`6e7cc909` — the guard stays on here), tool-prose
+  tweaks (`e4c99a3b`/`da5918c0`/`85077a41`), hooks running in the session
+  cwd (`c1459a61`), Gemini thinking-level mapping (`20b59915`/`b2603264`),
+  remote-control tunnel chunking (`ef727e51` — out of scope), and
+  TUI/vscode/dist/CI churn.
+
+Everything else re-verified unchanged live on 2.3.0 (see the verification
+log): `/api/v1/meta` (only `server_version` differs — same 5 flags, same 17
+features), the config projection (`default_model` `kimi-code/k3-256k`,
+`thinking.effort` `"max"`, `default_permission_mode` `"auto"`), the models
+catalog (10 entries, same item shape), sessions create/get/list (`last_seq`
+`1` on a fresh detail, `0` on the list), `40401` without `stack`, `/status`,
+the snapshot (top-level keys, real `session.usage`, busy `in_flight_turn`
+with `running_tools`, the completed roster entry with `output_preview`),
+messages history (newest-first; the steered message keeping the queued
+prompt's id; the `date_change`/`permission_mode` injections), prompts POST +
+ACK (`prompt_id` == `user_message_id`, `status` `running`/`queued`), the
+full prompt round-trip skeleton (no `streaming` phase), prompt queueing +
+steer (single-steer id reuse, `prompt.steered` before `turn.steer`, the
+`inTurn:true` origin), mid-run and idle `:abort` (full interrupted sequence
+with the `ownerPromptId` interruption splice), compact with `{}` and
+`{"instruction":…}` (instant ACK, instruction echo, wholesale splice with
+the id-less `compaction_summary` + `compaction_continuation`, `tokensAfter`
+30205 == post-compact `context_tokens`, both `40910`s with `stack`), the
+questions flow end-to-end (pending poll with `agent_id`, answer →
+`resolved:true`, re-answer `40902`, dismiss `40909` + `dismissed:true`,
+re-dismiss `40902`, all three `event.question.*` frames), the
+manual-approval round-trip (`approval_<uuid>` ≠ `tool_call_id`,
+`tool_call_id` POST → `40404`, both resolved frames), files (upload with
+sniffed `media_type`, the `session_media` projection with `name` in the ACK
+AND history, download 200, `Range` 206, delete → `40407` at HTTP 404, the
+media copy surviving the upload's delete), the TodoList contract (verbatim
+`{"todos":[{status,title}]}`), foreground + background sub-agent lifecycles
+(`subagent.spawned` with `taskId`/`model`/`thinkingEffort:"max"`,
+`subagent.completed` with `resultSummary`/`usage`/`contextTokens`,
+`task.started` → `background.task.started` → `task.terminated` →
+`background.task.terminated`), REST `/tasks` list (all the 0.39.0/0.36.1
+fields), the per-agent transcript (steps carry `usage` + `llmTiming`), the
+turn file-history routes (`{changes[], recorded}`, no `enabled`), the tools
+catalog, the workspaces list, global search (`index_state` intact), the v2
+grouped session table, the lifecycle events (`event.session.created`,
+`event.session.deleted` with camelCase `sessionId` on the `__global__`
+envelope), and WS hello/subscribe/ack/cursor-resume (`protocol_version: 2`,
+`heartbeat_ms` 10000; replay from seq 12 re-delivered 13–16 in order before
+the ack; future-seq cursor → standalone `resync_required` `epoch_changed`
+then the ack listing it; the heartbeat-timeout silence re-observed — frames
+stop ~30 s in when pongs go unanswered). **App impact: none — every 2.3.0
+change is additive on payloads the app parses with `ignoreUnknownKeys`, or
+self-heals server-side. The three improvement tickets this release warrants
+were filed by this drift run's earlier session (166 — consume the model
+catalog's `upgrade`; 167 — honor `model_switch_confirm`; 168 — recover chat
+sends from stale/occupied sessions); no breakage tickets.**
 
 The drift from 2.1.1 to 2.2.0 is **additive-only on the wire —
 `agent.status.updated` gained a `permission` variant that fires when the
@@ -1807,7 +1967,10 @@ is new (the experimental file-history feature unit, commit `650d12f6`).
   tool, which is absent from the tools catalog while the flag is off).
   **0.43.0 (verified live 2026-09-14): the set shrank to 5 entries** —
   `auto_session_title` is gone: AI session-title generation graduated out
-  of the flag and is always on (commit `6126472c`).
+  of the flag and is always on (commit `6126472c`). **2.3.0 (verified live
+  2026-10-22): unchanged** — the same 5 flags
+  (`notify_user`/`wait_for`/`subagent_fork`/`tower`/`tool-select`) and the
+  same 17 features; only `server_version` differs.
 - **`web_title` is new in 0.37.2** (additive): the instance's `--web-title`
   browser-tab label, present only when the server was started with that flag;
   omitted here (verified live 2026-08-18). Treat it as an optional instance
@@ -1931,7 +2094,27 @@ unchanged from 0.29.2):
   picker will consume it (ticket 142). **2.2.0 (verified live
   2026-10-14): it now reads `"auto"`** — config drift, not protocol;
   fresh sessions start in auto mode, which suppresses the model's
-  `AskUserQuestion` calls (see Questions).
+  `AskUserQuestion` calls (see Questions). **2.3.0 (verified live
+  2026-10-22): still `"auto"`.**
+- **Model-migration metadata (new in 2.3.0, commit `0327e8e9`):** catalog
+  items may carry an optional **`upgrade`** object —
+  `{model, migration_markdown, retirement_at?}` naming the replacement
+  alias with user-facing migration Markdown — and the global
+  `event.model_catalog.changed` frame may carry optional
+  **`retired_default: {from, to, from_display_name}`** when the server's
+  default model was retired and auto-migrated. Schema-derived: **none of
+  the 10 live catalog items publishes `upgrade`** and no `retired_default`
+  frame fired (verified live 2026-10-22). The same release re-parses the
+  managed provider's upstream `/models` payload from a unified schema
+  (commit `9f0693be`) — catalog *contents* (capabilities/efforts) may shift
+  with it; the item shape above is unchanged. Ticket 166 consumes
+  `upgrade`; the app already drops its models cache on
+  `event.model_catalog.changed` (ticket 110).
+- **`disable_feedback_survey`** (new in 2.3.0, commit `ce0834a8`): a
+  boolean gating the feedback surveys (see Session rating), accepted by the
+  GET/PATCH config schemas. **Absent from this server's GET projection when
+  unset** (verified live 2026-10-22 — no key in `data`). The app reads no
+  such field.
 - **`auto_session_title`** (new in 2.1.1, commit `6a52dd78`; verified live
   2026-09-24): a boolean gating automatic AI session-title generation ("Whether
   clients may automatically generate session titles" per the upstream doc).
@@ -1939,6 +2122,39 @@ unchanged from 0.29.2):
   and titles generate by default (`session.meta.updated` on the first prompt
   re-verified this run). The REST schema accepts it on both GET and POST.
   The app reads no such field — no ticket.
+
+## Client configs
+
+### Fetch — `POST /api/v1/client_configs`
+
+**New in 2.3.0** (commit `3f80896a`; verified live 2026-10-22). Server-proxied,
+cloud-controlled client configs — named JSON blobs the managed service
+distributes (region/`KIMI_CODE_BASE_URL`-derived), so Kimi can flip client
+behavior without a release. Body `{"name":"<config name>"}`; answers
+`{"name":<echo>, "config": <object>|null}` — `null` for unregistered names AND
+for registered names the cloud has not populated. No auth error variants
+beyond the standard envelope.
+
+```bash
+curl -s -X POST -H "Authorization: Bearer <token>" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"model_switch_confirm"}' http://127.0.0.1:58627/api/v1/client_configs
+```
+
+The one registered name upstream is **`model_switch_confirm`** — rules asking
+clients to confirm before switching a session's model mid-history. Both live
+captures (2026-10-22):
+
+```json
+{"code":0,"msg":"success","data":{"name":"model_switch_confirm","config":null},"request_id":"01M5JJ08KZCAPQF8RJFE9KABG1"}
+{"code":0,"msg":"success","data":{"name":"definitely_not_registered","config":null},"request_id":"01M5JJ09FK0Z9FRBJQ0YNMC2BJ"}
+```
+
+Per the upstream schema the populated shape is `{enable: boolean, rules:
+[{from: string|string[], to: string|string[], hint?: {en?, zh?}}]}` — `from`/`to`
+match **upstream model ids** (not aliases) exactly, no wildcards. The gate is
+off on this server (`config:null`). The Android app consumes it via ticket
+167.
 
 ## Sessions
 
@@ -2167,6 +2383,63 @@ with `archived:false` — verbatim capture, trimmed:
 - Errors: unknown id → `40401` "session … does not exist" (**0.43.0:**
   without `stack` — see Response envelope), on
   both actions.
+
+### Reload — `POST /api/v1/sessions/{id}:reload`
+
+**New in 2.3.0** (commit `18c6d642`; verified live 2026-10-22). Closes and
+resumes the session server-side — config, plugins and workspace catalogs are
+re-read, and engine change notifications (AGENTS.md/skills/sub-agent changes)
+are injected into the agent context afterwards, surfacing as ordinary session
+messages on the stream. Body `{}`. Answers the **standard session envelope**
+(same shape as create/get) on success:
+
+```json
+{"code":0,"msg":"success","data":{"id":"session_074efb5c-…","workspace_id":"wd_spike_6baf4c130e63","title":"…","busy":false,"metadata":{"cwd":"/home/ubuntu/spike"},"agent_config":{"model":""},"usage":{…},"permission_rules":[],"message_count":0,"last_seq":0},"request_id":"01M5JJ2APWHHDGYTYWZWZHCFNQ"}
+```
+
+- Busy guard: a turn or compaction in flight anywhere in the session →
+  **40901**, verbatim
+  `{"code":40901,"msg":"Session \"session_…\" cannot be reloaded while a turn is running","data":null,…}`
+  (with `stack`).
+- Unknown id → `40401`.
+- The reload clears the broadcaster's in-flight-turn tracker and sub-agent
+  roster (the lock commit's `reattachSession`), so post-reload snapshots and
+  resyncs no longer report stale running turns/sub-agents.
+- The Android app needs it for stale-session send recovery — ticket 168.
+
+### Occupancy lock — 40931 / 40932
+
+**New in 2.3.0** (commit `df0ff3c5`; verified live 2026-10-22). Sessions are
+now guarded by a cross-process lock: while a process works a session turn, a
+lock file lives at `~/.kimi-code/locks/sessions/<session-id>.lock` —
+verbatim content (the holder block the 40931 envelope echoes):
+
+```json
+{"version":1,"token":"368178:b549243e-a8b0-4c6e-8504-4d279dc1e4db","pid":368178,"hostname":"vps-46783f51","startedAt":1792699474275,"clientIdentity":"kimi_code_cli"}
+```
+
+- **40931 `SESSION_OCCUPIED`** — a write (prompt POST, profile write, …)
+  against a session another process currently holds fails with a fixed
+  English message and a top-level **`details` envelope field** (new on
+  Error2 envelopes in 2.3.0, exposed for 40931/40932 only — Zod `40001`s
+  already carried `details`) naming the holder — verbatim capture in the
+  drift section above. The lock is held only while the other process's turn runs:
+  an idle session's lock file is gone, and once the holder exits the same
+  write succeeds (both verified live with a `kimi -p` CLI turn as the
+  holder).
+- **40932 `SESSION_STALE`** — the session's on-disk state moved under the
+  holder (another process wrote to it). kap-server wraps prompt submit,
+  skill activation and `:compact` in `reloadOnStale`: the server
+  closes+resumes the session and **retries internally — those routes never
+  return 40932** (verified live: after a CLI turn appended to the session,
+  a server prompt POST answered `code:0` and ran normally). Only `:undo`
+  still returns 40932 after reloading (not probed; the app has no undo).
+- The WS error-code enum gained `session.occupied` (registered retryable)
+  and `session.stale`; both can therefore also appear in WS error payloads.
+- The same commit widened the error mapping: `session.fork_active_turn` →
+  40901, `compaction.unable` → the 40910 family, `file.not_found` → 40407,
+  skill not-found/name-empty → their skill codes, `validation.failed` →
+  40001 — these paths previously surfaced `50001`.
 
 ### Session profile — `POST /api/v1/sessions/{id}/profile`
 
@@ -3502,6 +3775,31 @@ the Error2 ones carry a server-side `stack` string, shown omitted here):
   `{"code":40001,"msg":"instruction: Invalid input: expected string, received number","data":null,...}`
   with a `details` array.
 
+## Session rating
+
+### Rate a session — `POST /api/v1/sessions/{id}/rating`
+
+**New in 2.3.0** (commit `ce0834a8` — the CLI/web feedback-survey rules
+shared with the server; verified live 2026-10-22). Pure REST, no WS events.
+The body is a discriminated union on `op`:
+
+- `{"op":"evaluate","turn_id":"<turn>"}` — asks whether a survey should
+  appear; answers `{"appearance":{"id","survey":"session"|"long_context"}|null}`.
+  Only the latest completed (non-running) main-agent turn can be rated.
+- `{"op":"shown","appearance_id":"…"}` — mark the survey shown.
+- `{"op":"respond","appearance_id":"…","response":"bad"|"fine"|"good"|"dismissed"}`
+- `{"op":"abandon","appearance_id":"…"}`
+
+The three non-evaluate ops answer `data: null` on success; a malformed body
+fails `40001`-family (`validation.failed`). Verified live: four `evaluate`
+probes on one session (turn ids `t4`, `t5`, `4`, `5`) all answered
+`{"code":0,"msg":"success","data":{"appearance":null}}` — no survey was
+due, and an unknown or non-latest turn id is **not** an error. The related
+config key `disable_feedback_survey` is accepted by the config GET/PATCH
+schemas and absent from the GET projection when unset (see Models). The
+Android app has no rating surface and no ticket — the surveys are Kimi's
+product feedback channel, surfaced by the TUI/web only.
+
 ## Permissions
 
 A permission request surfaces as **WebSocket events**; there is no polling
@@ -3801,7 +4099,11 @@ resolved from the live agent's model/state; treat the builtin count as
 server/model-state-dependent, exactly like the 0.38.0 episode). `NotifyUser`
 still gated off (`notify_user: false`). Content drift from
 this server's MCP config, not wire-shape drift; the builtin set is
-unchanged. Also re-observed this run: the 0.31.1
+unchanged. **2.3.0 (verified live 2026-10-22): 37 entries on an
+initialized agent — 28 builtins + the same 9 MCP tools (tavily 5, kiln
+4)** — `ReadMediaFile` is back in the catalog again (same
+model/state-dependent swing as the 0.38.0/2.0.0 episodes); `NotifyUser`
+still gated off. Also re-observed this run: the 0.31.1
 liveness caveat below still holds verbatim — right after session create,
 before any prompt ran, the catalog answered `{"tools":[]}`; it resolved to
 the 37 entries only once a session had run a turn. Two MCP routes ride along (both verified live
@@ -4622,6 +4924,20 @@ via REST). The standalone frame, verbatim:
 Note the reason string is `"epoch_changed"` even when only the seq was in the
 future.
 
+**2.3.0 (verified live 2026-10-22):** replay and the refused-cursor path are
+byte-unchanged (a cursor-resume from seq 12 re-delivered 13–16 in order
+before the ack; a future seq produced the standalone `resync_required`
+`epoch_changed` then the ack listing it). Two occupancy-era behaviors worth
+knowing: subscribing an **archived** session answers `accepted:[]` with the
+session in **`not_found`** (archived sessions are not subscribable); and the
+broadcaster now evicts per-session WS event state on close/archive (commit
+`5710c549`) — live on this deployment the eviction is invisible to replay:
+after `:archive` + `:restore`, a resume from seq 200 still replayed 201–230
+in order. The replay also surfaces **`agent.disposed`** frames (payload
+`{type, agentId, sessionId}`) when the engine tears the main agent down (a
+server-side reload, an archive) — engine-lifecycle noise; the app ignores
+unknown frames.
+
 **Caveat — unsolicited frames (observed repeatedly on 0.31.0):** an
 authenticated WS connection receives events for sessions it **never subscribed
 to** (frames for other live sessions arrived with zero subscribe frames sent).
@@ -5406,6 +5722,109 @@ deployment** (verified live — handshake refused).
 
 ## Verification log
 
+- 2026-10-22 re-verification on `2.3.0` (server 2.2.0 → 2.3.0; throwaway
+  sessions `session_074efb5c-…` / `session_76b4f3bc-…` created with
+  `metadata.cwd=/home/ubuntu/spike`, both `:delete`d after; the
+  nightly job's `pending-changelog.md` fetch FAILED again (missing tag or
+  network), so the 33 upstream commits between the tags were enumerated
+  from a `--filter=blob:none` clone of the public repo (annotated tags
+  `@moonshot-ai/kimi-code@2.2.0` → `472192c3…`, `…@2.3.0` → `b5e28fd6…`)
+  and the 20 touching `packages/kap-server`/`packages/agent-core-v2`
+  reviewed in full; live probes over REST + websocat against
+  `127.0.0.1:58627`, plus a second `kimi -p` CLI process to exercise the
+  occupancy lock; the wire-relevant commits are `df0ff3c5` (occupancy lock,
+  40931/40932, envelope `details`), `18c6d642` (`:reload`), `ce0834a8`
+  (`/rating` + `disable_feedback_survey`), `3f80896a` (`/client_configs`),
+  `0327e8e9` (model `upgrade` / `retired_default`), `5710c549` (WS
+  event-state eviction) — see the drift section above).
+  Drift found (all additive or behavioral; nothing breaks the Android app):
+  (a) new route `POST :reload` — idle answers the session DTO, busy answers
+      40901 with `stack` (both verified live);
+  (b) new route `POST /api/v1/sessions/{id}/rating` — `evaluate` with four
+      turn-id spellings all answered `{"appearance":null}`, unknown turn ids
+      are not errors;
+  (c) new route `POST /api/v1/client_configs` — `model_switch_confirm` AND
+      an unregistered name both answer `config:null` on this server;
+  (d) 40931 verified live end-to-end: a `kimi -p` CLI turn held the session
+      lock (`~/.kimi-code/locks/sessions/<id>.lock`, holder JSON verbatim in
+      the drift section), the server prompt POST answered 40931 with
+      `details.holder.clientIdentity:"kimi_code_cli"`; after the CLI exited
+      the same POST succeeded. 40932 NOT returned by prompts — a prompt
+      after the CLI appended a turn self-healed (`code:0`), confirming the
+      `reloadOnStale` wrap; only `:undo` surfaces it (not probed);
+  (e) schema-derived, absent live: model-item `upgrade`,
+      `event.model_catalog.changed` `retired_default`, config
+      `disable_feedback_survey` (no key when unset — verified live);
+  (f) behavioral: archived session subscribe → `not_found`; cursor-resume
+      replay still works across archive/restore AND across the stale-reload
+      (the replay included the reload's `agent.disposed` frame);
+  (g) content drift: tools catalog 37 entries on an initialized agent (28
+      builtins — `ReadMediaFile` back — + 9 MCP: tavily 5, kiln 4); v2
+      table `activity.model` read `null` (not `""`) on one never-opened
+      session.
+  Re-verified unchanged, most byte-for-byte: `/api/v1/meta` (5 flags —
+  `notify_user`/`wait_for`/`subagent_fork`/`tower`/`tool-select`; 17
+  features — only `server_version` differs), the config projection
+  (`default_model` `kimi-code/k3-256k`, `thinking.effort` `"max"`,
+  `default_permission_mode` `"auto"`, providers redacted, the `models` map),
+  the models catalog (10 entries, same item shape, no `upgrade`), sessions
+  create/get/list (`last_seq` `1` on a fresh detail, `0` on the list),
+  `40401` without `stack`, `/status` (`permission` flips `auto`→`manual`
+  via profile, pushing the 2.2.0 `agent.status.updated` `permission`
+  variant), the snapshot (top-level keys, real `session.usage`
+  `context_tokens` 28950/`context_limit` 1048576, busy `in_flight_turn`
+  with `current_prompt_id`/`running_tools`, the completed roster entry with
+  `output_preview`), messages history (newest-first; the steered message
+  persisted with the queued prompt's own id; `date_change` +
+  `permission_mode` injections; no text-part `meta` — hook-less server),
+  prompts POST + ACK (`prompt_id` == `user_message_id`, `status`
+  `running`/`queued`, `content` echo), one full prompt round-trip (the
+  documented skeleton — `prompt.submitted` → `session.meta.updated` →
+  `turn.started` with `promptId` → `context.spliced` → `prompt.started` →
+  steps/deltas → `turn.step.completed` with the full `llm*` timing block +
+  `usage` → `turn.ended` with `traceId` → idle `work_changed` →
+  `prompt.completed`; no `streaming` phase), prompt queueing + steer
+  (`prompt.queued` `queueLength`, `{"steered":true}` ACK, single-steer id
+  reuse, `prompt.steered` before `turn.steer` with the `inTurn:true`
+  origin), mid-run `:abort` (`turn.step.interrupted` `aborted` →
+  `turn.ended` `cancelled`/`user_cancelled` → interruption-reminder splice
+  with `ownerPromptId` → `prompt.aborted`) plus idle `:abort`
+  `{"aborted":true}`, compact with `{}` AND `{"instruction":"Keep the probe
+  findings."}` (instant empty ACK, instruction echo, wholesale
+  `context.spliced` — id-less `compaction_summary` +
+  `compaction_continuation` —, `compaction.completed` `result`,
+  `tokensAfter` 30205 == post-compact `context_tokens`, the busy AND empty
+  `40910`s with `stack`), the questions flow end-to-end (pending poll with
+  `agent_id`, `question_<uuid>` ≠ `tool_call_id`, answer →
+  `{"resolved":true}`, re-answer `40902`, dismiss `40909` +
+  `dismissed:true`, re-dismiss `40902`, all three `event.question.*`
+  frames), the manual-approval round-trip (`approval_<uuid>` split intact,
+  `tool_call_id` POST → `40404`, `approved` → both resolved frames), files
+  (upload with sniffed `media_type`, the `session_media` projection with
+  `name` in the ACK echo AND history, download 200, `Range` 206, delete →
+  `40407` at HTTP 404, the media copy surviving the upload's delete), the
+  TodoList contract (verbatim `{"todos":[{status,title}]}`), foreground +
+  background sub-agent lifecycles (`subagent.spawned` with
+  `taskId`/`model`/`thinkingEffort:"max"`, `subagent.started`,
+  `subagent.completed` with `resultSummary`/`usage`/`contextTokens`,
+  `task.started` → `background.task.started` → `task.terminated` →
+  `background.task.terminated`), REST `/tasks` list (all the
+  0.39.0/0.36.1 fields incl. `run_in_background`/`agent_id`/
+  `subagent_type`/`parent_tool_call_id`), the per-agent transcript (steps
+  carry `usage` + `llmTiming`; top-level `agents`/`attachments`/
+  `interactions`/`prompts`/`tasks`/`todos` intact), the turn file-history
+  routes (`{changes[], recorded}`, no `enabled`), the workspaces list,
+  global search (`index_state` intact), the v2 grouped session table
+  (`groups[]`, `activity.model`), the lifecycle events
+  (`event.session.created`, `:delete` → `{"deleted":true}` +
+  `event.session.deleted` with camelCase `sessionId` on the `__global__`
+  envelope), and WS hello/subscribe/ack/cursor-resume
+  (`protocol_version: 2`, `heartbeat_ms` 10000; replay before the ack;
+  future-seq cursor → standalone `resync_required` `epoch_changed` then the
+  ack listing it; the heartbeat-timeout silence re-observed — frames stop
+  ~30 s in when pongs go unanswered). **App impact: none — three
+  improvement tickets (166/167/168, filed by this drift run's earlier
+  session); no breakage tickets.**
 - 2026-10-14 re-verification on `2.2.0` (server 2.1.1 → 2.2.0; throwaway
   sessions `session_ec4c69c0-…` / `session_2796ca8f-…` created with
   `metadata.cwd=/home/ubuntu/spike`, both `:delete`d after; the nightly
