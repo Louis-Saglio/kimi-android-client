@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-10-22
-(server version `2.3.0`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-10-23
+(server version `2.3.1`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
@@ -15,7 +15,8 @@ the workspace list used by the mobile create-session flow. Explicitly skipped:
 Every endpoint below was executed against the live server; the exact commands
 used are shown with each section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `2.2.0`
+**Protocol history:** this document previously described server `2.3.0`
+(verified 2026-10-22; see git history), `2.2.0`
 (verified 2026-10-14; see git history), `2.1.1`
 (verified 2026-09-24; see git history), `2.0.2`
 (verified 2026-09-19; see git history), `2.0.1`
@@ -41,6 +42,113 @@ used are shown with each section. Secrets are redacted (`<token>`).
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
 that, `0.27.0` before that, and `0.23.3` before that.
+
+The drift from 2.3.0 to 2.3.1 is **additive-only on the wire — one new route
+(`POST :takeover`), one optional field on the 40931 holder
+(`clientDisplayName`) with a matching message-text change, and one env
+switch (`KIMI_CODE_SESSION_LOCK`); the workspace-trust decoupling is a
+behavioral fix on unchanged shapes. Nothing breaks the Android app**. The
+nightly job's `pending-changelog.md` fetch worked this time (4 upstream
+commits between the annotated tags, reviewed in full via the GitHub API —
+`packages/kap-server` touched in four files: the takeover action in
+`routes/sessions.ts`, its schema in `protocol/rest-session.ts` and
+`openapi/transforms.ts`, and the trust resolver in `routes/workspaces.ts`;
+the API-surface snapshot gained exactly the one route; no route or WS event
+type removed). The client-facing wire changed in exactly these places:
+
+- **New route `POST /api/v1/sessions/{id}:takeover`** (commit `c569bab5`;
+  verified live 2026-10-23 — see Sessions → Takeover): evicts the occupancy
+  lock another process holds, so a write that failed with 40931 can be
+  retried. Idle → `{"taken_over":true}` (a no-op success); unknown → `40401`
+  (with `stack`, unlike the get-session path's); held by a live CLI turn →
+  the lock file is deleted and the retried prompt runs. The CLI-side flow
+  this serves (retry first, offer takeover on a repeated 40931) is ported to
+  the app by ticket 169.
+- **40931 holder gained `clientDisplayName`** (commit `0e3980e7`; verified
+  live 2026-10-23 — verbatim envelope in the Occupancy-lock section): the
+  lock file and the `details.holder` echo carry the optional display name
+  ("Kimi Code CLI" / "Kimi Code Desktop" / "Kimi Code for VS Code" /
+  "Kimi Code Web" — the embedded server's own holds read "Kimi Code Web"),
+  and the 40931 `msg` names it when known ("This session is in use by
+  another Kimi Code CLI instance. …" — was a fixed "another Kimi Code
+  process" sentence). `code`, `details.sessionId` and the rest of the holder
+  block are unchanged — additive on an envelope the app maps generically.
+- **Zombie-occupancy fix** (same commit `c569bab5`; observed live): a lock
+  whose holder pid is dead (now including zombie-state processes, checked
+  via `ps`) no longer blocks — observed mid-probe: a CLI that took the lock
+  and immediately crashed out left the file behind, and the next server
+  prompt reclaimed the session and ran. Also first-time itemization: the
+  create route itself briefly holds a server-side lock (holder
+  `clientDisplayName:"Kimi Code Web"`), released as soon as the session goes
+  idle — matches the 2.3.0 note that an idle session's lock file is gone.
+- **Workspace trust decoupling** (commit `c569bab5`; wire shapes unchanged):
+  `GET|POST .../trust` / `:untrust` now read/write a standalone trust store
+  instead of materializing the workspace runtime — they no longer fail when
+  the runtime environment is unavailable. The round-trip re-verified live
+  (false → trust → true → untrust → false, all `{"trusted":…}` envelopes).
+- **Config/content drift (not shape):** the models catalog reads **12
+  entries** — `kimi-code/k3.1-pro` ("K3.1 Pro", 1048576 ctx,
+  `default_effort:"max"`) and `kimi-code/k3.1-pro-highspeed` are new; no
+  item publishes `upgrade`. The `model_switch_confirm` client config is
+  **populated now** (`enable:true`, rules gating k3*/kimi-for-coding* →
+  k3.1-pro* switches, bilingual hints — verbatim capture in Client configs;
+  it was `config:null` on 2.3.0), so ticket 167's gate is live. Tools
+  catalog: 36 entries on a fresh session (27 builtins + 9 MCP), consistent
+  with the documented fresh/initialized split.
+- **Wire-invisible here:** `KIMI_CODE_SESSION_LOCK=0` disables the lock
+  server-wide (env switch), the workspace-trust runtime decoupling's
+  internals (trust store, MCP-config recovery), the TUI occupancy dialogs,
+  and the web-dist sync (`c445cae0`).
+
+Everything else re-verified unchanged live on 2.3.1 (see the verification
+log): `/api/v1/meta` (only `server_version` differs — same 5 flags, same 17
+features), the config projection (`default_model` `kimi-code/k3-256k`,
+`thinking.effort` `"max"`, `default_permission_mode` `"auto"`; no
+`disable_feedback_survey`/`auto_session_title` keys), sessions create/get/list
+(`last_seq` `1` on a fresh detail, `0` on the list), `40401` without `stack`
+on the get path, `/status`, the snapshot (top-level keys, real
+`session.usage`, busy `in_flight_turn` with `thinking_text`/`running_tools`/
+`current_prompt_id`), messages history (newest-first), prompts POST + ACK
+(`prompt_id` == `user_message_id`, `status` `running`/`queued`), the full
+prompt round-trip skeleton (`prompt.submitted` → `session.meta.updated` →
+`turn.started` with `promptId` → `context.spliced` → `prompt.started` →
+steps/deltas → `turn.step.completed` → `turn.ended` with `traceId` →
+`work_changed` → `prompt.completed`; no `streaming` phase), prompt queueing +
+steer (`prompt.queued` `queueLength`, single-steer id reuse, `prompt.steered`
+before `turn.steer` with the `inTurn:true` origin), mid-run and idle `:abort`
+(`turn.step.interrupted` `aborted` → `turn.ended` `cancelled`/
+`user_cancelled` → interruption splice → `prompt.aborted`; idle
+`{"aborted":true}`), compact with `{"instruction":…}` (instant ACK,
+instruction echo in `compaction.started`, wholesale `context.spliced`,
+`compaction.completed` with the full `result` block, `tokensAfter` 30415) and
+both `40910`s with `stack` (empty + busy), the questions flow end-to-end
+(pending poll, answer → `resolved:true`, dismiss → `40909` +
+`dismissed:true`, re-dismiss AND answer-after-dismiss → `40902`, the
+`event.question.*` frames with `agent_id`), the manual-approval round-trip
+(`approval_<uuid>` ≠ `tool_call_id`, `tool_call_id` POST → `40404`,
+`approved` → both resolved frames), files (upload with sniffed
+`media_type:"image/png"`, the `session_media` projection with `name` in the
+ACK AND history, download 200, `Range` 206, delete → `{"deleted":true}`,
+`40407` at HTTP 404 after delete), the TodoList contract (verbatim
+`{"todos":[{status,title}]}` full-list writes in history `tool_use` parts),
+foreground + background sub-agent lifecycles (`subagent.spawned` with
+`taskId`/`model`/`thinkingEffort:"max"`, `subagent.started`/`completed`,
+`task.started` → `background.task.started`), REST `/tasks` list (all the
+0.39.0/0.36.1 fields incl. `run_in_background`/`agent_id`/`subagent_type`/
+`parent_tool_call_id`), the workspaces list, global search (`index_state`
+intact), the v2 grouped session table, the lifecycle events
+(`event.session.created`, `:delete` → `{"deleted":true}` +
+`event.session.deleted` with camelCase `sessionId` on the `__global__`
+envelope), and WS hello/subscribe/ack/cursor-resume (`protocol_version: 2`,
+`heartbeat_ms` 10000; replay from seq 2 re-delivered 3–15 in order before the
+ack; future-seq cursor → standalone `resync_required` `epoch_changed` then
+the ack listing it; the heartbeat-timeout silence re-observed — frames stop
+~30 s in when pongs go unanswered, and a 5 s pong feeder keeps the socket
+alive indefinitely). **App impact: none — both 2.3.1 changes are additive on
+payloads the app parses defensively. One improvement ticket filed (169 —
+offer `:takeover` on a repeated 40931, naming the holder from
+`clientDisplayName`); ticket 167's context updated (its gate is live now); no
+breakage tickets.**
 
 The drift from 2.2.0 to 2.3.0 is **additive-only on the wire — three new
 routes (`:reload`, `/rating`, `/client_configs`), two new error codes
@@ -2062,6 +2170,13 @@ unchanged from 0.29.2):
   server-wide default model reads **`kimi-code/k3-256k` again** (was
   `kimi-code/kimi-for-coding` on 0.42.0). All content drift, not
   protocol — the item shape is unchanged.
+  **2.3.1 (verified live 2026-10-23):** the catalog reads **12 entries** —
+  two new `managed:kimi-code` models ride alongside: **`kimi-code/k3.1-pro`**
+  ("K3.1 Pro", `max_context_size: 1048576`, `default_effort: "max"`) and
+  **`kimi-code/k3.1-pro-highspeed`** ("K3.1 Pro Highspeed", same context and
+  effort). None of the 12 publishes `upgrade`. Content drift, not protocol —
+  and the pair is exactly what the now-live `model_switch_confirm` rules gate
+  (see Client configs).
 - `GET`/`POST /api/v1/config` also carries a **`secondary_model`** field (new
   in 0.31.0, additive): `{}` on this server (2026-07-30). It is writable via
   `POST /api/v1/config`; per upstream, the POST body is snake_case while the
@@ -2142,19 +2257,26 @@ curl -s -X POST -H "Authorization: Bearer <token>" \
 ```
 
 The one registered name upstream is **`model_switch_confirm`** — rules asking
-clients to confirm before switching a session's model mid-history. Both live
-captures (2026-10-22):
+clients to confirm before switching a session's model mid-history. The 2.3.0
+captures (2026-10-22) both answered `config:null` — the gate was off:
 
 ```json
 {"code":0,"msg":"success","data":{"name":"model_switch_confirm","config":null},"request_id":"01M5JJ08KZCAPQF8RJFE9KABG1"}
 {"code":0,"msg":"success","data":{"name":"definitely_not_registered","config":null},"request_id":"01M5JJ09FK0Z9FRBJQ0YNMC2BJ"}
 ```
 
-Per the upstream schema the populated shape is `{enable: boolean, rules:
+**2.3.1 (verified live 2026-10-23): the gate is ON now** — the same probe
+answers a populated config (cloud-side flip, not the release; an unregistered
+name still answers `config:null`):
+
+```json
+{"code":0,"msg":"success","data":{"name":"model_switch_confirm","config":{"enable":true,"rules":[{"from":["k3","k3-256k","kimi-for-coding","kimi-for-coding-highspeed"],"to":["k3.1-pro"],"hint":{"en":"Switching to K3.1 Pro in this session may affect output quality. Choose how to continue.","zh":"在已有会话中切换至 K3.1 Pro 可能影响模型效果；请选择继续方式"}},{"from":["k3","k3-256k","kimi-for-coding","kimi-for-coding-highspeed"],"to":["k3.1-pro-highspeed"],"hint":{"en":"Switching to K3.1 Pro Highspeed in this session may affect output quality. Choose how to continue.","zh":"…"}}]}},"request_id":"01M5N4ADAT1SRHD28VNSR63V4D"}
+```
+
+The populated shape is `{enable: boolean, rules:
 [{from: string|string[], to: string|string[], hint?: {en?, zh?}}]}` — `from`/`to`
-match **upstream model ids** (not aliases) exactly, no wildcards. The gate is
-off on this server (`config:null`). The Android app consumes it via ticket
-167.
+match **upstream model ids** (not aliases) exactly, no wildcards. The Android
+app consumes it via ticket 167 — now a live gate, not a theoretical one.
 
 ## Sessions
 
@@ -2407,6 +2529,38 @@ messages on the stream. Body `{}`. Answers the **standard session envelope**
   resyncs no longer report stale running turns/sub-agents.
 - The Android app needs it for stale-session send recovery — ticket 168.
 
+### Takeover — `POST /api/v1/sessions/{id}:takeover`
+
+**New in 2.3.1** (commit `c569bab5`; verified live 2026-10-23). Evicts the
+cross-process occupancy lock another Kimi Code process holds on the session,
+so a write that failed with **40931** can be retried — the escape hatch for
+locks left behind by a crashed or exited process. Body `{}`. Success answers
+`{"taken_over": true}`:
+
+```json
+{"code":0,"msg":"success","data":{"taken_over":true},"request_id":"01M5N3S6YYRS51A8W7HVHJ6H50"}
+```
+
+- Verified live 2026-10-23 end-to-end: a `kimi -S <id> -m kimi-code/k3 -p`
+  CLI turn held the lock (`clientDisplayName:"Kimi Code CLI"`); a server
+  prompt POST answered 40931; `:takeover` answered the envelope above and
+  **deleted the lock file**; the same prompt POST then ran (`status:
+  "running"`). If the other process is still alive, both write to the
+  session until it goes idle — the upstream doc warns the history can
+  interleave, so take over only when the holder is known gone.
+- Idle session (no lock anywhere) → the same `{taken_over:true}` — a no-op
+  success, not an error.
+- Unknown id → `40401` `session <id> does not exist`. Note this route's
+  `40401` **carries `stack`** (a fresh Error2 from the action handler),
+  unlike the get-session path's stack-less `40401`.
+- Takeover by the process that itself holds the lock is a silent no-op
+  (`heldSessions` short-circuit — verified live: the server's own hold was
+  left in place).
+- The TUI flow this route serves (same commit): first 40931 → Retry/Cancel;
+  a retried 40931 → Cancel/Take over ("danger" tone). Ticket 169 ports it.
+- The lock can be turned off server-wide with `KIMI_CODE_SESSION_LOCK=0`
+  (same commit; env switch, wire-invisible).
+
 ### Occupancy lock — 40931 / 40932
 
 **New in 2.3.0** (commit `df0ff3c5`; verified live 2026-10-22). Sessions are
@@ -2417,6 +2571,28 @@ verbatim content (the holder block the 40931 envelope echoes):
 ```json
 {"version":1,"token":"368178:b549243e-a8b0-4c6e-8504-4d279dc1e4db","pid":368178,"hostname":"vps-46783f51","startedAt":1792699474275,"clientIdentity":"kimi_code_cli"}
 ```
+
+**2.3.1 (commit `0e3980e7`; verified live 2026-10-23):** the holder block —
+in the lock file AND echoed in the 40931 `details.holder` — gained an
+optional **`clientDisplayName`**, and the 40931 `msg` names it when known
+(was a fixed "another Kimi Code process" sentence). The mapping:
+`kimi_code_cli` → "Kimi Code CLI", `kimi_code_desktop` → "Kimi Code
+Desktop", `kimi_code_vscode` → "Kimi Code for VS Code", and the embedded
+server (`kimi_code_cli` + user-agent suffix `web`) → **"Kimi Code Web"**.
+Verbatim 2.3.1 capture, the holder a live `kimi -S <id> -p` CLI turn:
+
+```json
+{"code":40931,"msg":"This session is in use by another Kimi Code CLI instance. Stop the session in that instance or exit it, then try again.","data":null,"request_id":"01M5N459GDSZ6VXF4G6S099YQ6","stack":"Error2: …","details":{"sessionId":"session_1c9f1b2b-…","holder":{"version":1,"token":"396620:1162edc7-…","pid":396620,"hostname":"vps-46783f51","startedAt":1792784114990,"clientIdentity":"kimi_code_cli","clientDisplayName":"Kimi Code CLI"}}}
+```
+
+The envelope's `code`/`details.sessionId`/`details.holder` positions are
+unchanged — additive field plus a message-text change. Also verified live on
+2.3.1: a lock whose holder pid is **dead** no longer blocks — the server
+reclaimed one mid-probe and ran the prompt (the release's zombie-occupancy
+fix, commit `c569bab5` — `pidAlive` now also rejects zombie-state processes
+via `ps`; the create route itself briefly holds a server-side lock,
+`clientDisplayName:"Kimi Code Web"`, released as soon as the session goes
+idle).
 
 - **40931 `SESSION_OCCUPIED`** — a write (prompt POST, profile write, …)
   against a session another process currently holds fails with a fixed
@@ -5722,6 +5898,78 @@ deployment** (verified live — handshake refused).
 
 ## Verification log
 
+- 2026-10-23 re-verification on `2.3.1` (server 2.3.0 → 2.3.1; throwaway
+  sessions created with `metadata.cwd=/home/ubuntu/spike`, all eleven
+  `:delete`d after; the nightly job's `pending-changelog.md` fetch WORKED —
+  4 commits between the annotated tags `@moonshot-ai/kimi-code@2.3.0` →
+  `…@2.3.1`, diffs reviewed in full via the GitHub API: `c569bab5`
+  (`:takeover` route, zombie-occupancy fix, trust decoupling,
+  `KIMI_CODE_SESSION_LOCK`), `0e3980e7` (`clientDisplayName` on the 40931
+  holder + message text), `c445cae0` web-dist sync, `684bae9e` release CI;
+  live probes over REST + websocat against `127.0.0.1:58627`, plus
+  `kimi -S <id> -m kimi-code/k3 -p` CLI turns to exercise the occupancy
+  lock).
+  Drift found (all additive or behavioral; nothing breaks the Android app):
+  (a) new route `POST :takeover` — idle `{taken_over:true}`, unknown `40401`
+      with `stack`, live-CLI-held → lock file evicted and the retried prompt
+      ran; takeover by the holding process itself is a no-op (all verified
+      live);
+  (b) 40931 `details.holder` gained optional `clientDisplayName` and the
+      `msg` names it — verbatim envelope in the drift section; the embedded
+      server's own holds read "Kimi Code Web"; a dead-pid lock was reclaimed
+      live mid-probe;
+  (c) workspaces trust round-trip re-verified (the resolver no longer
+      materializes the runtime — behavioral, same wire);
+  (d) content drift: models catalog 12 entries (`kimi-code/k3.1-pro` +
+      `k3.1-pro-highspeed` new, no `upgrade` on any); `model_switch_confirm`
+      client config now POPULATED (`enable:true`, k3*/kimi-for-coding* →
+      k3.1-pro* rules with en/zh hints — was `config:null` on 2.3.0); tools
+      catalog 36 on a fresh session (27 builtins + 9 MCP);
+  (e) first-time itemization: the create route briefly holds a server-side
+      lock (`clientDisplayName:"Kimi Code Web"`), released when the session
+      goes idle.
+  Re-verified unchanged, most byte-for-byte: meta (5 flags, 17 features —
+  only `server_version` differs), the config projection, sessions
+  create/get/list (`last_seq` `1` fresh detail / `0` list), `40401` without
+  `stack` on the get path, `/status`, the snapshot (top-level keys, real
+  `session.usage`, busy `in_flight_turn` capture), messages history
+  (newest-first), prompts POST + ACK, one full prompt round-trip (the
+  documented skeleton verbatim — `prompt.submitted` → `session.meta.updated`
+  → `turn.started` with `promptId` → `context.spliced` → `prompt.started` →
+  steps/deltas → `turn.step.completed` → `turn.ended` with `traceId` →
+  idle `work_changed` → `prompt.completed`), prompt queueing + steer
+  (`queueLength`, `{"steered":true}` ACK, single-steer id reuse,
+  `prompt.steered` seq 15 before `turn.steer` seq 20 with the `inTurn:true`
+  origin), mid-run `:abort` (interrupted sequence verbatim) plus idle
+  `{"aborted":true}`, compact `{"instruction":…}` (instant ACK, instruction
+  echo, splice, `compaction.completed` `result` with `tokensAfter` 30415)
+  plus both `40910`s with `stack`, the questions flow (pending poll with
+  `agent_id`, answer → `resolved:true`, dismiss → `40909` +
+  `dismissed:true`, re-dismiss AND answer-after-dismiss → `40902`,
+  `event.question.requested`/`answered` frames), the manual-approval
+  round-trip (`approval_<uuid>` split intact, `tool_call_id` POST → `40404`,
+  `approved` → both resolved frames), files (upload sniffed `image/png`,
+  `session_media` projection with `name` in the ACK AND history, download
+  200, `Range` 206, delete → `{"deleted":true}`, `40407` at HTTP 404), the
+  TodoList contract (verbatim `{"todos":[{status,title}]}` in history
+  `tool_use` parts), foreground + background sub-agent lifecycles
+  (`subagent.spawned` with `taskId`/`model`/`thinkingEffort:"max"`,
+  `task.started` → `background.task.started`), REST `/tasks` list, the
+  workspaces list, global search (`index_state`), the v2 grouped session
+  table, the lifecycle events (`event.session.created`,
+  `event.session.deleted` on `__global__` with camelCase `sessionId`), and
+  WS hello/subscribe/ack/cursor-resume (`protocol_version: 2`,
+  `heartbeat_ms` 10000; replay from seq 2 re-delivered 3–15 in order before
+  the ack; future-seq cursor → standalone `resync_required` `epoch_changed`
+  then the ack listing it; heartbeat-timeout silence re-observed — frames
+  stop ~30 s in without pongs; a 5 s pong feeder keeps the socket alive).
+  Tooling notes: websocat 1.14 needs `-H="Authorization: …"` (equals form —
+  the space-separated form eats the header as the URL and fails with "No URL
+  specified"); a CLI resumed against a session created for a different cwd
+  refuses with "created under a different directory" — `cd` into the
+  session's cwd first; a CLI `-p` turn without `-m` may die with
+  `model.not_configured` after taking the lock (the dead-pid reclaim then
+  makes the probe silently pass — check the holder pid against the CLI pid).
 - 2026-10-22 re-verification on `2.3.0` (server 2.2.0 → 2.3.0; throwaway
   sessions `session_074efb5c-…` / `session_76b4f3bc-…` created with
   `metadata.cwd=/home/ubuntu/spike`, both `:delete`d after; the
