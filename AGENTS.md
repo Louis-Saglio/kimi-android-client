@@ -30,6 +30,29 @@ sudo cp app/build/outputs/apk/release/app-release.apk "/home/fileserver/files/ki
 sudo chown fileserver:fileserver "/home/fileserver/files/kimi-android-client-${BRANCH}.apk"
 ```
 
+## E2E tests: run on e2e-runner
+
+The VPS cannot host a usable Android emulator, and the hosted device farm has
+limited quota. Run the instrumented suite in `app/src/androidTest` on
+e2e-runner through its `kimi-android-uitest` runner — never try to boot an
+emulator here.
+
+```bash
+scripts/run-e2e.sh                      # current working tree, uncommitted changes included
+scripts/run-e2e.sh --class <FQCN>       # one class (comma-separated for several)
+scripts/run-e2e.sh --ref <branch|sha>   # clean checkout of a ref
+```
+
+The last stdout line is `RESULT=pass|fail|infra-error REPORT_DIR=<path>`; exit
+codes are 0 pass, 1 test/build failure, 2 infra error, 3 busy or low resources.
+The full suite takes about 5 minutes. The runner serializes runs and waits for
+load ≤ 8 and 10 GB free RAM, so it may sit idle until the desktop is free.
+Reports (JUnit XML, logcat, Gradle and emulator logs) live in `REPORT_DIR` on
+e2e-runner; pull one with
+`ssh louis@e2e-runner 'tar -C <REPORT_DIR> -cz .' | tar xz`.
+Live-server tests need `--env-file <file>` (mode 600) with `LIVE_SERVER_URL`
+and `LIVE_SERVER_TOKEN`; without it they are skipped.
+
 ## Web client source reference
 
 The Kimi Code repo is at <https://github.com/MoonshotAI/kimi-code>. Up to
