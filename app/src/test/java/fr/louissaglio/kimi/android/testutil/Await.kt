@@ -12,6 +12,8 @@ import kotlinx.coroutines.withTimeout
 suspend fun awaitCondition(timeoutMs: Long = 5_000, condition: () -> Boolean) =
     withTimeout(timeoutMs) { while (!condition()) delay(10) }
 
-/** [awaitCondition] on a StateFlow's current value: `awaitState(viewModel.uiState) { it.x }`. */
-suspend fun <T> awaitState(flow: StateFlow<T>, predicate: (T) -> Boolean) =
-    awaitCondition { predicate(flow.value) }
+/** [awaitCondition] on a StateFlow's current value: `awaitState(viewModel.uiState) { it.x }`.
+ * The timeout is overridable for the few resync paths whose multi-round-trip work can
+ * exceed the default on a loaded machine. */
+suspend fun <T> awaitState(flow: StateFlow<T>, timeoutMs: Long = 5_000, predicate: (T) -> Boolean) =
+    awaitCondition(timeoutMs) { predicate(flow.value) }

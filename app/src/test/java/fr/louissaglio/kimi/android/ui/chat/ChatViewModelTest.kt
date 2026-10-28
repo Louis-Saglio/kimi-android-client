@@ -346,8 +346,10 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         assertTrue(resume, resume.contains("\"epoch\":\"ep_1\""))
 
         // A finished turn can have no live rows: the status-aware resync clears the
-        // truncated ghost bubble and the canonical message renders exactly once.
-        awaitState(viewModel.uiState) { state ->
+        // truncated ghost bubble and the canonical message renders exactly once. The
+        // resync is a multi-round-trip path (/status, history, jobs) — give it more
+        // than the default budget on a loaded runner (ticket 163).
+        awaitState(viewModel.uiState, timeoutMs = 15_000) { state ->
             state.items?.filterIsInstance<ChatItem.AssistantMessage>()
                 ?.singleOrNull()?.let { it.id == "msg_1" && it.text == "partial plus the rest" } == true
         }
