@@ -259,6 +259,37 @@ class OkHttpSessionListSocketTest {
     }
 
     @Test
+    fun `the global session deleted event is delivered with the payload session id`() = runBlocking {
+        // 0.42.0 (docs/server-api.md, Global events — ticket 126): the frame below is
+        // the verbatim capture. Same __global__ envelope as the archived sibling, so it
+        // must survive the foreign-frame filter; the real id is the payload's
+        // camelCase sessionId.
+        sessionIds.value = linkedSetOf("session_1")
+        val events = CopyOnWriteArrayList<SessionListEvent>()
+        server.enqueue(
+            webSocketUpgradeResponse(
+                recordingListener(
+                    CopyOnWriteArrayList(),
+                    onClientFrame = { webSocket -> webSocket.send(sessionDeletedFrame) },
+                ),
+            ),
+        )
+        coroutineScope {
+            val job = launch { socket.observe(settings(), sessionIds).collect { events += it } }
+            try {
+                awaitCondition { events.isNotEmpty() }
+            } finally {
+                job.cancel()
+            }
+        }
+
+        assertEquals(
+            listOf(SessionListEvent.SessionDeleted("session_0e2d9419-353f-4e08-bb59-dbfdacac1467")),
+            events,
+        )
+    }
+
+    @Test
     fun `the session created event is delivered with the payload session`() = runBlocking {
         // Verified on 0.42.0 (docs/server-api.md, Global events — ticket 129): the
         // frame below is the verbatim capture. Its envelope session_id is the NEW
@@ -449,6 +480,14 @@ class OkHttpSessionListSocketTest {
             """"timestamp":"2026-08-20T19:31:40.052Z","payload":{"type":"event.session.archived",""" +
             """"workspace_id":"wd_spike_6baf4c130e63","agentId":"main",""" +
             """"sessionId":"session_a57d4784-4fe8-4268-bbe1-b5f3e23b37ba"},"epoch":"ep_01KX01QDWWRZFHBCEEQ8A5SZ8T"}"""
+
+    // Verbatim 0.42.0 capture (docs/server-api.md, "Global events — event.session.deleted").
+    private val sessionDeletedFrame =
+        """{"type":"event.session.deleted","seq":276,"session_id":"__global__",""" +
+            """"timestamp":"2026-09-09T19:33:22.675Z","payload":{"type":"event.session.deleted",""" +
+            """"workspace_id":"wd_spike_6baf4c130e63","agentId":"main",""" +
+            """"sessionId":"session_0e2d9419-353f-4e08-bb59-dbfdacac1467"},""" +
+            """"epoch":"ep_01KX01QDWWRZFHBCEEQ8A5SZ8T"}"""
 
     // Verbatim 0.42.0 capture (docs/server-api.md, "Global events — event.session.created"):
     // note the envelope session_id is the created session itself, not __global__.

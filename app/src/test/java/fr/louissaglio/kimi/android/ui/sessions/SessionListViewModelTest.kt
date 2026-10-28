@@ -894,6 +894,20 @@ class SessionListViewModelTest {
     }
 
     @Test
+    fun `a session deleted event drops the row without any refresh`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1", "session_2")))
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessions != null }
+        server.takeRequest(5, TimeUnit.SECONDS)
+
+        fakeSocket.events.tryEmit(SessionListEvent.SessionDeleted("session_1"))
+
+        awaitState(viewModel.uiState) { it.sessions?.map { s -> s.id } == listOf("session_2") }
+        // Pure WebSocket removal: no REST call beyond the initial load.
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
     fun `a session created event inserts the row live at its updated_at position`() = runBlocking {
         server.enqueue(
             MockResponse(body = pageBodyWithStamps(

@@ -1171,9 +1171,8 @@ in exactly these places:
   `{workspace_id, agentId, sessionId}` with the real id camelCase
   (verbatim capture in WebSocket → Global events). Deleted sessions drop
   off the list and answer `40401` on get. **The Android app's session-list
-  socket handles `event.session.archived` (ticket 105) but not the deleted
-  sibling — a row deleted from another client lingers until refresh —
-  ticket 126.**
+  socket handles both removal events since ticket 126: an archived or
+  deleted row leaves the list live, without a manual refresh.**
 - **Media attachment names are preserved** (commit `baf17a8f`; verified
   live 2026-09-09): image/video content parts in the prompt ACK echo AND
   `GET .../messages` history now carry an optional **`name`** — verbatim
@@ -5404,8 +5403,8 @@ in the payload alongside snake_case `workspace_id`. Verbatim capture
  "epoch":"ep_01KX01QDWWRZFHBCEEQ8A5SZ8T"}
 ```
 
-The Android app does not handle it — a deleted session's row lingers in
-the list until the next refresh (ticket 126); the app has no delete UI.
+A deleted session's row leaves the list live, exactly like an archive (ticket
+126); the app has no delete UI of its own.
 
 The sibling workspace lifecycle events `event.workspace.created` / `updated`
 (full wire workspace object) and `event.workspace.deleted`

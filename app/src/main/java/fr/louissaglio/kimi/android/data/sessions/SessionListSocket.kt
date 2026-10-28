@@ -63,11 +63,18 @@ sealed interface SessionListEvent {
 
     /**
      * `event.session.archived` (0.38.0, docs/server-api.md): the session was archived
-     * — from any client — and its row must leave the list; archives are the only
-     * removal signal (there is no session-deleted event). A global frame: the envelope
-     * `session_id` is `__global__`, so [sessionId] comes from the payload.
+     * — from any client — and its row must leave the list. A global frame: the
+     * envelope `session_id` is `__global__`, so [sessionId] comes from the payload.
      */
     data class SessionArchived(val sessionId: String) : SessionListEvent
+
+    /**
+     * `event.session.deleted` (0.42.0, docs/server-api.md — ticket 126): the session
+     * was deleted from any client and its row must leave the list, exactly like an
+     * archive. Same global frame shape as [SessionArchived]: the envelope `session_id`
+     * is `__global__`, the real id rides camelCase in the payload.
+     */
+    data class SessionDeleted(val sessionId: String) : SessionListEvent
 
     /**
      * `event.session.created` (verified on 0.42.0, docs/server-api.md — ticket 129):

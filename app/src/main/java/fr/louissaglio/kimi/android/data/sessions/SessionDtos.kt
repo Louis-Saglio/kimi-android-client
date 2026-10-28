@@ -182,6 +182,14 @@ data class SessionArchivedPayload(
     val sessionId: String,
 )
 
+/** `event.session.deleted` (0.42.0 — ticket 126): same global frame shape as the
+ * archived sibling, so the deleted id is read from the payload's camelCase
+ * `sessionId`. No default: a payload without it fails to decode and is dropped. */
+@Serializable
+data class SessionDeletedPayload(
+    val sessionId: String,
+)
+
 /** `event.session.created` (verified on 0.42.0 — ticket 129): broadcast on the new
  * session's own stream (the envelope `session_id` is the created session, NOT the
  * `__global__` watermark). The nested session rides in the snake_case REST shape, so

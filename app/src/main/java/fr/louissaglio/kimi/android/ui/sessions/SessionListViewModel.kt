@@ -284,11 +284,12 @@ class SessionListViewModel @Inject constructor(
                 // Same blank-title rule as the REST mapping: fall back to the cwd.
                 it.copy(title = event.title?.takeIf(String::isNotBlank))
             }
-            // Archived from any client (0.38.0): the row leaves the list — the same
-            // dual-mode removal as the app's own archive (ticket 131), whose undo
-            // bookkeeping this path ignores. An unknown id is ignored, like in
-            // patchRow; the next refresh reconciles.
+            // Archived or deleted from any client (0.38.0 / 0.42.0 — tickets 105/126):
+            // the row leaves the list — the same dual-mode removal as the app's own
+            // archive (ticket 131), whose undo bookkeeping this path ignores. An
+            // unknown id is ignored, like in patchRow; the next refresh reconciles.
             is SessionListEvent.SessionArchived -> removeRow(event.sessionId)
+            is SessionListEvent.SessionDeleted -> removeRow(event.sessionId)
             // Created from any client (verified on 0.42.0 — ticket 129): upsert by id
             // at the row's updated_at position, in the flat list and in the group
             // matching its cwd — the create/fork placement rule, so the app's own
@@ -363,8 +364,8 @@ class SessionListViewModel @Inject constructor(
     /**
      * Drops [sessionId]'s row from the flat list AND its workspace group (ticket 115
      * made both loaded at once), returning what was removed — the archive undo
-     * (ticket 131) reinserts it at these positions; the socket's SessionArchived
-     * path ignores the return. An unknown id is a no-op, like in [patchRow].
+     * (ticket 131) reinserts it at these positions; the socket's archive/delete
+     * paths ignore the return. An unknown id is a no-op, like in [patchRow].
      */
     private fun removeRow(sessionId: String): RemovedRow? {
         val state = uiState.value

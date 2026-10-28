@@ -42,10 +42,10 @@ import okhttp3.WebSocketListener
  * channel, reconnect loop with 1 s → 30 s exponential backoff) copies
  * [fr.louissaglio.kimi.android.data.chat.SessionSocket]'s shape; the frame parsing is
  * the list's own: exactly `event.session.work_changed`, `session.meta.updated`, the
- * global `event.session.archived` (0.38.0 — ticket 105), the broadcast
- * `event.session.created` (ticket 129) and the global
- * `event.config.changed`/`event.model_catalog.changed` (0.39.1 — ticket 110), and the
- * subscribe ack.
+ * global `event.session.archived` (0.38.0 — ticket 105) and `event.session.deleted`
+ * (0.42.0 — ticket 126), the broadcast `event.session.created` (ticket 129) and the
+ * global `event.config.changed`/`event.model_catalog.changed` (0.39.1 — ticket 110),
+ * and the subscribe ack.
  * SessionSocket stays single-session/chat-specific — patching it for multi-session
  * use was rejected in the ticket.
  */
@@ -214,6 +214,15 @@ class OkHttpSessionListSocket @Inject constructor(
         if (frame.type == "event.session.archived") {
             frame.decodePayload<SessionArchivedPayload>()?.let { payload ->
                 onEvent(SessionListEvent.SessionArchived(payload.sessionId))
+            }
+            return
+        }
+        // 0.42.0 global event, same shape and same ahead-of-the-filter placement as
+        // the archived frame (ticket 126): a delete from any client, the envelope
+        // session_id being the __global__ watermark.
+        if (frame.type == "event.session.deleted") {
+            frame.decodePayload<SessionDeletedPayload>()?.let { payload ->
+                onEvent(SessionListEvent.SessionDeleted(payload.sessionId))
             }
             return
         }
