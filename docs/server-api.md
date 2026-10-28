@@ -2,10 +2,10 @@
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
 by Kimi Code Web. Documented and verified against the live server on 2026-10-28
-(server version `2.3.3`, `"backend": "v2"`, WS `protocol_version: 2`).
+(server version `2.4.0`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
-steer, questions, abort, permissions, WebSocket events, file attachments,
+steer, interactions (approvals and questions), abort, WebSocket events, file attachments,
 sub-agents (foreground lifecycle + background task store), global message
 search, the tools catalog, the client-configs proxy and the session-rating
 rules, plus
@@ -16,7 +16,8 @@ Every core-loop endpoint below was executed against the live server unless
 its paragraph says **source-derived**. The exact commands are shown with each
 section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `2.3.1`
+**Protocol history:** this document previously described server `2.3.3`
+(verified 2026-10-28; see git history), `2.3.1`
 (verified 2026-10-23; see git history), `2.3.0`
 (verified 2026-10-22; see git history), `2.2.0`
 (verified 2026-10-14; see git history), `2.1.1`
@@ -44,6 +45,108 @@ section. Secrets are redacted (`<token>`).
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
 that, `0.27.0` before that, and `0.23.3` before that.
+
+The drift from 2.3.3 to 2.4.0 is **breaking for the interaction surface and
+additive elsewhere: approvals and questions moved onto a single flat
+`interaction` WebSocket frame and a single response route, while both old
+event families and all five old routes were removed; nothing else the app
+parses changed**. The nightly job's `pending-changelog.md` covered
+2.3.1→2.4.0 (49 commits); the post-2.3.3 slice is 10 commits, of which
+exactly two touch `packages/kap-server`'s protocol: `461c6e92` (interaction
+frames) and `78b72fe4` (`swarm_mode` applied on prompt submission). The rest
+is engine/TUI/web-bundle/CI work. Live verification used server `2.4.0`,
+started `2026-10-28T19:23:50.157Z`.
+
+- **Approvals and questions now arrive as one flat `interaction` frame**
+  (commit `461c6e92`; verified live 2026-10-28 — verbatim captures in
+  Interactions). It carries no `seq`, `timestamp`, or `payload` wrapper and
+  is **never journaled or replayed**: `{type:"interaction", session_id,
+  agent_id, event_created_at, interaction_id, status:"pending"|"ended",
+  outcome?, ended_at?, tool_call_id?, kind:"approval"|"question", request,
+  response?}`. An approval's `request` is
+  `{tool_name, action, tool_input_display?, expires_at}`; a question's is
+  `{questions[]}` with the same item shape as before. The ended frame adds
+  `outcome` (`approved`/`rejected`/`cancelled`, or
+  `answered`/`dismissed`/`cancelled`) and an approval `response`
+  (`{decision, scope?, feedback?, selected_label?}`); an answered question's
+  `response` is `{answers:{<question text>: <flattened answer>}}`. The server
+  **re-sends every pending interaction right after each accepted
+  `client_hello` / `subscribe` / `subscribe_v2` ack**, so clients rebuild the
+  pending list from the frames that follow the ack instead of polling.
+- **The legacy v2 `permission.approval.requested` / `.resolved` frames are
+  still delivered** (camelCase, unchanged; verified live) and still carry the
+  same `approval_<uuid>` id. The `event.approval.*` / `event.question.*`
+  families are **gone** — zero such frames occurred in this run's captures.
+- **One response route replaced five** (same commit): `POST
+  /api/v1/sessions/{id}/interactions/{interaction_id}` with
+  `{kind:"approval", decision, scope?, feedback?, selected_label?}` or
+  `{kind:"question", answers?|dismissed:true, method?, note?}`. Success is
+  `{outcome, ended_at}`. `GET .../approvals`, `GET .../questions`,
+  `POST .../approvals/{id}`, `POST .../questions/{id}` and
+  `POST .../questions/{id}:dismiss` are **removed** (all answer plain Fastify
+  HTTP 404s, verified live). Error codes: unknown id → **`40404`
+  `interaction … not found`** (was `APPROVAL_NOT_FOUND`/`QUESTION_NOT_FOUND`);
+  already ended → **`40902` `interaction … has ended`** (was
+  `APPROVAL_ALREADY_RESOLVED`/`QUESTION_DISMISSED`); a `kind` mismatch or
+  missing `kind` → `40001`. The old successful-dismiss `40909` is gone —
+  dismissal is `code:0` with `outcome:"dismissed"`.
+- **`swarm_mode` on the prompt POST is applied now** (commit `78b72fe4`;
+  verified live): `{"swarm_mode":true}` enters swarm mode before the prompt is
+  enqueued, `false` exits it, and `GET .../status` reflects the change
+  (`swarm_mode:true`→`false` across the two probes). Up to 2.3.3 the field was
+  accepted by the schema and silently ignored; `POST .../profile`'s
+  `agent_config.swarm_mode` was, and remains, the other way to set it. The
+  app has no swarm-mode control today (ticket 140 was closed when the field
+  was dead) — ticket 174 revives that toggle on the now-live field.
+- **Plan mode is user-only and every plan is reviewed** (commit `0325b755`,
+  engine behavior; verified live): entering plan mode through
+  `POST .../profile {"agent_config":{"plan_mode":true}}` and prompting an
+  `ExitPlanMode` call produced an approval whose `tool_input_display` reads
+  `{"kind":"plan_review","plan":"<markdown>","path":"<plan file>"}` (verbatim
+  capture in Interactions). The agent can no longer enter plan mode by
+  itself, and `auto` no longer approves plans silently.
+- **Idle sessions are reclaimed** (commit `366fafbf`): a session idle for 30
+  min unloads from memory and resumes transparently on the next REST/WS
+  access; `KIMI_CODE_SESSION_IDLE_RECLAIM_MS` overrides the timeout. A cold
+  session reports not-busy with no pending interaction (same rule the session
+  object always had for unloaded sessions), so the wire is unchanged.
+- **Question history maps engine cancellations to `cancelled`** (same
+  interaction commit): the transcript interaction entity now ends a
+  turn-cancelled question as `cancelled`, not `answered` (REST transcript
+  only; the live frame for an abort was observed as `dismissed` — see
+  Interactions).
+- **Content drift, not shape:** the tools catalog reads **35 entries — 26
+  builtins plus 9 MCP tools** (`ReadMediaFile` absent); the models catalog
+  still has **12 entries**; `GET /api/v1/config` still reads
+  `default_model:"deepseek/deepseek-v4-flash"`, `thinking.effort:"max"`,
+  `default_permission_mode:"auto"`, and no `disable_feedback_survey` /
+  `auto_session_title` keys. `/api/v1/meta` is unchanged apart from
+  `server_version`/`started_at` (same 5 flags, same 17 features).
+- **Provider state, not protocol:** a `kimi-code/k3` prompt still fails
+  immediately with `provider.auth_error` / HTTP 403 ("Your current
+  subscription does not have access to Kimi Code right now") — the same
+  envelope documented on 2.3.3. The checks below used
+  `deepseek/deepseek-v4-flash`.
+
+Everything else re-verified unchanged live on 2.4.0: the session
+create/get/list/status/snapshot shapes, `40401` envelopes, `:reload`,
+`:takeover`, `:archive`/`:restore`, `:delete` plus the global
+`event.session.created`/`deleted` frames, the full prompt round-trip (the
+documented skeleton on DeepSeek, no `streaming` phase), prompt queueing and
+steer (`prompt.queued`, `prompt.steered`, `turn.steer` with the
+`inTurn:true` origin and id reuse), running and idle `:abort` (approval abort
+→ `outcome:"cancelled"`; question abort → `dismissed`), both compaction
+bodies and both `40910`s, files (upload with sniffed `media_type`, download
+200, `Range` 206, prompt `session_media` rewrite, delete, media survival),
+the TodoList write contract, foreground and background sub-agents with the
+`subagent.*`/`task.*` sequence, REST `/tasks`, WS hello/subscribe/ack and
+cursor-resume (including future-cursor `resync_required`), the v2 session
+table, workspaces and global search. **App impact: the app cannot see live
+approvals or questions, cannot answer them, and its question poll now 404s —
+tickets 171 (approvals) and 172 (questions) restore both on the new frame;
+ticket 173 brings the plan text the mandatory plan review now requires, and
+ticket 174 revives the swarm-mode toggle the now-live prompt field unblocks.
+No other breakage.**
 
 The drift from 2.3.1 to 2.3.3 is **additive-only on the wire: no route or
 WebSocket event was added or removed, while both registered client configs
@@ -2928,11 +3031,12 @@ verified live on 0.31.1 (2026-08-01). Top-level keys of `data`:
 
 - `subagents`: the foreground sub-agent roster at the watermark — see
   [Session snapshot roster](#session-snapshot-roster) under Sub-agents.
-- `pending_approvals`: the pending permission requests. Each item is the
-  legacy `event.approval.requested` payload minus the camelCase `agentId`
-  stamp (up to 0.38.0 `approval_id` == `tool_call_id`; **0.39.0:**
+- `pending_approvals`: the pending permission requests. The snapshot keeps
+  the **pre-2.4.0 REST item shape** (the live event is the flat `interaction`
+  frame now): the old `event.approval.requested` payload minus the camelCase
+  `agentId` stamp (up to 0.38.0 `approval_id` == `tool_call_id`; **0.39.0:**
   `approval_id` is a dedicated `approval_<uuid>` id distinct from
-  `tool_call_id` — see Permissions). **2.0.2:** the items now carry
+  `tool_call_id` — see Interactions). **2.0.2:** the items now carry
   **`agent_id`** (snake_case, required — `"main"` or the asking sub-agent's
   id; verified live 2026-09-19), so the asking agent is no longer WS-only
   (this retro-fills ticket 139's gap). Verbatim 2.0.2 item:
@@ -2957,14 +3061,15 @@ verified live on 0.31.1 (2026-08-01). Top-level keys of `data`:
    "created_at":"2026-08-01T…","expires_at":"2026-08-01T…"}
   ```
 
-- `pending_questions`: the pending `AskUserQuestion` requests; each item is
-  byte-identical to the `/questions?status=pending` poll's `items[]` entries
-  (verified live with a live question, 2026-08-01): `question_id`,
-  `session_id`, `questions[]` with
+- `pending_questions`: the pending `AskUserQuestion` requests, in the same
+  item shape the pre-2.4.0 `event.question.requested` frame carried (the
+  per-session poll route is gone; this snapshot and the `interaction` frames
+  are the only surfaces) — verified live with a pending question on 2.4.0:
+  `question_id`, `session_id`, `questions[]` with
   `id`/`question`/`options[{id,label}]`/`header`/`allow_other`/`multi_select`,
   `created_at`, `turn_id`. **0.38.0:** `question_id` is a dedicated
   `question_<uuid>` interaction id and the item also carries a distinct
-  `tool_call_id` (was: `question_id` == `tool_call_id` — see Questions).
+  `tool_call_id` (was: `question_id` == `tool_call_id` — see Interactions).
   **2.0.2:** the item also carries `agent_id` (snake_case; verified live
   2026-09-19).
 
@@ -3745,25 +3850,23 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../promp
     `turn.started.promptAttachments` is still never emitted live (the schema
     gained a `kind:"file"` variant in 0.39.1; unobserved). The app decodes
     only `origin.kind` — additive, ignored.
-- **`swarm_mode` in the prompt body is DEAD** (verified live 2026-09-16 on
-  0.43.1 and re-verified 2026-10-28 on 2.3.3, ticket 140 — throwaway sessions,
-  deleted after): a prompt posted with `"swarm_mode": true` ran to completion
-  with `/status` `swarm_mode` never flipping and no `swarm.enter` transcript
-  marker. Upstream at tag 0.43.1 the submitPrompt handler applies only
-  `profile`/`model`/`thinking`/`permission_mode`/`disabled_tools`
-  (`packages/kap-server/src/routes/prompts.ts`) — the field parses
-  (`rest-prompt.ts`) but is never consumed; `plan_mode`, `goal_objective`
-  and `goal_control` are likewise parsed-but-unapplied there (source-derived,
-  not live-verified). Swarm mode DOES engage through the session profile
-  route: `POST /api/v1/sessions/{id}/profile` with
-  `{"agent_config":{"swarm_mode":true}}` flips `/status` `swarm_mode` to
-  `true` (verified live on the same probe session; upstream
-  `applySessionAgentConfig` → `swarm.enter('manual')`, Session profile).
+- **`swarm_mode` in the prompt body is LIVE since 2.4.0** (commit `78b72fe4`,
+  "apply swarm mode from prompt submissions"; verified live 2026-10-28):
+  a prompt posted with `"swarm_mode": true` enters swarm mode before the
+  prompt is enqueued and `/status` reads `swarm_mode:true`; posting `false`
+  exits it (`true`→`false` across two probes on the same session). Up to
+  2.3.3 the field parsed but was never consumed, while
+  `POST /api/v1/sessions/{id}/profile {"agent_config":{"swarm_mode":true}}`
+  already worked through `applySessionAgentConfig` → `swarm.enter('manual')`
+  (both routes verified again on 2.4.0). `plan_mode`, `goal_objective` and
+  `goal_control` on the prompt body remain parsed-but-unapplied
+  (source-derived; `plan_mode` through the profile route is live, see
+  Interactions).
 - Optional body fields (per-prompt overrides): `permission_mode`
   (`manual`/`auto`/`yolo` — `manual` verified live), `model` (verified: a
   session with empty `agent_config.model` runs when the prompt carries one),
-  `thinking`, `plan_mode`, `swarm_mode` (**dead on 0.43.1** — see above),
-  `agent_id`, `metadata`,
+  `thinking`, `plan_mode`, `swarm_mode` (**applied since 2.4.0** — see
+  above), `agent_id`, `metadata`,
   `goal_objective`, `goal_control`, `disabled_tools`, `prompt_id` (**0.37.2**:
   a client-chosen prompt record id echoed on the ACK `prompt_id`/
   `user_message_id`, the history message id, and `turn.started.promptId`;
@@ -4127,217 +4230,288 @@ schemas and absent from the GET projection when unset (see Models). The
 Android app has no rating surface and no ticket — the surveys are Kimi's
 product feedback channel, surfaced by the TUI/web only.
 
-## Permissions
+## Interactions
 
-A permission request surfaces as **WebSocket events**; there is no polling
-endpoint. The decision is posted back via REST.
+Approvals and questions are the session's two pending-interaction kinds. Since
+2.4.0 they share one live WebSocket frame and one REST response route; the
+`event.approval.*` / `event.question.*` event families and the
+`/approvals` + `/questions` routes are gone. Everything below was re-verified
+live on 2.4.0 (2026-10-28).
 
-1. A prompt sent with `permission_mode: "manual"` that needs a tool emits two
-   WS events (see the WS section for exact payloads):
-   `permission.approval.requested` (new v2 shape, camelCase) followed by the
-   legacy `event.approval.requested` (snake_case, with `approval_id` and
-   `expires_at` — 24 h validity observed).
-   Both carry the human-readable action and a command preview.
-   **0.39.0: the approval id split from the tool-call id** (verified live
-   2026-08-27): the v2 frame's `id` and the legacy frame's `approval_id` are
-   now a dedicated `approval_<uuid>` interaction id, **distinct** from the
-   `toolCallId`/`tool_call_id` (`tool_…`) both frames also carry (they were
-   equal up to 0.38.0 — the same split questions got in 0.38.0). The
-   `awaiting_approval` phase of `agent.status.updated` carries both ids too.
-   **2.0.2: the legacy frame and the snapshot `pending_approvals` items also
-   carry `agent_id`** (snake_case, required — `"main"` or the asking
-   sub-agent's id; verified live 2026-09-19), alongside the camelCase
-   `agentId` stamp the WS frame already had.
-   Pending approvals can also be polled —
-   `GET /api/v1/sessions/{id}/approvals?status=pending` returns
-   `{"code":0,...,"data":{"items":[<same item shape as the snapshot's
-   pending_approvals>]}}` (verified live 2026-09-19 on 2.0.2).
-2. Post the decision. **Only the `approval_<uuid>` id is accepted** —
-   posting the `tool_call_id` answers
-   `{"code":40404,"msg":"approval tool_… not found","data":null,...}`
-   (verified live 2026-08-27; up to 0.38.0 either spelling worked because
-   they were the same string):
+### The `interaction` frame
 
-```bash
-curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../approvals/approval_92bb2ce7-0956-4791-ba68-ac8f8762093f \
-  -H "Authorization: Bearer <token>" \
-  -H 'Content-Type: application/json; charset=utf-8' \
-  -d '{"decision":"approved"}'
-# {"code":0,"msg":"success","data":{"resolved":true,"resolved_at":"2026-08-27T19:54:53.787Z"},"request_id":"01M12CM9EJDYPKP9BT211FGFDP"}
-```
+Approvals and questions from every agent in the session, sub-agents included,
+arrive as the flat `interaction` frame. Unlike every other session event it has
+**no `seq`, `timestamp`, or `payload` wrapper**, it is never journaled and never
+replayed, and it is not tied to a cursor. Fields:
 
-Body fields: `decision` (`"approved"` | `"rejected"`; the 40001 error for an
-invalid value lists a third accepted enum, `"cancelled"` — observed
-2026-09-19 on 2.0.2, never exercised), optional `scope`,
-`feedback`, `selected_label`. After the decision the WS emits
-`event.approval.resolved` and `permission.approval.resolved`, then the tool
-runs.
+| Field | Type | Description |
+| --- | --- | --- |
+| `type` | string | `"interaction"` |
+| `session_id` | string | Session id |
+| `agent_id` | string | The asking agent: `"main"` or a sub-agent id |
+| `event_created_at` | string | When this frame was produced, ISO 8601 |
+| `interaction_id` | string | `approval_<uuid>` or `question_<uuid>`; the id the response route takes |
+| `status` | string | `pending` / `ended` |
+| `outcome` | string | Only on `ended`: `approved`/`rejected`/`cancelled` (approval) or `answered`/`dismissed`/`cancelled` (question) |
+| `ended_at` | string | Only on `ended`, ISO 8601 |
+| `tool_call_id` | string | Optional; the transcript row's tool-call id (the provider's id, e.g. `call_00_…` or `tool_…`) |
+| `kind` | string | `approval` / `question` |
+| `request` | object | Approval: `{tool_name, action, tool_input_display?, expires_at}`. Question: `{questions[]}` |
+| `response` | object | Only on `ended`: approval `{decision, scope?, feedback?, selected_label?}`; question `{answers?}` (only when `answered`) |
 
-## Questions
-
-The agent's user-question tool (`AskUserQuestion`) surfaces as **WebSocket
-events**; the answer or dismissal is posted back via REST. Re-verified
-2026-07-30 on 0.31.0 (same flow as
-2026-07-27 on 0.29.2: surface + selected-option answer + dismiss + polling,
-same session flow as 2026-07-23 on 0.29.0) by prompting a session to call the
-tool — the question surfaced directly, with no approval gate, under the
-session's default permission mode. Flow re-verified end-to-end on 0.32.0
-(2026-08-05: surface + selected-option answer + dismiss + re-dismiss `40902` +
-pending polling, all byte-identical), and the answer/dismiss routes plus the
-new id convention on 0.38.0 (2026-08-20). Since 0.32.0 the resolve routes also
-accept question ids containing **colons** (upstream #2585 — some
-OpenAI-compatible providers emit tool-call ids like `AskUserQuestion:0`).
-On 0.38.0 question ids are server-minted `question_<uuid>` strings (see step
-1), so provider tool-call id shapes no longer reach the route at all.
-
-1. Surface sequence: `tool.call.started` (`"name": "AskUserQuestion"`) →
-   `event.session.work_changed` with `pending_interaction: "question"` →
-   `event.question.requested` (verbatim payload in the WS section). **0.38.0
-   drift: the question id is no longer the `toolCallId`** — `question_id` is
-   now a dedicated interaction id (`question_<uuid>`), and the payload carries
-   BOTH `question_id` and a distinct `tool_call_id` (verified live 2026-08-20:
-   `question_a38aaf28-…` vs `tool_EwFXscDF0HraGfTelCTRdRe9`). Key
-   resolve/dismiss routes and resolution bookkeeping off `question_id`; the
-   `tool_call_id` is only the transcript row's id. Unlike
-   approvals there is **no v2 camelCase duplicate** — only the
-   `event.question.*` family exists. **2.0.2: the payload (WS frame, pending
-   poll, snapshot item alike) also carries `agent_id`** (snake_case,
-   optional in the schema, present on every 2.0.2 live capture — `"main"`
-   or the asking sub-agent's id; verified live 2026-09-19).
-   **Auto-mode caveat (verified live 2026-10-14 on 2.2.0):** a session
-   running `auto` permission mode gets a model-facing reminder not to call
-   `AskUserQuestion` at all — under `auto` the tool call never happens and
-   no question surfaces (the turn just completes). The end-to-end flow
-   below was therefore re-verified with the session switched to `manual`;
-   the wire contract is unchanged in every step.
-2. While a question is pending, the session object shows
-   `"pending_interaction": "question"`.
-3. Pending questions can also be polled —
-   `GET /api/v1/sessions/{id}/questions?status=pending` returns
-   `{"code":0,...,"data":{"items":[<same payload as event.question.requested>]}}`.
-   The `status` query param is mandatory and only accepts `"pending"`; without
-   it: `{"code":40001,"msg":"status: Invalid input: expected \"pending\"",...}`.
-   **`GET /api/v1/sessions/{id}/questions/{qid}` does not exist** (plain HTTP
-   404, `{"statusCode":404,"error":"Not Found",...}` — re-verified 2026-07-23)
-   — the single-question shape only exists inside the list item / WS event
-   payload.
-
-**Multi-select questions** (verified live 2026-08-02 on 0.31.1, against
-`packages/protocol/src/question.ts` in the upstream repo): every question item
-carries a **`multi_select` boolean** — **0.34.0: present only when `true`**
-(single-select items omit the key entirely in the `event.question.requested`
-payload, the `/questions?status=pending` poll, and the history `tool_use`
-input; re-verified live 2026-08-06 — on 0.31.1 it appeared in both `true` and
-`false` form). Treat absence as `false`; the protocol schema marks it
-optional, and the session snapshot behaves the same. **0.43.1 observation
-(2026-09-15):** the omission rule is input-dependent — when the model
-passes `multi_select` explicitly in its `AskUserQuestion` input, the wire
-item echoes it verbatim, so a single-select item can arrive with
-`"multi_select":false` present (observed on both the
-`event.question.requested` frame and the pending poll). Decoders must
-accept both forms. The history
-(`GET .../messages`) `tool_use` input for
-`AskUserQuestion` also carries `multi_select` per question (when true), but its options
-are **label-only** (no ids). The `skipped` answer kind and the optional
-`method`/`note` body fields exist in the protocol schema (`skipped` omits the
-item from the flattened `answers`; all-skipped degrades to the dismiss shape)
-— source-verified only, never observed live.
-
-4. Answer — `POST /api/v1/sessions/{id}/questions/{qid}`. `answers` keys are
-   the per-question item ids from the request payload (`q_0`); values are a
-   discriminated union on `kind` (single/other re-verified 2026-07-23, multi
-   kinds verified live 2026-08-02 on 0.31.1):
-
-```bash
-# selected option (re-verified 2026-07-23)
-curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../questions/tool_Isj4WDPaDkLQejGM4gDzWgQ3 \
-  -H "Authorization: Bearer <token>" \
-  -H 'Content-Type: application/json; charset=utf-8' \
-  -d '{"answers":{"q_0":{"kind":"single","option_id":"opt_0_1"}}}'
-# free text (the question had "allow_other": true; re-verified 2026-07-23)
-curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../questions/tool_J7bZIaNmzApVJZvKP0aQh9I5 \
-  -H "Authorization: Bearer <token>" \
-  -H 'Content-Type: application/json; charset=utf-8' \
-  -d '{"answers":{"q_0":{"kind":"other","text":"ramen"}}}'
-# multi-select, two options (verified live 2026-08-02 on 0.31.1)
-curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_28ba6c7b.../questions/tool_t4BQ8GpCUJGg32O6PTAPEpdy \
-  -H "Authorization: Bearer <token>" \
-  -H 'Content-Type: application/json; charset=utf-8' \
-  -d '{"answers":{"q_0":{"kind":"multi","option_ids":["opt_0_0","opt_0_2"]}}}'
-# multi-select + free text combined (verified live 2026-08-02 on 0.31.1)
-curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_28ba6c7b.../questions/tool_qRyyocUhF4wX6gCV6DqagJgx \
-  -H "Authorization: Bearer <token>" \
-  -H 'Content-Type: application/json; charset=utf-8' \
-  -d '{"answers":{"q_0":{"kind":"multi_with_other","option_ids":["opt_0_0"],"other_text":"Fish"}}}'
-```
-
-All four kinds return HTTP 200
-`{"code":0,"msg":"success","data":{"resolved":true,"resolved_at":"..."},...}`.
-On the wire: `event.session.work_changed` (`pending_interaction` back to
-`"none"`) → `event.question.answered` → `tool.result` whose output is
-`{"answers":{"<question text>":"<flattened answer>"}}` → the turn
-continues. The flattened value is the option label for `single`, the raw text
-for `other`, the selected labels **joined with `", "`** for `multi`
-(`"Red, Blue"`, verified live 2026-08-02) and the labels followed by the free
-text, same join, for `multi_with_other` (`"Dog, Fish"`, verified live
-2026-08-02). Answering an already-resolved question returns
-`{"code":40902,"msg":"question <qid> already resolved","data":{"resolved":false},...}`
-(re-verified 2026-07-23; 0.27.0 returned `40405` "not found").
-
-Two multi-answer caveats (both verified live 2026-08-02 on 0.31.1):
-
-- `{"kind":"multi","option_ids":[]}` is refused with envelope code `40001`
-  (`answers.q_0.option_ids: Too small: expected array to have >=1 items`) and
-  the question **stays pending** — a multi answer needs at least one option.
-- Option ids are **not validated** against the question's options: a bogus id
-  resolves the question and flattens verbatim into the answer value
-  (`{"answers":{"Which colors do you like?":"opt_0_9"}}`). Clients must
-  validate selections themselves.
-
-5. Dismiss — `POST /api/v1/sessions/{id}/questions/{qid}:dismiss`, body `{}`:
+Verbatim pending approval (manual Bash, 2026-10-28):
 
 ```json
-{"code":40909,"msg":"question tool_nZX3S4ZZ6klG3ppFyIUKvUNa dismissed",
- "data":{"dismissed":true,"dismissed_at":"2026-07-23T03:37:06.177Z"},
- "request_id":"01KY6GRQW0TPCSD8GNAQ47VN7T"}
+{"type":"interaction","session_id":"session_0b0a0493-7384-4d51-ba07-5badf36e8c9e",
+ "agent_id":"main","event_created_at":"2026-10-28T19:27:19.813Z",
+ "interaction_id":"approval_3c06aff8-3e53-4ecf-8e78-a841b579f4ec","status":"pending",
+ "tool_call_id":"call_00_KIfpS3Zd2Ch9FwjlUnG20665","kind":"approval",
+ "request":{"tool_name":"Bash","action":"Running: rm -rf /home/ubuntu/spike/drift-24/approval-target",
+            "tool_input_display":{"kind":"command","command":"rm -rf /home/ubuntu/spike/drift-24/approval-target",
+                                  "cwd":"/home/ubuntu/spike","language":"bash"},
+            "expires_at":"2026-10-29T19:27:19.811Z"}}
 ```
 
-**Beware: a successful dismiss comes back over HTTP 200 with the non-zero
-envelope code `40909`** — do not gate success on `code == 0` here; check
-`data.dismissed`. Re-dismissing a resolved question also returns
-`code:40902` ("already resolved"; re-verified 2026-07-23). On the wire:
-`event.session.work_changed` (`"none"`) → `event.question.dismissed` →
-`tool.result` with output
-`{"answers":{},"note":"User dismissed the question without answering."}` → the
-turn continues.
+The same interaction after `{"kind":"approval","decision":"approved"}`:
 
-**Background questions (`background: true`) — 0.41.0 fix (commit `523d35b5`,
-verified live 2026-09-04):** a background `AskUserQuestion` call no longer
-dies with its turn (up to 0.40.1 it was cancelled at turn end). The
-lifecycle matches a background task's:
+```json
+{"type":"interaction","session_id":"session_0b0a0493-7384-4d51-ba07-5badf36e8c9e",
+ "agent_id":"main","event_created_at":"2026-10-28T19:27:20.145Z",
+ "interaction_id":"approval_3c06aff8-3e53-4ecf-8e78-a841b579f4ec","status":"ended",
+ "outcome":"approved","ended_at":"2026-10-28T19:27:20.145Z",
+ "tool_call_id":"call_00_KIfpS3Zd2Ch9FwjlUnG20665","kind":"approval",
+ "request":{"tool_name":"Bash","action":"Running: rm -rf /home/ubuntu/spike/drift-24/approval-target",
+            "tool_input_display":{"kind":"command","command":"rm -rf /home/ubuntu/spike/drift-24/approval-target",
+                                  "cwd":"/home/ubuntu/spike","language":"bash"},
+            "expires_at":"2026-10-29T19:27:19.811Z"},
+ "response":{"decision":"approved"}}
+```
 
-- The question surfaces with the usual `event.question.requested` +
-  `pending_interaction: "question"`, then the turn can end **without**
-  resolving it. While it waits the session reads `busy: true` with
-  `main_turn_active: false` and `pending_interaction: "question"` — a state
-  combination earlier versions never produced (previously `busy` tracked
-  `main_turn_active` outside compactions).
-- The question registers in the main agent's task store: REST `/tasks`
-  lists it with wire kind **`tool`** (`{"id":"question-agfe3d68",…,
+Verbatim pending question (manual `AskUserQuestion`, 2026-10-28):
+
+```json
+{"type":"interaction","session_id":"session_0b0a0493-7384-4d51-ba07-5badf36e8c9e",
+ "agent_id":"main","event_created_at":"2026-10-28T19:28:18.527Z",
+ "interaction_id":"question_10025aea-b245-4d2e-a290-11461cf10422","status":"pending",
+ "tool_call_id":"call_00_IMrajNNAe1wdV1kRD3Zq6099","kind":"question",
+ "request":{"questions":[{"id":"q_0","question":"Cake or pie?",
+                         "options":[{"id":"opt_0_0","label":"Cake"},{"id":"opt_0_1","label":"Pie"}],
+                         "header":"Dessert","allow_other":true}]}}
+```
+
+After `{"kind":"question","answers":{"q_0":{"kind":"single","option_id":"opt_0_0"}}}`:
+
+```json
+{"type":"interaction","session_id":"session_0b0a0493-7384-4d51-ba07-5badf36e8c9e",
+ "agent_id":"main","event_created_at":"2026-10-28T19:28:18.858Z",
+ "interaction_id":"question_10025aea-b245-4d2e-a290-11461cf10422","status":"ended",
+ "outcome":"answered","ended_at":"2026-10-28T19:28:18.858Z",
+ "tool_call_id":"call_00_IMrajNNAe1wdV1kRD3Zq6099","kind":"question",
+ "request":{"questions":[{"id":"q_0","question":"Cake or pie?",
+                         "options":[{"id":"opt_0_0","label":"Cake"},{"id":"opt_0_1","label":"Pie"}],
+                         "header":"Dessert","allow_other":true}]},
+ "response":{"answers":{"Cake or pie?":"Cake"}}}
+```
+
+Notes:
+
+- **Pending re-send after subscribe.** Right after every accepted
+  `client_hello` / `subscribe` / `subscribe_v2` ack the server sends the
+  session's pending interactions to that connection (verified live: a fresh
+  subscribe while a question waited delivered the ack, then the pending
+  `interaction` frame). Clients should treat this as the authoritative pending
+  list rebuild: clear the session's pending interactions on the ack and
+  re-add them from the frames that follow. Order is unspecified; dedupe by
+  `interaction_id`. A resolved interaction is never re-sent.
+- **Ended frames reach every subscriber.** Close the card on the `ended`
+  frame, not on the REST response, so every client watching the session
+  converges — including the one that answered.
+- **Abort semantics.** Aborting a turn with a pending approval ends it with
+  `outcome:"cancelled"` and `response:{"decision":"cancelled"}`; aborting with
+  a pending question was observed ending it with `outcome:"dismissed"` and no
+  `response` (the REST transcript maps true engine cancellations to
+  `cancelled`; the live frame's question path reports dismissal).
+- An approval's `expires_at` is `event_created_at` + 24 h; `tool_input_display`
+  is the same discriminated object tool calls carry — `kind:"command"`, or
+  `kind:"plan_review"` with `{plan, path}` for `ExitPlanMode` (see below).
+- `permission.approval.requested` / `.resolved` (camelCase, with `id`,
+  `toolCallId`, `display`, `toolInput`) still ride the durable stream next to
+  these frames, sharing their `seq` with the surrounding events. They carry
+  the same `approval_<uuid>` id. Questions have no such duplicate.
+
+### Respond — `POST /api/v1/sessions/{id}/interactions/{interaction_id}`
+
+One route for both kinds; the body's `kind` must match the interaction's kind.
+The decision is routed back to the asking agent, so no `agent_id` is needed.
+
+With `kind:"approval"`:
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `decision` | string | **Required.** `approved` / `rejected` / `cancelled` |
+| `scope` | string | With `approved`, `session` (the only value) remembers the rule for the session |
+| `feedback` | string | Free-form feedback handed to the agent |
+| `selected_label` | string | The chosen label when the request offered labeled choices (plan review) |
+
+With `kind:"question"`, send exactly one of `answers` and `dismissed`:
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `answers` | object | Map of question item id (`q_0`, …) to an answer object |
+| `dismissed` | `true` | Dismiss without answering |
+| `method` | string | `enter` / `space` / `number_key` / `click` |
+| `note` | string | Free-form note |
+
+Each answer is discriminated by `kind`: `single` (`option_id`), `multi`
+(`option_ids`, at least 1), `other` (`text`), `multi_with_other`
+(`option_ids`, `other_text`), `skipped` (no fields; the item is omitted from
+the flattened answers).
+
+Success is the standard envelope with `data:{outcome, ended_at}` — for
+example:
+
+```json
+{"code":0,"msg":"success","data":{"outcome":"approved","ended_at":"2026-10-28T19:27:20.145Z"},"request_id":"01M61ZPCJB0ET579WG3TPXC3DP"}
+```
+
+A dismissal answers `data:{"outcome":"dismissed","ended_at":…}` — there is no
+special non-zero success code anymore (`40909` is gone).
+
+Errors (all with the standard envelope, no `stack`):
+
+```json
+{"code":40902,"msg":"interaction question_0c93eb23-8bf4-4a83-9139-f7566628115b has ended","data":null,"request_id":"…"}
+{"code":40404,"msg":"interaction question_00000000-0000-0000-0000-000000000000 not found","data":null,"request_id":"…"}
+{"code":40001,"msg":"kind: Invalid input","data":null,"request_id":"…","details":[{"path":"kind","message":"Invalid input"}]}
+```
+
+- `40401`: unknown session.
+- `40404`: no interaction with that id in the session (including an
+  `approval_…` id posted under the wrong session).
+- `40902`: the interaction already ended — answered elsewhere, or cancelled
+  because its turn ended or its agent closed.
+- `40001`: validation failure, including `kind` missing or mismatching the
+  interaction (checked before the resolve attempt; a mismatched body against
+  an already-ended interaction reports `40902` first).
+
+### Approval flow, end to end
+
+A prompt submitted with `permission_mode:"manual"` that needs a tool:
+
+```
+tool.call.started                name "Bash"
+event.session.work_changed       pending_interaction "approval" (busy true)
+permission.approval.requested    durable v2 frame, same approval_<uuid>
+interaction                      status "pending", kind "approval"
+-- POST interactions/{id} {"kind":"approval","decision":"approved"} --
+interaction                      status "ended", outcome "approved"
+permission.approval.resolved     durable v2 frame
+event.session.work_changed       pending_interaction "none"
+tool.result … turn continues
+```
+
+`tool_call_id` is the provider's tool-call id and is only the transcript row's
+id; every REST action keys on `interaction_id`. Posting a previously used
+`approval_<uuid>` answers `40902`; posting an unknown id `40404`. A rejected
+decision ends the same way with `outcome:"rejected"`; the tool does not run.
+
+### Question flow, end to end
+
+```
+tool.call.started                name "AskUserQuestion"
+event.session.work_changed       pending_interaction "question"
+interaction                      status "pending", kind "question", questions[]
+-- POST interactions/{id} {"kind":"question","answers":{…}} --
+event.session.work_changed       pending_interaction "none"
+interaction                      status "ended", outcome "answered"
+tool.result                      output {"answers":{"<question text>":"<flattened>"}}
+turn continues
+```
+
+Flattening: `single` → option label; `other` → raw text; `multi` → selected
+labels joined with `", "`; `multi_with_other` → labels then free text, same
+join; `skipped` → item omitted. The `ended` frame's `response.answers` uses
+the **question text** as the key. Option ids are not validated against the
+item's options (a bogus id flattens verbatim), so clients must validate their
+own selections. A `multi` answer with an empty `option_ids` array fails
+`40001` and leaves the interaction pending.
+
+Dismissal posts `{"kind":"question","dismissed":true}` and produces
+`outcome:"dismissed"`; the question's `response` is omitted. On the wire the
+turn continues and the result carries
+`{"answers":{},"note":"User dismissed the question without answering."}`.
+
+**Multi-select rule:** each question item carries an optional
+`multi_select` boolean; absence means `false`. The server echoes the model's
+input verbatim when it passes the field explicitly, so both `true` and
+`false` forms occur; decoders must accept both. The history
+(`GET .../messages`) `tool_use` input for `AskUserQuestion` carries
+`multi_select` per question but its options are label-only (no ids). The
+`skipped` answer kind and the optional `method`/`note` body fields are
+schema-verified but never observed live.
+
+**Auto-mode caveat (verified live 2026-10-14 on 2.2.0, unchanged):** a
+session running `auto` permission mode gets a model-facing reminder not to
+call `AskUserQuestion` at all — under `auto` the tool call never happens and
+no question surfaces. The flow above was therefore re-verified with the
+session switched to `manual`.
+
+### Pending state on REST
+
+The snapshot keeps both pending lists in their **pre-2.4.0 item shapes**
+(`pending_approvals` with `approval_id`/`tool_call_id`/`agent_id`/…,
+`pending_questions` with `question_id`/`questions[]`/`agent_id`/…) — see
+Session snapshot. There is no per-session pending list route anymore:
+`GET .../approvals` and `GET .../questions` are plain HTTP 404s. While an
+interaction waits, the session object reads `pending_interaction:
+"approval"|"question"` and `busy:true` (a background question can keep
+`busy:true` with `main_turn_active:false`).
+
+### Plan review approvals
+
+`ExitPlanMode` asks for approval with a plan body. Verbatim
+`tool_input_display` (live 2026-10-28, after entering plan mode through
+`POST .../profile {"agent_config":{"plan_mode":true}}`):
+
+```json
+{"kind":"plan_review",
+ "plan":"# Add README.md with \"hello\"\n\n## Context\n\n…",
+ "path":"/home/ubuntu/.kimi-code/sessions/wd_…/agents/main/plans/animal-man-moon-girl-squirrel-girl.md"}
+```
+
+`action` reads "Presenting plan and exiting plan mode". The approval can be
+answered `approved` (with optional `selected_label`, e.g. "Approve plan") or
+`rejected`. Since 2.4.0 every plan waits for this review: the agent can no
+longer enter plan mode itself and `auto` no longer approves plans silently.
+Style note: `tool_input_display` can also be absent; clients should fall back
+to `action`.
+
+### Background questions (`background: true`)
+
+The 0.41.0 lifecycle is unchanged; only the event names moved. A background
+`AskUserQuestion` call no longer dies with its turn:
+
+- The question surfaces as an `interaction` frame with
+  `pending_interaction:"question"`, then the turn can end **without**
+  resolving it. While it waits the session reads `busy:true` with
+  `main_turn_active:false` and `pending_interaction:"question"`.
+- The question registers in the main agent's task store: REST `/tasks` lists
+  it with wire kind **`tool`** (`{"id":"question-agfe3d68",…,
   "kind":"tool","description":"<the question text>","run_in_background":true}`),
   and `task.started`/`background.task.started` ride the WS when it opens.
-- Answering (the ordinary REST route, same `question_<uuid>` id) emits
-  `event.question.answered` → `task.terminated` (core kind `question`) →
-  `background.task.terminated` → a **task-origin notification turn** on the
-  main agent: `turn.started` origin
+- Answering posts the same interaction route and emits the `ended` frame →
+  `task.terminated` (core kind `question`) → `background.task.terminated` → a
+  **task-origin notification turn** on the main agent: `turn.started` origin
   `{"kind":"task","taskId":"question-…","status":"completed","notificationId":"task:question-…:completed"}`,
   `task.notified` with `notificationType:"task.completed"` and title
   "Background question answered", and a `context.spliced` `<notification>`
-  message that inlines the answer text (up to 0.40.1 the answer was saved
-  to an output file for the agent to read).
-- The background tool result text shrank to `task_id:` / `status:` /
-  `next_step:` lines (the `description:`/`automatic_notification:` lines are
-  gone) — tool prose, not wire shape.
+  message that inlines the answer text.
+- The background tool result text is `task_id:` / `status:` / `next_step:` —
+  tool prose, not wire shape.
+
+
+
 
 ## Todos
 
@@ -5478,13 +5652,12 @@ seq 5   turn.started               {"turnId": 0, "origin": {"kind": "user"}, "pr
                                     "promptId": "msg_…" ← always present since 0.40.1}
 seq 6   context.spliced            the new user message, inline
 seq 7   turn.step.started          step 1; thinking.delta, tool.call.delta xN
-seq 8   permission.approval.requested  v2 shape (approval id = toolCallId up to 0.38.0;
-                                        a dedicated approval_<uuid> id since 0.39.0)
+seq 8   permission.approval.requested  durable v2 shape (approval_<uuid> id)
 seq 9   event.session.work_changed pending_interaction "approval"
-seq 10  event.approval.requested   legacy shape (approval_id, expires_at +24 h)
-seq 11  event.session.work_changed pending_interaction back to "none" (decision posted)
-seq 12  event.approval.resolved    after the REST decision
-seq 13  permission.approval.resolved v2 duplicate
+        interaction               flat, unsequenced: status "pending"
+seq 10  event.session.work_changed pending_interaction back to "none" (decision posted)
+        interaction               flat, unsequenced: status "ended", outcome
+seq 11  permission.approval.resolved v2 duplicate
 seq 14  tool.call.started + tool.progress (volatile stdout streaming)
 seq 15  tool.result
 seq 16  turn.step.completed        usage + finishReason "tool_use" + latency stats
@@ -5532,20 +5705,21 @@ seq 35  prompt.completed           promptId = A (the original active prompt)
 ```
 
 Question round-trip (2026-07-23; the prompt asked the agent to use its
-`AskUserQuestion` tool):
+`AskUserQuestion` tool; event names updated for 2.4.0):
 
 ```
 seq 50  tool.call.started          name "AskUserQuestion"
 seq 51  event.session.work_changed pending_interaction "question"
-seq 52  event.question.requested   question_id (== toolCallId before 0.38.0), questions inline
+        interaction               flat, unsequenced: status "pending", questions inline
 -- answer posted via REST --
 seq 53  event.session.work_changed pending_interaction "none"
-seq 54  event.question.answered    answers {"<question text>": "<label or free text>"}
+        interaction               flat, unsequenced: status "ended", outcome "answered"
 seq 55  tool.result                output {"answers":{...}}; the turn continues
 ```
 
-Dismiss path instead of the answer (2026-07-23): `event.session.work_changed`
-(`"none"`) → `event.question.dismissed` → `tool.result` with output
+Dismiss path instead of the answer: `event.session.work_changed`
+(`"none"`) → `interaction` `status:"ended"`, `outcome:"dismissed"` →
+`tool.result` with output
 `{"answers":{},"note":"User dismissed the question without answering."}`.
 
 ### Core event payloads (verbatim captures, re-verified 0.32.0)
@@ -5820,45 +5994,36 @@ Otherwise unchanged:
             "agentId":"main","sessionId":"session_..."}}
 ```
 
-**Permission requested — v2 shape** (`permission.approval.requested`,
-camelCase; **no `expires_at`**). **0.39.0:** gained a dedicated
-**`id: "approval_<uuid>"`** — up to 0.38.0 there was no id field and
-`toolCallId` doubled as the approval id (fresh 0.39.0 capture, verified
-2026-08-27):
+**Approval interaction** (flat frame, no `seq`/`timestamp`/`payload`; 2.4.0
+caption — the earlier v2/legacy pair is history). Pending and its ended twin,
+verbatim (2026-10-28):
 
 ```json
-{"type":"permission.approval.requested","seq":276,
- "payload":{"type":"permission.approval.requested","time":1787860456869,
-            "id":"approval_92bb2ce7-0956-4791-ba68-ac8f8762093f",
-            "sessionId":"session_...","agentId":"main",
-            "turnId":11,"toolCallId":"tool_m7jk00BDj5fLljgs8LRp9YCP",
-            "toolName":"Bash","action":"Running: echo approval-probe",
-            "display":{"kind":"command","command":"echo approval-probe","cwd":"/home/ubuntu/spike","language":"bash"},
-            "toolInput":{"command":"echo approval-probe"}}}
-```
-
-**Permission requested — legacy shape** (`event.approval.requested`, still
-emitted right after the v2 one; `expires_at` is `created_at` + 24 h).
-**0.39.0:** `approval_id` is the same dedicated `approval_<uuid>` as the v2
-frame's `id`, no longer equal to `tool_call_id` (fresh 0.39.0 capture,
-verified 2026-08-27). **2.0.2:** the payload gained snake_case `agent_id`
-(see Permissions; verbatim 2.0.2 capture in the header drift block):
-
-```json
-{"type":"event.approval.requested","seq":278,
- "payload":{"type":"event.approval.requested","sessionId":"session_...","agentId":"main",
-            "approval_id":"approval_92bb2ce7-0956-4791-ba68-ac8f8762093f","session_id":"session_...",
-            "turn_id":11,"tool_call_id":"tool_m7jk00BDj5fLljgs8LRp9YCP",
-            "tool_name":"Bash","action":"Running: echo approval-probe",
-            "tool_input_display":{"kind":"command","command":"echo approval-probe",
+{"type":"interaction","session_id":"session_0b0a0493-…","agent_id":"main",
+ "event_created_at":"2026-10-28T19:27:19.813Z",
+ "interaction_id":"approval_3c06aff8-3e53-4ecf-8e78-a841b579f4ec","status":"pending",
+ "tool_call_id":"call_00_KIfpS3Zd2Ch9FwjlUnG20665","kind":"approval",
+ "request":{"tool_name":"Bash","action":"Running: rm -rf /home/ubuntu/spike/drift-24/approval-target",
+            "tool_input_display":{"kind":"command","command":"rm -rf /home/ubuntu/spike/drift-24/approval-target",
                                   "cwd":"/home/ubuntu/spike","language":"bash"},
-            "created_at":"2026-08-27T19:54:16.870Z","expires_at":"2026-08-28T19:54:16.870Z"}}
+            "expires_at":"2026-10-29T19:27:19.811Z"}}
+{"type":"interaction","session_id":"session_0b0a0493-…","agent_id":"main",
+ "event_created_at":"2026-10-28T19:27:20.145Z",
+ "interaction_id":"approval_3c06aff8-3e53-4ecf-8e78-a841b579f4ec","status":"ended",
+ "outcome":"approved","ended_at":"2026-10-28T19:27:20.145Z",
+ "tool_call_id":"call_00_KIfpS3Zd2Ch9FwjlUnG20665","kind":"approval",
+ "request":{"tool_name":"Bash","action":"Running: rm -rf /home/ubuntu/spike/drift-24/approval-target",
+            "tool_input_display":{"kind":"command","command":"rm -rf /home/ubuntu/spike/drift-24/approval-target",
+                                  "cwd":"/home/ubuntu/spike","language":"bash"},
+            "expires_at":"2026-10-29T19:27:19.811Z"},
+ "response":{"decision":"approved"}}
 ```
 
-Both are followed (after the REST decision) by `event.approval.resolved` →
-`{"approval_id": "...", "decision": "approved", "resolved_at": "..."}` and its
-`permission.approval.resolved` v2 duplicate (adds `"decision"` to the request
-payload).
+The durable `permission.approval.requested` / `.resolved` v2 frames still ride
+the same stream (unchanged; same `approval_<uuid>` id) and are followed by the
+`interaction` pair, not instead of it. The old `event.approval.*` frames no
+longer exist. An abort while the approval waits ends it with
+`outcome:"cancelled"` and `response:{"decision":"cancelled"}`.
 
 **Prompt finished** (0.37.2: the payload also carries `time`, epoch ms — see the
 `turn.started`/`turn.ended` note above; otherwise unchanged):
@@ -5922,68 +6087,38 @@ Pre-2.0.1 capture (no `messageId`; 0.29.x era):
             "steeredAt":"2026-07-23T03:30:19.589Z","agentId":"main","sessionId":"session_..."}}
 ```
 
-**Question requested** (`event.question.requested`; snake_case;
-no v2 duplicate). **0.38.0 drift (verified live 2026-08-20): `question_id` is
-now a dedicated `question_<uuid>` interaction id, distinct from
-`tool_call_id`** — both fields are present (before 0.38.0 they were equal).
-**2.0.2:** the payload gained snake_case `agent_id` (see Questions;
-verbatim 2.0.2 item in the header drift block). `options[].description`
-is omitted when the option has none; `header` is optional and was absent
-entirely from the 2026-07-23 captures (key order is not stable either — never
-rely on it). `multi_select` is present per item in both `true` and `false`
-form (verified live 2026-08-02 on 0.31.1; **0.34.0: present only when
-`true`**). Fresh 0.38.0 capture (2026-08-20):
+**Question interaction** (flat frame; no camelCase duplicate exists for
+either kind). Pending and answered, verbatim (2026-10-28):
 
 ```json
-{"type":"event.question.requested","seq":10,
- "payload":{"type":"event.question.requested","question_id":"question_a38aaf28-7dfe-489d-bca3-ea43c93b86fa",
-            "session_id":"session_...","turn_id":0,
-            "tool_call_id":"tool_EwFXscDF0HraGfTelCTRdRe9",
-            "questions":[{"id":"q_0","question":"Pick a color?",
-                          "options":[{"id":"opt_0_0","label":"Red"},
-                                     {"id":"opt_0_1","label":"Blue"}],
-                          "allow_other":true}],
-            "created_at":"2026-08-20T19:33:45.150Z","agentId":"main","sessionId":"session_..."}}
+{"type":"interaction","session_id":"session_0b0a0493-…","agent_id":"main",
+ "event_created_at":"2026-10-28T19:28:18.527Z",
+ "interaction_id":"question_10025aea-b245-4d2e-a290-11461cf10422","status":"pending",
+ "tool_call_id":"call_00_IMrajNNAe1wdV1kRD3Zq6099","kind":"question",
+ "request":{"questions":[{"id":"q_0","question":"Cake or pie?",
+                         "options":[{"id":"opt_0_0","label":"Cake"},{"id":"opt_0_1","label":"Pie"}],
+                         "header":"Dessert","allow_other":true}]}}
+{"type":"interaction","session_id":"session_0b0a0493-…","agent_id":"main",
+ "event_created_at":"2026-10-28T19:28:18.858Z",
+ "interaction_id":"question_10025aea-b245-4d2e-a290-11461cf10422","status":"ended",
+ "outcome":"answered","ended_at":"2026-10-28T19:28:18.858Z",
+ "tool_call_id":"call_00_IMrajNNAe1wdV1kRD3Zq6099","kind":"question",
+ "request":{"questions":[{"id":"q_0","question":"Cake or pie?",
+                         "options":[{"id":"opt_0_0","label":"Cake"},{"id":"opt_0_1","label":"Pie"}],
+                         "header":"Dessert","allow_other":true}]},
+ "response":{"answers":{"Cake or pie?":"Cake"}}}
 ```
 
-0.29.0 capture for comparison:
-
-```json
-{"type":"event.question.requested","seq":52,
- "payload":{"type":"event.question.requested","question_id":"tool_Isj4WDPaDkLQejGM4gDzWgQ3",
-            "session_id":"session_...","turn_id":3,
-            "tool_call_id":"tool_Isj4WDPaDkLQejGM4gDzWgQ3",
-            "questions":[{"id":"q_0","question":"Red or blue?",
-                          "options":[{"id":"opt_0_0","label":"red","description":"warm color"},
-                                     {"id":"opt_0_1","label":"blue","description":"cool color"}],
-                          "allow_other":true}],
-            "created_at":"2026-07-23T03:33:08.490Z","agentId":"main","sessionId":"session_..."}}
-```
-
-**Question answered** (`event.question.answered`; `answers` is keyed by
+`options[].description` is omitted when the option has none; `header` is
+optional and was absent entirely from the 2026-07-23 captures (key order is
+not stable either — never rely on it). `multi_select` is input-dependent: the
+server echoes the model's argument verbatim, so both `true` and `false` forms
+occur; absence means `false`. The ended frame's `response.answers` is keyed by
 **question text**, values are option labels or free text — multi-select
 answers flatten to labels joined with `", "`, free text appended the same way
-for `multi_with_other`; verified live 2026-08-02). Single/other unchanged —
-selected option and free text both re-verified 2026-07-23:
-
-```json
-{"type":"event.question.answered","seq":54,
- "payload":{"type":"event.question.answered","question_id":"tool_Isj4WDPaDkLQejGM4gDzWgQ3",
-            "answers":{"Red or blue?":"blue"},"resolved_at":"2026-07-23T03:33:36.757Z",
-            "agentId":"main","sessionId":"session_..."}}
-{"type":"event.question.answered","seq":88,
- "payload":{"type":"event.question.answered","question_id":"tool_J7bZIaNmzApVJZvKP0aQh9I5",
-            "answers":{"What is your favorite food?":"ramen"},"resolved_at":"2026-07-23T03:38:18.621Z",
-            "agentId":"main","sessionId":"session_..."}}
-```
-
-**Question dismissed:**
-
-```json
-{"type":"event.question.dismissed","seq":71,
- "payload":{"type":"event.question.dismissed","question_id":"tool_nZX3S4ZZ6klG3ppFyIUKvUNa",
-            "dismissed_at":"2026-07-23T03:37:06.177Z","agentId":"main","sessionId":"session_..."}}
-```
+for `multi_with_other`. An abort while the question waits was observed ending
+it with `outcome:"dismissed"` and no `response`; an explicit dismissal is the
+same shape.
 
 ### The v3 protocol (added 0.43.0, **removed in 2.0.2** — never used by the app)
 
@@ -6058,6 +6193,75 @@ deployment** (verified live — handshake refused).
 
 ## Verification log
 
+- 2026-10-28 re-verification on `2.4.0` (server 2.3.3 → 2.4.0; throwaway
+  sessions `session_0b0a0493-…`, `session_e27cced3-…`, `session_9415ea78-…`,
+  `session_b3b293e0-…`, `session_ddb95bd4-…`, `session_088406ec-…`, and a
+  deleted lifecycle session, all created with
+  `metadata.cwd=/home/ubuntu/spike`; the nightly job's
+  `pending-changelog.md` covered 2.3.1→2.4.0 (49 commits), reviewed via the
+  GitHub API; the post-2.3.3 slice is 10 commits with two protocol files
+  touched — `461c6e92` (`packages/kap-server`: interaction frame/route) and
+  `78b72fe4` (`routes/prompts.ts`: `swarm_mode`); live probes over REST +
+  Node's built-in WebSocket against `127.0.0.1:58627`).
+  Drift found (one breaking interaction change, one additive prompt field):
+  (a) **breaking** — `event.approval.*` / `event.question.*` removed and
+      replaced by the flat `interaction` frame; `POST .../approvals/{id}`,
+      `POST .../questions/{id}`, `POST .../questions/{id}:dismiss`,
+      `GET .../approvals`, `GET .../questions` removed; one
+      `POST .../interactions/{id}` remains (`{kind:"approval",decision,…}` /
+      `{kind:"question",answers|dismissed}` → `{outcome, ended_at}`).
+      Verbatim pending/ended captures for both kinds in Interactions; the
+      error paths `40404` unknown id, `40902` ended, `40001` kind mismatch,
+      and the old routes' plain HTTP 404s were exercised live. Pending
+      interactions are re-sent after every accepted subscribe ack.
+      `permission.approval.requested`/`.resolved` still ride the durable
+      stream unchanged; the v2 frames were observed next to the new ones.
+      Abort with a pending approval → `outcome:"cancelled"` /
+      `response:{decision:"cancelled"}`; abort with a pending question →
+      `outcome:"dismissed"`, no `response`;
+  (b) `swarm_mode` on the prompt POST is applied now (true→`/status`
+      `swarm_mode:true`, false→false); up to 2.3.3 it was ignored;
+  (c) engine behavior: plan mode is user-only and every plan waits for
+      review — an `ExitPlanMode` approval carries
+      `tool_input_display:{kind:"plan_review",plan,path}` (verbatim in
+      Interactions), and `POST .../profile {"agent_config":{"plan_mode":true}}`
+      still enters plan mode;
+  (d) idle sessions unload after 30 min
+      (`KIMI_CODE_SESSION_IDLE_RECLAIM_MS`) and resume transparently;
+  (e) content drift: 35 tools on an initialized agent (26 builtins + 9 MCP;
+      `ReadMediaFile` absent), 12 models, `default_model`
+      `deepseek/deepseek-v4-flash`, `/meta` 5 flags and 17 features; a
+      `kimi-code/k3` prompt still failed with `provider.auth_error` / HTTP
+      403 subscription text, so the turn probes ran on DeepSeek.
+  Re-verified unchanged: meta, config, sessions
+  create/get/list/status/snapshot, `40401`, `:reload` (idle, session DTO),
+  `:takeover` (idle `{taken_over:true}`), `:archive`/`:restore`, `:delete`
+  plus the `__global__` `event.session.deleted`, a full prompt round-trip
+  (`agent.created` → `agent.status.updated` → `prompt.submitted` →
+  `session.meta.updated` → `turn.started` → `context.spliced` →
+  `prompt.started` → steps/deltas → `turn.ended` → `work_changed` →
+  `prompt.completed`; no `streaming` phase), queueing + steer
+  (`prompt.queued` `queueLength:1`, `prompt.steered` reusing the queued id,
+  `turn.steer` with `inTurn:true` and the same `messageId`), running and idle
+  `:abort`, both compaction bodies (`tokensAfter` 29740 == post-compact
+  `context_tokens`, instruction echo, wholesale splice) and both `40910`s
+  with `stack`, questions (answer → `answered` + `response.answers` keyed by
+  question text, dismiss → `dismissed`, re-dismiss `40902`, unknown id
+  `40404`), approvals (approve and reject, both `interaction` pairs, the
+  snapshot `pending_approvals` item and `pending_interaction:"approval"`),
+  files (upload sniffed `media_type`, download 200, `Range` 206, prompt
+  `session_media` rewrite with `name`, delete → legacy route 404 while the
+  session media route still serves), the TodoList write
+  (`{"todos":[{"title","status"}]}` with `done`), foreground + background
+  sub-agents (`subagent.spawned` with `taskId`/`model`/`thinkingEffort`,
+  `subagent.completed` with `resultSummary`/`usage`/`contextTokens`,
+  `task.started` → `background.task.started` → `task.terminated` →
+  `background.task.terminated` → `task.notified`), REST `/tasks`, the v2
+  session table (`{items, has_more, next_page_token, total}`), workspaces,
+  global search (`index_state` ready, `stale:true`), and WS
+  hello/subscribe/ack/cursor-resume (replay from seq 65 re-delivered 66–68
+  before the ack; future seq → standalone `resync_required`
+  `epoch_changed` then the ack listing it).
 - 2026-10-28 re-verification on `2.3.3` (server 2.3.1 → 2.3.3; throwaway
   sessions `session_dac7161d-…`, `session_805f6cb8-…`, and
   `session_1e35eb75-…` created with `metadata.cwd=/home/ubuntu/spike`, all
