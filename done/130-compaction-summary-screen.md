@@ -149,3 +149,11 @@ the compaction path stops using it.
   use it, so a multi-KB summary is fine.
 - Chevron idiom source: the Edit/Read/Write rows in `ToolRows.kt` (ticket
   120's "tap or trailing chevron opens the content screen").
+
+## Implementation notes
+
+**2026-10-28 —** `CompactionSummaryStore` (put/consume), the `CompactionSummary`
+route + `CompactionSummaryScreen` (MarkdownBody in a selectable scroll, token
+delta in the top bar), the divider row's chevron and `onOpenSummary`, and the
+MessageList/ChatScreen threading. Tests: `CompactionSummaryStoreTest`,
+`CompactionSummaryScreenTest`, `CompactionDividerRowTest`, `RoutesTest`.

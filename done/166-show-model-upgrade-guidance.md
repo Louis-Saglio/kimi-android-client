@@ -62,3 +62,11 @@ Relevant code: `data/chat/ChatDtos.kt`, `ServerModel.kt`,
 `ModelsRepository.kt`, and `ui/chat/components/ModelPickerSheet.kt`.
 `SheetCheckRow` already supports subtitles and badges. The protocol schema and
 live-catalog absence are recorded in `docs/server-api.md`.
+
+## Implementation notes
+
+**2026-10-28 —** `ModelUpgradeDto` → `ServerModel.upgrade` (tolerant
+`retirement_at` parse); the shared picker badges upgradable rows, shows the
+replacement alias/retirement day, and opens the migration markdown in an
+`InfoDialog` without selecting. Tests: `ModelsRepositoryTest` (complete/absent
+upgrade), `ModelPickerSheetTest` (badge, subtitle, guide).

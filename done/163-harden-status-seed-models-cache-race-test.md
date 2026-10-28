@@ -64,3 +64,9 @@ is intentional (its comment says exactly that); the test was the bug.
   assertion may still pass — model does not depend on the models cache).
 - `modelsBody` is already set in the test; the missing piece is the
   await, not the fixture.
+
+## Implementation notes
+
+**2026-10-28 —** The named test now awaits `modelsAvailable` before `onSend()`;
+no other test in the class asserted a prompt-body thinking/model field without
+that wait. `promptThinking`'s cold-cache drop is untouched.

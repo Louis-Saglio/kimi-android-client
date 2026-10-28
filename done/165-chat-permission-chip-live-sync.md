@@ -81,3 +81,10 @@ fixture style.
   emission is needed.
 - Verbatim captured frame is in `docs/server-api.md` (drift section and the
   `agent.status.updated` core-payloads entry).
+
+## Implementation notes
+
+**2026-10-28 —** `AgentStatusUpdatedPayload.permission`, the
+`SessionPermissionUpdated` event, and the ChatViewModel handler that re-reads
+the stored pick and routes through `syncServerSessionPermission`. Tests:
+`ChatViewModelTest` (no stored pick updates; stored pick wins).

@@ -67,3 +67,11 @@ Relevant code: `data/network/Envelope.kt`, `DataError.kt`,
 `ui/chat/ChatViewModel.kt`. The current send failure already preserves the
 composer and emits `Effect.SendFailed`; build on that path rather than adding
 retries to `ApiClient`.
+
+## Implementation notes
+
+**2026-10-28 —** Envelope `details` → `DataError.Api`; `SessionsRepository.reloadSession`;
+the send-failure ladder posts `:reload`, applies one fresh snapshot resync and
+asks the user to retry, while 40931 explains the holder. The draft is preserved
+and nothing resubmits automatically. Tests: `ChatSendRecoveryTest`,
+`EnvelopeTest`, `SessionsRepositoryTest`.

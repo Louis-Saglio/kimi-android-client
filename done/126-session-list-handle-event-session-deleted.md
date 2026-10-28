@@ -69,3 +69,11 @@ collector test that the row is dropped on the event.
 - The REST side (`POST /api/v1/sessions/{id}:delete` →
   `{"deleted":true}`; get → `40401`) is verified and documented — reuse
   when a delete feature is ticketed.
+
+## Implementation notes
+
+**2026-10-28 —** `SessionListEvent.SessionDeleted` + `SessionDeletedPayload`; the
+socket parses `event.session.deleted` ahead of the unsubscribed filter and the
+session-list ViewModel drops the row through the shared `removeRow`. Tests:
+`OkHttpSessionListSocketTest` (verbatim 0.42.0 capture),
+`SessionListViewModelTest` (live drop, no refresh).

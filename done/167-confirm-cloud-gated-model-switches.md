@@ -91,3 +91,12 @@ come from `apps/kimi-code/src/utils/model-switch-confirm-config.ts` and
 `apps/kimi-code/src/tui/utils/model-switch.ts` at server 2.3.3. The server
 requires `session_type`; rules missing it are dropped during parsing. The live
 config and a verbatim capture are in `docs/server-api.md` under Client configs.
+
+## Implementation notes
+
+**2026-10-28 —** `ModelsRepository.modelSwitchConfirm` (POST client_configs),
+the config `models` alias map, `SwitchRule`/`SwitchConfirm` matching over
+`SessionAge`, and the idle-chat Continue/Cancel dialog. Alias-less or
+null/disabled configs keep immediate selection. Tests: `ClientConfigsTest`,
+`ModelsRepositoryTest`, `ChatViewModelTest` (matching, session types, cancel,
+fallbacks).

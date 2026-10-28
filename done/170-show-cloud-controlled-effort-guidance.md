@@ -94,3 +94,11 @@ come from `apps/kimi-code/src/tui/commands/config.ts` and
 `apps/kimi-code/src/utils/effort-switch-config.ts` at server 2.3.3. The live
 effort config and its descriptions are recorded in `docs/server-api.md` under
 Client configs.
+
+## Implementation notes
+
+**2026-10-28 —** `effort_switch_confirm` decoding (English descriptions + the
+shared rule shape), `UiState.activeEffortDescription` gated to
+`managed:kimi-code`, the description line under the effort segments, and the
+Continue/Cancel effort gate. Tests: `ClientConfigsTest`,
+`ChatViewModelTest` (old-session gate, cancel, managed-only description).

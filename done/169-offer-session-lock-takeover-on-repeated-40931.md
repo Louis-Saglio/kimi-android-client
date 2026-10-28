@@ -69,3 +69,11 @@ Relevant code: `data/network/Envelope.kt` (the envelope currently drops
 for 40931 only — do not grow a generic details model. The route shape and the
 verbatim 40931 envelope are in `docs/server-api.md` (Sessions → Takeover and
 Occupancy lock).
+
+## Implementation notes
+
+**2026-10-28 —** The holder's `clientDisplayName` names the conflict; the second
+consecutive 40931 opens the destructive Take over dialog (one
+`SessionsRepository.takeoverSession` POST, no prompt resubmission, draft kept).
+Tests: `SessionTakeoverTest` (display-name fallback, second-attempt gating,
+takeover success/failure).
