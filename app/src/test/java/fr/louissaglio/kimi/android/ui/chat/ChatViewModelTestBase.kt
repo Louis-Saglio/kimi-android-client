@@ -441,6 +441,20 @@ abstract class ChatViewModelTestBase {
                     }
                     path == "/api/v1/models" -> MockResponse(body = modelsBody)
                     path == "/api/v1/config" -> MockResponse(body = configBody)
+                    // The two cloud policies (tickets 167/170), keyed by the registered
+                    // name in the POST body — the real route serves one per request.
+                    path == "/api/v1/client_configs" -> {
+                        val name = request.body?.utf8()
+                            ?.let { runCatching { testJson.parseToJsonElement(it).jsonObject["name"] }.getOrNull() }
+                            ?.jsonPrimitive?.content
+                        MockResponse(
+                            body = if (name == "effort_switch_confirm") {
+                                effortSwitchConfigBody
+                            } else {
+                                modelSwitchConfigBody
+                            },
+                        )
+                    }
                     path.startsWith("/api/v1/ws") -> {
                         awaitStartupGetsQuiet()
                         webSocketUpgradeResponse(
