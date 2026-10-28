@@ -626,6 +626,7 @@ private fun ChatContent(
             supportedEfforts = uiState.supportedEfforts,
             selectedEffort = uiState.selectedEffort,
             defaultEffort = uiState.defaultEffort,
+            effortDescription = uiState.activeEffortDescription,
             onModelSelected = onModelSelected,
             onEffortSelected = onEffortSelected,
             onDismiss = { showModelPicker = false },

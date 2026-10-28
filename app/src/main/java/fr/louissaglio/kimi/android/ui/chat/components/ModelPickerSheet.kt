@@ -144,6 +144,23 @@ internal fun ModelPickerSheet(
                     effectiveEffort = selectedEffort ?: defaultEffort,
                     onEffortSelected = onEffortSelected,
                 )
+                // The cloud's English description of the active effort (ticket 170):
+                // the three bare labels carry no hint of what `max` costs otherwise.
+                if (effortDescription != null) {
+                    Text(
+                        text = effortDescription,
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+    upgradeGuide?.let { model ->
+        model.upgrade?.let { upgrade ->
+            InfoDialog(title = "Upgrade to ${upgrade.model}", onDismiss = { upgradeGuide = null }) {
+                MarkdownBody(upgrade.migrationMarkdown)
             }
         }
     }
