@@ -109,6 +109,9 @@ fun ChatScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
+    // Ticket 169: the SECOND consecutive 40931 opens a destructive Retry/Take over
+    // dialog instead of a snackbar; the message is the effect's occupied copy.
+    var occupiedWarning by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
     // Document/photo picker for composer attachments (ticket 033): the ViewModel
     // resolves each Uri via the AttachmentStore (size-capped) into a staged chip or
@@ -128,6 +131,29 @@ fun ChatScreen(
                     )
                     // The typed text was preserved in the UiState; Retry re-sends it as-is.
                     if (result == SnackbarResult.ActionPerformed) viewModel.onSend()
+                }
+                // Ticket 168: reload + resync done — offer the explicit retry.
+                is ChatViewModel.Effect.SessionReloaded -> {
+                    val result = snackbarHostState.showSnackbar(
+                        message = effect.message,
+                        actionLabel = "Retry",
+                        duration = SnackbarDuration.Long,
+                    )
+                    if (result == SnackbarResult.ActionPerformed) viewModel.onSend()
+                }
+                // Ticket 169: the first 40931 is a plain Retry snackbar; the second
+                // hands the decision to the destructive dialog below.
+                is ChatViewModel.Effect.SessionOccupied -> {
+                    if (effect.canTakeOver) {
+                        occupiedWarning = effect.message
+                    } else {
+                        val result = snackbarHostState.showSnackbar(
+                            message = effect.message,
+                            actionLabel = "Retry",
+                            duration = SnackbarDuration.Long,
+                        )
+                        if (result == SnackbarResult.ActionPerformed) viewModel.onSend()
+                    }
                 }
                 is ChatViewModel.Effect.OpenFile ->
                     if (!openWithOtherApp(context, effect.contentUri, effect.mimeType)) {
@@ -275,6 +301,44 @@ fun ChatScreen(
             image = image,
             loadImageBytes = loadImageBytes,
             onDismiss = { fullScreenImage = null },
+        )
+    }
+    occupiedWarning?.let { message ->
+        AlertDialog(
+            onDismissRequest = { occupiedWarning = null },
+            title = { Text("Session in use") },
+            text = {
+                Column {
+                    Text(message)
+                    Text(
+                        text = "Taking over a session that is still running elsewhere can " +
+                            "interleave the history. Only take over when the other client is gone.",
+                        modifier = Modifier.padding(top = 12.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        occupiedWarning = null
+                        viewModel.onTakeOverSession()
+                    },
+                ) {
+                    Text("Take over", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        occupiedWarning = null
+                        viewModel.onSend()
+                    },
+                ) {
+                    Text("Retry")
+                }
+            },
         )
     }
 }
