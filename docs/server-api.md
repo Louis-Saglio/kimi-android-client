@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-10-23
-(server version `2.3.1`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-10-28
+(server version `2.3.3`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, questions, abort, permissions, WebSocket events, file attachments,
@@ -12,10 +12,12 @@ rules, plus
 the workspace list used by the mobile create-session flow. Explicitly skipped:
 `fs:*`, terminals, cron, goals, providers, skills.
 
-Every endpoint below was executed against the live server; the exact commands
-used are shown with each section. Secrets are redacted (`<token>`).
+Every core-loop endpoint below was executed against the live server unless
+its paragraph says **source-derived**. The exact commands are shown with each
+section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `2.3.0`
+**Protocol history:** this document previously described server `2.3.1`
+(verified 2026-10-23; see git history), `2.3.0`
 (verified 2026-10-22; see git history), `2.2.0`
 (verified 2026-10-14; see git history), `2.1.1`
 (verified 2026-09-24; see git history), `2.0.2`
@@ -42,6 +44,84 @@ used are shown with each section. Secrets are redacted (`<token>`).
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
 that, `0.27.0` before that, and `0.23.3` before that.
+
+The drift from 2.3.1 to 2.3.3 is **additive-only on the wire: no route or
+WebSocket event was added or removed, while both registered client configs
+changed shape and `effort_switch_confirm` was added; nothing breaks the
+Android app**. The nightly job's `pending-changelog.md` fetch worked this
+time. The GitHub compare reports 13 commits between the tags. Only one
+client-facing protocol file changed in `packages/kap-server`
+(`src/services/clientConfigs.ts`, commits `f895f305` and `0051ef10`); the
+remaining changes are engine prompts, swarm gating, TUI dialogs, and the web
+bundle. Live verification used server `2.3.3`, started
+`2026-10-26T19:23:51.707Z`.
+
+- **`model_switch_confirm` rules gained `session_type`, wildcards, and
+  `warning`** (commit `f895f305`, verified live 2026-10-28): every rule now
+  requires `session_type: "old" | "new" | "all"`. `from` and `to` accept the
+  literal `*` wildcard, and a rule may carry `warning: {en?, zh?}` next to
+  `hint`. The live config is enabled and now publishes one `new`-session
+  price warning for `k3.1-pro-highspeed`, one `old`-session warning for the
+  same model, and one `old`-session rule for the other K3.1 targets. The
+  capture is in Client configs. Rules without `session_type` are
+  dropped by the server-side parser. Ticket 167 was updated for the new
+  shape; the app has no client-config consumer yet, so there is no decode
+  break.
+- **New client config `effort_switch_confirm`** (commit `0051ef10`, verified
+  live 2026-10-28): registered alongside `model_switch_confirm`. It carries
+  `descriptions: {enable, items: {low?, high?, max?: {en?, zh?}}}` and
+  `confirm: {enable, rules}` using the same rule shape as the model config.
+  The live response enables descriptions for all three efforts and one
+  `old`-session, wildcard-to-wildcard confirmation rule. See Client configs
+  for the verbatim payload. Ticket 170 consumes it in the app's effort row.
+- **Engine and TUI behavior, no wire-shape change:**
+  - `AgentSwarm` now runs only while swarm mode is on, and only the user can
+    turn swarm mode on (commits `c9a48369`/`f36c127a`/`fd2e2c7e`). A call
+    made while it is off returns an error tool result and starts no
+    subagents; a rejected call with no spawned members is hidden from the
+    transcript. The model is also told to launch `Agent` subagents only when
+    the user, `AGENTS.md`, or a skill asks for them.
+  - The TUI prints a static high-usage warning when `/swarm` activates swarm
+    mode (commit `07a34fe9`). This is local TUI prose, not a server event.
+  - The remaining TUI changes merge duplicate permission notices and update
+    model-switch dialog copy. None changes REST or WebSocket payloads.
+- **Content drift, not shape:** the catalog still has **12 models**, with
+  `kimi-code/k3.1-pro-highspeed` now displayed as "K3.1 Pro Highspeed 2x
+  Usage Cost" and `default_effort:"high"` on both K3.1 entries. The
+  server-wide default model moved to **`deepseek/deepseek-v4-flash`** (1M
+  context) from `kimi-code/k3-256k`. The initialized tool catalog reads
+  **36 entries: 27 builtins plus 9 MCP tools**; `ReadMediaFile` is absent
+  again. `GET /api/v1/config` still has `thinking.effort:"max"`,
+  `default_permission_mode:"auto"`, and no `disable_feedback_survey` or
+  `auto_session_title` keys.
+- **Provider state, not protocol:** a `kimi-code/k3` prompt under the
+  managed provider failed immediately with
+  `provider.auth_error` / HTTP 403 "Your current subscription does not have
+  access to Kimi Code right now" (verbatim error frames captured in the
+  verification log). The core-loop checks below then used the server's
+  configured `deepseek/deepseek-v4-flash` model and completed normally.
+  This is an account subscription state; the error envelope and turn
+  failure shapes are unchanged.
+
+Everything else re-verified unchanged live on 2.3.3: `/api/v1/meta` (same 5
+flags and 17 features, only `server_version` and `started_at` differ), the
+config projection, the models catalog shape, sessions create/get/list/status/
+snapshot (`last_seq:1`, `as_of_seq:2` on a fresh session), `40401` without
+`stack` on the get path, `:reload` on an idle and an unknown session, a full prompt
+round-trip (the documented skeleton, now on
+DeepSeek), the TodoList write contract, prompt queueing plus `prompt.steered`
+and the deferred steered turn after abort, running and idle `:abort`, both
+compaction bodies with `tokensAfter` matching post-compact `/status`, both
+`40910`s with `stack`, questions (pending poll, answer, re-answer `40902`,
+dismiss `40909`, re-dismiss `40902`), the manual approval round-trip
+(`tool_call_id` rejected `40404`, approval resolved), file upload/download/
+`Range`/delete and session-media survival, foreground and background
+sub-agents with task cancel (`40904` on re-cancel), `/tasks`, session rating
+(`evaluate` returns `{"appearance":null}`), `:takeover` on an idle session,
+WS hello/subscribe/ack/cursor replay, future-cursor `resync_required`, and
+the global `event.session.deleted` on session deletion. **App impact: none.
+Ticket 167 was updated for the new model-switch schema, ticket 170 was added
+for effort guidance, and no breakage ticket was needed.**
 
 The drift from 2.3.0 to 2.3.1 is **additive-only on the wire — one new route
 (`POST :takeover`), one optional field on the 40931 holder
@@ -2078,7 +2158,9 @@ is new (the experimental file-history feature unit, commit `650d12f6`).
   of the flag and is always on (commit `6126472c`). **2.3.0 (verified live
   2026-10-22): unchanged** — the same 5 flags
   (`notify_user`/`wait_for`/`subagent_fork`/`tower`/`tool-select`) and the
-  same 17 features; only `server_version` differs.
+  same 17 features; only `server_version` differs. **2.3.3 (verified live
+  2026-10-28):** still the same 5 flags and 17 features; `server_version` and
+  `started_at` differ.
 - **`web_title` is new in 0.37.2** (additive): the instance's `--web-title`
   browser-tab label, present only when the server was started with that flag;
   omitted here (verified live 2026-08-18). Treat it as an optional instance
@@ -2172,11 +2254,20 @@ unchanged from 0.29.2):
   protocol — the item shape is unchanged.
   **2.3.1 (verified live 2026-10-23):** the catalog reads **12 entries** —
   two new `managed:kimi-code` models ride alongside: **`kimi-code/k3.1-pro`**
-  ("K3.1 Pro", `max_context_size: 1048576`, `default_effort: "max"`) and
-  **`kimi-code/k3.1-pro-highspeed`** ("K3.1 Pro Highspeed", same context and
-  effort). None of the 12 publishes `upgrade`. Content drift, not protocol —
-  and the pair is exactly what the now-live `model_switch_confirm` rules gate
-  (see Client configs).
+  ("K3.1 Pro", `max_context_size: 1048576`) and
+  **`kimi-code/k3.1-pro-highspeed`**. None of the 12 publishes `upgrade`.
+  Content drift, not protocol.
+  **2.3.3 (verified live 2026-10-28):** still 12 entries. Both K3.1 entries
+  now report `default_effort: "high"`, and the highspeed display name reads
+  **"K3.1 Pro Highspeed 2x Usage Cost"**. The server-wide default model moved
+  to **`deepseek/deepseek-v4-flash`** (`max_context_size: 1000000`), so a
+  fresh model-less session reports `max_context_tokens: 1000000`. The pair is
+  what the live `model_switch_confirm` rules gate (see Client configs).
+- **2.3.3 default-model drift (verified live 2026-10-28):**
+  `GET /api/v1/config` reports `default_model:"deepseek/deepseek-v4-flash"`
+  (was `kimi-code/k3-256k` on 2.3.1). `thinking.effort` stays `"max"` and
+  `default_permission_mode` stays `"auto"`. The app reads this default on the
+  send path, so it follows the server without a code change.
 - `GET`/`POST /api/v1/config` also carries a **`secondary_model`** field (new
   in 0.31.0, additive): `{}` on this server (2026-07-30). It is writable via
   `POST /api/v1/config`; per upstream, the POST body is snake_case while the
@@ -2243,12 +2334,13 @@ unchanged from 0.29.2):
 ### Fetch — `POST /api/v1/client_configs`
 
 **New in 2.3.0** (commit `3f80896a`; verified live 2026-10-22). Server-proxied,
-cloud-controlled client configs — named JSON blobs the managed service
-distributes (region/`KIMI_CODE_BASE_URL`-derived), so Kimi can flip client
-behavior without a release. Body `{"name":"<config name>"}`; answers
-`{"name":<echo>, "config": <object>|null}` — `null` for unregistered names AND
-for registered names the cloud has not populated. No auth error variants
-beyond the standard envelope.
+cloud-controlled client configs. These are named JSON blobs the managed
+service distributes (from the region or `KIMI_CODE_BASE_URL`), so Kimi can
+change client behavior without a release. Body `{"name":"<config name>"}`;
+the answer is `{"name":<echo>, "config": <object>|null}`. An unregistered
+name returns `config:null` without a network call, and a registered name
+returns `null` when the cloud value is absent or malformed. Every request
+fetches the cloud value again; there is no server-side cache.
 
 ```bash
 curl -s -X POST -H "Authorization: Bearer <token>" \
@@ -2256,27 +2348,86 @@ curl -s -X POST -H "Authorization: Bearer <token>" \
   -d '{"name":"model_switch_confirm"}' http://127.0.0.1:58627/api/v1/client_configs
 ```
 
-The one registered name upstream is **`model_switch_confirm`** — rules asking
-clients to confirm before switching a session's model mid-history. The 2.3.0
-captures (2026-10-22) both answered `config:null` — the gate was off:
+Two names are registered on 2.3.3: **`model_switch_confirm`** and
+**`effort_switch_confirm`**.
+
+### `model_switch_confirm`
+
+Rules asking clients to confirm a model switch. The shape changed in 2.3.3
+(commit `f895f305`): every rule now requires `session_type`, wildcards are
+supported, and `warning` is optional.
 
 ```json
-{"code":0,"msg":"success","data":{"name":"model_switch_confirm","config":null},"request_id":"01M5JJ08KZCAPQF8RJFE9KABG1"}
-{"code":0,"msg":"success","data":{"name":"definitely_not_registered","config":null},"request_id":"01M5JJ09FK0Z9FRBJQ0YNMC2BJ"}
+{"enable": true, "rules": [
+  {"from": "*", "to": ["k3.1-pro-highspeed"], "session_type": "new",
+   "hint": {"en": "Note: K3.1 Pro Highspeed consumption is approximately 2x that of K3.1 Pro", "zh": "…"}},
+  {"from": "*", "to": ["k3.1-pro-highspeed"], "session_type": "old",
+   "hint": {"en": "Switching to K3.1 Pro Highspeed in this session may affect output quality. Choose how to continue", "zh": "…"},
+   "warning": {"en": "Note: K3.1 Pro Highspeed consumption is approximately 2x that of K3.1 Pro", "zh": "…"}},
+  {"from": ["k3", "k3-256k", "kimi-for-coding", "kimi-for-coding-highspeed"],
+   "to": ["k3.1-pro", "k3.1-pro-highspeed"], "session_type": "old",
+   "hint": {"en": "Switching to a K3.1 series model in this session may affect output quality. Choose how to continue", "zh": "…"}}
+]}
 ```
 
-**2.3.1 (verified live 2026-10-23): the gate is ON now** — the same probe
-answers a populated config (cloud-side flip, not the release; an unregistered
-name still answers `config:null`):
+The live envelope, captured 2026-10-28 with Chinese strings trimmed to `…`
+here (`request_id` `01M60TRX5D93V10HE1ANXF08W8`):
 
 ```json
-{"code":0,"msg":"success","data":{"name":"model_switch_confirm","config":{"enable":true,"rules":[{"from":["k3","k3-256k","kimi-for-coding","kimi-for-coding-highspeed"],"to":["k3.1-pro"],"hint":{"en":"Switching to K3.1 Pro in this session may affect output quality. Choose how to continue.","zh":"在已有会话中切换至 K3.1 Pro 可能影响模型效果；请选择继续方式"}},{"from":["k3","k3-256k","kimi-for-coding","kimi-for-coding-highspeed"],"to":["k3.1-pro-highspeed"],"hint":{"en":"Switching to K3.1 Pro Highspeed in this session may affect output quality. Choose how to continue.","zh":"…"}}]}},"request_id":"01M5N4ADAT1SRHD28VNSR63V4D"}
+{"code":0,"msg":"success","data":{"name":"model_switch_confirm","config":{"enable":true,"rules":[{"from":"*","to":["k3.1-pro-highspeed"],"session_type":"new","hint":{"en":"Note: K3.1 Pro Highspeed consumption is approximately 2x that of K3.1 Pro","zh":"…"}},{"from":"*","to":["k3.1-pro-highspeed"],"session_type":"old","hint":{"en":"Switching to K3.1 Pro Highspeed in this session may affect output quality. Choose how to continue","zh":"…"},"warning":{"en":"Note: K3.1 Pro Highspeed consumption is approximately 2x that of K3.1 Pro","zh":"…"}},{"from":["k3","k3-256k","kimi-for-coding","kimi-for-coding-highspeed"],"to":["k3.1-pro","k3.1-pro-highspeed"],"session_type":"old","hint":{"en":"Switching to a K3.1 series model in this session may affect output quality. Choose how to continue","zh":"…"}}]}},"request_id":"01M60TRX5D93V10HE1ANXF08W8"}
 ```
 
-The populated shape is `{enable: boolean, rules:
-[{from: string|string[], to: string|string[], hint?: {en?, zh?}}]}` — `from`/`to`
-match **upstream model ids** (not aliases) exactly, no wildcards. The Android
-app consumes it via ticket 167 — now a live gate, not a theoretical one.
+- `from` and `to` are a string or a non-empty string array. A string `*`
+  matches any upstream model id on that side.
+- `session_type` is `old`, `new`, or `all`. Upstream treats a session as
+  `old` once its conversation has at least one real user message, and `new`
+  otherwise. It matches the first enabled rule whose session type is `all`
+  or equal to the current type. This matching behavior is source-derived; the
+  config shape and values are live.
+- Ids are **upstream model ids** such as `k3` and `kimi-for-coding`, not the
+  picker aliases. `GET /api/v1/config`'s `models` map resolves an alias to
+  its upstream `model` value.
+- `hint` and `warning` are optional localized strings. The TUI displays
+  `en`, and `warning` is highlighted separately.
+
+The 2.3.0 and 2.3.1 history: both probes answered `config:null` on 2.3.0
+(2026-10-22), then 2.3.1 (2026-10-23) served the old rules without
+`session_type`. The current shape above is the 2.3.3 one. Ticket 167 consumes
+it.
+
+### `effort_switch_confirm`
+
+**New in 2.3.3** (commit `0051ef10`, verified live 2026-10-28). It supplies
+effort descriptions and optional confirmation rules for changing the
+thinking effort on a managed Kimi model:
+
+```json
+{"descriptions": {"enable": true,
+  "items": {
+    "low": {"en": "Light reasoning for simple tasks and quick iterations", "zh": "…"},
+    "high": {"en": "Deeper reasoning for complex tasks, with higher token usage", "zh": "…"},
+    "max": {"en": "Maximum reasoning for the hardest tasks, with longer response times and higher token usage", "zh": "…"}}},
+ "confirm": {"enable": true, "rules": [
+   {"from": "*", "to": "*", "session_type": "old",
+    "hint": {"en": "Switching thinking effort may affect output quality. It may also invalidate the current prompt cache and increase token usage", "zh": "…"}}]}}
+```
+
+Verbatim live envelope, Chinese strings trimmed to `…` (`request_id`
+`01M60TRXWWX8PV21YJP6FY1215`):
+
+```json
+{"code":0,"msg":"success","data":{"name":"effort_switch_confirm","config":{"descriptions":{"enable":true,"items":{"low":{"en":"Light reasoning for simple tasks and quick iterations","zh":"…"},"max":{"en":"Maximum reasoning for the hardest tasks, with longer response times and higher token usage","zh":"…"},"high":{"en":"Deeper reasoning for complex tasks, with higher token usage","zh":"…"}}},"confirm":{"enable":true,"rules":[{"from":"*","to":"*","session_type":"old","hint":{"en":"Switching thinking effort may affect output quality. It may also invalidate the current prompt cache and increase token usage","zh":"…"}}]}}},"request_id":"01M60TRXWWX8PV21YJP6FY1215"}
+```
+
+Descriptions are keyed by the effort wire value and are independent of the
+model. Upstream shows `descriptions.items[effort].en` only for models whose
+provider is `managed:kimi-code`. The `confirm.rules` use the same rule shape
+as `model_switch_confirm`, with effort values in `from`/`to` instead of model
+ids. Both behaviors are source-derived; only the config payload was captured
+live. Ticket 170 consumes this config.
+
+An unregistered name still answers `config:null` (verified 2026-10-28:
+`{"name":"definitely_not_registered","config":null}`).
 
 ## Sessions
 
@@ -4210,9 +4361,14 @@ not triggered live that run.
   `tool.call.delta` / `tool.call.started` WS events.
 - **Input schema:** `{"todos": [{"title": string, "status": "pending" |
   "in_progress" | "done"}]}`. Every *write* carries the **full** list.
-- **Write vs read:** a call *without* the `todos` key is a read-only query —
-  the list is unchanged; skip it and keep looking back. An empty `todos`
+- **Write vs read:** a call *without* the `todos` key is a read-only query.
+  The list is unchanged; skip it and keep looking back. An empty `todos`
   array clears the list.
+- **Result prose:** a write result starts `Todo list updated.` followed by
+  `Current todo list:` and may end with the next-step nudge (verified live
+  2026-10-28 on 2.3.3). A read-only query carries `args:{}` and its result
+  starts `Current todo list:` (verified 2026-10-22 on 2.3.0; not re-probed on
+  2.3.3). The app ignores this prose and derives state from the input args.
 - **Derivation rule:** scan the messages backwards for the newest `TodoList`
   call whose input carries a `todos` array — that is the current state.
 - **Not on this wire:** upstream also persists the list as
@@ -4282,7 +4438,11 @@ model/state-dependent swing as the 0.38.0/2.0.0 episodes); `NotifyUser`
 still gated off. Also re-observed this run: the 0.31.1
 liveness caveat below still holds verbatim — right after session create,
 before any prompt ran, the catalog answered `{"tools":[]}`; it resolved to
-the 37 entries only once a session had run a turn. Two MCP routes ride along (both verified live
+the 37 entries only once a session had run a turn. **2.3.3 (verified live
+2026-10-28): back to 36 entries on an initialized agent: 27 builtins plus
+the same 9 MCP tools, `ReadMediaFile` absent again.** `NotifyUser` is still
+gated off. The app reads tool names and `source`, so the swing is invisible
+to it. Two MCP routes ride along (both verified live
 2026-08-27):
 
 - `GET /api/v1/mcp/servers` →
@@ -5898,6 +6058,68 @@ deployment** (verified live — handshake refused).
 
 ## Verification log
 
+- 2026-10-28 re-verification on `2.3.3` (server 2.3.1 → 2.3.3; throwaway
+  sessions `session_dac7161d-…`, `session_805f6cb8-…`, and
+  `session_1e35eb75-…` created with `metadata.cwd=/home/ubuntu/spike`, all
+  `:delete`d after; the nightly job's
+  `pending-changelog.md` fetch WORKED, 13 commits between
+  `@moonshot-ai/kimi-code@2.3.1` and `…@2.3.3`, reviewed via the GitHub API;
+  only `packages/kap-server/src/services/clientConfigs.ts` changed among the
+  client-facing protocol files: `f895f305` and `0051ef10`; live probes over
+  REST + websocat against `127.0.0.1:58627`).
+  Drift found (all additive; nothing breaks the Android app):
+  (a) `model_switch_confirm` rules now require `session_type`
+      (`old`/`new`/`all`), accept `*` wildcards in `from`/`to`, and may carry
+      `warning`; the live config is populated and includes `new`-session and
+      `old`-session rules for `k3.1-pro-highspeed`, plus an `old`-session rule
+      for the K3.1 series (verbatim capture in Client configs);
+  (b) new registered client config `effort_switch_confirm` returns enabled
+      descriptions for `low`/`high`/`max` and one wildcard `old`-session
+      confirmation rule (verbatim capture in Client configs);
+  (c) engine behavior: AgentSwarm requires user-enabled swarm mode, rejected
+      swarm calls with no spawned members are hidden, and the model is told
+      to launch `Agent` only on explicit request. No wire type or field
+      changed;
+  (d) content drift: 12 models (K3.1 highspeed display now includes
+      "2x Usage Cost", both K3.1 defaults `high`), `default_model`
+      `deepseek/deepseek-v4-flash`, and 36 tools on an initialized agent
+      (27 builtins + 9 MCP, `ReadMediaFile` absent);
+  (e) provider state: a `kimi-code/k3` prompt failed instantly with
+      `provider.auth_error` / HTTP 403 subscription text; the round-trip then
+      ran on the configured `deepseek/deepseek-v4-flash`. Envelope and turn
+      failure shapes were unchanged.
+  Re-verified unchanged: meta (5 flags, 17 features), config
+  (`thinking.effort:"max"`, `default_permission_mode:"auto"`, no feedback
+  survey or title keys), sessions create/get/list/status/snapshot
+  (`last_seq:1`, `as_of_seq:2`), `40401` without `stack`, `:reload` on an
+  idle session (session DTO, `last_seq:0`) and on an unknown session
+  (`40401` with `stack`), a full prompt
+  round-trip (`prompt.submitted` → `session.meta.updated` → `turn.started` →
+  `context.spliced` → `prompt.started` → steps → `turn.ended` with `traceId`
+  → `work_changed` → `prompt.completed`), the TodoList write with
+  `{"todos":[{status,title}]}` and its `Todo list updated.` result prose,
+  queueing plus `prompt.steered` (the queued prompt seeded the next turn
+  after abort, so no `turn.steer` fired), running and idle `:abort`, compact
+  with `{}` (`tokensAfter` 30413) and `{"instruction":…}` (`tokensAfter`
+  30298), both `40910`s with `stack`, questions (answer, re-answer `40902`,
+  dismiss `40909`, re-dismiss `40902`, snapshot items), the manual approval
+  round-trip (`tool_call_id` → `40404`, approval → both resolved frames),
+  files (upload, download byte match, `Range` 206, delete → `40407`, session
+  media survives upload deletion), foreground and background sub-agents
+  (`subagent.*`, `turn.started` on the agent id, task cancel and terminal
+  `40904`), `/tasks`, session rating `evaluate` (all `{"appearance":null}`),
+  idle `:takeover` `{"taken_over":true}`, the lifecycle events
+  (`event.session.created`, global `event.session.deleted` with camelCase
+  `sessionId`), and WS hello/subscribe/ack (`protocol_version:2`,
+  `heartbeat_ms:10000`; cursor 100 replayed 101–217 before the ack; a future
+  cursor produced standalone `resync_required` `epoch_changed` then the ack).
+  Unit tests: `:app:testDebugUnitTest --rerun-tasks` ran 959 tests, 2 failed,
+  4 skipped. The failures are `ChatViewModelTest.a swarm's members all link
+  to the one call from the cold-start roster` (deterministic, no element in
+  the expected UI list) and `SubagentViewModelTest.the store entry flows into
+  the ui state` (passed when rerun alone). Neither test touches a DTO or
+  parser changed by this protocol audit, and no app source was changed in
+  this run.
 - 2026-10-23 re-verification on `2.3.1` (server 2.3.0 → 2.3.1; throwaway
   sessions created with `metadata.cwd=/home/ubuntu/spike`, all eleven
   `:delete`d after; the nightly job's `pending-changelog.md` fetch WORKED —
