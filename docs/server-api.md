@@ -2677,7 +2677,8 @@ messages on the stream. Body `{}`. Answers the **standard session envelope**
 - The reload clears the broadcaster's in-flight-turn tracker and sub-agent
   roster (the lock commit's `reattachSession`), so post-reload snapshots and
   resyncs no longer report stale running turns/sub-agents.
-- The Android app needs it for stale-session send recovery — ticket 168.
+- The Android app uses it for stale-session send recovery: a 40932 send
+  failure posts `:reload`, then applies one fresh snapshot resync (ticket 168).
 
 ### Takeover — `POST /api/v1/sessions/{id}:takeover`
 

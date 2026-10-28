@@ -171,6 +171,32 @@ class SessionsRepository @Inject constructor(
         }
 
     /**
+     * Reloads a session after another client changed it, via
+     * `POST /api/v1/sessions/{id}:reload` (2.3.0, ticket 168): closes and resumes the
+     * session server-side and answers the standard session envelope. The chat calls
+     * it on a 40932 send failure, then rebuilds from a snapshot; it never resubmits
+     * the prompt. A busy session answers envelope 40901. Same error-boundary
+     * contract as [listSessions].
+     */
+    suspend fun reloadSession(settings: ServerSettings, sessionId: String): Result<Session> =
+        api.post(settings, "/api/v1/sessions/$sessionId:reload", api.jsonBody {}) { responseBody ->
+            json.decodeFromString<Envelope<SessionDto>>(responseBody).toResult().map { it.toDomain() }
+        }
+
+    /**
+     * Evicts another process's occupancy lock via
+     * `POST /api/v1/sessions/{id}:takeover` (2.3.1, ticket 169): the escape hatch for
+     * a lock left behind by a crashed or exited client. Success carries
+     * `taken_over: true` (an idle session's no-op included); unknown id → 40401.
+     * The caller never resubmits the prompt after it. Same error-boundary contract
+     * as [listSessions].
+     */
+    suspend fun takeoverSession(settings: ServerSettings, sessionId: String): Result<Boolean> =
+        api.post(settings, "/api/v1/sessions/$sessionId:takeover", api.jsonBody {}) { responseBody ->
+            json.decodeFromString<Envelope<SessionTakeoverData>>(responseBody).toResult().map { it.takenOver }
+        }
+
+    /**
      * Fetches the known workspaces via `GET /api/v1/workspaces` (docs/server-api.md),
      * sorted by `last_opened_at` descending — the server order is not relied upon.
      * Same error-boundary contract as [listSessions].

@@ -45,6 +45,13 @@ data class SessionDeleteData(
     val deleted: Boolean = false,
 )
 
+/** `POST /api/v1/sessions/{id}:takeover` answer (2.3.1, ticket 169): true when the
+ * lock was evicted — a no-op idle session also answers true. */
+@Serializable
+data class SessionTakeoverData(
+    @SerialName("taken_over") val takenOver: Boolean = false,
+)
+
 @Serializable
 data class SessionMetadataDto(
     val cwd: String? = null,

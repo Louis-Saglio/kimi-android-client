@@ -574,6 +574,44 @@ class SessionsRepositoryTest {
         assertTrue(repository.getSession(settings(), "session_nope").exceptionOrNull() is DataError.Api)
     }
 
+    @Test
+    fun `reload posts the reload action and maps the session`() = runBlocking {
+        server.enqueue(MockResponse(body = CREATED_SESSION_BODY))
+
+        val session = repository.reloadSession(settings(), "session_new").getOrThrow()
+
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/sessions/session_new:reload", request.target)
+        assertEquals("{}", request.body!!.utf8())
+        assertEquals("session_new", session.id)
+    }
+
+    @Test
+    fun `takeover posts the takeover action and maps taken_over`() = runBlocking {
+        server.enqueue(
+            MockResponse(body = """{"code":0,"msg":"success","data":{"taken_over":true},"request_id":"r"}"""),
+        )
+
+        assertTrue(repository.takeoverSession(settings(), "session_new").getOrThrow())
+
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/sessions/session_new:takeover", request.target)
+        assertEquals("{}", request.body!!.utf8())
+    }
+
+    @Test
+    fun `a failed takeover surfaces the envelope code`() = runBlocking {
+        server.enqueue(
+            MockResponse(body = """{"code":40401,"msg":"session session_new does not exist","data":null,"request_id":"r"}"""),
+        )
+
+        val error = repository.takeoverSession(settings(), "session_new").exceptionOrNull()
+
+        assertEquals(DataError.Api(40401, "session session_new does not exist"), error)
+    }
+
     private companion object {
         const val CREATED_SESSION_BODY = """
             {"code":0,"msg":"success","data":{"id":"session_new","workspace_id":"wd_spike-008_1",

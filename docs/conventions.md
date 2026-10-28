@@ -302,6 +302,24 @@
   (ui/chat/components) renders it directly above the composer — spinner leading
   icon, elapsed `mm:ss` ticking from a 1 s ticker that lives only while a phase
   is shown.
+- Send-path recovery and cloud switch gates (tickets 167–170): the composer's
+  model/effort taps go through `ChatViewModel.onModelPicked`/`onEffortPicked`,
+  which consult the two client configs fetched with the model data
+  (`model_switch_confirm`, `effort_switch_confirm`; `SwitchConfirm.firstMatch`
+  over `SessionAge` — `old` once a timeline user message exists, `new`
+  otherwise). A match raises a Continue/Cancel dialog
+  (`PendingSwitch` in `UiState`); only Continue calls the unchanged
+  `onModelSelected`/`onEffortSelected` commit path, and Cancel writes nothing.
+  A null/disabled config, unknown alias, nonmatching rule, running turn or
+  same-value pick commits immediately. The effort sheet additionally shows
+  `effortDescriptions[effectiveEffort]` for `managed:kimi-code` models only.
+  The send failure path (`handleSendFailure`) keeps the draft and never
+  resubmits automatically: 40931 `SESSION_OCCUPIED` names the envelope
+  `details.holder.clientDisplayName` (fallback: the server message) and offers
+  takeover only on the SECOND consecutive 40931 (`onTakeOverSession` posts
+  `sessions/{id}:takeover` once); 40932 `SESSION_STALE` posts `:reload` then
+  applies one fresh snapshot resync and asks the user to retry. The envelope's
+  `details` is carried only by `DataError.Api`, for 40931 only.
 - Cold start / resync (085, freshness model 091): `GET .../snapshot` is the single
   entry point — `SnapshotSync` (ui/chat, session-scoped singleton like the store, so
   the page-on-top restore path with no ChatViewModel runs the same rebuild) owns the

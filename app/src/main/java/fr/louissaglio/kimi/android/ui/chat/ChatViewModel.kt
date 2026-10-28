@@ -316,6 +316,26 @@ class ChatViewModel internal constructor(
         /** The typed text stays in [UiState.inputText]; the snackbar's Retry re-calls [onSend]. */
         data class SendFailed(override val message: String) : Effect
 
+        /** The send was refused with 40931: the session's occupancy lock belongs to
+         * another client (2.3.0, tickets 168/169). `canTakeOver` is true only on a
+         * SECOND consecutive 40931 — the screen then offers the destructive takeover
+         * next to Retry; the first answer is a plain explanation. */
+        data class SessionOccupied(
+            override val message: String,
+            val canTakeOver: Boolean,
+        ) : Effect
+
+        /** A 40932 send failure recovered: the session was reloaded and the chat
+         * rebuilt — the draft is intact and the user may retry (ticket 168). */
+        data class SessionReloaded(override val message: String) : Effect
+
+        /** A recovery step failed (reload, snapshot or takeover); the draft is intact
+         * and nothing was resubmitted. */
+        data class SessionRecoveryFailed(override val message: String) : Effect
+
+        /** The occupancy lock was evicted (ticket 169); the user sends when ready. */
+        data class TakeoverSucceeded(override val message: String) : Effect
+
         /** The turn is still running; the Stop action stays available. */
         data class AbortFailed(override val message: String) : Effect
 
@@ -830,6 +850,7 @@ class ChatViewModel internal constructor(
                     pendingModelPick = false
                     pendingEffortPick = false
                     pendingPermissionPick = false
+                    occupiedFailureStreak = 0
                     // The optimistic local echo (ticket 154): the bubble shows at once
                     // — for a prompt queued while the agent is busy, the context.spliced
                     // echo arrives only when the queued turn starts. The splice heals
@@ -856,10 +877,129 @@ class ChatViewModel internal constructor(
                 }
                 .onFailure { error ->
                     uiState.update { it.copy(isSending = false) }
-                    _effects.send(Effect.SendFailed(error.toUserMessage()))
+                    handleSendFailure(error)
                 }
         }
     }
+
+    /** Consecutive 40931 answers on the composer's send path (ticket 169): only the
+     * SECOND one offers the takeover, so the flag resets on a successful send, on any
+     * other failure, and after a takeover attempt. */
+    private var occupiedFailureStreak = 0
+
+    /**
+     * The send failure's recovery ladder (tickets 168/169). The composer draft and
+     * attachments are never touched here, and no path resubmits the prompt — the
+     * user's explicit Retry is always the resubmission.
+     *
+     * - 40931 `SESSION_OCCUPIED`: explain the conflict, naming the holder's
+     *   `clientDisplayName` when the envelope carries it (fallback: the server's own
+     *   message). Never reload, never take over automatically; the second consecutive
+     *   answer offers the takeover.
+     * - 40932 `SESSION_STALE`: reload the session, rebuild from a fresh snapshot, then
+     *   tell the user to retry. A failed step reports itself and keeps the draft.
+     * - Anything else keeps the existing [Effect.SendFailed] Retry snackbar.
+     */
+    private suspend fun handleSendFailure(error: Throwable) {
+        val api = error as? DataError.Api
+        when (api?.code) {
+            SESSION_OCCUPIED_CODE -> {
+                occupiedFailureStreak++
+                _effects.send(
+                    Effect.SessionOccupied(
+                        message = occupiedMessage(api),
+                        canTakeOver = occupiedFailureStreak >= 2,
+                    ),
+                )
+            }
+            SESSION_STALE_CODE -> {
+                occupiedFailureStreak = 0
+                recoverStaleSession()
+            }
+            else -> {
+                occupiedFailureStreak = 0
+                _effects.send(Effect.SendFailed(error.toUserMessage()))
+            }
+        }
+    }
+
+    /** "This session is in use by Kimi Code CLI." — the holder's display name from
+     * the 40931 `details.holder`, else the server's own sentence (ticket 169). */
+    private fun occupiedMessage(error: DataError.Api): String {
+        val holder = error.details
+            ?.get("holder")
+            ?.let { it as? JsonObject }
+            ?.get("clientDisplayName")
+            ?.jsonPrimitive
+            ?.contentOrNull
+            ?.takeIf { it.isNotBlank() }
+        return if (holder != null) {
+            "This session is in use by $holder. Close it there, then retry."
+        } else {
+            error.toUserMessage()
+        }
+    }
+
+    /** The 40932 recovery (ticket 168): one `:reload`, then one fresh snapshot apply.
+     * The prompt is NOT resubmitted; a failure at either step reports itself and the
+     * draft stays in the composer. */
+    private suspend fun recoverStaleSession() {
+        val settings = settingsRepository.current()
+        sessionsRepository.reloadSession(settings, sessionId)
+            .onFailure { error ->
+                _effects.send(
+                    Effect.SessionRecoveryFailed(
+                        "The session changed elsewhere and could not be reloaded: ${error.toUserMessage()}",
+                    ),
+                )
+            }
+            .onSuccess {
+                val guards = captureSeedGuards()
+                snapshotSync.resync(sessionId)
+                    .onSuccess { snapshot ->
+                        applySnapshot(snapshot, guards)
+                        jobsStore.seed()
+                        _effects.send(
+                            Effect.SessionReloaded("The session was reloaded. Review the chat, then retry your message."),
+                        )
+                    }
+                    .onFailure { error ->
+                        _effects.send(
+                            Effect.SessionRecoveryFailed(
+                                "The session was reloaded, but the chat could not resync: ${error.toUserMessage()}",
+                            ),
+                        )
+                    }
+            }
+    }
+
+    /**
+     * Ticket 169's explicit takeover: one `sessions/{id}:takeover` POST, never a prompt
+     * POST. Success only clears the lock; the user decides when to retry. Failure is
+     * surfaced and the draft stays put.
+     */
+    fun onTakeOverSession() {
+        if (takeoverInFlight) return
+        takeoverInFlight = true
+        viewModelScope.launch {
+            try {
+                sessionsRepository.takeoverSession(settingsRepository.current(), sessionId)
+                    .onSuccess {
+                        occupiedFailureStreak = 0
+                        _effects.send(Effect.TakeoverSucceeded("The session lock was released. Send when ready."))
+                    }
+                    .onFailure { error ->
+                        _effects.send(
+                            Effect.SessionRecoveryFailed("Could not take over the session: ${error.toUserMessage()}"),
+                        )
+                    }
+            } finally {
+                takeoverInFlight = false
+            }
+        }
+    }
+
+    private var takeoverInFlight = false
 
     /** POSTs `:abort` for the running turn. On success nothing is cleared locally: the
      * server's turn.ended frame (docs/server-api.md) drives isWorking=false and the

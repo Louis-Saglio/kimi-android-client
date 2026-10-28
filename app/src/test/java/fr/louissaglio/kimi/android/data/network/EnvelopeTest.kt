@@ -1,7 +1,11 @@
 package fr.louissaglio.kimi.android.data.network
 
 import fr.louissaglio.kimi.android.data.DataError
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -58,6 +62,27 @@ class EnvelopeTest {
         assertEquals(
             Result.success(Unit),
             Envelope<JsonObject>(code = 0, msg = "", data = null).toAckResult(),
+        )
+    }
+
+    @Test
+    fun `the 40931 envelope carries the holder details through to the Api error`() {
+        // Verbatim 2.3.1 capture, secrets redacted (docs/server-api.md, Occupancy lock).
+        val body =
+            """{"code":40931,"msg":"This session is in use by another Kimi Code CLI instance.",""" +
+                """"data":null,"request_id":"r","details":{"sessionId":"session_1","holder":{"version":1,""" +
+                """"token":"396620:…","pid":396620,"hostname":"vps","startedAt":1792784114990,""" +
+                """"clientIdentity":"kimi_code_cli","clientDisplayName":"Kimi Code CLI"}}}"""
+
+        val error = Json { ignoreUnknownKeys = true }
+            .decodeFromString<Envelope<JsonObject>>(body)
+            .toAckResult()
+            .exceptionOrNull() as DataError.Api
+
+        assertEquals(40931, error.code)
+        assertEquals(
+            "Kimi Code CLI",
+            error.details?.get("holder")?.jsonObject?.get("clientDisplayName")?.jsonPrimitive?.contentOrNull,
         )
     }
 }
