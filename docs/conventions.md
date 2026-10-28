@@ -210,7 +210,11 @@
   on arrival (the Edit diff screen's ViewModel on init; the 120 file content screen
   has no ViewModel — the destination consumes once into a `remember`),
   and a miss (process death with the screen on top) is the screen's
-  missing-content state with back navigation. First consumer: the Edit call's
+  missing-content state with back navigation. `CompactionSummaryStore` (ticket
+  130) is the same hand-off for a done compaction divider's markdown (`CompactionSummary`
+  route — dividerId only — `CompactionSummaryScreen`, no ViewModel): `MarkdownBody`
+  in a selectable scroll, the token delta in the top bar only when the live divider
+  carried it, the divider row chevroned only while a summary exists. First consumer: the Edit call's
   unified diff screen (`EditDiff` route — toolCallId only — plus `EditDiffScreen`/
   `EditDiffViewModel` in ui/chat), opened from parsed Edit rows on the chat and the
   sub-agent page alike; those rows never expand inline and carry the pencil glyph

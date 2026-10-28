@@ -6,6 +6,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import dagger.hilt.android.AndroidEntryPoint
 import fr.louissaglio.kimi.android.navigation.KimiNavHost
+import fr.louissaglio.kimi.android.ui.chat.CompactionSummaryStore
 import fr.louissaglio.kimi.android.ui.chat.ToolContentStore
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 import javax.inject.Inject
@@ -18,12 +19,16 @@ class MainActivity : ComponentActivity() {
     @Inject
     lateinit var toolContentStore: ToolContentStore
 
+    /** The compaction divider's summary hand-off (ticket 130), same pattern. */
+    @Inject
+    lateinit var compactionSummaryStore: CompactionSummaryStore
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
             KimiTheme {
-                KimiNavHost(toolContentStore)
+                KimiNavHost(toolContentStore, compactionSummaryStore)
             }
         }
     }

@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -28,6 +29,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -95,6 +97,9 @@ fun ChatScreen(
     /** Ticket 147: the top bar's magnifier opens the search screen scoped to this
      * session; the label rides along so the scoped screen can name its scope. */
     onNavigateToSearch: (sessionId: String, sessionTitle: String?) -> Unit = { _, _ -> },
+    /** Ticket 130: a done "Context compacted" divider tap opens the compaction
+     * summary screen (the NavHost stages the summary in the store first). */
+    onOpenCompactionSummary: (ChatItem.CompactionDivider) -> Unit = {},
     /** Ticket 158: the composer prefill handed back by a sub-agent page's
      * Continue (a nav result on this entry's SavedStateHandle — KimiNavHost);
      * consumed once into the composer's text. */
@@ -324,7 +329,12 @@ private fun ChatContent(
     onQuestionRowTapped: (toolCallId: String, input: String, output: String) -> Unit,
     onModelSelected: (String) -> Unit,
     onEffortSelected: (String) -> Unit,
+    onModelSwitchConfirmed: () -> Unit = {},
+    onModelSwitchDismissed: () -> Unit = {},
+    onEffortSwitchConfirmed: () -> Unit = {},
+    onEffortSwitchDismissed: () -> Unit = {},
     onPermissionModeSelected: (PermissionMode) -> Unit,
+    onOpenCompactionSummary: (ChatItem.CompactionDivider) -> Unit = {},
     onAttach: () -> Unit,
     onAttachmentRemoved: (String) -> Unit,
     onImageClick: (ChatMessage.Part.Image) -> Unit,
@@ -593,6 +603,7 @@ private fun ChatContent(
                     // Tickets 088/089: AskUserQuestion rows never expand — the pending
                     // row toggles the live card, a resolved row opens its read-only view.
                     onQuestionRowTapped = onQuestionRowTapped,
+                    onOpenCompactionSummary = onOpenCompactionSummary,
                     swarmMembers = uiState.swarmMembers,
                     onOpenSwarm = onOpenSwarm,
                     isLoadingMoreHistory = uiState.isLoadingMoreHistory,

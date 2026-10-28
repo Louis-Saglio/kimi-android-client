@@ -9,6 +9,8 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
 import fr.louissaglio.kimi.android.ui.chat.ChatScreen
+import fr.louissaglio.kimi.android.ui.chat.CompactionSummaryScreen
+import fr.louissaglio.kimi.android.ui.chat.CompactionSummaryStore
 import fr.louissaglio.kimi.android.ui.chat.EditDiffScreen
 import fr.louissaglio.kimi.android.ui.chat.FileContentRoute
 import fr.louissaglio.kimi.android.ui.chat.JobDetailScreen
@@ -97,6 +99,12 @@ data class EditDiff(val toolCallId: String)
 @Serializable
 data class FileContent(val toolCallId: String)
 
+/** The compaction summary screen (ticket 130): same shape as [FileContent] — only the
+ * divider id rides the route; the summary markdown goes through the
+ * [CompactionSummaryStore]. */
+@Serializable
+data class CompactionSummary(val dividerId: String)
+
 /** One turn's file-changes list (ticket 149): the turn id is the main agent's
  * 0-based turn index — the transcript ordinal — resolved by the chat at navigation
  * time; the list itself is fetched from the file-history route, nothing is staged. */
@@ -110,7 +118,7 @@ data class TurnChanges(val sessionId: String, val turnId: Int)
 data class TurnFileContent(val sessionId: String, val turnId: Int, val path: String)
 
 @Composable
-fun KimiNavHost(toolContentStore: ToolContentStore) {
+fun KimiNavHost(toolContentStore: ToolContentStore, compactionSummaryStore: CompactionSummaryStore) {
     val navController = rememberNavController()
     NavHost(navController = navController, startDestination = Sessions) {
         composable<Sessions> { entry ->
@@ -231,6 +239,23 @@ fun KimiNavHost(toolContentStore: ToolContentStore) {
                         launchSingleTop = true
                     }
                 },
+                // Ticket 130: a done compaction divider stages its summary and opens
+                // the screen — no summary, no navigation (the row is not clickable then).
+                onOpenCompactionSummary = { divider ->
+                    divider.summary?.let { summary ->
+                        compactionSummaryStore.put(
+                            divider.id,
+                            CompactionSummaryStore.Entry(
+                                summary = summary,
+                                tokensBefore = divider.tokensBefore,
+                                tokensAfter = divider.tokensAfter,
+                            ),
+                        )
+                        navController.navigate(CompactionSummary(divider.id)) {
+                            launchSingleTop = true
+                        }
+                    }
+                },
             )
         }
         composable<Subagent> { entry ->
@@ -309,6 +334,14 @@ fun KimiNavHost(toolContentStore: ToolContentStore) {
             // the Edit diff screen's store-miss recovery.
             val staged = remember { toolContentStore.consume(route.toolCallId) }
             FileContentRoute(route.toolCallId, staged, onNavigateBack = { navController.popBackStack() })
+        }
+        composable<CompactionSummary> { backStackEntry ->
+            val route = backStackEntry.toRoute<CompactionSummary>()
+            // Same static-snapshot contract as FileContent (ticket 130): consume once
+            // into a remember — a bare call would re-consume to null on the next
+            // recomposition.
+            val staged = remember { compactionSummaryStore.consume(route.dividerId) }
+            CompactionSummaryScreen(staged, onNavigateBack = { navController.popBackStack() })
         }
         composable<TurnChanges> { entry ->
             val route = entry.toRoute<TurnChanges>()

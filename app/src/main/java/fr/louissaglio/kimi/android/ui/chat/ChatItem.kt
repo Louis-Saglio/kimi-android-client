@@ -111,8 +111,9 @@ sealed interface ChatItem {
      * while the server summarizes ("Compacting context…"), done afterwards. Done rows
      * carry the token delta when the completion event reported it (live); history-sourced
      * rows have none — the numbers are not persisted. [summary] (null only while pending)
-     * opens the "Compaction summary" dialog on tap. The live row's [id] is the synthetic
-     * [LIVE_COMPACTION_DIVIDER_ID]; a history-sourced row keys on the summary message id. */
+     * opens the "Compaction summary" screen on tap (ticket 130). The live row's [id] is
+     * the synthetic [LIVE_COMPACTION_DIVIDER_ID]; a history-sourced row keys on the
+     * summary message id. */
     data class CompactionDivider(
         override val id: String,
         val pending: Boolean,

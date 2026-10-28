@@ -87,6 +87,10 @@ internal fun MessageList(
     /** Ticket 158: a spawn row's "Next step" Continue — invoked with the composer
      * prefill (the hint's suggested `Agent(resume=…)` call text). */
     onContinueSubagent: (String) -> Unit = {},
+    /** Ticket 130: a done "Context compacted" divider tap opens the summary screen.
+     * Compaction dividers exist only in the main session timeline, so the sub-agent
+     * page keeps the default. */
+    onOpenCompactionSummary: (ChatItem.CompactionDivider) -> Unit = {},
     /** Top-anchored history pagination (ticket 046 on the sub-agent page; the 043
      * mechanics): a small overlay spinner shows while an older page loads and
      * [onHistoryTopReached] fires when the scroll position nears the top. Prepending
@@ -193,7 +197,8 @@ internal fun MessageList(
                             item, onOpenSubagent, onOpenJob, onQuestionRowTapped, onOpenEditDiff, onOpenFileContent,
                             swarmMembers, onOpenSwarm, onContinueSubagent,
                         )
-                    is ChatItem.CompactionDivider -> CompactionDividerRow(item)
+                    is ChatItem.CompactionDivider ->
+                        CompactionDividerRow(item, onOpenSummary = { onOpenCompactionSummary(item) })
                     is ChatItem.TurnEnd -> TurnEndFooter(item.label)
                     // Bare rows are not produced by ChatTimeline anymore (ticket 037) but
                     // stay renderable for tests and previews.

@@ -8,14 +8,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -26,15 +25,18 @@ import fr.louissaglio.kimi.android.ui.common.formatTokenCount
  * small spinner while the server summarizes, then "Context compacted" — with the
  * " (26.5k → 386 tokens)" delta when the completion event carried the numbers (they
  * are not persisted, so history-sourced rows go without). A done row with a summary
- * is tappable and opens it in a "Compaction summary" dialog.
+ * is tappable and opens the "Compaction summary" screen (ticket 130); a trailing
+ * chevron marks that affordance, the tool rows' navigation cue.
  */
 @Composable
-internal fun CompactionDividerRow(item: ChatItem.CompactionDivider) {
-    var showSummary by rememberSaveable { mutableStateOf(false) }
+internal fun CompactionDividerRow(
+    item: ChatItem.CompactionDivider,
+    onOpenSummary: () -> Unit = {},
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(enabled = item.summary != null) { showSummary = true }
+            .clickable(enabled = item.summary != null) { onOpenSummary() }
             .padding(vertical = 4.dp),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
@@ -48,11 +50,13 @@ internal fun CompactionDividerRow(item: ChatItem.CompactionDivider) {
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-    }
-    val summary = item.summary
-    if (showSummary && summary != null) {
-        InfoDialog(title = "Compaction summary", onDismiss = { showSummary = false }) {
-            Text(summary)
+        if (item.summary != null) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = "Open compaction summary",
+                modifier = Modifier.size(16.dp).padding(start = 4.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

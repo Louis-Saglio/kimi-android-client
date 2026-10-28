@@ -54,4 +54,12 @@ class RoutesTest {
         val decoded = Json.decodeFromString(Swarm.serializer(), Json.encodeToString(Swarm.serializer(), route))
         assertEquals(route, decoded)
     }
+
+    @Test
+    fun `compaction summary route round-trips through json`() {
+        val route = CompactionSummary(dividerId = "compaction/1 & #2")
+        val decoded =
+            Json.decodeFromString(CompactionSummary.serializer(), Json.encodeToString(CompactionSummary.serializer(), route))
+        assertEquals(route, decoded)
+    }
 }
