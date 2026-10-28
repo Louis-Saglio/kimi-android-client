@@ -116,3 +116,22 @@ fix making the prompt-body field live, or re-scope the ticket to drive
 swarm mode through `POST .../profile` `agent_config.swarm_mode` (a
 session-level toggle with its own UX semantics — the chip would then
 read/write server state instead of stamping a per-prompt flag).
+
+**2026-10-28 — re-probe on server 2.3.3: the field is still dead; the ticket is
+closed without a toggle.**
+
+Probe (throwaway session `session_472093ba-…`, created under `/home/ubuntu/spike`,
+deleted afterwards):
+
+- `POST /api/v1/sessions/{id}/prompts` with
+  `{"content":[{"type":"text","text":"Reply with exactly: probe-ok"}],"swarm_mode":true}`
+  acked `code:0` and the turn completed; `/status` read `swarm_mode:false` before,
+  during and after the turn (context grew to 195 tokens, so the turn really ran).
+- Positive control on the same session: `POST .../profile` with
+  `{"agent_config":{"swarm_mode":true}}` flipped `/status` `swarm_mode` to `true`.
+
+The upstream submitPrompt handler still ignores the prompt-body field on 2.3.3
+(docs/server-api.md keeps the 0.43.1 finding, now re-verified). Per the ticket's
+stop condition nothing was shipped: a chip stamping a per-prompt flag would never
+reach the agent. The follow-up path stays as written above — either an upstream
+fix, or a re-scoped server-state toggle through the profile route.

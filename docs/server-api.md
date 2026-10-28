@@ -3745,11 +3745,11 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../promp
     `turn.started.promptAttachments` is still never emitted live (the schema
     gained a `kind:"file"` variant in 0.39.1; unobserved). The app decodes
     only `origin.kind` — additive, ignored.
-- **`swarm_mode` in the prompt body is DEAD on 0.43.1** (verified live
-  2026-09-16, ticket 140 — throwaway session, deleted after): a prompt posted
-  with `"swarm_mode": true` ran to completion with `/status` `swarm_mode`
-  never flipping and no `swarm.enter` transcript marker. Upstream at tag
-  0.43.1 the submitPrompt handler applies only
+- **`swarm_mode` in the prompt body is DEAD** (verified live 2026-09-16 on
+  0.43.1 and re-verified 2026-10-28 on 2.3.3, ticket 140 — throwaway sessions,
+  deleted after): a prompt posted with `"swarm_mode": true` ran to completion
+  with `/status` `swarm_mode` never flipping and no `swarm.enter` transcript
+  marker. Upstream at tag 0.43.1 the submitPrompt handler applies only
   `profile`/`model`/`thinking`/`permission_mode`/`disabled_tools`
   (`packages/kap-server/src/routes/prompts.ts`) — the field parses
   (`rest-prompt.ts`) but is never consumed; `plan_mode`, `goal_objective`
