@@ -1475,6 +1475,10 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         withTimeout(5_000) {
             while (dataStore.data.first()[stringPreferencesKey("effort_for_session_session_1")] != "low") delay(10)
         }
+        // The /status seed and the /models fetch race: promptThinking drops the effort
+        // stamp while the models cache is cold (ticket 163), so wait for it before the
+        // send assertion below.
+        awaitState(viewModel.uiState) { it.modelsAvailable }
 
         viewModel.onInputChange("hi")
         viewModel.onSend()
