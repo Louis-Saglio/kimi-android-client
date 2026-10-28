@@ -335,6 +335,11 @@ class SessionSocket @Inject constructor(
                     if (model != null || effort != null) {
                         onEvent(SessionEvent.SessionModelUpdated(model, effort, agentId))
                     }
+                    // 2.2.0's permission variant (ticket 165): pushed the moment the
+                    // session's mode changes, from any client. Only the blank guard is
+                    // needed — a frame without the field parses it as null.
+                    payload.permission?.takeIf { it.isNotBlank() }
+                        ?.let { onEvent(SessionEvent.SessionPermissionUpdated(it, agentId)) }
                 }
             "context.spliced" -> frame.decodePayload<ContextSplicedPayload>()
                 ?.let { onEvent(SessionEvent.ContextSpliced(it.messages.map { msg -> mapper.toDomain(msg) }, agentId)) }

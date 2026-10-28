@@ -600,9 +600,17 @@ abstract class ChatViewModelTestBase {
             """"maxContextTokens":$max,"usage":{},"contextTokens":$used,""" +
             """"agentId":"main","sessionId":"session_1"}}"""
 
+    /** 2.2.0 permission variant (docs/server-api.md; ticket 165): the usage/model
+     * fields ride along, the new `permission` field names the mode. */
+    protected fun agentStatusPermissionFrame(permission: String): String =
+        """{"type":"agent.status.updated","seq":90,"epoch":"ep_1","volatile":true,""" +
+            """"session_id":"session_1","timestamp":"2026-10-14T00:00:00.000Z",""" +
+            """"payload":{"type":"agent.status.updated","time":1792006993469,"agentId":"main",""" +
+            """"permission":"$permission","usage":{},"contextTokens":30317,""" +
+            """"maxContextTokens":1048576,"model":"kimi-code/k3","sessionId":"session_1"}}"""
+
     /** Verbatim 0.29.0 phase variant: no token counts, must not clobber the ring. */
-    protected fun agentStatusPhaseFrame(): String =
-        """{"type":"agent.status.updated","seq":31,"epoch":"ep_1","volatile":true,""" +
+    protected fun agentStatusPhaseFrame(): String =        """{"type":"agent.status.updated","seq":31,"epoch":"ep_1","volatile":true,""" +
             """"session_id":"session_1","timestamp":"2026-07-26T00:00:01.000Z",""" +
             """"payload":{"type":"agent.status.updated",""" +
             """"phase":{"kind":"running","turnId":0,"step":0,"stepId":"","since":1784777223312},""" +

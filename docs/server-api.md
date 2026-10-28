@@ -420,9 +420,9 @@ touched the client-facing wire in exactly these places:
   ```
 
   The reverse write (`"auto"`) produced the twin frame. The app decodes
-  `agent.status.updated` with `ignoreUnknownKeys` and never modeled
-  `permission` — no breakage; ticket 165 consumes it to keep the chat
-  permission chip in sync live.
+  `agent.status.updated` with `ignoreUnknownKeys` and handles `permission`
+  since ticket 165: the chat permission chip follows the frame live, under
+  the ticket-141 guard (a stored local pick wins).
 - **History text parts gained an optional `meta` object** (commit
   `06ebfc82` — UserPromptSubmit hook output folded into the prompt
   message; source-derived, **not observed live** — this server runs no

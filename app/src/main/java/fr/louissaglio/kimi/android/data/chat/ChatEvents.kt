@@ -16,6 +16,10 @@ const val AGENT_TOOL_NAME = "Agent"
  * fans out N sub-agents sharing its tool call id as `parentToolCallId` (ticket 134). */
 const val AGENT_SWARM_TOOL_NAME = "AgentSwarm"
 
+/** The managed Kimi provider's name in the model catalog — the only provider whose
+ * effort descriptions the client config supplies (ticket 170). */
+const val MANAGED_KIMI_PROVIDER = "managed:kimi-code"
+
 /** A transcript event scoped to one emitting agent (payload `agentId`). The chat
  * screen consumes only [MAIN_AGENT_ID] events itself; the rest are routed to the
  * sub-agent stream store (ticket 045). */
@@ -228,6 +232,15 @@ sealed interface SessionEvent {
     data class SessionModelUpdated(
         val model: String?,
         val thinkingEffort: String?,
+        override val agentId: String = MAIN_AGENT_ID,
+    ) : SessionEvent, AgentScopedEvent
+
+    /** The session's permission mode as the server reports it (agent.status.updated,
+     * permission variant — 2.2.0, ticket 165). The server pushes this the moment the
+     * mode changes, including when another client writes it through the profile route;
+     * the chat's chip follows it unless a local pick is in force (ticket 141). */
+    data class SessionPermissionUpdated(
+        val permission: String,
         override val agentId: String = MAIN_AGENT_ID,
     ) : SessionEvent, AgentScopedEvent
 

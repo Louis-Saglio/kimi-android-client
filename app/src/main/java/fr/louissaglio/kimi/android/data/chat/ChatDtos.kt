@@ -114,9 +114,10 @@ data class SessionStatusData(
 )
 
 /**
- * `agent.status.updated` payload (docs/server-api.md, volatile). Two variants share the
- * event type: the model/usage one carries [contextTokens]/[maxContextTokens], the phase
- * one carries [phase] — its null token fields must not clobber the stored values.
+ * `agent.status.updated` payload (docs/server-api.md, volatile). Three variants share
+ * the event type: the model/usage one carries [contextTokens]/[maxContextTokens], the
+ * phase one carries [phase], and the permission one carries [permission] — its null
+ * fields must not clobber the stored values.
  */
 @Serializable
 data class AgentStatusUpdatedPayload(
@@ -127,6 +128,9 @@ data class AgentStatusUpdatedPayload(
     val thinkingEffort: String? = null,
     // Phase variant only (ticket 148): the agent's live activity.
     val phase: AgentPhaseDto? = null,
+    // Permission variant only (2.2.0, ticket 165): manual/yolo/auto, pushed the
+    // moment the session's mode changes — from any client.
+    val permission: String? = null,
 )
 
 /** `phase` of the agent.status.updated phase variant (docs/server-api.md — ticket 148):

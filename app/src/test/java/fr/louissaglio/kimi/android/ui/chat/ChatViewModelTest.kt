@@ -1653,6 +1653,37 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         assertEquals("manual", dataStore.data.first()[stringPreferencesKey("permission_for_session_session_1")])
     }
 
+    @Test
+    fun `an agent status permission frame updates the chip when no local pick is stored`() = runBlocking {
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.modelsAvailable }
+        val socket = awaitServerSocket()
+
+        socket.send(agentStatusPermissionFrame(permission = "manual"))
+
+        awaitState(viewModel.uiState) { it.sessionPermission == "manual" }
+        assertEquals(PermissionMode.AlwaysAsk, viewModel.uiState.value.currentPermissionMode)
+        // Read-only sync: the frame never writes the per-session store (the ticket 141
+        // "follow the server" rule) — the next prompt omits the stamp.
+        assertNull(dataStore.data.first()[stringPreferencesKey("permission_for_session_session_1")])
+    }
+
+    @Test
+    fun `an agent status permission frame leaves a stored pick untouched`() = runBlocking {
+        dataStore.edit { it[stringPreferencesKey("permission_for_session_session_1")] = "yolo" }
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessionPermission == "yolo" }
+        val socket = awaitServerSocket()
+
+        socket.send(agentStatusPermissionFrame(permission = "auto"))
+
+        // The sticky pick is re-asserted per prompt; showing the server's value would
+        // mislead (ticket 165's carry-over of the 141 design).
+        delay(200)
+        assertEquals("yolo", viewModel.uiState.value.sessionPermission)
+        assertEquals("yolo", dataStore.data.first()[stringPreferencesKey("permission_for_session_session_1")])
+    }
+
     // --- Compact session (ticket 056) ---------------------------------------------------
 
     @Test

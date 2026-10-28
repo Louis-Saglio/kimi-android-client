@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.navigation.toRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
 import fr.louissaglio.kimi.android.data.attachments.AttachmentStore
+import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.toUserMessage
 import fr.louissaglio.kimi.android.data.chat.AGENT_SWARM_TOOL_NAME
 import fr.louissaglio.kimi.android.data.chat.AGENT_TOOL_NAME
@@ -14,14 +15,18 @@ import fr.louissaglio.kimi.android.data.chat.AgentPhase
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
+import fr.louissaglio.kimi.android.data.chat.EffortSwitchConfig
 import fr.louissaglio.kimi.android.data.chat.MAIN_AGENT_ID
+import fr.louissaglio.kimi.android.data.chat.MANAGED_KIMI_PROVIDER
 import fr.louissaglio.kimi.android.data.chat.MessagePage
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.data.chat.ResolvedQuestion
 import fr.louissaglio.kimi.android.data.chat.ServerModel
+import fr.louissaglio.kimi.android.data.chat.SessionAge
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.SessionSnapshot
 import fr.louissaglio.kimi.android.data.chat.SocketEvent
+import fr.louissaglio.kimi.android.data.chat.SwitchConfirm
 import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.TodoParser
 import fr.louissaglio.kimi.android.data.chat.isSubagentScoped
@@ -46,6 +51,13 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
+
+/** Cross-process occupancy errors (2.3.0, docs/server-api.md — tickets 168/169). */
+private const val SESSION_OCCUPIED_CODE = 40931
+private const val SESSION_STALE_CODE = 40932
 
 @HiltViewModel
 class ChatViewModel internal constructor(
@@ -1143,6 +1155,13 @@ class ChatViewModel internal constructor(
             // Same frame family, session-scope fields: the live model/effort binding.
             is SessionEvent.SessionModelUpdated ->
                 syncServerSessionModel(event.model, event.thinkingEffort)
+            // 2.2.0's permission variant (ticket 165): the server pushes the mode the
+            // moment it changes, including a profile write from another client. The
+            // seed's guard applies verbatim — a stored pick stays displayed and the
+            // per-prompt stamp re-asserts it (ticket 141); the store read is the
+            // recreation-proof half of that guard.
+            is SessionEvent.SessionPermissionUpdated ->
+                syncServerSessionPermission(event.permission, chatRepository.getSessionPermission(sessionId))
             // Compaction (ticket 056): no turn events fire for it — these frames alone
             // drive the divider and the compacting state. Started also arrives for
             // compactions triggered from another client (the TUI's /compact), so it —
