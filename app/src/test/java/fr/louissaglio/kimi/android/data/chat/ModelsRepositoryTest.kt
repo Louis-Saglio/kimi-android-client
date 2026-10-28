@@ -3,6 +3,7 @@ package fr.louissaglio.kimi.android.data.chat
 import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.network.ApiClient
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
+import java.time.Instant
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import mockwebserver3.MockResponse
@@ -10,6 +11,7 @@ import mockwebserver3.MockWebServer
 import okhttp3.OkHttpClient
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -126,7 +128,66 @@ class ModelsRepositoryTest {
         assertEquals(2, server.requestCount)
     }
 
+    @Test
+    fun `models map the optional upgrade object and items without it stay plain`() = runBlocking {
+        server.enqueue(MockResponse(body = MODELS_BODY))
+
+        val models = repository.models(settings()).getOrThrow()
+
+        assertEquals(
+            ModelUpgrade(
+                model = "kimi-code/k3.1-pro",
+                migrationMarkdown = "## Time to upgrade\n\nK3 retires soon.",
+                retirementAt = Instant.parse("2026-12-01T00:00:00Z"),
+            ),
+            models[0].upgrade,
+        )
+        assertNull(models[1].upgrade)
+    }
+
+    @Test
+    fun `client configs fetch by registered name and map both policies`() = runBlocking {
+        server.enqueue(MockResponse(body = MODEL_SWITCH_CONFIG_BODY))
+        val modelPolicy = repository.modelSwitchConfirm(settings()).getOrThrow()
+        assertEquals("""{"name":"model_switch_confirm"}""", server.takeRequest().body!!.utf8())
+        assertEquals("new", modelPolicy?.rules?.single()?.sessionType)
+
+        server.enqueue(MockResponse(body = EFFORT_SWITCH_CONFIG_BODY))
+        val effortPolicy = repository.effortSwitchConfig(settings()).getOrThrow()
+        assertEquals("""{"name":"effort_switch_confirm"}""", server.takeRequest().body!!.utf8())
+        assertEquals("Quick", effortPolicy?.descriptions?.get("low"))
+        assertTrue(effortPolicy?.confirm?.enabled == true)
+    }
+
+    @Test
+    fun `a null client config preserves the no-gate fallback`() = runBlocking {
+        server.enqueue(MockResponse(body = """{"code":0,"msg":"success","data":{"name":"model_switch_confirm","config":null},"request_id":"r"}"""))
+
+        assertNull(repository.modelSwitchConfirm(settings()).getOrThrow())
+    }
+
+    @Test
+    fun `config maps the models alias to upstream ids`() = runBlocking {
+        server.enqueue(MockResponse(body = CONFIG_BODY))
+
+        val config = repository.config(settings()).getOrThrow()
+
+        assertEquals(mapOf("kimi-code/k3" to "k3", "deepseek/deepseek-v4-pro" to "deepseek-v4-pro"), config.modelAliases)
+    }
+
     private companion object {
+        // Trimmed 2.3.3 catalog shape (docs/server-api.md, Models): no live item
+        // publishes `upgrade` yet, so the first entry carries the 2.3.0 schema.
+        const val MODELS_BODY =
+            """{"code":0,"msg":"success","data":{"items":[""" +
+                """{"provider":"managed:kimi-code","model":"kimi-code/k3","display_name":"K3",""" +
+                """"max_context_size":1048576,"support_efforts":["low","high","max"],"default_effort":"high",""" +
+                """"upgrade":{"model":"kimi-code/k3.1-pro","migration_markdown":"## Time to upgrade\n\nK3 retires soon.",""" +
+                """"retirement_at":"2026-12-01T00:00:00Z"}},""" +
+                """{"provider":"deepseek","model":"deepseek/deepseek-v4-pro","display_name":"DeepSeek V4 Pro",""" +
+                """"max_context_size":1000000}""" +
+                """]},"request_id":"r"}"""
+
         // Verbatim trimmed capture (0.39.1, 2026-09-01) plus default_permission_mode
         // (verified live on 0.42.0, 2026-09-15 — ticket 142): the consumed fields are
         // snake_case on both the GET and the POST echo.
@@ -135,9 +196,19 @@ class ModelsRepositoryTest {
                 """"default_model":"kimi-code/k3",""" +
                 """"default_permission_mode":"yolo",""" +
                 """"thinking":{"enabled":true,"effort":"high"},""" +
+                """"models":{"kimi-code/k3":{"model":"k3"},"deepseek/deepseek-v4-pro":{"model":"deepseek-v4-pro"}},""" +
                 """"providers":{""" +
                 """"managed:kimi-code":{"type":"kimi","base_url":"https://api.kimi.com/coding/v1","has_api_key":true},""" +
                 """"deepseek":{"type":"openai","base_url":"https://api.deepseek.com","has_api_key":false}""" +
                 """}},"request_id":"r"}"""
+
+        const val MODEL_SWITCH_CONFIG_BODY =
+            """{"code":0,"msg":"success","data":{"name":"model_switch_confirm","config":{"enable":true,""" +
+                """"rules":[{"from":"*","to":"k3.1-pro-highspeed","session_type":"new"}]}},"request_id":"r"}"""
+
+        const val EFFORT_SWITCH_CONFIG_BODY =
+            """{"code":0,"msg":"success","data":{"name":"effort_switch_confirm","config":{""" +
+                """"descriptions":{"enable":true,"items":{"low":{"en":"Quick"}}},""" +
+                """"confirm":{"enable":true,"rules":[{"from":"*","to":"*","session_type":"old"}]}}},"request_id":"r"}"""
     }
 }

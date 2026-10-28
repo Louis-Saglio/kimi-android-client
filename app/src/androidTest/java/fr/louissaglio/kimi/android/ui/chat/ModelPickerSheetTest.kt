@@ -13,8 +13,10 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import fr.louissaglio.kimi.android.data.chat.ModelUpgrade
 import fr.louissaglio.kimi.android.data.chat.ServerModel
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
+import java.time.Instant
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -117,5 +119,66 @@ class ModelPickerSheetTest {
         // The picked model row carries the only check; the effort shows as a segment.
         composeTestRule.onAllNodesWithText("✓").assertCountEquals(1)
         composeTestRule.onNodeWithText("Thinking").assertIsDisplayed()
+    }
+
+    @Test
+    fun upgradeMetadataShowsItsBadgeReplacementAliasAndGuideWithoutSelecting() {
+        val upgradable = models.first().copy(
+            upgrade = ModelUpgrade(
+                model = "kimi-code/k3.1-pro",
+                migrationMarkdown = "## Upgrade notes\n\nK3 retires soon.",
+                retirementAt = Instant.parse("2026-12-01T00:00:00Z"),
+            ),
+        )
+        var picked: String? = null
+        composeTestRule.setContent {
+            KimiTheme {
+                ModelPickerSheet(
+                    availableModels = listOf(upgradable) + models.drop(1),
+                    currentModelId = "kimi-code/k3-256k",
+                    serverDefaultModel = "kimi-code/k3-256k",
+                    supportedEfforts = listOf("low", "high"),
+                    selectedEffort = null,
+                    defaultEffort = "high",
+                    onModelSelected = { picked = it },
+                    onEffortSelected = {},
+                    onDismiss = {},
+                )
+            }
+        }
+
+        // The row is marked as upgradable and names the replacement + retirement day.
+        composeTestRule.onNodeWithText("Upgrade").assertIsDisplayed()
+        composeTestRule
+            .onNode(hasText("Upgrade to kimi-code/k3.1-pro · retires 1 Dec 2026", substring = true))
+            .assertIsDisplayed()
+
+        composeTestRule.onNodeWithText("Guide").performClick()
+        // The guide is a read-only dialog; opening or closing it selects nothing.
+        composeTestRule.onNodeWithText("Upgrade to kimi-code/k3.1-pro").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Upgrade notes").assertIsDisplayed()
+        assertEquals(null, picked)
+    }
+
+    @Test
+    fun theActiveEffortShowsItsCloudDescriptionWhenSupplied() {
+        composeTestRule.setContent {
+            KimiTheme {
+                ModelPickerSheet(
+                    availableModels = models,
+                    currentModelId = "kimi-code/k3-256k",
+                    serverDefaultModel = "kimi-code/k3-256k",
+                    supportedEfforts = listOf("low", "high"),
+                    selectedEffort = "low",
+                    defaultEffort = "high",
+                    effortDescription = "Light reasoning for simple tasks",
+                    onModelSelected = {},
+                    onEffortSelected = {},
+                    onDismiss = {},
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("Light reasoning for simple tasks").assertIsDisplayed()
     }
 }

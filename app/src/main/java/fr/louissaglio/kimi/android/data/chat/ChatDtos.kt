@@ -199,6 +199,18 @@ data class ModelDto(
     // Only on models with thinking-effort levels (K3 on 0.29.0); absent elsewhere.
     @SerialName("support_efforts") val supportEfforts: List<String>? = null,
     @SerialName("default_effort") val defaultEffort: String? = null,
+    // Ticket 166 (2.3.0): optional retirement/replacement guidance. No live catalog
+    // item publishes it yet (verified 2026-10-28).
+    val upgrade: ModelUpgradeDto? = null,
+)
+
+/** The model catalog item's optional `upgrade` object (2.3.0, ticket 166):
+ * `{model, migration_markdown, retirement_at?}`. */
+@Serializable
+data class ModelUpgradeDto(
+    val model: String = "",
+    @SerialName("migration_markdown") val migrationMarkdown: String = "",
+    @SerialName("retirement_at") val retirementAt: String? = null,
 )
 
 /** `data` of the POST /prompts ack. */

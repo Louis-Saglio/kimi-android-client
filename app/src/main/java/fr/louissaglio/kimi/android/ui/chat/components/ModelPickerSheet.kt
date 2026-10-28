@@ -22,9 +22,11 @@ import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -34,6 +36,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import fr.louissaglio.kimi.android.data.chat.ServerModel
 import fr.louissaglio.kimi.android.ui.common.formatTokenCount
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 
 /** Model picker bottom sheet (ticket 031, redesigned 108): every server model, grouped
  * by provider — one collapsible section per distinct [ServerModel.provider] headed by the
@@ -64,10 +68,16 @@ internal fun ModelPickerSheet(
     selectedEffort: String?,
     /** The current model's server default effort, used when nothing is stored. */
     defaultEffort: String?,
+    /** Ticket 170: the active effort's English description (managed provider only,
+     * already gated by the caller); null renders nothing. */
+    effortDescription: String? = null,
     onModelSelected: (String) -> Unit,
     onEffortSelected: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    // The upgrade guide is a read-only read of catalog metadata (ticket 166): opening
+    // it never selects a model or touches the stored/session preference.
+    var upgradeGuide by remember { mutableStateOf<ServerModel?>(null) }
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.padding(bottom = 24.dp)) {
             // Display names collide across providers (two "K3-256k" rows on Louis's
@@ -95,14 +105,34 @@ internal fun ModelPickerSheet(
                     )
                     if (expanded) {
                         models.forEach { model ->
+                            val upgrade = model.upgrade
                             SheetCheckRow(
                                 title = model.displayName.ifBlank { model.model },
-                                subtitle = formatContextSize(model.maxContextSize) +
-                                    if ((collidingNames[model.displayName] ?: 0) > 1) " · ${model.model}" else "",
-                                badge = if (model.model == serverDefaultModel) "Default" else null,
+                                subtitle = buildString {
+                                    append(formatContextSize(model.maxContextSize))
+                                    if ((collidingNames[model.displayName] ?: 0) > 1) append(" · ${model.model}")
+                                    if (upgrade != null) {
+                                        append(" · Upgrade to ${upgrade.model}")
+                                        upgrade.retirementAt?.let { append(" · retires ${formatRetirement(it)}") }
+                                    }
+                                },
+                                badge = listOfNotNull(
+                                    "Default".takeIf { model.model == serverDefaultModel },
+                                    "Upgrade".takeIf { upgrade != null },
+                                ).joinToString(" · ").ifEmpty { null },
                                 checked = model.model == currentModelId,
                                 onClick = { onModelSelected(model.model) },
                             )
+                            if (upgrade != null) {
+                                // Outside the check row on purpose: the row tap selects
+                                // the model, the guide is a read-only detour (ticket 166).
+                                TextButton(
+                                    onClick = { upgradeGuide = model },
+                                    modifier = Modifier.padding(start = 16.dp),
+                                ) {
+                                    Text("Guide")
+                                }
+                            }
                         }
                     }
                 }
@@ -188,3 +218,11 @@ private fun ThinkingEffortRow(
 /** Context window for the picker rows: "1M context", "262.1k context". */
 private fun formatContextSize(size: Long): String =
     if (size >= 1_000) "${formatTokenCount(size)} context" else "$size tokens"
+
+/** The upgrade's retirement day: "1 Dec 2026" (UTC — the server's stamp is an
+ * absolute instant). */
+private val retirementFormatter: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("d MMM yyyy").withZone(ZoneOffset.UTC)
+
+private fun formatRetirement(instant: java.time.Instant): String =
+    retirementFormatter.format(instant)

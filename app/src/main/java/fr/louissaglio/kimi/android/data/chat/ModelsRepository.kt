@@ -6,6 +6,9 @@ import fr.louissaglio.kimi.android.data.network.toAckResult
 import fr.louissaglio.kimi.android.data.network.toNullableResult
 import fr.louissaglio.kimi.android.data.network.toResult
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneOffset
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.serialization.json.JsonObject
@@ -161,5 +164,17 @@ class ModelsRepository @Inject constructor(
         maxContextSize = maxContextSize,
         supportEfforts = supportEfforts,
         defaultEffort = defaultEffort,
+        upgrade = upgrade?.let { dto ->
+            ModelUpgrade(
+                model = dto.model,
+                migrationMarkdown = dto.migrationMarkdown,
+                // Tolerated as absent: a malformed date is the same non-guidance as none.
+                // The schema says ISO instant; a date-only stamp degrades to UTC midnight.
+                retirementAt = dto.retirementAt?.let { raw ->
+                    runCatching { Instant.parse(raw) }.getOrNull()
+                        ?: runCatching { LocalDate.parse(raw).atStartOfDay(ZoneOffset.UTC).toInstant() }.getOrNull()
+                },
+            )
+        },
     )
 }
