@@ -1,10 +1,12 @@
 package fr.louissaglio.kimi.android.ui.chat
 
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -58,7 +60,7 @@ class TurnChangesScreenTest {
         composeTestRule.onNodeWithText("Files changed").assertIsDisplayed()
         composeTestRule.onNodeWithText("Turn 2").assertIsDisplayed()
         composeTestRule.onNodeWithText("notes.txt").assertIsDisplayed()
-        composeTestRule.onNodeWithText("/home/ubuntu/spike").assertIsDisplayed()
+        composeTestRule.onAllNodesWithText("/home/ubuntu/spike").assertCountEquals(3)
         // Status badges.
         composeTestRule.onNodeWithText("modified").assertIsDisplayed()
         composeTestRule.onNodeWithText("added").assertIsDisplayed()
