@@ -1521,6 +1521,209 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         )
     }
 
+    // --- Cloud switch policies (tickets 167/170) ---------------------------------
+
+    /** The catalog and alias map the gate tests share: k3 → k3.1-pro is the switch
+     * the captured live rules gate. */
+    private fun configureSwitchCatalog() {
+        modelsBody = """{"code":0,"msg":"success","data":{"items":[""" +
+            """{"provider":"managed:kimi-code","model":"kimi-code/k3","display_name":"K3",""" +
+            """"max_context_size":1048576,"support_efforts":["low","high","max"],"default_effort":"high"},""" +
+            """{"provider":"managed:kimi-code","model":"kimi-code/k3.1-pro","display_name":"K3.1 Pro",""" +
+            """"max_context_size":1048576,"support_efforts":["low","high","max"],"default_effort":"high"},""" +
+            """{"provider":"deepseek","model":"deepseek/deepseek-v4-pro","display_name":"DeepSeek V4 Pro",""" +
+            """"max_context_size":1000000,"support_efforts":["low","high","max"],"default_effort":"high"}""" +
+            """]},"request_id":"r"}"""
+        configBody = """{"code":0,"msg":"success","data":{"default_model":"kimi-code/k3",""" +
+            """"models":{"kimi-code/k3":{"model":"k3"},"kimi-code/k3.1-pro":{"model":"k3.1-pro"}},""" +
+            """"thinking":{"effort":"high"}},"request_id":"r"}"""
+    }
+
+    private fun configureModelSwitchRule(sessionType: String) {
+        modelSwitchConfigBody = """{"code":0,"msg":"success","data":{"name":"model_switch_confirm",""" +
+            """"config":{"enable":true,"rules":[{"from":"k3","to":"k3.1-pro","session_type":"$sessionType",""" +
+            """"hint":{"en":"Switching may affect quality"},"warning":{"en":"Costs about twice as much"}}]}},"request_id":"r"}"""
+    }
+
+    private fun configureEffortSwitchRule(sessionType: String) {
+        effortSwitchConfigBody = """{"code":0,"msg":"success","data":{"name":"effort_switch_confirm",""" +
+            """"config":{"descriptions":{"enable":true,"items":{"low":{"en":"Light reasoning"},""" +
+            """"max":{"en":"Maximum reasoning"}}},"confirm":{"enable":true,"rules":[""" +
+            """{"from":"*","to":"*","session_type":"$sessionType","hint":{"en":"Affects output quality"}}]}}},"request_id":"r"}"""
+    }
+
+    @Test
+    fun `a matching model rule opens the dialog and only Continue persists the pick`() = runBlocking {
+        configureSwitchCatalog()
+        configureModelSwitchRule("new")
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.modelsAvailable && it.modelAliases.isNotEmpty() }
+
+        viewModel.onModelPicked("kimi-code/k3.1-pro")
+
+        val pending = viewModel.uiState.value.pendingModelSwitch
+        assertEquals("kimi-code/k3.1-pro", pending?.target)
+        assertEquals("K3", pending?.fromLabel)
+        assertEquals("K3.1 Pro", pending?.toLabel)
+        assertEquals("Switching may affect quality", pending?.hint)
+        assertEquals("Costs about twice as much", pending?.warning)
+        // Nothing is committed before Continue.
+        assertNull(viewModel.uiState.value.sessionModel)
+        assertNull(dataStore.data.first()[stringPreferencesKey("model_for_session_session_1")])
+
+        viewModel.onModelSwitchConfirmed()
+        awaitState(viewModel.uiState) { it.sessionModel == "kimi-code/k3.1-pro" }
+        assertNull(viewModel.uiState.value.pendingModelSwitch)
+        assertEquals(
+            "kimi-code/k3.1-pro",
+            dataStore.data.first()[stringPreferencesKey("model_for_session_session_1")],
+        )
+    }
+
+    @Test
+    fun `Cancel leaves the model preference untouched`() = runBlocking {
+        configureSwitchCatalog()
+        configureModelSwitchRule("new")
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.modelsAvailable && it.modelAliases.isNotEmpty() }
+
+        viewModel.onModelPicked("kimi-code/k3.1-pro")
+        viewModel.onModelSwitchDismissed()
+
+        assertNull(viewModel.uiState.value.pendingModelSwitch)
+        assertNull(viewModel.uiState.value.sessionModel)
+        assertNull(dataStore.data.first()[stringPreferencesKey("model_for_session_session_1")])
+    }
+
+    @Test
+    fun `an old-session rule gates a chat with history`() = runBlocking {
+        messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
+            """{"id":"msg_0","role":"user","content":[{"type":"text","text":"earlier question"}]}""" +
+            """]},"request_id":"r"}"""
+        configureSwitchCatalog()
+        configureModelSwitchRule("old")
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.modelsAvailable && it.modelAliases.isNotEmpty() }
+        awaitState(viewModel.uiState) { it.items?.isNotEmpty() == true }
+
+        viewModel.onModelPicked("kimi-code/k3.1-pro")
+
+        assertEquals("kimi-code/k3.1-pro", viewModel.uiState.value.pendingModelSwitch?.target)
+    }
+
+    @Test
+    fun `a new-session-only rule does not gate a chat with history`() = runBlocking {
+        messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
+            """{"id":"msg_0","role":"user","content":[{"type":"text","text":"earlier question"}]}""" +
+            """]},"request_id":"r"}"""
+        configureSwitchCatalog()
+        configureModelSwitchRule("new")
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.modelsAvailable && it.modelAliases.isNotEmpty() }
+        awaitState(viewModel.uiState) { it.items?.isNotEmpty() == true }
+
+        viewModel.onModelPicked("kimi-code/k3.1-pro")
+
+        assertNull(viewModel.uiState.value.pendingModelSwitch)
+        awaitState(viewModel.uiState) { it.sessionModel == "kimi-code/k3.1-pro" }
+    }
+
+    @Test
+    fun `a null config preserves immediate model selection`() = runBlocking {
+        configureSwitchCatalog()
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.modelsAvailable }
+
+        viewModel.onModelPicked("kimi-code/k3.1-pro")
+
+        assertNull(viewModel.uiState.value.pendingModelSwitch)
+        awaitState(viewModel.uiState) { it.sessionModel == "kimi-code/k3.1-pro" }
+    }
+
+    @Test
+    fun `a nonmatching rule preserves immediate model selection`() = runBlocking {
+        configureSwitchCatalog()
+        // The rule gates only a kimi-for-coding → k3.1-pro switch.
+        modelSwitchConfigBody = """{"code":0,"msg":"success","data":{"name":"model_switch_confirm",""" +
+            """"config":{"enable":true,"rules":[{"from":"kimi-for-coding","to":"k3.1-pro","session_type":"all"}]}},"request_id":"r"}"""
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.modelsAvailable && it.modelAliases.isNotEmpty() }
+
+        viewModel.onModelPicked("kimi-code/k3.1-pro")
+
+        assertNull(viewModel.uiState.value.pendingModelSwitch)
+        awaitState(viewModel.uiState) { it.sessionModel == "kimi-code/k3.1-pro" }
+    }
+
+    @Test
+    fun `the effort gate opens on an old-session rule and Cancel writes nothing`() = runBlocking {
+        messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
+            """{"id":"msg_0","role":"user","content":[{"type":"text","text":"earlier question"}]}""" +
+            """]},"request_id":"r"}"""
+        configureSwitchCatalog()
+        configureEffortSwitchRule("old")
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.modelsAvailable && it.effortDescriptions.isNotEmpty() }
+        awaitState(viewModel.uiState) { it.items?.isNotEmpty() == true }
+
+        assertEquals("high", viewModel.uiState.value.effectiveEffort)
+        assertEquals("managed:kimi-code", viewModel.uiState.value.currentModel?.provider)
+        viewModel.onEffortPicked("max")
+
+        val pending = viewModel.uiState.value.pendingEffortSwitch
+        assertEquals("max", pending?.target)
+        assertEquals("Affects output quality", pending?.hint)
+        assertNull(dataStore.data.first()[stringPreferencesKey("effort_for_session_session_1")])
+
+        viewModel.onEffortSwitchDismissed()
+        assertNull(viewModel.uiState.value.pendingEffortSwitch)
+        assertNull(dataStore.data.first()[stringPreferencesKey("effort_for_session_session_1")])
+
+        // The next pick goes through the gate again, and Continue persists it.
+        viewModel.onEffortPicked("max")
+        viewModel.onEffortSwitchConfirmed()
+        awaitState(viewModel.uiState) { it.sessionEffort == "max" }
+        assertEquals("max", dataStore.data.first()[stringPreferencesKey("effort_for_session_session_1")])
+    }
+
+    @Test
+    fun `effort descriptions apply to the managed provider only`() = runBlocking {
+        configureSwitchCatalog()
+        configureEffortSwitchRule("old")
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.modelsAvailable && it.effortDescriptions.isNotEmpty() }
+
+        // The effective effort is the model's default ("high" → no description in this
+        // fixture); pick "low", which the config describes.
+        viewModel.onEffortSelected("low")
+        awaitState(viewModel.uiState) { it.effectiveEffort == "low" }
+        assertEquals("Light reasoning", viewModel.uiState.value.activeEffortDescription)
+
+        // A non-managed provider renders no description even with the same effort.
+        viewModel.onModelSelected("deepseek/deepseek-v4-pro")
+        awaitState(viewModel.uiState) { it.currentModel?.provider == "deepseek" }
+        assertEquals("low", viewModel.uiState.value.effectiveEffort)
+        assertNull(viewModel.uiState.value.activeEffortDescription)
+    }
+
+    @Test
+    fun `a rule with no alias metadata preserves immediate selection`() = runBlocking {
+        // Catalog without the config's alias map: the switch cannot be resolved to
+        // upstream ids, so the gate stays out of the way.
+        configureSwitchCatalog()
+        configBody = """{"code":0,"msg":"success","data":{"default_model":"kimi-code/k3"},"request_id":"r"}"""
+        configureModelSwitchRule("all")
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.modelsAvailable }
+
+        viewModel.onModelPicked("kimi-code/k3.1-pro")
+
+        assertNull(viewModel.uiState.value.pendingModelSwitch)
+        awaitState(viewModel.uiState) { it.sessionModel == "kimi-code/k3.1-pro" }
+    }
+
+    // --- Cloud switch policies end ------------------------------------------------
+
     @Test
     fun `a pending pick is not clobbered by a status frame of the running turn`() = runBlocking {
         viewModel.onScreenStarted()

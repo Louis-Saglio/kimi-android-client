@@ -183,6 +183,18 @@ class ChatRepository @Inject constructor(
      * null instead of blocking the caller. */
     suspend fun getDefaultModel(settings: ServerSettings): String? = models.defaultModel(settings)
 
+    /** The server config projection (ticket 167 reads its `models` alias map to
+     * resolve the upstream ids the client-config rules match). */
+    suspend fun getServerConfig(settings: ServerSettings): Result<ServerConfig> = models.config(settings)
+
+    /** The `model_switch_confirm` cloud policy (ticket 167); null = no gate. */
+    suspend fun getModelSwitchConfirm(settings: ServerSettings): Result<SwitchConfirm?> =
+        models.modelSwitchConfirm(settings)
+
+    /** The `effort_switch_confirm` cloud policy (ticket 170); null = no policy. */
+    suspend fun getEffortSwitchConfig(settings: ServerSettings): Result<EffortSwitchConfig?> =
+        models.effortSwitchConfig(settings)
+
     /** Aborts the running turn (`POST /api/v1/sessions/{id}:abort`); the teardown
      * arrives over the WebSocket, so success carries no payload. */
     suspend fun abortPrompt(settings: ServerSettings, sessionId: String): Result<Unit> =

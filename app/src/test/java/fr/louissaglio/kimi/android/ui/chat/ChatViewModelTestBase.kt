@@ -104,6 +104,17 @@ abstract class ChatViewModelTestBase {
     @Volatile
     protected var forksSucceed = true
 
+    /** When set, `/prompts` answers this envelope body instead of the ack — the
+     * 40931/40932 recovery tests (tickets 168/169). */
+    @Volatile
+    protected var promptFailureBody: String? = null
+
+    @Volatile
+    protected var reloadsSucceed = true
+
+    @Volatile
+    protected var takeoversSucceed = true
+
     @Volatile
     protected var questionsBody =
         """{"code":0,"msg":"success","data":{"items":[]},"request_id":"r"}"""
@@ -184,6 +195,17 @@ abstract class ChatViewModelTestBase {
     @Volatile
     protected var configBody =
         """{"code":0,"msg":"success","data":{"default_model":"kimi-code/k3"},"request_id":"r"}"""
+
+    /** The `model_switch_confirm` answer (ticket 167); null config = no gate, like a
+     * server without the cloud policy. */
+    @Volatile
+    protected var modelSwitchConfigBody =
+        """{"code":0,"msg":"success","data":{"name":"model_switch_confirm","config":null},"request_id":"r"}"""
+
+    /** The `effort_switch_confirm` answer (ticket 170); null config = no policy. */
+    @Volatile
+    protected var effortSwitchConfigBody =
+        """{"code":0,"msg":"success","data":{"name":"effort_switch_confirm","config":null},"request_id":"r"}"""
 
     @Volatile
     protected var statusBody =
@@ -283,10 +305,34 @@ abstract class ChatViewModelTestBase {
                         statusResponseGate?.await(5, TimeUnit.SECONDS)
                         MockResponse(body = statusBody)
                     }
-                    path == "/api/v1/sessions/session_1/prompts" -> MockResponse(body = 
-                        """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
-                            """"status":"running","created_at":"2026-07-20T00:00:00.000Z"},"request_id":"r"}""",
-                    )
+                    path == "/api/v1/sessions/session_1/prompts" ->
+                        promptFailureBody?.let { MockResponse(body = it) } ?: MockResponse(body = 
+                            """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
+                                """"status":"running","created_at":"2026-07-20T00:00:00.000Z"},"request_id":"r"}""",
+                        )
+                    path == "/api/v1/sessions/session_1:reload" ->
+                        if (reloadsSucceed) {
+                            MockResponse(body =
+                                """{"code":0,"msg":"success","data":{"id":"session_1",""" +
+                                    """"title":"Fix the bug","updated_at":"2026-07-20T00:00:00.000Z",""" +
+                                    """"busy":false,"metadata":{"cwd":"/home/ubuntu/kimi-android-client"}},"request_id":"r"}""",
+                            )
+                        } else {
+                            MockResponse(body =
+                                """{"code":40901,"msg":"Session \"session_1\" cannot be reloaded while a turn is running",""" +
+                                    """"data":null,"request_id":"r"}""",
+                            )
+                        }
+                    path == "/api/v1/sessions/session_1:takeover" ->
+                        if (takeoversSucceed) {
+                            MockResponse(body =
+                                """{"code":0,"msg":"success","data":{"taken_over":true},"request_id":"r"}""",
+                            )
+                        } else {
+                            MockResponse(body =
+                                """{"code":40401,"msg":"session session_1 does not exist","data":null,"request_id":"r"}""",
+                            )
+                        }
                     path == "/api/v1/sessions/session_1/prompts:steer" -> MockResponse(body = 
                         """{"code":0,"msg":"success","data":{"steered":true,"prompt_ids":["msg_1"]},"request_id":"r"}""",
                     )

@@ -109,6 +109,33 @@ class ModelsRepository @Inject constructor(
         return models.firstOrNull { it.model == model }?.supportEfforts
     }
 
+    /**
+     * The `model_switch_confirm` cloud policy (2.3.0, ticket 167): fetched fresh on
+     * every chat model-data load — the server re-reads the cloud value per request
+     * and the app deliberately invents no TTL. A null config (unregistered name,
+     * absent cloud value) means no gate.
+     */
+    suspend fun modelSwitchConfirm(settings: ServerSettings): Result<SwitchConfirm?> =
+        fetchClientConfig(settings, "model_switch_confirm") { it.toSwitchConfirm() }
+
+    /**
+     * The `effort_switch_confirm` cloud policy (2.3.3, ticket 170): effort
+     * descriptions plus the optional change-confirmation rules. Same fresh-fetch,
+     * null-means-no-policy contract as [modelSwitchConfirm].
+     */
+    suspend fun effortSwitchConfig(settings: ServerSettings): Result<EffortSwitchConfig?> =
+        fetchClientConfig(settings, "effort_switch_confirm") { it.toEffortSwitchConfig() }
+
+    private suspend fun <T> fetchClientConfig(
+        settings: ServerSettings,
+        name: String,
+        map: (ClientConfigDto) -> T,
+    ): Result<T?> =
+        api.post(settings, "/api/v1/client_configs", api.jsonBody { put("name", name) }) { body ->
+            api.json.decodeFromString<Envelope<ClientConfigData>>(body).toNullableResult()
+                .map { data -> data?.config?.let(map) }
+        }
+
     /** Applies [patch] to the cached config of [settings]' server only; an empty or
      * other-server cache is left alone — the next [config] read refetches anyway. */
     private fun patchCachedConfig(settings: ServerSettings, patch: (ServerConfig) -> ServerConfig) {
@@ -153,6 +180,9 @@ class ModelsRepository @Inject constructor(
                             hasApiKey = dto.hasApiKey,
                         )
                     },
+                    modelAliases = data?.models.orEmpty().mapNotNull { (alias, dto) ->
+                        dto.model?.takeIf { it.isNotBlank() }?.let { alias to it }
+                    }.toMap(),
                 )
             }
         }

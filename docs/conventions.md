@@ -21,7 +21,11 @@
   instance level so it survives the ON_STOP/ON_START collection restarts —
   ticket 048; a refused cursor acks as `resync_required` → snapshot re-sync,
   ticket 085),
-  `ModelsRepository`,
+  `ModelsRepository` (models/config caches; catalog items map their optional
+  `upgrade` retirement guidance — ticket 166 — and its `clientConfigs` fetches
+  the two named cloud policies, `model_switch_confirm`/`effort_switch_confirm`,
+  fresh per chat model-data load — tickets 167/170; `config(settings)` also maps
+  the config `models` alias → upstream id map the switch rules match),
   `SessionPrefsStore` (per-session model/effort prefs — server-synced since
   ticket 107: `/status` seeds and `agent.status.updated` frames write the
   session's bound model/effort through to it, so the chip and the prompt send
@@ -30,7 +34,9 @@
   permission-mode pick, which is deliberately NOT server-synced: `/status`
   always reports a mode, so write-through would turn follow-the-server
   sessions into stamped ones; the stored pick wins over the report and
-  self-heals via the per-prompt `permission_mode` stamp), `ChatMessageMapper`
+  self-heals via the per-prompt `permission_mode` stamp. Since ticket 165 the
+  live `agent.status.updated` `permission` variant follows the same guard for
+  the chip — read-only, never written through), `ChatMessageMapper`
   (DTO→domain; a tool call's raw `args` JsonObject rides the domain/end-to-end
   models — `tool_use` parts, `tool.call.started` events, transcript tool frames,
   `ChatItem.ToolActivity` — and payload-derived display renderings live in

@@ -7,12 +7,17 @@ package fr.louissaglio.kimi.android.data.chat
  * UI maps it through PermissionMode.fromWire), and the providers (read-only —
  * managing them is out of scope for the phone client). Nulls mean the server has no
  * such value.
+ *
+ * [modelAliases] maps every picker alias (the config's `models` keys, equal to the
+ * `/models` catalog ids) to its UPSTREAM model id (`kimi-code/k3` → `k3`) — the ids
+ * client-config rules match (ticket 167). Missing entries leave a switch ungated.
  */
 data class ServerConfig(
     val defaultModel: String?,
     val defaultEffort: String?,
     val defaultPermissionMode: String?,
     val providers: List<ServerProvider>,
+    val modelAliases: Map<String, String> = emptyMap(),
 )
 
 /** One configured provider; [name] is its key in the config's `providers` map.

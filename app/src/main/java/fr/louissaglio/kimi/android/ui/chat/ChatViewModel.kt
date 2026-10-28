@@ -141,6 +141,17 @@ class ChatViewModel internal constructor(
         val since: Instant? = null,
     )
 
+    /** A model/effort switch held behind the cloud policy's confirmation dialog
+     * (tickets 167/170): [target] is the picker value to commit on Continue; the
+     * labels, hint and warning are the dialog's copy. */
+    data class PendingSwitch(
+        val target: String,
+        val fromLabel: String,
+        val toLabel: String,
+        val hint: String? = null,
+        val warning: String? = null,
+    )
+
     /** [items] is null until the first load lands; [error] is shown only when there is nothing to display. */
     data class UiState(
         /** The session this screen shows; [sessionLabel] falls back to it until the title loads. */
@@ -196,6 +207,17 @@ class ChatViewModel internal constructor(
         val sessionModel: String? = null,
         /** The thinking effort chosen for this session; null = follow the server default. */
         val sessionEffort: String? = null,
+        /** Picker alias → upstream model id (ticket 167), read from the config's
+         * `models` map; used only to match client-config rules. Empty when unknown. */
+        val modelAliases: Map<String, String> = emptyMap(),
+        /** English descriptions per thinking effort from `effort_switch_confirm`
+         * (ticket 170); empty = no descriptions to show. */
+        val effortDescriptions: Map<String, String> = emptyMap(),
+        /** A model switch awaiting the cloud policy's confirmation (ticket 167); null
+         * when no dialog is up. Nothing is persisted until Continue. */
+        val pendingModelSwitch: PendingSwitch? = null,
+        /** An effort switch awaiting confirmation (ticket 170), same contract. */
+        val pendingEffortSwitch: PendingSwitch? = null,
         /** The session's permission mode wire value (manual/yolo/auto — ticket 141):
          * the local pick (persisted), else the /status-seeded server report; null until
          * either lands — the composer's permission chip stays hidden meanwhile. */
@@ -271,6 +293,12 @@ class ChatViewModel internal constructor(
          * effort-less models — the chip then shows the plain model name. */
         val effectiveEffort: String?
             get() = if (supportedEfforts.isEmpty()) null else selectedEffort ?: defaultEffort
+
+        /** The active effort's English description (ticket 170): managed-kimi models
+         * only, exactly like upstream; empty descriptions render nothing. */
+        val activeEffortDescription: String?
+            get() = currentModel?.takeIf { it.provider == MANAGED_KIMI_PROVIDER }
+                ?.let { effortDescriptions[effectiveEffort] }
 
         /** The permission mode the composer chip shows (ticket 141); an unknown wire
          * value (or none yet) hides the chip. */
@@ -1280,6 +1308,18 @@ class ChatViewModel internal constructor(
     private fun loadModels() {
         viewModelScope.launch {
             val settings = settingsRepository.current()
+            // The cloud switch policies (tickets 167/170) are fetched FIRST, so the
+            // model sheet never shows a picker whose gates are still unknown — once
+            // modelsAvailable flips, the rules and aliases are in place too. Failures
+            // and null configs all mean "no gate": selection stays immediate, exactly
+            // like a server without the feature.
+            chatRepository.getServerConfig(settings).onSuccess { config ->
+                uiState.update { it.copy(modelAliases = config.modelAliases) }
+            }
+            modelSwitchConfirm = chatRepository.getModelSwitchConfirm(settings).getOrNull()
+            effortSwitchConfig = chatRepository.getEffortSwitchConfig(settings).getOrNull().also { config ->
+                uiState.update { it.copy(effortDescriptions = config?.descriptions.orEmpty()) }
+            }
             chatRepository.getModels(settings)
                 .onSuccess { models ->
                     uiState.update {
@@ -1299,6 +1339,109 @@ class ChatViewModel internal constructor(
                 }
         }
     }
+
+    /** The cloud switch policies fetched with the model data (tickets 167/170); null
+     * means no gate — an unregistered name, an absent/disabled config, or a fetch or
+     * decode failure. */
+    private var modelSwitchConfirm: SwitchConfirm? = null
+    private var effortSwitchConfig: EffortSwitchConfig? = null
+
+    /**
+     * The picker's model intent: commits immediately unless the cloud's
+     * `model_switch_confirm` policy gates this switch (ticket 167) — a different
+     * model, an idle chat, known aliases on both sides, and a matching enabled rule.
+     * A gate only raises the confirmation dialog; [onModelSwitchConfirmed] is the
+     * commit, [onModelSwitchDismissed] leaves every preference untouched.
+     */
+    fun onModelPicked(model: String) {
+        val state = uiState.value
+        val currentId = state.sessionModel ?: state.serverDefaultModel
+        val rule = if (state.isWorking || model == currentId) {
+            null
+        } else {
+            modelSwitchConfirm?.firstMatch(
+                upstreamModelId(currentId),
+                upstreamModelId(model),
+                sessionAge(),
+            )
+        }
+        if (rule == null) {
+            onModelSelected(model)
+            return
+        }
+        uiState.update {
+            it.copy(
+                pendingModelSwitch = PendingSwitch(
+                    target = model,
+                    fromLabel = state.currentModelLabel ?: currentId ?: "Current model",
+                    toLabel = state.availableModels.firstOrNull { candidate -> candidate.model == model }
+                        ?.displayName?.takeIf { label -> label.isNotBlank() } ?: model,
+                    hint = rule.hint,
+                    warning = rule.warning,
+                ),
+            )
+        }
+    }
+
+    /** Continue on the model-switch dialog: the commit goes through the existing,
+     * unchanged selection path. */
+    fun onModelSwitchConfirmed() {
+        val pending = uiState.value.pendingModelSwitch ?: return
+        uiState.update { it.copy(pendingModelSwitch = null) }
+        onModelSelected(pending.target)
+    }
+
+    fun onModelSwitchDismissed() {
+        uiState.update { it.copy(pendingModelSwitch = null) }
+    }
+
+    /** The effort picker's intent (ticket 170): same gate shape as [onModelPicked],
+     * over `effort_switch_confirm`'s rules and effort values. */
+    fun onEffortPicked(effort: String) {
+        val state = uiState.value
+        val current = state.effectiveEffort
+        val rule = if (state.isWorking || effort == current) {
+            null
+        } else {
+            effortSwitchConfig?.confirm?.firstMatch(current, effort, sessionAge())
+        }
+        if (rule == null) {
+            onEffortSelected(effort)
+            return
+        }
+        uiState.update {
+            it.copy(
+                pendingEffortSwitch = PendingSwitch(
+                    target = effort,
+                    fromLabel = current ?: "Default",
+                    toLabel = effort,
+                    hint = rule.hint,
+                    warning = rule.warning,
+                ),
+            )
+        }
+    }
+
+    fun onEffortSwitchConfirmed() {
+        val pending = uiState.value.pendingEffortSwitch ?: return
+        uiState.update { it.copy(pendingEffortSwitch = null) }
+        onEffortSelected(pending.target)
+    }
+
+    fun onEffortSwitchDismissed() {
+        uiState.update { it.copy(pendingEffortSwitch = null) }
+    }
+
+    /** Upstream `old` once the conversation has at least one real user turn, `new`
+     * otherwise — the client-config rules' session typing (tickets 167/170). The
+     * gate only runs while idle, so an optimistic echo cannot be pending here. */
+    private fun sessionAge(): SessionAge =
+        if (uiState.value.items.orEmpty().any { it is ChatItem.UserMessage }) SessionAge.Old else SessionAge.New
+
+    /** The upstream id a picker alias resolves to (ticket 167); unknown aliases mean
+     * the switch cannot be matched and therefore stays immediate. */
+    private fun upstreamModelId(alias: String?): String? =
+        alias?.let { uiState.value.modelAliases[it] }
 
     /** Persists the picked model for this session; subsequent prompts carry it. */
     fun onModelSelected(model: String) {

@@ -244,9 +244,14 @@ fun ChatScreen(
         onResolvedQuestionNext = viewModel::onResolvedQuestionNext,
         onResolvedQuestionBack = viewModel::onResolvedQuestionBack,
         onQuestionRowTapped = onQuestionRowTapped,
-        onModelSelected = viewModel::onModelSelected,
-        onEffortSelected = viewModel::onEffortSelected,
+        onModelSelected = viewModel::onModelPicked,
+        onEffortSelected = viewModel::onEffortPicked,
+        onModelSwitchConfirmed = viewModel::onModelSwitchConfirmed,
+        onModelSwitchDismissed = viewModel::onModelSwitchDismissed,
+        onEffortSwitchConfirmed = viewModel::onEffortSwitchConfirmed,
+        onEffortSwitchDismissed = viewModel::onEffortSwitchDismissed,
         onPermissionModeSelected = viewModel::onPermissionModeSelected,
+        onOpenCompactionSummary = onOpenCompactionSummary,
         onAttach = onAttach,
         onAttachmentRemoved = viewModel::onAttachmentRemoved,
         onImageClick = onImageClick,
@@ -636,6 +641,74 @@ private fun ChatContent(
             onDismiss = { showPermissionPicker = false },
         )
     }
+    uiState.pendingModelSwitch?.let { pending ->
+        SwitchConfirmDialog(
+            title = "Switch model?",
+            fromLabel = pending.fromLabel,
+            toLabel = pending.toLabel,
+            hint = pending.hint,
+            warning = pending.warning,
+            onConfirm = onModelSwitchConfirmed,
+            onDismiss = onModelSwitchDismissed,
+        )
+    }
+    uiState.pendingEffortSwitch?.let { pending ->
+        SwitchConfirmDialog(
+            title = "Change thinking effort?",
+            fromLabel = pending.fromLabel,
+            toLabel = pending.toLabel,
+            hint = pending.hint,
+            warning = pending.warning,
+            onConfirm = onEffortSwitchConfirmed,
+            onDismiss = onEffortSwitchDismissed,
+        )
+    }
+}
+
+/** The cloud policy's Continue/Cancel gate for a model or effort switch (tickets
+ * 167/170): the two values, the optional English hint, and the optional warning
+ * highlighted as the destructive consequence. Cancel dismisses without touching any
+ * preference. */
+@Composable
+private fun SwitchConfirmDialog(
+    title: String,
+    fromLabel: String,
+    toLabel: String,
+    hint: String?,
+    warning: String?,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column {
+                Text("$fromLabel → $toLabel", style = MaterialTheme.typography.bodyLarge)
+                if (hint != null) {
+                    Text(
+                        text = hint,
+                        modifier = Modifier.padding(top = 12.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+                if (warning != null) {
+                    Text(
+                        text = warning,
+                        modifier = Modifier.padding(top = 12.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("Continue") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
 }
 
 @Preview

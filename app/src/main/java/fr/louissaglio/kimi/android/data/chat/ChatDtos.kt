@@ -170,6 +170,16 @@ data class ConfigData(
     @SerialName("default_permission_mode") val defaultPermissionMode: String? = null,
     val thinking: ThinkingConfigDto? = null,
     val providers: Map<String, ProviderDto> = emptyMap(),
+    // Ticket 167: alias → model metadata; only the upstream `model` id is consumed
+    // (client-config rules match that, not the alias).
+    val models: Map<String, ConfigModelDto> = emptyMap(),
+)
+
+/** One entry of the config's `models` map (camelCase upstream, unlike the catalog's
+ * `GET /models` items): just the upstream id the switch rules match. */
+@Serializable
+data class ConfigModelDto(
+    val model: String? = null,
 )
 
 @Serializable
