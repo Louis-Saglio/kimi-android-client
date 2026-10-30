@@ -8,6 +8,12 @@ The app talks to the same backend as the Kimi Code web client — the HTTP +
 WebSocket server embedded in the `kimi` binary — and always tracks the latest
 server release. It has been in daily use since July 2026.
 
+<p align="center">
+  <img src="docs/screenshots/sessions.png" width="260" alt="Sessions grouped by workspace">
+  <img src="docs/screenshots/chat-tool-calls.png" width="260" alt="Chat with an expanded Bash tool call and its output">
+  <img src="docs/screenshots/chat-answer.png" width="260" alt="Agent answer rendered as Markdown">
+</p>
+
 ## Features
 
 - **Sessions** — list grouped by workspace with live status (running spinner,
