@@ -1,22 +1,30 @@
 #!/usr/bin/env bash
-# Run the instrumented Android suite (app/src/androidTest) on e2e-runner.
+# Run the instrumented Android suite (app/src/androidTest) on the e2e runner host.
 #
-# The VPS cannot host a usable emulator, so emulator tests never run here.
-# See AGENTS.md, "E2E tests: run on e2e-runner".
+# The development VPS cannot host a usable emulator, so emulator tests never run
+# there. See AGENTS.md, "E2E tests: run on the emulator runner".
 #
 #   scripts/run-e2e.sh                      # current working tree, uncommitted changes included
 #   scripts/run-e2e.sh --class <FQCN>       # one class (comma-separated for several)
 #   scripts/run-e2e.sh --ref <branch|sha>   # clean checkout of a ref, fetched from GitHub
 #
-# Any remaining argument is forwarded to kimi-android-uitest on e2e-runner.
+# KIMI_E2E_HOST (ssh destination) and KIMI_E2E_RUNNER (runner path on that host)
+# come from the environment or from scripts/e2e.local.env, which is gitignored
+# because they are machine-specific.
+#
+# Any remaining argument is forwarded to kimi-android-uitest on the runner host.
 # Last stdout line: RESULT=pass|fail|infra-error REPORT_DIR=<path>
 # Exit codes: 0 pass, 1 test/build failure, 2 infra error, 3 busy or low resources.
 
 set -euo pipefail
 
-host=${KIMI_E2E_HOST:-louis@e2e-runner}
-runner=${KIMI_E2E_RUNNER:-/home/louis/.local/bin/kimi-android-uitest}
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+if [[ -f $repo/scripts/e2e.local.env ]]; then
+  # shellcheck source=/dev/null
+  source "$repo/scripts/e2e.local.env"
+fi
+host=${KIMI_E2E_HOST:?set KIMI_E2E_HOST (ssh destination of the e2e runner), e.g. in scripts/e2e.local.env}
+runner=${KIMI_E2E_RUNNER:?set KIMI_E2E_RUNNER (path of kimi-android-uitest on the runner host)}
 
 ref=
 args=()

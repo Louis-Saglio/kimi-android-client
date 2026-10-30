@@ -2,9 +2,9 @@
 
 ## What this project is
 
-A native Android clone of the Kimi Code web client. It lets Louis drive the Kimi
-Code agent from his phone with a native UX instead of the browser. The app talks
-to the same backend as the web client — the HTTP + WebSocket server embedded in
+A native Android clone of the Kimi Code web client: it drives the Kimi Code
+agent from a phone with a native UX instead of the browser. The app talks to
+the same backend as the web client — the HTTP + WebSocket server embedded in
 the `kimi` binary.
 
 The app only ever runs against the LATEST server version: never keep
@@ -13,29 +13,34 @@ codes, superseded fields). When the server drops something, drop it here too —
 `docs/server-api.md` always describes the current version, and the nightly
 drift check keeps the two in sync.
 
-## Distribution: put the release APK on the file server
+## Machine-specific setup: `AGENTS.local.md`
 
-After every build Louis is meant to try, the **release** APK **must** be copied
-to the file server so he can download and install it on his phone. The file
-name on the file server must be `kimi-android-client-<branch-name>.apk`, where
-`<branch-name>` is the current git branch with `/` replaced by `-` (e.g.
-`kimi-android-client-main.apk`, `kimi-android-client-agent-fix-auth.apk`).
-This avoids name conflicts with other apps and prevents parallel sessions on
-different branches from overwriting each other's APK:
+This repository is public. Everything tied to one machine — where the APKs to
+try are published, the e2e runner host, the Firebase project and its
+credentials, the server's hostnames — lives in `AGENTS.local.md`, which is
+gitignored. Read it at the start of every session when it exists; when it does
+not, the steps it describes do not apply.
 
-```bash
-./gradlew :app:assembleRelease
-BRANCH=$(git branch --show-current | tr '/' '-')
-sudo cp app/build/outputs/apk/release/app-release.apk "/home/fileserver/files/kimi-android-client-${BRANCH}.apk"
-sudo chown fileserver:fileserver "/home/fileserver/files/kimi-android-client-${BRANCH}.apk"
-```
+## Public repo hygiene
 
-## E2E tests: run on e2e-runner
+Never commit anything machine- or user-specific:
 
-The VPS cannot host a usable Android emulator, and the hosted device farm has
-limited quota. Run the instrumented suite in `app/src/androidTest` on
-e2e-runner through its `kimi-android-uitest` runner — never try to boot an
-emulator here.
+- `app/google-services.json`, `local.properties`, `AGENTS.local.md` and
+  `scripts/*.local.*` are gitignored — keep them that way. Without
+  `google-services.json` the build simply leaves Firebase Crashlytics out.
+- Commits, docs and tickets carry no personal hostnames, IP addresses,
+  credentials or home paths: use placeholders such as `agent.example.com` and
+  `100.64.0.1`.
+
+## E2E tests: run on the emulator runner
+
+The development VPS cannot host a usable Android emulator, and the hosted
+device farm has limited quota. Run the instrumented suite in
+`app/src/androidTest` on a separate machine that hosts an emulator, through its
+`kimi-android-uitest` runner — never try to boot an emulator on the VPS.
+`scripts/run-e2e.sh` reaches the runner over SSH; it reads `KIMI_E2E_HOST` (ssh
+destination) and `KIMI_E2E_RUNNER` (runner path on that host) from the
+environment or from `scripts/e2e.local.env`.
 
 ```bash
 scripts/run-e2e.sh                      # current working tree, uncommitted changes included
@@ -46,10 +51,10 @@ scripts/run-e2e.sh --ref <branch|sha>   # clean checkout of a ref
 The last stdout line is `RESULT=pass|fail|infra-error REPORT_DIR=<path>`; exit
 codes are 0 pass, 1 test/build failure, 2 infra error, 3 busy or low resources.
 The full suite takes about 5 minutes. The runner serializes runs and waits for
-load ≤ 8 and 10 GB free RAM, so it may sit idle until the desktop is free.
+load ≤ 8 and 10 GB free RAM, so it may sit idle while its host is busy.
 Reports (JUnit XML, logcat, Gradle and emulator logs) live in `REPORT_DIR` on
-e2e-runner; pull one with
-`ssh louis@e2e-runner 'tar -C <REPORT_DIR> -cz .' | tar xz`.
+the runner host; pull one with
+`ssh "$KIMI_E2E_HOST" 'tar -C <REPORT_DIR> -cz .' | tar xz`.
 Live-server tests need `--env-file <file>` (mode 600) with `LIVE_SERVER_URL`
 and `LIVE_SERVER_TOKEN`; without it they are skipped.
 
@@ -71,6 +76,6 @@ deleted).
 - `docs/conventions.md` — code layout and architectural conventions
   (data layer, chat feature collaborators, streaming, sync).
 - `docs/crashlytics.md` — querying Crashlytics issues and stack traces from
-  the VPS, and closing verified-fixed issues.
+  the command line, and closing verified-fixed issues.
 - `docs/server-drift.md` — the nightly server update + protocol drift check
   automation in `scripts/`.

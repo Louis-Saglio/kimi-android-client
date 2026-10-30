@@ -1,9 +1,12 @@
-# Querying Crashlytics from the VPS
+# Querying Crashlytics from the command line
+
+The service-account key and the Firebase app id are machine-specific: take
+them from `AGENTS.local.md`.
 
 ```bash
-export GOOGLE_APPLICATION_CREDENTIALS=/home/ubuntu/service-account.json
+export GOOGLE_APPLICATION_CREDENTIALS=<service-account key path>
 TOKEN=$(gcloud auth application-default print-access-token)
-APP=projects/kimi-code-android-client/apps/1:000000000000:android:0000000000000000
+APP=projects/<firebase-project-id>/apps/<firebase-app-id>
 BASE=https://firebasecrashlytics.googleapis.com/v1alpha   # v1alpha only, v1beta1 404s
 ```
 

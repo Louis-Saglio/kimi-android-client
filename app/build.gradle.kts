@@ -7,8 +7,13 @@ plugins {
     alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
     alias(libs.plugins.kotlin.serialization)
-    alias(libs.plugins.google.services)
-    alias(libs.plugins.firebase.crashlytics)
+}
+
+// google-services.json identifies one Firebase project, so it stays out of the
+// public repo: a clone without it builds an app that reports no crashes.
+if (file("google-services.json").exists()) {
+    apply(plugin = libs.plugins.google.services.get().pluginId)
+    apply(plugin = libs.plugins.firebase.crashlytics.get().pluginId)
 }
 
 android {

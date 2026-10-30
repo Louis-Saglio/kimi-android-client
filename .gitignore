@@ -10,3 +10,8 @@ captures/
 .cxx/
 app/release/output-metadata.json
 pids
+
+# Machine-specific, never committed (AGENTS.md, "Public repo hygiene")
+app/google-services.json
+AGENTS.local.md
+scripts/*.local.*
