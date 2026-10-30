@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-10-28
-(server version `2.4.0`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-10-30
+(server version `2.4.1`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, interactions (approvals and questions), abort, WebSocket events, file attachments,
@@ -16,7 +16,8 @@ Every core-loop endpoint below was executed against the live server unless
 its paragraph says **source-derived**. The exact commands are shown with each
 section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `2.3.3`
+**Protocol history:** this document previously described server `2.4.0`
+(verified 2026-10-28; see git history), `2.3.3`
 (verified 2026-10-28; see git history), `2.3.1`
 (verified 2026-10-23; see git history), `2.3.0`
 (verified 2026-10-22; see git history), `2.2.0`
@@ -45,6 +46,68 @@ section. Secrets are redacted (`<token>`).
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
 that, `0.27.0` before that, and `0.23.3` before that.
+
+The drift from 2.4.0 to 2.4.1 is **engine-only: no route, WebSocket event,
+request field, response shape or enum changed**. The nightly job's
+`pending-changelog.md` covered 2.4.0→2.4.1 (4 commits, 140 changed files);
+none touches `packages/kap-server/src` or the wire definitions — the changes
+are `packages/agent-core-v2` tool/prompt code and the prebuilt web bundle.
+Live verification used server `2.4.1`, started `2026-10-30T19:23:52.832Z`.
+
+- **Read now caps one call at about 25k tokens** (commit `9140ea0d`:
+  `DEFAULT_MAX_CHARS_LIMIT` 500k → 100k; configurable with `[read]
+  max_chars`): a 210,000-character file read on 2.4.1 returned **99,613
+  characters** ending mid-file, where 2.4.0 would return the whole file. The
+  truncation notice (`Next Read: …`) rides the model-facing `note`, **not the
+  wire** — `tool.result` carried only `output`, with no `note` field and no
+  `<system>` block, so the app's file-content screen shows the shorter
+  extract unchanged. Content drift, not shape.
+- **Edit/Write results gained a model-facing `note`** (same commit family,
+  `editTool.ts`/`writeTool.ts`): `<system>The change is applied; there is no
+  need to Read the file back to check it.</system>`. Live capture confirms
+  the wire `tool.result` output is unchanged (`Replaced 1 occurrence in …`,
+  `Wrote 10 bytes to …`) and carries no `note` — engine→LLM only.
+- **The compaction summary prefix** (see Compact) reads on both 2.4.0 and
+  2.4.1: "Do not redo work it reports as done or re-run checks it reports as
+  passed; check anything it marks as unverified before relying on it." The
+  earlier quote in this document ("Treat it as notes, not proof…") was
+  stale. The `result` block, splice message keys and
+  `compaction_continuation` injection are unchanged; the app keys the
+  summary divider on `origin.kind:"compaction_summary"`, so the wording is
+  cosmetic.
+- **Steer ordering nit** (observed 2026-10-30): `prompt.steered` →
+  `turn.step.completed` → `context.spliced` (the steered message) →
+  `turn.steer` → the next `turn.step.started` in the same turn. `turn.steer`
+  can therefore arrive *after* the splice rather than before step
+  completion; payload shapes are unchanged and `prompt.completed` still
+  carries the original active prompt id.
+- **`kimi-code/k3` still fails on this server's subscription, but not at the
+  POST** (verified live 2026-10-30, same envelope on 2.4.0): the prompt POST
+  answers `code:0` with `status:"running"`, then the turn fails ~4 s later —
+  `turn.ended {"reason":"failed","error":{"code":"provider.auth_error",
+  "message":"403 Your current subscription does not have access …"},
+  "interruptReason":"error"}`, a standalone `error` frame with the same
+  object, and `prompt.completed {"reason":"failed"}`.
+
+Everything else re-verified unchanged live on 2.4.1: `/meta` (5 flags,
+17 features, same capabilities), config (`default_model`
+`deepseek/deepseek-v4-flash`, thinking `max`, permission `auto`, 3 providers,
+`read:{}`, no `disable_feedback_survey`/`auto_session_title` keys), the
+12-model catalog item shape, the tools catalog (empty before a session runs,
+then 35 = 26 builtins + 9 MCP, `ReadMediaFile` absent), session
+create/get/list/status/snapshot/messages, the v2 session table (flat and
+`by_workspace`), workspaces, search, the full prompt round-trip
+(`agent.created` when the agent is cold, then `prompt.submitted` →
+`session.meta.updated` → `turn.started` → `event.session.work_changed` →
+`context.spliced` → `prompt.started` → steps/deltas → `turn.ended` →
+`prompt.completed`), the TodoList write contract, steer, abort (mid-approval
+→ `outcome:"cancelled"`; idle `{"aborted":true}`), both compaction bodies and
+both `40910`s, approvals and questions on the `interaction` frame + response
+route, foreground/background sub-agents (`subagent.*`/`task.*`, REST
+`/tasks` list/get/`:cancel`, the snapshot roster), files
+(upload/download/`Range`/session media/delete → `40407`, prompt file/image
+rewriting), and WS hello/subscribe/ack, cursor replay and future-cursor
+`resync_required`. **App impact: none — no ticket.**
 
 The drift from 2.3.3 to 2.4.0 is **breaking for the interaction surface and
 additive elsewhere: approvals and questions moved onto a single flat
@@ -3064,9 +3127,10 @@ verified live on 0.31.1 (2026-08-01). Top-level keys of `data`:
 - `pending_questions`: the pending `AskUserQuestion` requests, in the same
   item shape the pre-2.4.0 `event.question.requested` frame carried (the
   per-session poll route is gone; this snapshot and the `interaction` frames
-  are the only surfaces) — verified live with a pending question on 2.4.0:
-  `question_id`, `session_id`, `questions[]` with
-  `id`/`question`/`options[{id,label}]`/`header`/`allow_other`/`multi_select`,
+  are the only surfaces) — verified live with a pending question on 2.4.0,
+  and again on 2.4.1 (2026-10-30, options carried the optional
+  `description`): `question_id`, `session_id`, `questions[]` with
+  `id`/`question`/`options[{id,label,description?}]`/`header`/`allow_other`/`multi_select`,
   `created_at`, `turn_id`. **0.38.0:** `question_id` is a dedicated
   `question_<uuid>` interaction id and the item also carries a distinct
   `tool_call_id` (was: `question_id` == `tool_call_id` — see Interactions).
@@ -3973,7 +4037,11 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../promp
   its `id` with the `inTurn:true` origin. **A single steer reuses the queued
   prompt's own id** as `messageId`; **a multi-prompt steer mints a fresh
   ULID** for the merged message (verbatim frames in WebSocket → Core event
-  payloads).
+  payloads). **2.4.1 re-verification (2026-10-30):** the engine-side
+  `turn.steer` was observed *after* the steered-message `context.spliced`
+  (spliced seq 18, `turn.steer` seq 19) and immediately before the new
+  `turn.step.started`; the payload set is unchanged, so clients must not
+  require `turn.steer` ahead of the splice.
 
 ## Abort
 
@@ -4135,19 +4203,18 @@ need no change.
 
 The spliced summary text is prefixed with model-facing instructions that are
 **not** persisted — history stores the bare summary (verified, see below).
-The prefix (verbatim, re-verified byte-identical 2026-09-04 on 0.41.0;
-**0.42.0 amendment (commit `f12d59e0`, verified live 2026-09-09): a final
-sentence was appended**, shown in bold):
+The prefix (refreshed 2026-10-30 on 2.4.1; the text is identical on 2.4.0,
+so it replaces the earlier 0.42.0-era quote):
 
 > The conversation so far has been compacted to free up context. What
 > follows is your own working summary of this task — use it to continue
-> your train of thought rather than starting over. Treat it as notes, not
-> proof: where it says a step was done, tests passed, or a fix worked,
-> verify that yourself before relying on it. Any user messages earlier in
+> your train of thought rather than starting over. Do not redo work it
+> reports as done or re-run checks it reports as passed; check anything it
+> marks as unverified before relying on it. Any user messages earlier in
 > this context are preserved verbatim from the compacted conversation;
 > where a system-reminder note among them marks an omitted middle section,
-> the user messages it replaced are covered by this summary. **The summary
-> records which earlier requests were already addressed.**
+> the user messages it replaced are covered by this summary. The summary
+> records which earlier requests were already addressed.
 
 The same 0.42.0 commit reworded the summarizer instruction file (handoff
 "note" → "summary", the first-person framing dropped) and anchored
@@ -4236,7 +4303,8 @@ Approvals and questions are the session's two pending-interaction kinds. Since
 2.4.0 they share one live WebSocket frame and one REST response route; the
 `event.approval.*` / `event.question.*` event families and the
 `/approvals` + `/questions` routes are gone. Everything below was re-verified
-live on 2.4.0 (2026-10-28).
+live on 2.4.0 (2026-10-28) and again on 2.4.1 (2026-10-30; the live captures
+below are the 2.4.0 ones — shapes unchanged).
 
 ### The `interaction` frame
 
@@ -4615,7 +4683,11 @@ before any prompt ran, the catalog answered `{"tools":[]}`; it resolved to
 the 37 entries only once a session had run a turn. **2.3.3 (verified live
 2026-10-28): back to 36 entries on an initialized agent: 27 builtins plus
 the same 9 MCP tools, `ReadMediaFile` absent again.** `NotifyUser` is still
-gated off. The app reads tool names and `source`, so the swing is invisible
+gated off. **2.4.0 (verified live 2026-10-28) and 2.4.1 (verified live
+2026-10-30): 35 entries — 26 builtins + the same 9 MCP tools; the builtin
+list no longer contains `EnterPlanMode` (plan mode became user-only), and
+`ReadMediaFile` stays absent.** The app reads tool names and `source`, so
+the swing is invisible
 to it. Two MCP routes ride along (both verified live
 2026-08-27):
 
@@ -6193,6 +6265,48 @@ deployment** (verified live — handshake refused).
 
 ## Verification log
 
+- 2026-10-30 re-verification on `2.4.1` (server 2.4.0 → 2.4.1; throwaway
+  sessions `session_0d923d75-…`, `session_ae1dd2d4-…`,
+  `session_c221914f-…`, `session_926d017c-…`, `session_0d4d620b-…`,
+  `session_3282d15a-…`, `session_2a04406f-…`, `session_50a8c086-…`,
+  `session_f47cf281-…`, `session_74a7d234-…`, `session_8dfe1187-…`,
+  `session_3bc8967d-…`, `session_acf99dac-…`, `session_6896cadc-…`, all
+  created with `metadata.cwd=/home/ubuntu/spike`; the nightly job's
+  `pending-changelog.md` covered 2.4.0→2.4.1 (4 commits), reviewed via the
+  GitHub API — 140 changed files, none under `packages/kap-server/src` or the
+  wire definitions; live probes over REST + Node's built-in WebSocket
+  against `127.0.0.1:58627`). **No wire drift found**: no route, frame type,
+  field or enum changed. Content-only changes: (a) a single Read now caps at
+  ~25k tokens/100k chars (a 210,000-char file returned 99,613 chars); the
+  notice is the model-facing `note`, absent from `tool.result`; (b)
+  Edit/Write gained the same model-facing `note`, absent from the wire; (c)
+  the compaction summary prefix reads "Do not redo work it reports as done
+  or re-run checks it reports as passed; …" on both 2.4.0 and 2.4.1 (quote
+  refreshed); (d) `turn.steer` was observed after the steered-message
+  `context.spliced`, before the new `turn.step.started`; (e) a
+  `kimi-code/k3` prompt is accepted and then fails ~4 s later with
+  `turn.ended reason:"failed"` + `provider.auth_error` + a standalone `error`
+  frame (the POST itself is `code:0`) — same as 2.4.0. Re-verified unchanged:
+  meta, config, models (12), tools (35 = 26 builtins + 9 MCP), sessions
+  create/get/list/status/snapshot/messages, the v2 session table (flat +
+  `by_workspace`), workspaces, search, the prompt round-trip
+  (TodoList/Write/Edit/Read: 6 tool calls, 294 frames; `agent.created` on the
+  cold sub-agent session, no `streaming` phase), steer (`prompt.queued`
+  `queueLength:1`, `prompt.steered`, `turn.steer`, `prompt.completed` with the
+  original id), abort (mid-approval → `outcome:"cancelled"`, idle
+  `{"aborted":true}`), compaction `{}` and instruction (splice keys,
+  `result` fields, empty/busy `40910` with `stack`), approvals (pending →
+  POST → ended, legacy `permission.approval.*` alongside), questions
+  (pending → answer → `response.answers` keyed by question text; options may
+  carry an optional `description`), foreground + background sub-agents
+  (`subagent.*`/`task.*`, REST `/tasks` list/get/`:cancel` →
+  `status:"killed"`/`"cancelled"`, the snapshot roster), files (upload
+  sniffed `text/plain`/`image/png`, download 200, `Range` 206, session media
+  200, delete → `40407`, prompt notice + `session_media` rewrite,
+  `origin.attachments`), WS hello/subscribe/ack, cursor replay (from seq 40
+  re-delivered 43–44), future-cursor `resync_required`, and the
+  `client_hello` ack (`{accepted_subscriptions:[], resync_required:[],
+  cursors:{}}`).
 - 2026-10-28 re-verification on `2.4.0` (server 2.3.3 → 2.4.0; throwaway
   sessions `session_0b0a0493-…`, `session_e27cced3-…`, `session_9415ea78-…`,
   `session_b3b293e0-…`, `session_ddb95bd4-…`, `session_088406ec-…`, and a
