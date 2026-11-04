@@ -2,6 +2,7 @@
 
 - **ID:** 172
 - **Created:** 2026-10-28
+- **Updated:** 2026-11-04 for server 2.5.0
 - **Depends on:** 171
 
 ## Context
@@ -32,6 +33,14 @@ route answered 404; the new route returned
 `response.answers` was keyed by question text (verbatim captures in
 `docs/server-api.md`, Interactions).
 
+**2.5.0 update (nightly drift run 2026-11-04).** The `interaction` frame is
+unchanged, but it now arrives only on a `subscribe_v2` subscription, and
+`GET /snapshot` is a 404. Pending questions rebuild from
+`transcript.reset.snapshot.interactions` / `GET .../transcript.interactions`
+instead of the removed snapshot, and the transcript `interaction.upsert` op
+mirrors every state change. This ticket is blocked on ticket 175/171; replace
+the snapshot seed (item 4) with that transcript source.
+
 ## Description
 
 1. Reuse the interaction-frame decoder introduced in ticket 171. For
@@ -57,7 +66,10 @@ route answered 404; the new route returned
    server's pending re-send after every accepted subscribe ack. Apply the ack
    reset from ticket 171 to the question queue too, then let the re-sent
    `interaction` frames refill it; dedupe by `question_id`.
-4. Keep the snapshot `pending_questions` seed and its mapping unchanged.
+4. Seed pending questions from `transcript.reset.snapshot.interactions` (or
+   `GET .../transcript.interactions`) on a cold open; both carry the full
+   question `request` entity. The removed snapshot's `pending_questions` path
+   is deleted.
 5. Keep `POST .../profile`/permission behavior untouched; this is only the
    question transport.
 
@@ -81,7 +93,8 @@ route answered 404; the new route returned
       `outcome:"dismissed"` frame.
 - [ ] Reconnecting while a question is pending rebuilds exactly one card from
       the post-ack re-send; no `/questions` request is issued anywhere.
-- [ ] A fresh snapshot with `pending_questions` still seeds one card.
+- [ ] A cold open with a pending question seeds one card from the transcript
+      reset interactions (or `GET .../transcript`).
 - [ ] Unit tests cover question frame decoding, the POST body/URL, the ack
       reset, and removal of the poll; `:app:testDebugUnitTest` passes.
 

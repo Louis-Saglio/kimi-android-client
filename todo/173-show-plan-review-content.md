@@ -2,6 +2,7 @@
 
 - **ID:** 173
 - **Created:** 2026-10-28
+- **Updated:** 2026-11-04 for server 2.5.0
 - **Depends on:** 171
 
 ## Context
@@ -18,7 +19,7 @@ the agent call `ExitPlanMode` produced an approval whose
 ```json
 {"kind":"plan_review",
  "plan":"# Add README.md with \"hello\"\n\n## Context\n\n…",
- "path":"/home/ubuntu/.kimi-code/sessions/wd_…/agents/main/plans/….md"}
+ "path":"/path/to/session/agents/main/plans/plan.md"}
 ```
 
 The app's `ToolInputDisplayDto` only decodes `command` and the `agent_call`
@@ -31,6 +32,14 @@ now hits it.
 `selected_label` exists on the response for approvals that offer labeled
 choices, but the captured plan approval carried no option labels, so this
 ticket only covers the plan body.
+
+**2.5.0 update (nightly drift run 2026-11-04).** The `interaction` frame and
+its `request.tool_input_display` are unchanged, but approvals now arrive only
+on a `subscribe_v2` subscription. For a cold read (or when the display is
+absent), `GET /api/v1/sessions/{id}/transcript/plan?agent_id=main` returns
+`plans:[{tool_call_id, turn_id, source:"interaction"|"display"|"output",
+plan, path?, options?, review?}]` — a second source of the same text; use it
+only as a fallback, not as a second rendering path.
 
 ## Description
 
