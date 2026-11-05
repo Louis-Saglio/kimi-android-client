@@ -1,13 +1,13 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-11-04
-(server version `2.5.0`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-11-05
+(server version `2.5.1`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, interactions (approvals and questions), abort, WebSocket events, file attachments,
-sub-agents (foreground lifecycle + background task store), todos, the tools
-catalog, the client-configs proxy and the session-rating
+tool-result media, sub-agents (foreground lifecycle + background task store),
+todos, the tools catalog, the client-configs proxy and the session-rating
 rules, plus
 the workspace list used by the mobile create-session flow. Explicitly skipped:
 `fs:*`, terminals, cron, goals' write path, providers, skills, plugins and
@@ -17,7 +17,8 @@ Every core-loop endpoint below was executed against the live server unless
 its paragraph says **source-derived**. The exact commands are shown with each
 section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `2.4.1`
+**Protocol history:** this document previously described server `2.5.0`
+(verified 2026-11-04; see git history), `2.4.1`
 (verified 2026-10-30; see git history), `2.4.0`
 (verified 2026-10-28; see git history), `2.3.3`
 (verified 2026-10-28; see git history), `2.3.1`
@@ -48,6 +49,100 @@ section. Secrets are redacted (`<token>`).
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
 that, `0.27.0` before that, and `0.23.3` before that.
+
+The drift from 2.5.0 to 2.5.1 is **small and additive on the core loop: media
+tool results carry structured `session_media` parts again, and session lists
+hide sessions whose workspace was deleted; no route, frame type or field was
+removed**. The nightly job's `pending-changelog.md` covered 2.5.0→2.5.1 (5
+commits). The protocol-bearing commits are `6dad2c8d` ("preserve session media
+in tool results" — `services/messages/messageProjection.ts` and the transcript
+cold fold in `packages/transcript/src/history/groupTurns.ts`) and `b4e4a84f`
+("hide sessions of deleted workspaces" — `routes/sessions.ts`,
+`routes/v2/sessions.ts`, new `services/workspaceVisibility.ts`); `2af56d29`
+is Kimi-provider request serialization (omit empty system tool content) and
+`2391a77f`/`1b02030d` are the web bundle and the release commit. Live
+verification used server `2.5.1`, started `2026-11-05T19:23:54.678Z`.
+
+- **Media tool results are structured `session_media` parts again** (commit
+  `6dad2c8d`; verified live 2026-11-05). The 2.5.0 document recorded media
+  tool results as hidden behind a `notice` frame; 2.5.1 projects daemon file
+  references (`kimi-file://…`) to the same `session_media` shape user images
+  use, inside the tool frame's **`output` array** — identical on the live
+  `transcript.ops` stream, the warm REST transcript and
+  `GET .../messages` history (cold-fold parity is source-derived from the
+  same commit's `groupTurns.ts` change). Verbatim `ReadMediaFile` result for a 1×1
+  png (tool frame, trimmed):
+
+  ```json
+  {"kind":"tool","frameId":"t1.1.ReadMediaFile_0_731303c4",
+   "toolCallId":"ReadMediaFile_0_731303c4","name":"ReadMediaFile","state":"done",
+   "input":{"path":"/home/ubuntu/spike/one.png"},
+   "output":[
+     {"type":"text","text":"<image path=\"/home/ubuntu/spike/one.png\">"},
+     {"type":"image","source":{"kind":"session_media","file_id":"f_13df9359…"}},
+     {"type":"text","text":"</image>"}]}
+  ```
+
+  The history projection carries the same array as
+  `{"type":"tool_result","tool_call_id":"ReadMediaFile_0_731303c4","output":[…]}`.
+  `GET /api/v1/sessions/{id}/media/{file_id}` serves the bytes (verified live,
+  200). Only daemon refs are structured: base64/data URLs, `https` media and
+  audio stay on the text path (`audio_url` is never mapped, and an audio-only
+  cold result stays text). The projection emits `name` when the daemon ref
+  carries one; `ReadMediaFile` here supplied none. The Android app decodes
+  tool `output` as `JsonElement` and pretty-prints arrays, so nothing breaks;
+  it can now show the image instead of JSON (ticket 184).
+- **Session lists hide sessions of deleted workspaces** (commit `b4e4a84f`;
+  verified live 2026-11-05). `GET /api/v1/sessions` and
+  `GET /api/v2/sessions` — flat, `view=by_workspace` and the
+  `fields=id,archived` projection — skip every session whose `workspace_id`
+  is not a registered workspace or one of its aliases. A deleted workspace's
+  sessions disappear from the list, its group disappears from
+  `view=by_workspace`, and `total`/`has_more` count only the visible set; the
+  session itself stays readable: `GET /api/v1/sessions/{id}` still answers
+  `code:0` with its `metadata.cwd` (verified: create a workspace + session,
+  delete the workspace, list → 0 occurrences, get → normal session object).
+  List filtering only — no shape change. The app never creates or deletes
+  workspaces, so it is unaffected.
+- **Content drift, not shape:** `/api/v1/meta` still reports 5 flags and 17
+  features; `GET /api/v1/config` still reads
+  `default_model:"deepseek/deepseek-v4-flash"`, `thinking.effort:"max"`,
+  `default_permission_mode:"auto"` and the same 3 providers; the models
+  catalog still has **12 entries**; the tools catalog reads **36 entries —
+  27 builtins + 9 MCP** on the checked sessions (`ReadMediaFile` present).
+  The Kimi provider is usable on this server:
+  `Kimi Platform/kimi-k3` completed turns live; the 2.5.0 note about the
+  managed `kimi-code/k3` alias failing with `provider.auth_error` was not
+  re-probed.
+- **App impact: none — no breakage ticket.** The tool-output arrays decode
+  into the app's existing `JsonElement` fields, the session-list filter is
+  server-side, and no event type or route changed. One improvement ticket:
+  **184** renders `ReadMediaFile` results instead of pretty-printing them.
+
+Everything else re-verified unchanged live on 2.5.1: auth, `/meta`, config,
+models, tools, session create/get/list/profile, the v2 session table,
+messages (newest-first; image attachments keep the `session_media` + `name`
+rewrite), the full prompt round-trip (prompt.upsert → turn.upsert → undo
+marker → step.upsert → frame.upsert/append → completed step/turn/prompt; a
+synchronous Bash call emits `task` running/ended frames with
+`detached:false`), steer (queued → completed with `steeredAt`; the steered
+text as a user-role frame with `promptIds` in the same turn), abort
+(interrupted step, cancelled turn, interruption marker, aborted prompt; idle
+`:abort` → `{"aborted":true}`), both compaction bodies (`{}` and
+`{"instruction":…}`, instruction echoed in the `started` marker; the empty-
+and busy-session `40910`s with `stack`; `tokensAfter` equal to the following
+`usage` frame), questions (pending/ended `interaction` frames,
+`interaction.upsert`, answer → `outcome:"answered"`, re-answer `40902`,
+dismiss → `outcome:"dismissed"`), approvals (manual Bash, pending/ended
+`interaction` frames), foreground and background sub-agents (`transcript.reset`
+and `agent` frames for `agent-0`/`agent-1`, `task` frames with
+`kind:"subagent"`, `child_agent_id` and `detached` true/false; no
+`subagent.*` frames), the `TodoList` write contract and read query
+(`input:{}` → `Current todo list:` output), files
+(upload/download/`Range`/delete → `40407`; session media 200), WS
+hello/`subscribe_v2`/ack, the unknown-session `not_found` and malformed
+`code:1` acks, and `transcript_since` resume (from seq 55 the server sent
+batches 56–60 then the ack, with no `transcript.reset`).
 
 The drift from 2.4.1 to 2.5.0 is **a breaking rewrite of the WebSocket layer
 plus the removal of three core REST routes — the session stream the Android app
@@ -2751,7 +2846,8 @@ re-verified 2026-07-30 on 0.31.0), `status`, `include_archive`, `archived_only`,
 curl -s -H "Authorization: Bearer <token>" 'http://127.0.0.1:58627/api/v1/sessions?page_size=2'
 ```
 
-Session object shape (2.5.0, captured 2026-11-04, fields trimmed for
+Session object shape (2.5.0, captured 2026-11-04 and re-verified unchanged on
+2.5.1, 2026-11-05; fields trimmed for
 brevity — note the absent `last_seq` and the filled `agent_config.model`):
 
 ```json
@@ -2823,6 +2919,12 @@ brevity — note the absent `last_seq` and the filled `agent_config.model`):
   `/home/ubuntu/.[redacted].txt` (verified live 2026-08-05, server-emitted).
   Display-only — `turn.started.prompt`, `context.spliced` and
   `GET .../messages` history still carry the full path.
+- **2.5.1: sessions of deleted workspaces are hidden from the list** (commit
+  `b4e4a84f`; verified live 2026-11-05). A summary whose `workspace_id` is no
+  longer a registered workspace (or one of its aliases) is skipped before
+  the page is built, so it does not consume a page slot and is not counted by
+  `has_more`. The session is **not deleted**: `GET /api/v1/sessions/{id}`
+  still serves it with its `metadata.cwd`. See the drift section.
 
 ### Create — `POST /api/v1/sessions`
 
@@ -3420,6 +3522,13 @@ curl -s -H "Authorization: Bearer <token>" \
   (Note: the 0.38.0 v2 item `meta` now carries **`archived_at: null`** when
   never archived — present-but-null, unlike the v1 session object where the
   key is absent for never-archived sessions.)
+- **2.5.1: deleted-workspace sessions are filtered out** (commit
+  `b4e4a84f`; verified live 2026-11-05). Flat lists, `view=by_workspace`
+  groups and the `fields=id,archived` projection all skip a session whose
+  `workspace_id` is no longer registered (aliases count as registered), and
+  `total` is computed after the filter; a workspace whose only sessions are
+  orphaned disappears from the grouped view entirely. `GET
+  /api/v1/sessions/{id}` still serves the hidden session.
 
 ### Batch archive/restore — `POST /api/v2/sessions:archive` / `:restore`
 
@@ -3554,6 +3663,24 @@ types observed:
 - `{"type": "tool_use", "tool_call_id": "tool_...", "tool_name": "Bash", "input": {...}}` — assistant tool call.
 - `{"type": "tool_result", "tool_call_id": "tool_...", "output": "..."}` — in a
   `role: "tool"` message; may also carry `"is_error": true`.
+  **2.5.1 (commit `6dad2c8d`; verified live 2026-11-05):** `output` may be an
+  **array of content parts** when the tool returned daemon media. A
+  `ReadMediaFile` result for `/home/ubuntu/spike/one.png` captures verbatim as:
+
+  ```json
+  {"id":"msg_session_…_000006","role":"tool",
+   "content":[{"type":"tool_result","tool_call_id":"ReadMediaFile_0_731303c4",
+     "output":[
+       {"type":"text","text":"<image path=\"/home/ubuntu/spike/one.png\">"},
+       {"type":"image","source":{"kind":"session_media","file_id":"f_13df9359…"}},
+       {"type":"text","text":"</image>"}]}],
+   "created_at":"2026-11-05T19:27:50.461Z"}
+  ```
+
+  The same array structure rides the transcript tool frames (see Transcript).
+  Only daemon file refs are structured; base64/data URLs, `https` media and
+  audio stay on the plain-string path. `name` is present when the ref carries
+  one. Fetch the bytes with `GET /api/v1/sessions/{id}/media/{file_id}`.
 
 **Message id format (since 0.28.1):** user messages keep the ULID form
 (`msg_01KY...`), but server-generated messages (`assistant`, `tool`) get
@@ -3724,8 +3851,18 @@ Turn → step → frame structure (verbatim keys, running sub-agent capture):
   frame), `tool` (`frameId`, `toolCallId`, `name`, `state`
   `"running"`/`"done"`/`"error"` (2.5.0 added `"error"`), `input` (args
   object), `output`, optional `approvalId`/`taskId`/`display`/`progress`),
-  and `notice` (2.5.0: `level`/`message`, replacing hidden media tool
-  results — commit `b4da9215`).
+  and `notice` (2.5.0: `level`/`message`, used when a tool result has no
+  displayable content — commit `b4da9215`). **2.5.1 (commit `6dad2c8d`;
+  verified live 2026-11-05): a daemon-media tool result's `output` is an
+  array of parts**, not a string —
+  `[{"type":"text","text":"<image path=\"…\">"}, {"type":"image",
+  "source":{"kind":"session_media","file_id":"f_…"}}, {"type":"text",
+  "text":"</image>"}]` — on the live ops stream and the warm transcript (the
+  history `tool_result.output` carries the same array; the same projection is
+  applied in the cold fold per the commit's `groupTurns.ts` change —
+  source-derived, not probed cold here).
+  Non-daemon media and audio stay on the text path, and no `notice` frame
+  accompanied the media result in the 2.5.1 capture.
   A step can hold several frames of the same kind (two `text` frames seen).
   **0.40.1 (additive, commit `cbe0a77f`; verified live 2026-09-02):**
   user-role text frames carry an optional **`origin`** — `{"kind":"user"}`
@@ -4660,11 +4797,12 @@ Approvals and questions are the session's two pending-interaction kinds. Since
 `/approvals` + `/questions` routes are gone. **2.5.0 keeps the frame and the
 route unchanged but delivers the frame only to `subscribe_v2` subscribers**
 (the old raw `subscribe` no longer exists), adds an `interaction.upsert`
-transcript op, and re-sends the pending list first inside
-`transcript.reset.snapshot.interactions` and then as standalone frames.
-Everything below was re-verified live on 2.5.0 (2026-11-04, approval and
-question), after 2.4.0/2.4.1; the captures are the 2.4.0 shapes, which the
-2.5.0 frames match byte-for-byte except for the delivery rule.
+transcript op, and re-sends the full interaction entity list inside
+`transcript.reset.snapshot.interactions` plus the pending ones as standalone
+frames. Everything below was re-verified live on 2.5.0 (2026-11-04, approval
+and question) and again on 2.5.1 (2026-11-05); the captures are the 2.4.0
+shapes, which the 2.5.x frames match byte-for-byte except for the delivery
+rule.
 
 ### The `interaction` frame
 
@@ -4744,16 +4882,19 @@ After `{"kind":"question","answers":{"q_0":{"kind":"single","option_id":"opt_0_0
 
 Notes:
 
-- **Pending re-send after subscribe (2.5.0).** After an accepted
-  `subscribe_v2`, the server sends the pending interactions **twice**: first
-  inside `transcript.reset.snapshot.interactions` (full entities), then as
-  standalone `interaction` frames after the ack (verified live: a fresh
-  subscribe while a question waited delivered reset, ack, then the pending
-  frame). Clients should treat this as the authoritative pending-list
-  rebuild: clear the session's pending interactions at reset and re-add them
-  from the frames that follow. Dedupe by `interaction_id`. A resolved
-  interaction is never re-sent. `GET .../transcript` also returns the current
-  `interactions` and `pending_interactions` for a cold read.
+- **Pending re-send after subscribe (2.5.0; re-verified on 2.5.1).** After an
+  accepted `subscribe_v2`, `transcript.reset.snapshot.interactions` carries
+  the **full interaction entity list for the session — ended ones included,
+  not only pending** — and the still-pending ones are additionally sent as
+  standalone `interaction` frames after the ack (verified live 2026-11-05: a
+  fresh subscribe while a question waited delivered a reset whose
+  `interactions` held one answered and one pending entity, the ack, then one
+  pending frame). Clients should rebuild the pending list from the reset by
+  filtering `state:"pending"` (or from the frames that follow), not assume
+  the snapshot array is pending-only. Dedupe by `interaction_id`. A resolved
+  interaction is never re-sent as a standalone frame. `GET .../transcript`
+  also returns the current `interactions` and `pending_interactions` for a
+  cold read.
 - **Ended frames reach every subscriber.** Close the card on the `ended`
   frame, not on the REST response, so every client watching the session
   converges — including the one that answered.
@@ -4904,13 +5045,19 @@ The snapshot route is gone. Pending interactions now come from two places:
   `interactions` — full entities
   `{interactionId, interactionKind, toolCallId?, state, request?, response?}`
   — and `pending_interactions` — the ids of the still-pending ones. The
-  `request` is the pre-2.4.0 item shape (approval: `tool_name`/`action`/
-  `tool_input_display`/`expires_at`; question: `question_id`/`questions[]`/
-  `created_at`/`turn_id`/`tool_call_id`).
-- After an accepted `subscribe_v2`, the pending list is re-sent twice: inside
-  `transcript.reset.snapshot.interactions`, then as standalone `interaction`
-  frames. The transcript `interaction.upsert` op carries the same entity on
-  every state change.
+  `request` shape differs by kind (re-verified live on 2.5.1, 2026-11-05):
+  an **approval** uses camelCase
+  `{id, sessionId, agentId, turnId, toolCallId, toolName, action, display}`
+  (no `expires_at`), while a **question** keeps
+  `{question_id, questions[], created_at, turn_id, tool_call_id}`. The WS
+  `interaction` frame's own `request` stays snake_case for approvals — only
+  the transcript entity is camelCase. `state` observed: `pending`,
+  `approved`, `answered`.
+- After an accepted `subscribe_v2`,
+  `transcript.reset.snapshot.interactions` carries the full interaction
+  entity list (ended ones included); the pending ones are also sent as
+  standalone `interaction` frames. The transcript `interaction.upsert` op
+  carries the same entity on every state change.
 
 There is still no per-session pending list route:
 `GET .../approvals` and `GET .../questions` are plain HTTP 404s (a POST to
@@ -5075,9 +5222,11 @@ the same 9 MCP tools, `ReadMediaFile` absent again.** `NotifyUser` is still
 gated off. **2.4.0 (verified live 2026-10-28) and 2.4.1 (verified live
 2026-10-30): 35 entries — 26 builtins + the same 9 MCP tools; the builtin
 list no longer contains `EnterPlanMode` (plan mode became user-only), and
-`ReadMediaFile` stays absent.** The app reads tool names and `source`, so
-the swing is invisible
-to it. Two MCP routes ride along (both verified live
+`ReadMediaFile` stays absent.** **2.5.0 (verified live 2026-11-04) and 2.5.1
+(verified live 2026-11-05): 36 entries — 27 builtins + 9 MCP; the builtin
+set includes `ReadMediaFile`** (the count stays model/session-state
+dependent — keep treating it as live state). The app reads tool names and
+`source`, so the swing is invisible to it. Two MCP routes ride along (both verified live
 2026-08-27):
 
 - `GET /api/v1/mcp/servers` →
@@ -6440,6 +6589,58 @@ session `40401`. The loopback-only debug xstate stream
 deployment** (verified live — handshake refused).
 
 ## Verification log
+
+- 2026-11-05 re-verification on `2.5.1` (server 2.5.0 → 2.5.1; throwaway
+  sessions created with `metadata.cwd=/home/ubuntu/spike` and deleted after
+  probing; the nightly job's `pending-changelog.md` covered
+  2.5.0→2.5.1 (5 commits), reviewed via the GitHub API — the protocol-bearing
+  commits are `6dad2c8d` (structured session media in tool results) and
+  `b4e4a84f` (hide sessions of deleted workspaces); `2af56d29` is
+  LLM-request serialization and the rest is the web bundle/release; live
+  probes over REST + websocat against `127.0.0.1:58627`, server started
+  `2026-11-05T19:23:54.678Z`). Drift found:
+  (a) a `ReadMediaFile` tool result now carries
+      `output:[{type:"text"}, {type:"image",source:{kind:"session_media",
+      file_id}}, {type:"text"}]` in the live ops, the warm transcript and
+      `/messages` `tool_result.output` (cold-fold parity is source-derived);
+      session media download → 200; base64/https/audio stay text;
+  (b) `GET /api/v1/sessions` and `GET /api/v2/sessions` (flat, grouped,
+      `fields=id,archived`) hide sessions whose workspace was deleted;
+      `GET .../{id}` still serves them with `metadata.cwd`;
+  (c) two doc corrections from the same probes: the transcript interaction
+      entity's approval `request` is camelCase
+      (`id/sessionId/agentId/turnId/toolCallId/toolName/action/display`, no
+      `expires_at`), and `transcript.reset.snapshot.interactions` is the full
+      entity list (ended interactions included), with pending ones re-sent as
+      standalone frames after the ack.
+  Re-verified unchanged: auth, `/meta` (5 flags, 17 features), config
+  (`deepseek/deepseek-v4-flash`, effort `max`, permission `auto`), models
+  (12), tools (36 = 27 builtins + 9 MCP), session create/get/list/profile,
+  the v2 session table, messages (newest-first; the prompt image rewrite to
+  `session_media` + `name`), a full DeepSeek prompt round-trip
+  (prompt.upsert → turn.upsert → undo marker → step.upsert →
+  frame.upsert/append → completed step/turn/prompt; the synchronous Bash call
+  emitted `task` running/ended frames), steer (queued → completed with
+  `steeredAt`, user text frame with `promptIds` in the same turn), abort
+  (interrupted step, cancelled turn, interruption marker, aborted prompt;
+  idle `:abort` → `{"aborted":true}`), both compaction bodies (`{}` and an
+  instruction echo; both `40910`s with `stack`; `tokensAfter` matched the
+  following `usage` frame and the compaction_summary message), questions
+  (pending/ended `interaction` frames, `interaction.upsert`, answer →
+  `outcome:"answered"`, re-answer `40902`, dismiss → `outcome:"dismissed"`,
+  subscribe-while-pending reset), approvals (manual Bash, pending/ended
+  `interaction` frames; no `permission.approval.*` frames), foreground and
+  background sub-agents (`agent-0`/`agent-1` `transcript.reset` + `agent`
+  frames, `task` frames with `kind:"subagent"`, `child_agent_id`, `detached`
+  true/false; no `subagent.*` frames), the `TodoList` write contract and a
+  read-only `input:{}` query, files (upload/download/`Range` 206/delete →
+  `40407`, session media 200), WS hello/`subscribe_v2`/ack, unknown-session
+  `not_found`, malformed `code:1`, and `transcript_since` resume (from seq 55
+  the server sent batches 56–60 then the ack, no `transcript.reset`).
+  **App impact: none — no breakage ticket. One improvement ticket: 184
+  (render tool-result `session_media` images).**
+  Unit tests: `:app:testDebugUnitTest --rerun-tasks` — 998 tests, 0 failures,
+  4 skipped.
 
 - 2026-11-04 re-verification on `2.5.0` (server 2.4.1 → 2.5.0; throwaway
   sessions created with `metadata.cwd=/path/to/project` and deleted after;
