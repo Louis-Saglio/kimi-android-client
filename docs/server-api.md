@@ -110,10 +110,11 @@ verification used server `2.5.1`, started `2026-11-05T19:23:54.678Z`.
   `default_permission_mode:"auto"` and the same 3 providers; the models
   catalog still has **12 entries**; the tools catalog reads **36 entries —
   27 builtins + 9 MCP** on the checked sessions (`ReadMediaFile` present).
-  The Kimi provider is usable on this server:
-  `Kimi Platform/kimi-k3` completed turns live; the 2.5.0 note about the
-  managed `kimi-code/k3` alias failing with `provider.auth_error` was not
-  re-probed.
+  The Kimi provider is usable through its platform alias:
+  `Kimi Platform/kimi-k3` completed turns live. The managed `kimi-code/k3`
+  alias was re-probed and still fails after the POST with
+  `provider.auth_error` (step `interrupted`/`endReason:"error"`, turn
+  `failed`, prompt `failed`) — a subscription state, not a protocol change.
 - **App impact: none — no breakage ticket.** The tool-output arrays decode
   into the app's existing `JsonElement` fields, the session-list filter is
   server-side, and no event type or route changed. One improvement ticket:
@@ -6636,7 +6637,9 @@ deployment** (verified live — handshake refused).
   read-only `input:{}` query, files (upload/download/`Range` 206/delete →
   `40407`, session media 200), WS hello/`subscribe_v2`/ack, unknown-session
   `not_found`, malformed `code:1`, and `transcript_since` resume (from seq 55
-  the server sent batches 56–60 then the ack, no `transcript.reset`).
+  the server sent batches 56–60 then the ack, no `transcript.reset`). The
+  managed `kimi-code/k3` alias still fails with `provider.auth_error` (turn
+  `failed`, step `endReason:"error"`), while `Kimi Platform/kimi-k3` completes.
   **App impact: none — no breakage ticket. One improvement ticket: 184
   (render tool-result `session_media` images).**
   Unit tests: `:app:testDebugUnitTest --rerun-tasks` — 998 tests, 0 failures,
