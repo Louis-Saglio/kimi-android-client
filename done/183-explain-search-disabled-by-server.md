@@ -59,3 +59,22 @@ is simply unavailable, and the UI should say so rather than look broken.
 Relevant code: `ui/search/SearchViewModel.kt`, `ui/search/SearchScreen.kt`,
 `data/DataError.kt` (`toUserMessage`), `data/search/SearchApi.kt`.
 Wire reference: `docs/server-api.md` → Search.
+
+## Implementation notes
+
+**2026-11-06 —** `isGlobalSearchDisabled()` (top-level in
+`ui/search/SearchViewModel.kt`) recognises only envelope `50001` whose message
+starts with `global search is disabled`. `SearchViewModel` maps it — from the
+first page, a next page or the page-token restart — to the terminal
+`UiState.searchDisabled`; `onSearch`/`onRetry`/`onEndReached` then no-op, so
+neither Retry nor a changed query re-issues the request. `SearchScreen` renders
+`SearchDisabledState` ("Search is disabled on this server" plus the operator
+hint, no Retry button), disables the query field and hides the stale-index
+banner. Entry points: the cheaper option — the session-list and chat
+magnifiers stay visible and the screen explains; no probe, nothing on app
+start. Tests: `SearchDisabledMappingTest` (the mapper: the 2.5.0 answer, other
+50001s, the prefix under another code or mid-message, non-envelope errors),
+`SearchViewModelTest` (disabled state with no further requests, scoped search,
+switched off between pages, another 50001 keeps the generic error + Retry),
+and `SearchScreenTest.disabledSearchExplainsWithoutRetryAndLocksTheField`
+(instrumented, compiled only).

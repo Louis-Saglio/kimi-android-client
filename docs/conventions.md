@@ -330,7 +330,14 @@
   during the refetch, then are replaced); a new query cancels in-flight page
   loads and drops the token, so tokens never cross queries. A hit tap opens the
   session through the plain Chat route — or, scoped, just pops back to the chat
-  below (every hit is that session's) — jump-to-message is out of scope.
+  below (every hit is that session's) — jump-to-message is out of scope. A
+  server with its global search index off (the 2.5.0 default) answers every
+  call with a 50001 whose message starts `global search is disabled`
+  (`isGlobalSearchDisabled` — code AND prefix, so other 50001s keep the generic
+  `toUserMessage()` error); ticket 183 maps it to the terminal
+  `UiState.searchDisabled` state — a phone-level explanation, no Retry, the query
+  field disabled and every request entry point a no-op. There is no probe: both
+  magnifier entry points stay visible and the screen explains on first submit.
 - `data/attachments/` — `AttachmentStore` owns all platform file I/O (content
   resolver reads capped at 256 MiB — a client-side guard; the server removed
   its own upload cap in 0.31.0, see ticket 059; cache writes;

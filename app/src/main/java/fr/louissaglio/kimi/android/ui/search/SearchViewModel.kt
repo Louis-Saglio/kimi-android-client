@@ -29,6 +29,13 @@ import kotlinx.coroutines.launch
  * anyway). Paging appends while the server reports has_more, the opaque v2 keyset
  * token passed back verbatim; the keyset cursor pins the index generation, so pages
  * cannot overlap and no client-side dedup exists.
+ *
+ * Ticket 183: a server whose global search index is off (the 2.5.0 default)
+ * answers every call with a [isGlobalSearchDisabled] 50001; that flips the screen
+ * into its terminal [UiState.searchDisabled] state — no retry, the query field
+ * disabled, and [onSearch]/[onRetry]/[onEndReached] no-ops, since any further
+ * request could only fail the same way. No probe runs ahead of the first query:
+ * the entry points stay visible and this screen explains.
  */
 @HiltViewModel
 class SearchViewModel internal constructor(
@@ -55,7 +62,10 @@ class SearchViewModel internal constructor(
      * [results] null = the submitted query's first page has not landed (loading, or
      * failed — [error] is then the full-screen state; [loadMoreError] only the
      * footer's). [indexStale] carries the latest page's
-     * `index_state.stale`/`degraded` flag — the slim banner; results stay usable. */
+     * `index_state.stale`/`degraded` flag — the slim banner; results stay usable.
+     * [searchDisabled] (ticket 183) is terminal and wins over every other field: the
+     * server has its search index off, so the body explains that and nothing more
+     * is requested. */
     data class UiState(
         val query: String = "",
         val submittedQuery: String? = null,
@@ -68,6 +78,7 @@ class SearchViewModel internal constructor(
         val indexStale: Boolean = false,
         /** The scoped session's name (ticket 147); null on the global search. */
         val scopeTitle: String? = null,
+        val searchDisabled: Boolean = false,
     )
 
     val uiState: StateFlow<UiState>
@@ -86,6 +97,7 @@ class SearchViewModel internal constructor(
     /** IME-submit of the query field; a blank query is a no-op (the server would
      * answer a 40001 validation error anyway). */
     fun onSearch() {
+        if (uiState.value.searchDisabled) return
         val query = uiState.value.query.trim()
         if (query.isEmpty()) return
         search(query)
@@ -93,6 +105,7 @@ class SearchViewModel internal constructor(
 
     /** Retry of the failed first page (the error state is the whole body). */
     fun onRetry() {
+        if (uiState.value.searchDisabled) return
         val query = uiState.value.submittedQuery ?: return
         search(query)
     }
@@ -106,6 +119,7 @@ class SearchViewModel internal constructor(
     fun onEndReached() {
         val state = uiState.value
         val query = state.submittedQuery ?: return
+        if (state.searchDisabled) return
         if (state.isLoading || !state.hasMore) return
         if (searchJob?.isActive == true || loadMoreJob?.isActive == true) return
         val token = pageToken ?: return
@@ -124,7 +138,10 @@ class SearchViewModel internal constructor(
                     }
                 }
                 .onFailure { error ->
-                    if ((error as? DataError.Api)?.code == PAGE_TOKEN_INVALID_CODE) {
+                    if (error.isGlobalSearchDisabled()) {
+                        // Switched off server-side between pages.
+                        uiState.update { it.copy(isLoadingMore = false, searchDisabled = true) }
+                    } else if ((error as? DataError.Api)?.code == PAGE_TOKEN_INVALID_CODE) {
                         restartFromFirstPage(query)
                     } else {
                         // The loaded results stay visible; the footer offers a retry.
@@ -166,7 +183,13 @@ class SearchViewModel internal constructor(
                     }
                 }
                 .onFailure { error ->
-                    uiState.update { it.copy(isLoading = false, error = error.toUserMessage()) }
+                    uiState.update {
+                        if (error.isGlobalSearchDisabled()) {
+                            it.copy(isLoading = false, searchDisabled = true)
+                        } else {
+                            it.copy(isLoading = false, error = error.toUserMessage())
+                        }
+                    }
                 }
         }
     }
@@ -193,7 +216,13 @@ class SearchViewModel internal constructor(
                     }
                 }
                 .onFailure { error ->
-                    uiState.update { it.copy(isLoadingMore = false, loadMoreError = error.toUserMessage()) }
+                    uiState.update {
+                        if (error.isGlobalSearchDisabled()) {
+                            it.copy(isLoadingMore = false, searchDisabled = true)
+                        } else {
+                            it.copy(isLoadingMore = false, loadMoreError = error.toUserMessage())
+                        }
+                    }
                 }
         }
     }
@@ -203,3 +232,17 @@ class SearchViewModel internal constructor(
         const val PAGE_TOKEN_INVALID_CODE = 40001
     }
 }
+
+/**
+ * docs/server-api.md, Search (2.5.0): with the global search index off — the
+ * server default — every `POST /api/v1/search` answers envelope 50001 with this
+ * message prefix, before any validation. Deliberately narrow (code AND exact
+ * prefix): every other 50001 stays on the generic [toUserMessage] path.
+ */
+internal fun Throwable.isGlobalSearchDisabled(): Boolean =
+    this is DataError.Api &&
+        code == GLOBAL_SEARCH_DISABLED_CODE &&
+        serverMessage.startsWith(GLOBAL_SEARCH_DISABLED_PREFIX)
+
+private const val GLOBAL_SEARCH_DISABLED_CODE = 50001
+private const val GLOBAL_SEARCH_DISABLED_PREFIX = "global search is disabled"

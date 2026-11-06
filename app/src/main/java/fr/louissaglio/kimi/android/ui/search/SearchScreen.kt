@@ -35,6 +35,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -56,7 +57,8 @@ import fr.louissaglio.kimi.android.ui.theme.warningColor
  * icon, session title, snippet, hit time — paging on scroll, and the stale-index
  * banner when the server reports a lagging index. Scoped to one session, the title
  * slot's placeholder and the prompt name it. Tapping a hit opens its session's chat —
- * or, scoped, just returns to the chat below (jump-to-message is out of scope).
+ * or, scoped, just returns to the chat below (jump-to-message is out of scope). A
+ * server with its search index off gets the dedicated disabled state (ticket 183).
  */
 @Composable
 fun SearchScreen(
@@ -104,6 +106,8 @@ internal fun SearchContent(
                                 else "Search messages",
                             )
                         },
+                        // Ticket 183: nothing to type into once the server said search is off.
+                        enabled = !uiState.searchDisabled,
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                         keyboardActions = KeyboardActions(onSearch = { onSearchSubmit() }),
@@ -122,10 +126,11 @@ internal fun SearchContent(
                 .fillMaxSize()
                 .padding(innerPadding),
         ) {
-            if (uiState.indexStale) {
+            if (uiState.indexStale && !uiState.searchDisabled) {
                 StaleIndexBanner()
             }
             when {
+                uiState.searchDisabled -> SearchDisabledState()
                 uiState.submittedQuery == null ->
                     EmptyState(
                         if (uiState.scopeTitle != null) {
@@ -141,6 +146,32 @@ internal fun SearchContent(
                 else -> SearchResultList(uiState, onHitClick, onEndReached)
             }
         }
+    }
+}
+
+/** Ticket 183: the server's global search index is off (the 2.5.0 default). Says so
+ * in phone terms — no server config key, and no Retry: it could only fail the same
+ * way until the operator turns the index on. */
+@Composable
+private fun SearchDisabledState() {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
+    ) {
+        Text(
+            text = "Search is disabled on this server",
+            style = MaterialTheme.typography.bodyLarge,
+            textAlign = TextAlign.Center,
+        )
+        Text(
+            text = "The server operator can enable the search index.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
     }
 }
 

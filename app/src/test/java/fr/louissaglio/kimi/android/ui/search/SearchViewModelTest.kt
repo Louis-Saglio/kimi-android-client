@@ -262,6 +262,79 @@ class SearchViewModelTest {
         assertTrue(state.hasMore)
     }
 
+    @Test
+    fun `the global-search-disabled 50001 shows the disabled state, not the server text`() = runBlocking {
+        server.enqueue(MockResponse(body = DISABLED_BODY))
+        viewModel.onQueryChange("deploy")
+        viewModel.onSearch()
+
+        awaitState(viewModel.uiState) { it.searchDisabled }
+        val state = viewModel.uiState.value
+        assertNull(state.error)
+        assertNull(state.results)
+        assertFalse(state.isLoading)
+
+        // Terminal: neither Retry, a new submit nor a changed query re-issues it.
+        viewModel.onRetry()
+        viewModel.onQueryChange("login timeout")
+        viewModel.onSearch()
+        viewModel.onEndReached()
+        assertTrue(viewModel.uiState.value.searchDisabled)
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun `a scoped search on a disabled server shows the same disabled state`() = runBlocking {
+        viewModel = SearchViewModel(
+            testSearchRepository(),
+            settingsRepository,
+            Search(sessionId = "session_1", sessionTitle = "Deploy hotfix"),
+        )
+        server.enqueue(MockResponse(body = DISABLED_BODY))
+        viewModel.onQueryChange("deploy")
+        viewModel.onSearch()
+
+        awaitState(viewModel.uiState) { it.searchDisabled }
+        assertNull(viewModel.uiState.value.error)
+    }
+
+    @Test
+    fun `search switched off between pages flips to the disabled state`() = runBlocking {
+        server.enqueue(MockResponse(body = pageBody(hasMore = true, "session_1")))
+        viewModel.onQueryChange("deploy")
+        viewModel.onSearch()
+        awaitState(viewModel.uiState) { it.results != null }
+        server.enqueue(MockResponse(body = DISABLED_BODY))
+
+        viewModel.onEndReached()
+
+        awaitState(viewModel.uiState) { it.searchDisabled }
+        val state = viewModel.uiState.value
+        assertFalse(state.isLoadingMore)
+        assertNull(state.loadMoreError)
+    }
+
+    @Test
+    fun `another 50001 keeps the generic error with Retry`() = runBlocking {
+        server.enqueue(
+            MockResponse(body =
+                """{"code":50001,"msg":"internal error: disk full","data":null,"request_id":"r"}""",
+            ),
+        )
+        viewModel.onQueryChange("deploy")
+        viewModel.onSearch()
+
+        awaitState(viewModel.uiState) { it.error != null }
+        val failed = viewModel.uiState.value
+        assertEquals("internal error: disk full", failed.error)
+        assertFalse(failed.searchDisabled)
+
+        server.enqueue(MockResponse(body = pageBody(hasMore = false, "session_1")))
+        viewModel.onRetry()
+        awaitState(viewModel.uiState) { it.results != null }
+        assertEquals(2, server.requestCount)
+    }
+
     /** One search page: one user hit per id, the token present while has_more (the
      * v2 keyset cursor's only contract — docs/server-api.md, Search). [stale] adds
      * the mid-rebuild `index_state.stale` flag. */
@@ -276,5 +349,13 @@ class SearchViewModelTest {
         return """{"code":0,"msg":"success","data":{"items":[$items],"has_more":$hasMore$token,""" +
             """"index_state":{"state":"ready","indexed_sessions":10,"total_sessions":10,""" +
             """"documents":42$staleField},"source":"index"},"request_id":"r"}"""
+    }
+
+    private companion object {
+        /** docs/server-api.md, Search: the 2.5.0 default-off answer, verbatim shape. */
+        const val DISABLED_BODY =
+            """{"code":50001,"msg":"global search is disabled; set [database] global_search = true """ +
+                """or KIMI_CODE_GLOBAL_SEARCH=1 to enable it","data":null,"request_id":"r",""" +
+                """"stack":"GlobalSearchError: global search is disabled"}"""
     }
 }
