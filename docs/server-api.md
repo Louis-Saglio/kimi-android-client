@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-11-05
-(server version `2.5.1`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-11-06
+(server version `2.5.2`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, interactions (approvals and questions), abort, WebSocket events, file attachments,
@@ -17,7 +17,8 @@ Every core-loop endpoint below was executed against the live server unless
 its paragraph says **source-derived**. The exact commands are shown with each
 section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `2.5.0`
+**Protocol history:** this document previously described server `2.5.1`
+(verified 2026-11-05; see git history), `2.5.0`
 (verified 2026-11-04; see git history), `2.4.1`
 (verified 2026-10-30; see git history), `2.4.0`
 (verified 2026-10-28; see git history), `2.3.3`
@@ -49,6 +50,75 @@ section. Secrets are redacted (`<token>`).
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
 that, `0.27.0` before that, and `0.23.3` before that.
+
+The drift from 2.5.1 to 2.5.2 is **engine-internal — no route, WebSocket frame
+type, request field, response shape or enum changed** (verified live
+2026-11-06). The nightly job's `pending-changelog.md` covered 2.5.1→2.5.2
+(3 commits): `7b906ea3` ("defer same-name tool updates") is the only code
+change and touches `packages/agent-core-v2` only (MCP service, tool registry,
+tool-select, tool contract); `packages/kap-server` and the wire definitions are
+untouched, `ef10107d` is the web-dist sync and `1c142a00` the release commit.
+Live verification used server `2.5.2`, started `2026-11-06T19:23:39.783Z`.
+
+- **Same-name MCP tool updates are pinned for the running session** (commit
+  `7b906ea3`; verified live 2026-11-06). When an MCP server re-registers a
+  tool under a name the session already publishes, the active schema and
+  executor stay in place for that session; instead of a remove+add the model
+  gets a reminder, once per service instance: `Tool "<name>" has an update,
+  but the update is not applied in this session. Continue using the currently
+  registered version.` The reminder is a user-role injection, so if it fires
+  it reaches the wire as the usual `<system-reminder>` message with
+  `metadata.origin:{"kind":"injection","variant":"tool_update_pending"}`
+  (source-derived from `features/reminder/reminderService.ts`; not triggered
+  here — this server's MCP tool sets do not change mid-session). The tools
+  catalog stays at **36 entries — 27 builtins + 9 MCP**. The app strips
+  `<system-reminder>` envelopes from user text, so the new variant would
+  render exactly like the existing date/permission reminders — additive and
+  harmless.
+- **Content drift, not shape:** `/api/v1/meta` still reports 5 flags and 17
+  features; `GET /api/v1/config` still reads
+  `default_model:"deepseek/deepseek-v4-flash"`, `thinking.effort:"max"`,
+  `default_permission_mode:"auto"` and the same 3 providers; the models
+  catalog still has **12 entries**; the tools catalog reads **36 entries —
+  27 builtins + 9 MCP** (`ReadMediaFile` present). The managed `kimi-code/k3`
+  alias still fails after the POST with `provider.auth_error` (step
+  `interrupted`/`endReason:"error"`, turn `failed` with the subscription
+  message); `Kimi Platform/kimi-k3` completed a turn live.
+- **App impact: none — no breakage ticket, no improvement ticket.** Every
+  shape the app parses is byte-identical to 2.5.1; the outstanding 2.5.0
+  migration tickets (171–184) are unchanged.
+
+Everything else re-verified unchanged live on 2.5.2 (see the verification
+log): auth 401s, `/meta`, config, models, tools, session create/get/list/
+profile, the v2 session table, fork (`turn_index` accepted, and the
+`event.session.created` broadcast), archive/restore, goal and warnings,
+messages (newest-first; image attachments keep the `session_media` + `name`
+rewrite), the full prompt round-trip (prompt.upsert → turn.upsert → undo
+marker → step.upsert → frame.upsert/append → completed step/turn/prompt; a
+synchronous Bash call emits `task` running/ended frames with
+`detached:false`), steer (queued → completed with `steeredAt`; the steered
+text as a user-role frame with `promptIds` in the same turn), abort
+(interrupted step, cancelled turn, interruption marker, aborted prompt; idle
+`:abort` → `{"aborted":true}`), both compaction bodies (`{}` and
+`{"instruction":…}`, instruction echoed in the `started` marker; `tokensAfter`
+equal to the following `usage` frame; both `40910`s with `stack`), questions
+(pending/ended `interaction` frames, `interaction.upsert`, answer →
+`outcome:"answered"`, re-answer `40902`, dismiss → `outcome:"dismissed"`,
+unknown → `40404`), approvals (manual Bash, pending/ended `interaction`
+frames; `40902` on a re-answer), foreground and background sub-agents
+(`transcript.reset` and `agent` frames for `agent-0`/`agent-1`, `task` frames
+with `kind:"subagent"`, `child_agent_id` and `detached` true/false; no
+`subagent.*` frames; REST `/tasks` → 404), the `TodoList` write contract and
+read query (`input:{}` → `Current todo list:` output,
+`display:{"kind":"todo_list","items":[…]}`), files (upload/download/`Range`
+206/delete → `40407`; session media 200 and surviving the upload's delete),
+the `task.watch`/`task.stop` control frames (byte-offset `task.output`,
+`response` carrying the task), WS hello/`subscribe_v2`/ack, unknown-session
+`not_found`, malformed `code:1`, `transcript_since` resume (from seq 197 the
+server sent batches 198–200 then the ack, with no `transcript.reset`; a
+future cursor falls back to `transcript.reset`), `unsubscribe_v2`, search
+still `50001`, transcript `/ops` + `/user-messages` + `/plan`, and session
+rating (`{"appearance":null}`).
 
 The drift from 2.5.0 to 2.5.1 is **small and additive on the core loop: media
 tool results carry structured `session_media` parts again, and session lists
@@ -6590,6 +6660,60 @@ session `40401`. The loopback-only debug xstate stream
 deployment** (verified live — handshake refused).
 
 ## Verification log
+
+- 2026-11-06 re-verification on `2.5.2` (server 2.5.1 → 2.5.2; throwaway
+  sessions created with `metadata.cwd=/home/ubuntu/spike` and deleted after
+  probing; the nightly job's `pending-changelog.md` covered 2.5.1→2.5.2
+  (3 commits), reviewed via the GitHub API — the only code commit `7b906ea3`
+  touches `packages/agent-core-v2` (MCP service, tool registry, tool-select,
+  tool contract), `ef10107d` is the web-dist sync and `1c142a00` the release
+  commit; no `packages/kap-server` or protocol-definition change; live probes
+  over REST + websocat against `127.0.0.1:58627`, server started
+  `2026-11-06T19:23:39.783Z`). Drift found: **none on the wire** — every
+  endpoint and frame shape below is byte-identical to 2.5.1. The release's
+  one engine behavior change (same-name tool updates pinned for a running
+  session) adds only the source-derived `tool_update_pending` injection
+  variant, which was not triggered here. Re-verified unchanged: auth 401s
+  (missing + wrong token), `/meta` (5 flags, 17 features, same capabilities),
+  config (`deepseek/deepseek-v4-flash`, effort `max`, permission `auto`,
+  3 providers), models (12), tools (36 = 27 builtins + 9 MCP), session
+  create/get/list/profile, the v2 session table (flat, grouped,
+  `fields=id,archived`), fork with `turn_index` (broadcasts
+  `event.session.created`), archive/restore, goal/warnings, messages
+  (newest-first; the image prompt rewrite to `session_media` + `name` in the
+  ACK and history), a full DeepSeek prompt round-trip (prompt.upsert →
+  turn.upsert → undo marker → step.upsert → frame.upsert/append → completed
+  step/turn/prompt; the synchronous Bash call emitted `task` running/ended
+  frames), steer (queued → completed with `steeredAt`, user text frame with
+  `promptIds` in the same turn), abort (interrupted step with
+  `endReason:"aborted"`, cancelled turn, interruption marker, aborted prompt;
+  idle `:abort` → `{"aborted":true}`), both compaction bodies (`{}` and an
+  instruction echo; both `40910`s with `stack`; `tokensAfter` matched the
+  following `usage` frame and the compaction summary message), questions
+  (pending/ended `interaction` frames, `interaction.upsert`, answer →
+  `outcome:"answered"`, re-answer `40902`, dismiss → `outcome:"dismissed"`,
+  unknown id `40404`), approvals (manual Bash, pending/ended `interaction`
+  frames; `40902` on a re-answer), foreground and background sub-agents
+  (`agent-0`/`agent-1` `transcript.reset` + `agent` frames, `task` frames
+  with `kind:"subagent"`, `child_agent_id`, `detached` true/false; no
+  `subagent.*` frames; REST `/tasks` 404), the `TodoList` write contract and
+  a read-only `input:{}` query (both with `display:{"kind":"todo_list"}`),
+  the `task.watch`/`task.stop` control frames (`task.output` byte offsets and
+  a `response` carrying the task), files (upload with sniffed
+  `media_type:"image/png"`, download 200, `Range` 206, delete → 
+  `{"deleted":true}` then GET 404, session media 200 and surviving the
+  upload's delete), WS hello/`subscribe_v2`/ack, unknown-session
+  `not_found`, malformed `code:1`, `transcript_since` resume (from seq 197
+  the server sent batches 198–200 then the ack, no `transcript.reset`; a
+  future cursor fell back to `transcript.reset`), `unsubscribe_v2`,
+  `/transcript` (same 2.5.0 key set), `/transcript/ops`,
+  `/transcript/user-messages`, `/transcript/plan`, session rating
+  (`{"appearance":null}`) and search (`50001`, still disabled). The managed
+  `kimi-code/k3` alias still fails with `provider.auth_error` (turn
+  `failed`, step `endReason:"error"`), while `Kimi Platform/kimi-k3`
+  completed a turn. **App impact: none — no breakage ticket, no improvement
+  ticket.** Unit tests: `:app:testDebugUnitTest --rerun-tasks` — 998 tests,
+  0 failures, 4 skipped.
 
 - 2026-11-05 re-verification on `2.5.1` (server 2.5.0 → 2.5.1; throwaway
   sessions created with `metadata.cwd=/home/ubuntu/spike` and deleted after
