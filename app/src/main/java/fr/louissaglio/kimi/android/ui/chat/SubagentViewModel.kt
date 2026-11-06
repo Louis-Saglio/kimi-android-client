@@ -12,8 +12,11 @@ import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.TranscriptPage
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.data.toUserMessage
+import fr.louissaglio.kimi.android.di.DefaultDispatcher
 import fr.louissaglio.kimi.android.navigation.Subagent
 import javax.inject.Inject
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -39,6 +42,9 @@ class SubagentViewModel internal constructor(
     private val chatRepository: ChatRepository,
     private val settingsRepository: SettingsRepository,
     private val routeArgs: Subagent,
+    // Default mirrors the DI value for direct construction in tests.
+    @DefaultDispatcher
+    private val decodeDispatcher: CoroutineDispatcher = Dispatchers.Default,
 ) : ViewModel() {
 
     // Production entry point (Hilt): the destination's SavedStateHandle is decoded
@@ -52,7 +58,8 @@ class SubagentViewModel internal constructor(
         chatRepository: ChatRepository,
         settingsRepository: SettingsRepository,
         savedStateHandle: SavedStateHandle,
-    ) : this(subagentStore, chatRepository, settingsRepository, savedStateHandle.toRoute<Subagent>())
+        @DefaultDispatcher decodeDispatcher: CoroutineDispatcher,
+    ) : this(subagentStore, chatRepository, settingsRepository, savedStateHandle.toRoute<Subagent>(), decodeDispatcher)
 
     private val sessionId: String = routeArgs.sessionId
     private val subagentId: String = routeArgs.subagentId
@@ -245,7 +252,7 @@ class SubagentViewModel internal constructor(
      * `ReadMediaFile` results): the chat's own resolution, session media of THIS
      * session. Pull-based display data, like the chat's `imageBytes`. */
     suspend fun imageBytes(image: ChatMessage.Part.Image): ByteArray? =
-        resolveImageBytes(chatRepository, settingsRepository, sessionId, image)
+        resolveImageBytes(chatRepository, settingsRepository, sessionId, image, decodeDispatcher)
 
     /** Retry of the failed initial load (the error state is the whole screen). */
     fun onRetry() {

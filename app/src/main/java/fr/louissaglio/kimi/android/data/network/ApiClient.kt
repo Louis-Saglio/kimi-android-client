@@ -3,7 +3,10 @@ package fr.louissaglio.kimi.android.data.network
 import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import java.io.IOException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
@@ -79,11 +82,29 @@ class ApiClient(
      * The core: executes [request] on the IO dispatcher and maps failures to
      * [DataError] — 401 → Auth, other non-2xx → Http, IOException → Network, and a
      * [SerializationException] out of [read] → MalformedResponse.
+     *
+     * `execute()` blocks and ignores coroutine cancellation, so a cancelled GET aborts
+     * its call: the caller stops at once instead of at OkHttp's read timeout (a cold
+     * start whose sibling read failed, a forgotten fetch). A write is left to finish —
+     * aborting a POST mid-flight could drop a prompt the server half-received.
      */
     suspend fun <T> executeResponse(request: Request, read: (Response) -> Result<T>): Result<T> =
         withContext(Dispatchers.IO) {
+            val call = client.newCall(request)
+            val abortOnCancel = if (request.method == "GET") {
+                // UNDISPATCHED: armed before execute() starts, even if cancelled first.
+                launch(start = CoroutineStart.UNDISPATCHED) {
+                    try {
+                        awaitCancellation()
+                    } finally {
+                        call.cancel()
+                    }
+                }
+            } else {
+                null
+            }
             try {
-                client.newCall(request).execute().use { response ->
+                call.execute().use { response ->
                     when {
                         response.code == 401 -> Result.failure(DataError.Auth)
                         !response.isSuccessful -> Result.failure(DataError.Http(response.code))
@@ -96,6 +117,8 @@ class ApiClient(
                 }
             } catch (e: IOException) {
                 Result.failure(DataError.Network(e))
+            } finally {
+                abortOnCancel?.cancel()
             }
         }
 

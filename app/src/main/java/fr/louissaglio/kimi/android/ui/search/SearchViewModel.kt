@@ -31,7 +31,7 @@ import kotlinx.coroutines.launch
  * cannot overlap and no client-side dedup exists.
  *
  * Ticket 183: a server whose global search index is off (the 2.5.0 default)
- * answers every call with a [isGlobalSearchDisabled] 50001; that flips the screen
+ * answers every call with [DataError.SearchDisabled]; that flips the screen
  * into its terminal [UiState.searchDisabled] state — no retry, the query field
  * disabled, and [onSearch]/[onRetry]/[onEndReached] no-ops, since any further
  * request could only fail the same way. No probe runs ahead of the first query:
@@ -138,7 +138,7 @@ class SearchViewModel internal constructor(
                     }
                 }
                 .onFailure { error ->
-                    if (error.isGlobalSearchDisabled()) {
+                    if (error is DataError.SearchDisabled) {
                         // Switched off server-side between pages.
                         uiState.update { it.copy(isLoadingMore = false, searchDisabled = true) }
                     } else if ((error as? DataError.Api)?.code == PAGE_TOKEN_INVALID_CODE) {
@@ -184,7 +184,7 @@ class SearchViewModel internal constructor(
                 }
                 .onFailure { error ->
                     uiState.update {
-                        if (error.isGlobalSearchDisabled()) {
+                        if (error is DataError.SearchDisabled) {
                             it.copy(isLoading = false, searchDisabled = true)
                         } else {
                             it.copy(isLoading = false, error = error.toUserMessage())
@@ -217,7 +217,7 @@ class SearchViewModel internal constructor(
                 }
                 .onFailure { error ->
                     uiState.update {
-                        if (error.isGlobalSearchDisabled()) {
+                        if (error is DataError.SearchDisabled) {
                             it.copy(isLoadingMore = false, searchDisabled = true)
                         } else {
                             it.copy(isLoadingMore = false, loadMoreError = error.toUserMessage())
@@ -232,17 +232,3 @@ class SearchViewModel internal constructor(
         const val PAGE_TOKEN_INVALID_CODE = 40001
     }
 }
-
-/**
- * docs/server-api.md, Search (2.5.0): with the global search index off — the
- * server default — every `POST /api/v1/search` answers envelope 50001 with this
- * message prefix, before any validation. Deliberately narrow (code AND exact
- * prefix): every other 50001 stays on the generic [toUserMessage] path.
- */
-internal fun Throwable.isGlobalSearchDisabled(): Boolean =
-    this is DataError.Api &&
-        code == GLOBAL_SEARCH_DISABLED_CODE &&
-        serverMessage.startsWith(GLOBAL_SEARCH_DISABLED_PREFIX)
-
-private const val GLOBAL_SEARCH_DISABLED_CODE = 50001
-private const val GLOBAL_SEARCH_DISABLED_PREFIX = "global search is disabled"

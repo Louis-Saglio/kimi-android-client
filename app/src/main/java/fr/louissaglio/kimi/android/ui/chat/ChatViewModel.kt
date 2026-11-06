@@ -18,6 +18,7 @@ import fr.louissaglio.kimi.android.data.chat.EffortSwitchConfig
 import fr.louissaglio.kimi.android.data.chat.MAIN_AGENT_ID
 import fr.louissaglio.kimi.android.data.chat.MANAGED_KIMI_PROVIDER
 import fr.louissaglio.kimi.android.data.chat.MessagePage
+import fr.louissaglio.kimi.android.data.chat.PendingApprovalRequest
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 import fr.louissaglio.kimi.android.data.chat.ResolvedQuestion
 import fr.louissaglio.kimi.android.data.chat.ServerModel
@@ -34,11 +35,15 @@ import fr.louissaglio.kimi.android.data.sessions.UnreadSessionsStore
 import fr.louissaglio.kimi.android.data.sessions.displayName
 import fr.louissaglio.kimi.android.data.sessions.displayNameFor
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
+import fr.louissaglio.kimi.android.di.DefaultDispatcher
 import fr.louissaglio.kimi.android.di.StreamCoalesceWindowMillis
 import fr.louissaglio.kimi.android.navigation.Chat
 import fr.louissaglio.kimi.android.ui.common.formatTokenCount
 import java.time.Instant
 import javax.inject.Inject
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job as CoroutineJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -71,6 +76,9 @@ class ChatViewModel internal constructor(
     // pass 0 to publish every delta immediately (the pre-conflation behavior).
     @StreamCoalesceWindowMillis
     private val streamCoalesceWindowMillis: Long = 100L,
+    // Default mirrors the DI value, like the window above.
+    @DefaultDispatcher
+    private val decodeDispatcher: CoroutineDispatcher = Dispatchers.Default,
 ) : ViewModel() {
 
     // Production entry point (Hilt): the destination's SavedStateHandle is decoded
@@ -89,6 +97,7 @@ class ChatViewModel internal constructor(
         savedStateHandle: SavedStateHandle,
         unreadStore: UnreadSessionsStore,
         @StreamCoalesceWindowMillis streamCoalesceWindowMillis: Long,
+        @DefaultDispatcher decodeDispatcher: CoroutineDispatcher,
     ) : this(
         chatRepository,
         sessionsRepository,
@@ -99,6 +108,7 @@ class ChatViewModel internal constructor(
         savedStateHandle.toRoute<Chat>(),
         unreadStore,
         streamCoalesceWindowMillis,
+        decodeDispatcher,
     )
 
     private val sessionId: String = routeArgs.sessionId
@@ -461,6 +471,7 @@ class ChatViewModel internal constructor(
         sessionId = sessionId,
         updateState = { transform -> uiState.update(transform) },
         sendEffect = { effect -> _effects.send(effect) },
+        decodeDispatcher = decodeDispatcher,
     )
 
     /** The question wizard (ticket 072): pending-question lifecycle, answer submission,
@@ -495,13 +506,10 @@ class ChatViewModel internal constructor(
      * row). Reset by every newest-page refetch. */
     private var oldestHistoryId: String? = null
 
-    /** Screen visibility as state — one input of the socket gate (see init). */
+    /** Screen visibility as state — one input of the [socketGate]. */
     private val screenVisible = MutableStateFlow(false)
 
     init {
-        // (The socket gate is started by the class body's LAST init block, at the
-        // end of the file — it can run inline, before later properties exist.)
-        //
         // The swarm cards' aggregate input (ticket 135): the store's per-call member
         // lists, live — every member status flip republishes them, so the card's bar
         // and counts advance mid-swarm.
@@ -579,6 +587,14 @@ class ChatViewModel internal constructor(
         }
     }
 
+    // The one approval-card mapping, for both carriers (the transcript's and the
+    // reset's pending requests, the live request frame).
+    private fun PendingApprovalRequest.toPendingApproval() =
+        PendingApproval(approvalId, toolName, summary, agentId, plan)
+
+    private fun SessionEvent.ApprovalRequested.toPendingApproval() =
+        PendingApproval(approvalId, toolName, summary, agentId, plan)
+
     /** The guard captures for a cold-start apply racing the live stream (the socket is
      * open on the resync paths): an event landing mid-fetch is newer than the
      * fetched state, so its tracked field skips the stale apply. */
@@ -635,7 +651,7 @@ class ChatViewModel internal constructor(
                 pendingApprovals =
                     if (!approvalsSeedGuard.isStale(guards.approvals)) {
                         bundle.transcript.pendingApprovals
-                            .map { a -> PendingApproval(a.approvalId, a.toolName, a.summary, a.agentId, a.plan) }
+                            .map { a -> a.toPendingApproval() }
                             .distinctBy { a -> a.approvalId }
                     } else {
                         it.pendingApprovals
@@ -811,6 +827,7 @@ class ChatViewModel internal constructor(
      * re-applies the stored permission pick. Also fires when the app returns to the
      * foreground. */
     fun onScreenStarted() {
+        socketGate.start()
         screenVisible.value = true
         // The web clears a session's unread marker when it becomes the visible session
         // (ticket 145 backstop: a process-death restore lands here without a list tap).
@@ -1230,11 +1247,7 @@ class ChatViewModel internal constructor(
                             // full-screen while nothing renders, a snackbar otherwise.
                             is SocketEvent.Failed -> if (event.error is DataError.SessionNotFound) {
                                 uiState.update { it.copy(isReconnecting = false) }
-                                if (uiState.value.items.isNullOrEmpty()) {
-                                    uiState.update { it.copy(error = event.error.toUserMessage()) }
-                                } else {
-                                    _effects.send(Effect.RefreshFailed(event.error.toUserMessage()))
-                                }
+                                reportLoadFailure(event.error)
                             }
                             is SocketEvent.Event -> Unit // handled above via the coalescer
                         }
@@ -1333,7 +1346,7 @@ class ChatViewModel internal constructor(
             is SessionEvent.TranscriptStale -> rebuildFromTranscript()
             is SessionEvent.ApprovalRequested -> {
                 approvalsSeedGuard.bump()
-                val approval = PendingApproval(event.approvalId, event.toolName, event.summary, event.agentId, event.plan)
+                val approval = event.toPendingApproval()
                 uiState.update {
                     // Deduped by interaction id, in place: the post-ack re-send of a
                     // request the reset already queued must neither double it nor move
@@ -1355,7 +1368,7 @@ class ChatViewModel internal constructor(
                 uiState.update {
                     it.copy(
                         pendingApprovals = event.pending
-                            .map { a -> PendingApproval(a.approvalId, a.toolName, a.summary, a.agentId, a.plan) }
+                            .map { a -> a.toPendingApproval() }
                             .distinctBy { a -> a.approvalId },
                     )
                 }
@@ -1737,43 +1750,43 @@ class ChatViewModel internal constructor(
         }
     }
 
-    // Kept as the class body's LAST initializer: with a sub-agent page already open
-    // (the restored-page case) the gate opens at once, and on Main.immediate its
-    // cold start runs inline — every property it touches (the seed guards, the cold
-    // start job, the coalescer) must be initialized by then, and none may be reset
-    // by an initializer running after it.
-    init {
-        // The socket gate (ticket 045): the session socket is collected while the chat
-        // is visible OR a sub-agent page of this session is open. While it runs, this
-        // collection is the sub-agent store's feeder — the chatCollectionStarted/
-        // Stopped pair (ticket 064) keeps the store's own keep-alive collection off,
-        // so exactly one collection per session exists in every state combination (two
-        // concurrent ones would double-feed the store on every cursor replay). The
-        // gate still outlives navigation to a page, so chat → page → chat costs no
-        // reconnect. Gate flips cancel/restart the collection (collectLatest),
-        // matching the old explicit start/cancel for the chat-only case.
-        //
-        // The FIRST opening awaits the session's transcript cold start (ticket 176)
-        // before subscribing: the cold-start apply IS the initial load, and the
-        // seeded resume watermark makes the first subscribe replay from exactly the
-        // fetched transcript page (`transcript_since`), gapless. The chat claims the
-        // feeder role BEFORE the cold start: the store's keep-alive must not keep
-        // folding the session socket while this chat rebuilds its rows.
-        viewModelScope.launch {
-            combine(screenVisible, subagentStore.openPageCount(sessionId)) { visible, openPages ->
-                visible || openPages > 0
-            }.distinctUntilChanged()
-                .collectLatest { holdSocket ->
-                    if (holdSocket) {
-                        subagentStore.chatCollectionStarted(sessionId)
-                        try {
-                            ensureColdStart().join()
-                            collectSessionSocket()
-                        } finally {
-                            subagentStore.chatCollectionStopped(sessionId)
-                        }
+    /**
+     * The socket gate (ticket 045): the session socket is collected while the chat is
+     * visible OR a sub-agent page of this session is open. While it runs, this
+     * collection is the sub-agent store's feeder — the chatCollectionStarted/Stopped
+     * pair (ticket 064) keeps the store's own keep-alive collection off, so exactly one
+     * collection per session exists in every state combination (two concurrent ones
+     * would double-feed the store on every cursor replay). The gate still outlives
+     * navigation to a page, so chat → page → chat costs no reconnect. Gate flips
+     * cancel/restart the collection (collectLatest), matching the old explicit
+     * start/cancel for the chat-only case.
+     *
+     * The FIRST opening awaits the session's transcript cold start (ticket 176) before
+     * subscribing: the cold-start apply IS the initial load, and the seeded resume
+     * watermark makes the first subscribe replay from exactly the fetched transcript
+     * page (`transcript_since`), gapless. The chat claims the feeder role BEFORE the
+     * cold start: the store's keep-alive must not keep folding the session socket while
+     * this chat rebuilds its rows.
+     *
+     * Started by the first [onScreenStarted], never during construction: with a page
+     * already open (the restored-page hand-over) the gate opens at once and, on
+     * Main.immediate, runs its cold start inline — before a property initializer
+     * declared after a constructor-time start would have run.
+     */
+    private val socketGate: CoroutineJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
+        combine(screenVisible, subagentStore.openPageCount(sessionId)) { visible, openPages ->
+            visible || openPages > 0
+        }.distinctUntilChanged()
+            .collectLatest { holdSocket ->
+                if (holdSocket) {
+                    subagentStore.chatCollectionStarted(sessionId)
+                    try {
+                        ensureColdStart().join()
+                        collectSessionSocket()
+                    } finally {
+                        subagentStore.chatCollectionStopped(sessionId)
                     }
                 }
-        }
+            }
     }
 }

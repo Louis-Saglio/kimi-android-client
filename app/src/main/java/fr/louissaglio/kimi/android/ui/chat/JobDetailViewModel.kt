@@ -160,6 +160,10 @@ class JobDetailViewModel internal constructor(
     /** No more watching: the ended task's output is complete, or the server refused. */
     private var watchDone = false
 
+    /** Unanswered watches re-sent on the current connection; reset by a reply or a new
+     * connection. */
+    private var watchRetries = 0
+
     init {
         if (storeBacked) {
             collectStoreJob()
@@ -226,6 +230,7 @@ class JobDetailViewModel internal constructor(
         viewModelScope.launch {
             chatRepository.observeSocketConnection(sessionId).collect { id ->
                 connectionId = id
+                watchRetries = 0
                 if (id == null) {
                     watchedOn = null
                     uiState.update { it.copy(isLoading = false) }
@@ -263,15 +268,23 @@ class JobDetailViewModel internal constructor(
         viewModelScope.launch {
             val result = chatRepository.watchTaskOutput(sessionId, taskId, sinceOffset = tail.endOffset, tailBytes = TAIL_BYTES)
             if (generation != watchGeneration) return@launch
+            result.onSuccess { watchRetries = 0 }
             result.onFailure { error ->
                 if (watchedOn == connection) watchedOn = null
-                if (error is DataError.Api) {
-                    // 40406 unknown task, 50003 output unreadable: retrying cannot help.
-                    watchDone = true
-                    uiState.update { it.copy(isLoading = false, outputError = error.toUserMessage()) }
-                } else {
+                when {
+                    error is DataError.Api -> {
+                        // 40406 unknown task, 50003 output unreadable: retrying cannot help.
+                        watchDone = true
+                        uiState.update { it.copy(isLoading = false, outputError = error.toUserMessage()) }
+                    }
+                    // No reply while the connection stayed open (the socket's control
+                    // timeout): no new connection id will re-watch, so re-send here.
+                    connectionId == connection && watchRetries < MAX_WATCH_RETRIES -> {
+                        watchRetries++
+                        startWatch()
+                    }
                     // The connection dropped mid-request: the next one re-watches.
-                    uiState.update { it.copy(isLoading = false) }
+                    else -> uiState.update { it.copy(isLoading = false) }
                 }
             }
         }
@@ -331,5 +344,9 @@ class JobDetailViewModel internal constructor(
     internal companion object {
         /** The first chunk a watch asks for: the old `output_preview` cap. */
         const val TAIL_BYTES = 32 * 1024
+
+        /** Re-sends of an unanswered watch per connection (each one waited the
+         * socket's full control timeout first). */
+        const val MAX_WATCH_RETRIES = 3
     }
 }

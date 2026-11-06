@@ -10,6 +10,7 @@ import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.data.toUserMessage
 import java.util.UUID
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -64,6 +65,7 @@ internal class ChatAttachments(
     private val sessionId: String,
     private val updateState: ((ChatViewModel.UiState) -> ChatViewModel.UiState) -> Unit,
     private val sendEffect: suspend (ChatViewModel.Effect) -> Unit,
+    private val decodeDispatcher: CoroutineDispatcher,
 ) {
 
     /** Stages picked files as composer chips (ticket 033): the store resolves each
@@ -119,7 +121,7 @@ internal class ChatAttachments(
      * `GET /api/v1/files/{id}`. Pull-based display data for the thumbnail/full-screen
      * viewer, hence a call rather than state or an effect. */
     suspend fun imageBytes(image: ChatMessage.Part.Image): ByteArray? =
-        resolveImageBytes(chatRepository, settingsRepository, sessionId, image)
+        resolveImageBytes(chatRepository, settingsRepository, sessionId, image, decodeDispatcher)
 
     /** Downloads a history attachment's bytes, persists them via the store, and emits
      * [ChatViewModel.Effect.OpenFile] for the screen to hand to another app
@@ -195,8 +197,10 @@ internal suspend fun resolveImageBytes(
     settingsRepository: SettingsRepository,
     sessionId: String,
     image: ChatMessage.Part.Image,
+    // An inline image can be megabytes of base64: decoded off the caller's Main.
+    decodeDispatcher: CoroutineDispatcher,
 ): ByteArray? =
-    image.base64Data?.let { runCatching { Base64.decode(it, Base64.DEFAULT) }.getOrNull() }
+    image.base64Data?.let { data -> withContext(decodeDispatcher) { decodeBase64OrNull(data) } }
         ?: image.fileId?.let { fileId ->
             val settings = settingsRepository.current()
             if (image.isSessionMedia) {
@@ -205,3 +209,9 @@ internal suspend fun resolveImageBytes(
                 chatRepository.downloadFile(settings, fileId).getOrNull()?.bytes
             }
         }
+
+private fun decodeBase64OrNull(data: String): ByteArray? = try {
+    Base64.decode(data, Base64.DEFAULT)
+} catch (e: IllegalArgumentException) {
+    null
+}

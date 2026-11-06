@@ -2,7 +2,11 @@
 
 - `data/network/` — `ApiClient` is the shared HTTP scaffold (URL building,
   401/HTTP/IO → `DataError`, envelope unwrap). Every REST call goes through it;
-  never hand-roll `Request.Builder` in a repository. `SocketStallWatchdog`
+  never hand-roll `Request.Builder` in a repository. Cancelling the caller of a GET
+  aborts its OkHttp call (ticket 185 — `execute()` alone blocks until the response or
+  the read timeout, so a cancelled read would still hold its parent); a POST is left
+  to finish, since aborting a write mid-flight could drop a prompt the server
+  half-received. `SocketStallWatchdog`
   (ticket 152) is the shared stalled-socket detection both WebSockets run: one
   instance per connection, armed at socket open, fed `heartbeat_ms` from each
   connection's `server_hello`; inbound silence past 3× it unwinds the connection
@@ -343,9 +347,11 @@
   session through the plain Chat route — or, scoped, just pops back to the chat
   below (every hit is that session's) — jump-to-message is out of scope. A
   server with its global search index off (the 2.5.0 default) answers every
-  call with a 50001 whose message starts `global search is disabled`
-  (`isGlobalSearchDisabled` — code AND prefix, so other 50001s keep the generic
-  `toUserMessage()` error); ticket 183 maps it to the terminal
+  call with a 50001 whose message starts `global search is disabled`;
+  `SearchApi` maps exactly that (`isGlobalSearchDisabled` — code AND prefix, so other
+  50001s stay a plain `DataError.Api` with the generic `toUserMessage()` error) to
+  `DataError.SearchDisabled` (ticket 185 — the ViewModel never reads wire codes for
+  it), which ticket 183's ViewModel turns into the terminal
   `UiState.searchDisabled` state — a phone-level explanation, no Retry, the query
   field disabled and every request entry point a no-op. There is no probe: both
   magnifier entry points stay visible and the screen explains on first submit.
@@ -361,7 +367,12 @@
   serialization's — and `DateTimeParseException`), never `runCatching`: an
   `Error` or a mapper bug must crash, not turn into a silently dropped frame.
   (Older call sites outside `data/chat`'s socket/fold/mapper/tasks paths still
-  use `runCatching`; convert them when touched.)
+  use `runCatching`; convert them when touched.) A server condition a screen
+  branches on is a typed `DataError` produced in the data layer
+  (`SessionNotFound`, `SearchDisabled`), never a code/message decoded in a ViewModel.
+  Dispatchers are injected through the `di/AppModule.kt` qualifiers
+  (`@MainImmediateDispatcher`, `@DefaultDispatcher`) where a class picks one itself;
+  `ApiClient`'s `Dispatchers.IO` and the sub-agent store's scope predate them.
 - `ui/<screen>/` — screen composable + ViewModel. Chat building blocks live in
   `ui/chat/components/` (same package, `internal` — androidTests import them; the
   `ModelPickerSheet` doubles as the Settings screen's server-default model/effort
@@ -406,7 +417,8 @@
   through the user bubble's `HistoryImageThumbnail` + full-screen viewer, bytes via
   the shared `resolveImageBytes` (ChatAttachments.kt — the ticket-104 session-media
   fetch; the chat's `ChatAttachments.imageBytes` and `SubagentViewModel.imageBytes`
-  both call it), labelled with `name`; a video is a "▶ name" chip, never decoded;
+  both call it, passing the injected `@DefaultDispatcher` the inline base64 decodes
+  on — ticket 185), labelled with `name`; a video is a "▶ name" chip, never decoded;
   the collapsed row adds only a small media indicator —, ExitPlanMode the fixed
   "Plan ready for review" label plus option-label chips above the generic args
   table, UpdateGoal a status badge instead of a preview — colored per the
@@ -476,7 +488,11 @@
   no poll): while the screen is started and the socket has an open connection,
   one watch per connection (`tail_bytes` 32 KiB; once output is held,
   `since_offset` = its UTF-8 byte end, so a reconnect or ON_STOP→ON_START
-  re-entry neither loses nor duplicates). Chunks append into a
+  re-entry neither loses nor duplicates). A watch the socket's 15 s control timeout
+  fails while the SAME connection stays open is re-sent at once (ticket 185 — no new
+  connection id would ever re-watch it; at most 3 re-sends per connection, reset by a
+  reply or a new connection); a watch lost with its connection waits for the next
+  one. Chunks append into a
   `TaskOutputTail` by BYTE offset (never `String.length`): a chunk ending at or
   before the held end is a duplicate, a straddling one keeps its new bytes, a
   later one opens a segment rendered behind a `[… N bytes missing …]` marker,
@@ -528,7 +544,9 @@
   newest turn plus the session's global state: pending interactions, prompt
   entities, the `agents` roster, the `seq` watermark — `TranscriptPage` carries
   them, mapped in `ChatMessageMapper`) and `GET .../prompts` (the queue,
-  `TranscriptSyncApi`) — any failed read failing the whole cold start. It is taken
+  `TranscriptSyncApi`) — any failed read failing the whole cold start at once (ticket
+  185: the failure cancels the two sibling reads, whose GETs abort, instead of
+  waiting for the slowest). Its scope runs on the injected `@MainImmediateDispatcher`. It is taken
   BEFORE the session's first socket subscribe (the chat's gate and the store's
   keep-alive both await it; the chat claims the feeder role before awaiting, so the
   keep-alive never folds the socket while the chat rebuilds). On success it seeds the
@@ -556,7 +574,12 @@
   subscribe's `agent`/`usage` frames seed them (ticket 177), and its `todo` frame
   the widget (ticket 178).
   The fetch is cached per session only until the session is LEFT:
-  `SubagentStreamStore.release` calls `TranscriptColdStart.forget`, so the next entry
+  `SubagentStreamStore.release` calls `TranscriptColdStart.forget`, which also
+  cancels a fetch still in flight (ticket 185 — applied late, it would re-seed the
+  socket and re-create the released session's store records; the apply step checks
+  `ensureActive()`, and a caller still awaiting the cancelled fetch gets a
+  `TranscriptColdStart.Interrupted` failure — the ordinary load error with Retry —
+  never a CancellationException of its own), so the next entry
   re-fetches (one cheap round per entry — no process-lifetime cache of mutable
   server state) while chat → page → chat costs zero fetches. A chat joining someone
   else's fetch (`AlreadyFresh` — the keep-alive restoring a page on top) takes a
@@ -656,7 +679,9 @@
   pin, or the settled call's result per the refined tier above). The store is fed by
   exactly ONE session-socket collection at a time (064): the chat's while its
   socket gate holds the session (ChatViewModel signals
-  chatCollectionStarted/Stopped), otherwise the store's own keep-alive
+  chatCollectionStarted/Stopped; the gate is a `CoroutineStart.LAZY` job started by
+  the first `onScreenStarted`, never during construction — with a page already open
+  it opens at once and runs its cold start inline, ticket 185), otherwise the store's own keep-alive
   collection while a sub-agent page is open (SubagentViewModel registers via
   pageOpened/pageClosed; the job screen registers the same page count so the
   socket — and with it the live task frames — survives watching a job) — the keep-alive lives in the store because after

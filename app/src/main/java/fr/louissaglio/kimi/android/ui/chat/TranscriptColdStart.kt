@@ -10,15 +10,20 @@ import fr.louissaglio.kimi.android.data.chat.TranscriptFrame
 import fr.louissaglio.kimi.android.data.chat.TranscriptPage
 import fr.louissaglio.kimi.android.data.chat.TranscriptTurn
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
+import fr.louissaglio.kimi.android.di.MainImmediateDispatcher
 import javax.inject.Inject
 import javax.inject.Provider
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.job
 
 /**
  * The session-scoped owner of the chat's cold start (ticket 176 — the server 2.5.0
@@ -57,8 +62,10 @@ import kotlinx.coroutines.coroutineScope
  * answering the subscribe's watermark).
  *
  * Failure handling: none beyond the ordinary load-error path — a failed fetch (any of
- * the three reads) is forgotten, so the next [sync] call retries; there is
- * deliberately no fallback to the removed `/snapshot` or a burst of ad-hoc REST calls.
+ * the three reads; the first failure cancels the other two) is forgotten, so the next
+ * [sync] call retries; there is deliberately no fallback to the removed `/snapshot` or
+ * a burst of ad-hoc REST calls. [forget] cancels a fetch still in flight: it applies
+ * nothing, and whoever still awaits it gets a [Interrupted] failure.
  */
 @Singleton
 class TranscriptColdStart @Inject constructor(
@@ -67,7 +74,12 @@ class TranscriptColdStart @Inject constructor(
     // Provider-lazy: the store takes the cold start directly (its keep-alive awaits
     // it), so the reverse edge must resolve at runtime, not at graph construction.
     private val subagentStore: Provider<SubagentStreamStore>,
+    @MainImmediateDispatcher private val mainDispatcher: CoroutineDispatcher,
 ) {
+
+    /** The failure of a fetch [forget] cancelled, as seen by a caller still awaiting it
+     * (the caller itself is not cancelled, so it must not see a CancellationException). */
+    class Interrupted(cause: CancellationException) : Exception("Loading was interrupted — retry", cause)
 
     /** The chat-side cold-start state: the history page, the main transcript page (its
      * [TranscriptPage.runningTurn], pending interactions and prompt entities) and the
@@ -97,9 +109,8 @@ class TranscriptColdStart @Inject constructor(
         data object AlreadyFresh : Outcome
     }
 
-    // Lazy, like the store's: JVM tests that never open a socket path have no Main
-    // dispatcher to reference.
-    private val scope by lazy { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
+    // Lazy: the injected dispatcher is only touched once a fetch starts.
+    private val scope by lazy { CoroutineScope(SupervisorJob() + mainDispatcher) }
 
     // sessionId → the cold-start fetch (in-flight or done), valid until the session
     // is left ([forget]) or a forced re-fetch lands ([resync]). The shared
@@ -112,41 +123,48 @@ class TranscriptColdStart @Inject constructor(
      * left) fetches; concurrent and later callers join the same fetch. */
     suspend fun sync(sessionId: String): Result<Outcome> {
         val running = coldStarts[sessionId]
-        if (running != null) {
-            val result = running.await()
-            if (result.isFailure && coldStarts[sessionId] === running) coldStarts.remove(sessionId)
-            return result.map { Outcome.AlreadyFresh }
-        }
+        if (running != null) return awaitFetch(sessionId, running).map { Outcome.AlreadyFresh }
         val deferred = scope.async { fetchAndApply(sessionId) }
         coldStarts[sessionId] = deferred
-        val result = deferred.await()
-        if (result.isFailure && coldStarts[sessionId] === deferred) coldStarts.remove(sessionId)
-        return result.map { Outcome.Fresh(it) }
+        return awaitFetch(sessionId, deferred).map { Outcome.Fresh(it) }
     }
 
     /** Forgets the session's cold start (ticket 091): called from
      * [SubagentStreamStore.release] — the session-left signal — so the next entry
      * re-fetches instead of reusing a state that predates everything that happened
-     * while the session was away. */
+     * while the session was away. A fetch still in flight is cancelled: applied late,
+     * it would re-seed the socket and re-create store records of the session just
+     * released. */
     fun forget(sessionId: String) {
-        coldStarts.remove(sessionId)
+        coldStarts.remove(sessionId)?.cancel()
     }
 
     /** The forced re-fetch: always fetches and becomes the session's cold-start state. */
     suspend fun resync(sessionId: String): Result<Bundle> {
         val deferred = scope.async { fetchAndApply(sessionId) }
         coldStarts[sessionId] = deferred
-        val result = deferred.await()
-        if (result.isFailure && coldStarts[sessionId] === deferred) coldStarts.remove(sessionId)
+        return awaitFetch(sessionId, deferred)
+    }
+
+    private suspend fun awaitFetch(sessionId: String, fetch: Deferred<Result<Bundle>>): Result<Bundle> {
+        val result = try {
+            fetch.await()
+        } catch (e: CancellationException) {
+            // Either this caller was cancelled (rethrown here) or [forget] cancelled the
+            // shared fetch under a caller that still wants a result: a failure for it.
+            currentCoroutineContext().ensureActive()
+            Result.failure(Interrupted(e))
+        }
+        if (result.isFailure && coldStarts[sessionId] === fetch) coldStarts.remove(sessionId)
         return result
     }
 
-    /** Awaits every cold start still in flight, for tests: a fetch lives on this
-     * singleton's own scope, so a ViewModel's cancellation never stops it — joining it
-     * in tearDown keeps a late response from resuming on Main after resetMain (the
-     * ticket-049 leak class, like [SubagentStreamStore.keepAliveJob]). */
+    /** Joins every fetch still running on this singleton's scope, for tests — forgotten
+     * (cancelled) ones included: a ViewModel's cancellation never stops a fetch, so
+     * joining in tearDown keeps a late response from resuming on Main after resetMain
+     * (the ticket-049 leak class, like [SubagentStreamStore.keepAliveJob]). */
     internal suspend fun awaitInFlight() {
-        coldStarts.values.toList().forEach { it.await() }
+        scope.coroutineContext.job.children.toList().forEach { it.join() }
     }
 
     /** The three reads in parallel, then the session-scope apply shared by both
@@ -156,35 +174,44 @@ class TranscriptColdStart @Inject constructor(
      * ChatViewModel, ticket 091). */
     private suspend fun fetchAndApply(sessionId: String): Result<Bundle> {
         val settings = settingsRepository.current()
-        val result = coroutineScope {
-            val messages = async { chatRepository.getMessages(settings, sessionId) }
-            val transcript = async {
-                chatRepository.getTranscript(settings, sessionId, MAIN_AGENT_ID, beforeTurn = null, pageSize = TRANSCRIPT_TURNS)
+        val bundle = try {
+            // A failed read throws out of its async, which cancels the two siblings at
+            // once (their GETs abort — ApiClient), so the error does not wait for the
+            // slowest read.
+            coroutineScope {
+                val messages = async { chatRepository.getMessages(settings, sessionId).orFailRead() }
+                val transcript = async {
+                    chatRepository.getTranscript(settings, sessionId, MAIN_AGENT_ID, beforeTurn = null, pageSize = TRANSCRIPT_TURNS)
+                        .orFailRead()
+                }
+                val queue = async { chatRepository.getPromptQueue(settings, sessionId).orFailRead() }
+                Bundle(messages.await(), transcript.await(), queue.await())
             }
-            val queue = async { chatRepository.getPromptQueue(settings, sessionId) }
-            // The repositories never throw (their failures are Result values): the
-            // first failed read fails the whole cold start.
-            val page = messages.await().getOrElse { return@coroutineScope Result.failure(it) }
-            val turns = transcript.await().getOrElse { return@coroutineScope Result.failure(it) }
-            val prompts = queue.await().getOrElse { return@coroutineScope Result.failure(it) }
-            Result.success(Bundle(page, turns, prompts))
+        } catch (e: ReadFailed) {
+            return Result.failure(e.error)
         }
-        result.onSuccess { bundle ->
-            chatRepository.seedTranscript(sessionId, bundle.transcript)
-            val store = subagentStore.get()
-            store.applyRoster(sessionId, bundle.transcript.agents)
-            mineAgentCalls(bundle).forEach { call ->
-                // The miner filters on AGENT_TOOL_NAME, so the call is always a plain
-                // `Agent` one — AgentSwarm calls are mined by ChatViewModel only
-                // (ticket 134).
-                store.applyAgentCall(
-                    sessionId, call.toolCallId, call.argsJson, call.resultText, call.rowStatus,
-                    toolName = AGENT_TOOL_NAME,
-                )
-            }
+        // Forgotten after the reads returned: apply nothing.
+        currentCoroutineContext().ensureActive()
+        chatRepository.seedTranscript(sessionId, bundle.transcript)
+        val store = subagentStore.get()
+        store.applyRoster(sessionId, bundle.transcript.agents)
+        mineAgentCalls(bundle).forEach { call ->
+            // The miner filters on AGENT_TOOL_NAME, so the call is always a plain
+            // `Agent` one — AgentSwarm calls are mined by ChatViewModel only
+            // (ticket 134).
+            store.applyAgentCall(
+                sessionId, call.toolCallId, call.argsJson, call.resultText, call.rowStatus,
+                toolName = AGENT_TOOL_NAME,
+            )
         }
-        return result
+        return Result.success(bundle)
     }
+
+    /** Carries one read's [Result] failure out of its `async`, so [coroutineScope]
+     * fails fast; unwrapped right outside it. */
+    private class ReadFailed(val error: Throwable) : Exception(error)
+
+    private fun <T> Result<T>.orFailRead(): T = getOrElse { throw ReadFailed(it) }
 
     /** One mined `Agent` call: [argsJson] verbatim from the carrier, [resultText]
      * null while no result exists (running), [rowStatus] the row-level outcome. */

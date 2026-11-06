@@ -1,4 +1,4 @@
-package fr.louissaglio.kimi.android.ui.search
+package fr.louissaglio.kimi.android.data.search
 
 import fr.louissaglio.kimi.android.data.DataError
 import java.io.IOException

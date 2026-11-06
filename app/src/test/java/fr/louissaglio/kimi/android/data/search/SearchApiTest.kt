@@ -163,4 +163,20 @@ class SearchApiTest {
         assertTrue((error as? DataError.Api)?.code == 40001)
         assertEquals("pageToken is malformed", (error as DataError.Api).serverMessage)
     }
+
+    @Test
+    fun `search maps the disabled-index 50001 to SearchDisabled and leaves other 50001s alone`() = runBlocking {
+        server.enqueue(
+            MockResponse(body =
+                """{"code":50001,"msg":"global search is disabled; set [database] global_search = true """ +
+                    """or KIMI_CODE_GLOBAL_SEARCH=1 to enable it","data":null,"request_id":"01KZ"}""",
+            ),
+        )
+        server.enqueue(
+            MockResponse(body = """{"code":50001,"msg":"internal error","data":null,"request_id":"01L0"}"""),
+        )
+
+        assertEquals(DataError.SearchDisabled, repository.search(settings(), "deploy").exceptionOrNull())
+        assertEquals(DataError.Api(50001, "internal error"), repository.search(settings(), "deploy").exceptionOrNull())
+    }
 }

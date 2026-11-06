@@ -72,6 +72,7 @@ class JobDetailViewModelTest {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
 
     private lateinit var repository: ChatRepository
+    private val mainDispatcher = UnconfinedTestDispatcher()
     private lateinit var settingsRepository: SettingsRepository
     private lateinit var subagentStore: SubagentStreamStore
 
@@ -82,7 +83,7 @@ class JobDetailViewModelTest {
 
     @Before
     fun setUp() {
-        Dispatchers.setMain(UnconfinedTestDispatcher())
+        Dispatchers.setMain(mainDispatcher)
         server.start()
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
@@ -447,6 +448,27 @@ class JobDetailViewModelTest {
         awaitCondition { sentUnwatches().size == 1 }
         assertEquals("exit 1\n", viewModel.uiState.value.output)
         assertEquals(Job.Status.Failed, viewModel.uiState.value.status)
+    }
+
+    @Test
+    fun `a watch left unanswered on an open connection is re-sent on it`() = runBlocking {
+        val (_, socket) = connect()
+        val viewModel = newViewModel()
+        socket.send(taskListFrame(taskState("bash-1")))
+        awaitState(viewModel.uiState) { it.status == Job.Status.Running }
+
+        viewModel.onScreenStarted()
+        awaitCondition { sentWatches().size == 1 }
+        // No reply: the control's 15 s timeout (on the Main test clock) passes while
+        // the connection stays up.
+        mainDispatcher.scheduler.advanceTimeBy(15_001)
+
+        awaitCondition { sentWatches().size == 2 }
+        val retry = sentWatches().last()
+        assertEquals(32768, retry["tail_bytes"]?.jsonPrimitive?.int)
+        socket.send(taskResponseFrame(retry.requestId(), task = taskState("bash-1")))
+        socket.send(taskOutputFrame("bash-1", offset = 0, text = "after retry\n"))
+        awaitState(viewModel.uiState) { it.output == "after retry\n" }
     }
 
     @Test

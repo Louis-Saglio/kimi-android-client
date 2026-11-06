@@ -126,3 +126,114 @@ project convention for these two findings.
   match.
 - Docs: docs/conventions.md has the `toolRendering` note next to the
   `toolOutput` "one parse" paragraph, and the `parseOrNull` rule under Errors.
+
+## Implementation notes — 2-state
+
+*2026-11-06.* Skills loaded: `android-dev`, `kotlin-coroutines`, `kotlin-flows`,
+`android-data-layer`, `android-testing`. One project convention won over a skill
+rule: `TranscriptColdStart` stays a session-scoped `@Singleton` that owns its scope
+(docs/conventions.md, Cold start). B1 fixes only the missing cancel and the
+hard-coded dispatcher, as the review scoped it.
+
+- **B1 — done.** `forget` now runs `coldStarts.remove(id)?.cancel()`.
+  `fetchAndApply` calls `ensureActive()` between the reads and the apply, so a
+  forgotten fetch never seeds the socket or re-creates store records. `sync` and
+  `resync` share `awaitFetch`. When `await()` throws a `CancellationException`,
+  `awaitFetch` rethrows it only if the caller itself was cancelled
+  (`currentCoroutineContext().ensureActive()`). Otherwise it returns
+  `Result.failure(TranscriptColdStart.Interrupted)`, so a second awaiter gets the
+  ordinary load error with Retry and does not end silently. The scope's dispatcher
+  is now injected through a new `@MainImmediateDispatcher` qualifier
+  (`di/AppModule.kt`). The test graph passes `Dispatchers.Main`, which is the
+  `setMain` delegate and behaves like `Main.immediate` over a TestDispatcher.
+  `awaitInFlight()` now joins every child of the scope, cancelled fetches included,
+  so tests keep it as a leak guard. Cancelling the Deferred alone would not stop a
+  read blocked in OkHttp's `execute()`: the Deferred only completes once its
+  `withContext(IO)` block returns. The fetch is only really stopped together with
+  the ApiClient change under B7. Test:
+  `TranscriptColdStartSyncTest."forget cancels the in-flight fetch, which applies nothing, and its awaiter gets a failure"`
+  holds the messages read open, releases the store, and asserts an `Interrupted`
+  failure within 5 s, no watermark, no roster record, and that the next `sync` is
+  `Fresh`.
+- **B7 — done, with a wider fix than suggested.** On inspection, the suggested
+  `cancelChildren()` before each early return was ineffective in two ways. The
+  reads were awaited in a fixed order, so a fast prompts failure still waited for a
+  slow messages read. And cancelling a read does not interrupt OkHttp's blocking
+  `execute()`, so `coroutineScope` still waited for it until the response or the
+  read timeout. I checked this: with only the cold-start change, the new test fails.
+  The fix has two parts:
+  1. Each read's `async` throws its failure (a private `ReadFailed` wrapper,
+     unwrapped right outside `coroutineScope`, so the catch is narrow). The first
+     failure in completion order cancels its siblings.
+  2. `ApiClient.executeResponse` aborts the OkHttp call when the caller of a GET is
+     cancelled. An `UNDISPATCHED` child awaits cancellation and calls `call.cancel()`
+     in its `finally`. POSTs are deliberately left alone: aborting a write mid-flight
+     could drop a prompt the server half-received, and that would change behaviour.
+
+  Tests: `TranscriptColdStartSyncTest."a failed read fails the cold start without waiting for a hung sibling"`
+  holds the messages read and fails the prompts read, then expects a failure within
+  5 s while the held read is still unreleased. New `ApiClientCancellationTest`: a
+  cancelled GET joins within 5 s and fires `EventListener.canceled`; a cancelled
+  POST runs to completion with no `canceled` event. All three were confirmed red
+  without the ApiClient change.
+- **B2 — done.** In `JobDetailViewModel.startWatch`, a non-`Api` failure while
+  `connectionId` still equals the connection the watch was sent on (the socket's
+  15 s no-reply timeout) re-sends the watch immediately. The timeout itself already
+  spaced the attempts, so no extra delay is added. Re-sends are capped at
+  `MAX_WATCH_RETRIES` = 3 per connection; the counter resets on a reply or a new
+  connection id. A watch lost with its connection still waits for the next
+  connection. Test:
+  `JobDetailViewModelTest."a watch left unanswered on an open connection is re-sent on it"`
+  does not answer the first watch, advances the Main test scheduler past 15 s
+  (`sendControl`'s `withTimeoutOrNull` runs on the caller's Main, so on the test
+  clock), and checks that the second watch streams. I first tried an injectable
+  timeout and dropped it, because the virtual clock makes it unnecessary. The test
+  was confirmed red without the fix.
+- **B3 — done, with a different start point.** The gate is now
+  `private val socketGate = viewModelScope.launch(start = CoroutineStart.LAZY)`,
+  and the first `onScreenStarted()` starts it with `socketGate.start()` (idempotent).
+  The review's literal option, `start()` as the last line of the existing (first)
+  `init`, would have run the inline cold start before `coldStartJob`,
+  `coldStartDone`, `runningTools` and others were initialised. A start from a named
+  trigger after construction cannot depend on source order at all. The ordering
+  comments are deleted. Behaviour is the same, because `ChatScreen` always wires
+  ON_START. The only shift is the restored-page hand-over: the gate now opens at
+  the first ON_START instead of in the constructor, one frame later, and the
+  keep-alive keeps feeding until then.
+  `SubagentStreamStoreKeepAliveTest."opening the chat hands the feed over…"` now
+  asserts that the keep-alive is still the feeder between construction and
+  `onScreenStarted`.
+- **B4 — done as suggested.** New `DataError.SearchDisabled`, plus a
+  `toUserMessage` branch. `SearchApi.search` maps exactly the disabled-index 50001
+  (`isGlobalSearchDisabled`, moved to `data/search` and still internal) to it.
+  `SearchViewModel` now checks `error is DataError.SearchDisabled`. The existing
+  `SearchViewModelTest` cases go through the real `SearchApi` on MockWebServer, so
+  they pass unchanged. `SearchDisabledMappingTest` moved to `data/search`, and
+  `SearchApiTest` gained a case: the disabled 50001 maps to `SearchDisabled`, and
+  another 50001 stays `DataError.Api`. The 40001 page-token check in the
+  ViewModel is left as it is (not part of this finding).
+- **B5 — done.** `resolveImageBytes` takes a `decodeDispatcher` and decodes the
+  inline base64 under `withContext(decodeDispatcher)`, catching only
+  `IllegalArgumentException`. The dispatcher comes from a new `@DefaultDispatcher`
+  qualifier into `ChatViewModel` (passed on to `ChatAttachments`) and
+  `SubagentViewModel`. Their internal test constructors default it to
+  `Dispatchers.Default`, following the `@StreamCoalesceWindowMillis` precedent. There
+  is no JVM test for the decode, because `android.util.Base64` is a stub there
+  (`isReturnDefaultValues`). This is not a bug fix, and the existing `imageBytes`
+  tests pass.
+- **B6 — done.** The `SocketEvent.Failed(SessionNotFound)` branch calls
+  `reportLoadFailure(event.error)` after clearing `isReconnecting`. Two adjacent
+  private mappers, `PendingApprovalRequest.toPendingApproval()` and
+  `SessionEvent.ApprovalRequested.toPendingApproval()`, replace the three inline
+  constructors (the cold start, `ApprovalsReset`, `ApprovalRequested`). There are
+  two because the live frame and the snapshot carry different domain types. This is
+  a pure refactor, and the existing tests pass unchanged.
+- Docs: docs/conventions.md describes GET cancellation (data/network), the
+  `SearchDisabled` mapping (data/search), the cancel-on-forget and fail-fast reads
+  (Cold start), the watch re-send (job screen), the lazily started gate (sub-agent
+  feeder), the decode dispatcher (media rows), and the typed-condition and
+  dispatcher-qualifier rules (Errors). `SubagentStreamStore`'s own
+  `Dispatchers.Main.immediate` scope is unchanged (not part of these findings).
+- Gate: `./gradlew :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin` is
+  green (1093 tests, 0 failures, 1 skipped). The instrumented
+  suite was not run in this step.

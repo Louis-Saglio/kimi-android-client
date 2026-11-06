@@ -1,5 +1,6 @@
 package fr.louissaglio.kimi.android.data.search
 
+import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.network.ApiClient
 import fr.louissaglio.kimi.android.data.network.Envelope
 import fr.louissaglio.kimi.android.data.network.toResult
@@ -23,10 +24,12 @@ import kotlinx.serialization.json.putJsonObject
  * scope. Paging is the 0.33.0 v2 keyset cursor:
  * [pageToken] is opaque and goes back verbatim; a rejected token answers HTTP 200
  * with envelope code 40001, which surfaces as the typed
- * [fr.louissaglio.kimi.android.data.DataError.Api] through the [ApiClient] scaffold —
+ * [DataError.Api] through the [ApiClient] scaffold —
  * the documented signal to restart the search from page one (the caller's job).
  * Hits of deleted sessions are filtered server-side since 0.43.1, so no client-side
- * filtering is needed.
+ * filtering is needed. A server with its global index off answers every call with
+ * one specific 50001 ([isGlobalSearchDisabled]), mapped here to
+ * [DataError.SearchDisabled] (ticket 183).
  */
 @Singleton
 class SearchApi @Inject constructor(
@@ -51,8 +54,13 @@ class SearchApi @Inject constructor(
                 putJsonObject("container") { put("session_id", sessionId) }
             }
         }
-        return api.post(settings, "/api/v1/search", body) { responseBody ->
+        val result = api.post(settings, "/api/v1/search", body) { responseBody ->
             api.json.decodeFromString<Envelope<SearchData>>(responseBody).toResult().map { it.toDomain() }
+        }
+        return if (result.exceptionOrNull()?.isGlobalSearchDisabled() == true) {
+            Result.failure(DataError.SearchDisabled)
+        } else {
+            result
         }
     }
 
@@ -148,3 +156,17 @@ data class IndexStateDto(
     /** The last background refresh's error, when one failed. */
     val degraded: String? = null,
 )
+
+/**
+ * docs/server-api.md, Search (2.5.0): with the global search index off — the
+ * server default — every `POST /api/v1/search` answers envelope 50001 with this
+ * message prefix, before any validation. Deliberately narrow (code AND exact
+ * prefix): every other 50001 stays a plain [DataError.Api].
+ */
+internal fun Throwable.isGlobalSearchDisabled(): Boolean =
+    this is DataError.Api &&
+        code == GLOBAL_SEARCH_DISABLED_CODE &&
+        serverMessage.startsWith(GLOBAL_SEARCH_DISABLED_PREFIX)
+
+private const val GLOBAL_SEARCH_DISABLED_CODE = 50001
+private const val GLOBAL_SEARCH_DISABLED_PREFIX = "global search is disabled"

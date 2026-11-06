@@ -21,6 +21,9 @@ sealed class DataError(message: String, cause: Throwable? = null) : Exception(me
     /** The session socket's `subscribe_v2` was acked `not_found` (ticket 175): the
      * server does not know the session (deleted, or another server). */
     data object SessionNotFound : DataError("Session not found")
+    /** The server's global search index is off (2.5.0's default, ticket 183): every
+     * `POST /api/v1/search` fails this way, so retrying cannot help. */
+    data object SearchDisabled : DataError("Global search is disabled")
 }
 
 /** The one error → user-facing message mapping, shared by the ViewModels. */
@@ -32,5 +35,6 @@ internal fun Throwable.toUserMessage(): String = when (this) {
     is DataError.Api -> serverMessage.ifBlank { "Server error $code" }
     is DataError.MalformedResponse -> "Malformed server response"
     is DataError.SessionNotFound -> "This session no longer exists on the server"
+    is DataError.SearchDisabled -> "Message search is turned off on this server"
     else -> message ?: "Unknown error"
 }

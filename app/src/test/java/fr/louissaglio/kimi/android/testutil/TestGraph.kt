@@ -24,6 +24,7 @@ import fr.louissaglio.kimi.android.ui.chat.ChatTimeline
 import fr.louissaglio.kimi.android.ui.chat.TranscriptColdStart
 import fr.louissaglio.kimi.android.ui.chat.SubagentStreamStore
 import javax.inject.Provider
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -98,7 +99,7 @@ fun testSubagentStreamStore(
         settings,
         // Tests sharing one cold start per session (the production singleton shape)
         // pass the same TranscriptColdStart to the store AND the ViewModels.
-        coldStart ?: TranscriptColdStart(repository, settings, Provider { store }),
+        coldStart ?: TranscriptColdStart(repository, settings, Provider { store }, Dispatchers.Main),
         streamCoalesceWindowMillis,
     ).also { store = it }
 }
@@ -108,5 +109,9 @@ fun testSubagentStreamStore(
 fun testColdStart(
     chatRepository: ChatRepository,
     settingsRepository: SettingsRepository,
+    // Dispatchers.Main is the test-swappable main (setMain): with a TestDispatcher
+    // delegate it behaves exactly like production's Main.immediate.
+    mainDispatcher: CoroutineDispatcher = Dispatchers.Main,
     storeProvider: () -> SubagentStreamStore,
-): TranscriptColdStart = TranscriptColdStart(chatRepository, settingsRepository, Provider { storeProvider() })
+): TranscriptColdStart =
+    TranscriptColdStart(chatRepository, settingsRepository, Provider { storeProvider() }, mainDispatcher)
