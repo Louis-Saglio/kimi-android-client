@@ -6,8 +6,7 @@ import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.ORIGIN_KIND_COMPACTION_SUMMARY
 import fr.louissaglio.kimi.android.data.chat.PromptStatus
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
-import fr.louissaglio.kimi.android.data.chat.Todo
-import fr.louissaglio.kimi.android.data.chat.TodoParser
+import fr.louissaglio.kimi.android.data.chat.TODO_LIST_TOOL_NAME
 import fr.louissaglio.kimi.android.data.chat.ToolPayloads
 import fr.louissaglio.kimi.android.data.chat.TranscriptFrame
 import fr.louissaglio.kimi.android.data.chat.TranscriptTurn
@@ -38,7 +37,6 @@ import kotlinx.serialization.json.JsonObject
  * turn pages into the same prefix/tail split.
  */
 class ChatTimeline(
-    private val todoParser: TodoParser,
     private val historyBacked: Boolean = true,
 ) {
 
@@ -62,15 +60,9 @@ class ChatTimeline(
 
     /** Todo tool calls seen so far (ticket 042): their rows are suppressed — the
      * widget replaces them — and their results must not surface as orphan rows. Ids
-     * are globally unique per session, so the set is never pruned. */
+     * are globally unique per session, so the set is never pruned. The widget's list
+     * itself is not timeline state: the `todo` frame drives it (ticket 178). */
     private val todoCallIds = mutableSetOf<String>()
-
-    // The widget mirrors the latest TodoList call (ticket 042). Committed and live
-    // states are tracked apart: a mid-turn refetch re-derives the committed value
-    // while a live call not yet committed stays the latest. null = no call seen,
-    // empty = the last call cleared the list; both hide the widget.
-    private var committedTodos: List<Todo>? = null
-    private var liveTodos: List<Todo>? = null
 
     /** Copy of the newest ended turn's footer (ticket 155), null when the last
      * `turn.ended` carried no known `interruptReason`. Set by [onTurnEnded]; the row
@@ -96,10 +88,6 @@ class ChatTimeline(
 
     fun items(): List<ChatItem> = rows.toList()
 
-    /** Live calls win over history (they are newer) until the turn-end refetch
-     * commits them. */
-    fun todos(): List<Todo>? = liveTodos ?: committedTodos
-
     /**
      * Replaces committed rows from a fresh history fetch. With [keepLive] (mid-turn
      * refetch), the live tail survives — minus the rows the server has since committed.
@@ -108,11 +96,10 @@ class ChatTimeline(
      */
     fun replaceHistory(messages: List<ChatMessage>, keepLive: Boolean) {
         committedMessageIds.clear()
-        committedTodos = null
         val fresh = mutableListOf<ChatItem>()
         messages.forEach { message ->
             committedMessageIds += message.id
-            flatten(fresh, message, updateTodos = true)
+            flatten(fresh, message)
         }
         replaceCommitted(fresh, keepLive)
     }
@@ -123,15 +110,14 @@ class ChatTimeline(
      * [replaceHistory] can never make a page apply twice. Id-less messages are always
      * kept: they never come from history pages (the steer/splice echoes, which carry no
      * id, stay live-end only), so dedup by id is sound. The live tail is untouched: it
-     * only ever grows at the newest end. The todo widget is untouched too — it mirrors
-     * the newest page's latest call, and an older page's call must not regress it.
+     * only ever grows at the newest end.
      * Tool pairs split by the page boundary are re-joined by [completeOrphanResults].
      */
     fun prependHistory(messages: List<ChatMessage>) {
         val fresh = messages.filter { it.id.isBlank() || committedMessageIds.add(it.id) }
         if (fresh.isEmpty()) return
         val head = mutableListOf<ChatItem>()
-        fresh.forEach { flatten(head, it, updateTodos = false) }
+        fresh.forEach { flatten(head, it) }
         completeOrphanResults(head)
         prependCommitted(head)
     }
@@ -202,7 +188,6 @@ class ChatTimeline(
      */
     fun replaceTranscript(turns: List<TranscriptTurn>, keepLive: Boolean) {
         committedTurnIds.clear()
-        committedTodos = null
         val fresh = mutableListOf<ChatItem>()
         turns.forEach { turn ->
             flatten(fresh, turn)
@@ -261,10 +246,8 @@ class ChatTimeline(
                         }
                     is TranscriptFrame.Tool -> {
                         flushBubble()
-                        if (isTodoCall(frame.toolCallId, frame.name)) {
-                            // Same rule as a live TodoList call: no row, the widget mirrors it.
-                            todoParser.of(frame.name, frame.input)?.let { liveTodos = it }
-                        } else {
+                        // Same rule as a live TodoList call: no row (ticket 042).
+                        if (!isTodoCall(frame.toolCallId, frame.name)) {
                             upsertTool(
                                 frame.toolCallId, frame.name, frame.toolStatus(), frame.preview,
                                 input = frame.input, output = frame.output, args = frame.args,
@@ -328,7 +311,6 @@ class ChatTimeline(
         }
         if (!keepLive) {
             rows.subList(liveStart, rows.size).clear()
-            liveTodos = null
         } else {
             pruneCoveredLiveRows()
         }
@@ -439,9 +421,6 @@ class ChatTimeline(
                     // (046) merge under the live tail instead of clearing it.
                     liveStart = rows.size
                 }
-                // Same clear as the rows: the previous turn's todo calls are committed
-                // (history-backed) or irrelevant now (sub-agent page renders no widget).
-                liveTodos = null
                 // The footer closed the PREVIOUS turn (ticket 155) — a new one starts
                 // clean. Removal keeps the committed/live boundary like compactionFailed.
                 turnEndLabel = null
@@ -454,10 +433,9 @@ class ChatTimeline(
             is SessionEvent.AssistantDelta -> appendDelta(event.delta, thinking = false)
             is SessionEvent.ThinkingDelta -> appendDelta(event.delta, thinking = true)
             is SessionEvent.ToolCallStarted ->
-                if (isTodoCall(event.toolCallId, event.name)) {
-                    // The todo state comes from the call's input, not its result.
-                    todoParser.of(event.name, event.input)?.let { liveTodos = it }
-                } else {
+                // A TodoList call renders no row (ticket 042); the `todo` frame carries
+                // the list (ticket 178).
+                if (!isTodoCall(event.toolCallId, event.name)) {
                     upsertTool(
                         event.toolCallId, event.name, ToolStatus.Running, event.preview,
                         input = event.input, args = event.args, agentCall = event.agentCall,
@@ -596,7 +574,7 @@ class ChatTimeline(
                 // (canonical content, its timestamp, the queued mark cleared).
                 if (message.id in localEchoes) {
                     val healed = mutableListOf<ChatItem>()
-                    flatten(healed, message, updateTodos = true)
+                    flatten(healed, message)
                     val row = healed.filterIsInstance<ChatItem.UserMessage>().firstOrNull()
                     if (row != null) {
                         rows[index] = row
@@ -606,7 +584,7 @@ class ChatTimeline(
                 return
             }
             val fresh = mutableListOf<ChatItem>()
-            flatten(fresh, message, updateTodos = true)
+            flatten(fresh, message)
             fresh.forEach(::appendCommitted)
             return
         }
@@ -792,20 +770,16 @@ class ChatTimeline(
     }
 
     /** Records a call as the agent's todo tool (ticket 042): its row is suppressed and
-     * later result/progress frames for the id are dropped too. */
+     * later result frames for the id are dropped too. */
     private fun isTodoCall(toolCallId: String, name: String): Boolean {
-        if (name != TodoParser.TOOL_NAME) return false
+        if (name != TODO_LIST_TOOL_NAME) return false
         todoCallIds += toolCallId
         return true
     }
 
-    /**
-     * Flattens one history message into [target] rows. [updateTodos] gates the
-     * [committedTodos] write: [replaceHistory] re-derives the widget from the newest
-     * page, while [prependHistory] must not let an older page's call regress it. Todo
-     * row suppression itself is unconditional — todo calls never become rows.
-     */
-    private fun flatten(target: MutableList<ChatItem>, message: ChatMessage, updateTodos: Boolean) {
+    /** Flattens one history message into [target] rows. Todo calls never become rows
+     * (ticket 042). */
+    private fun flatten(target: MutableList<ChatItem>, message: ChatMessage) {
         when (message.role) {
             ChatMessage.Role.User -> {
                 val text = message.parts.filterIsInstance<ChatMessage.Part.Text>().joinToString("\n") { it.text }
@@ -827,11 +801,7 @@ class ChatTimeline(
                     target += ChatItem.AssistantMessage(message.id, text, thinking)
                 }
                 message.parts.filterIsInstance<ChatMessage.Part.ToolUse>().forEach {
-                    if (isTodoCall(it.toolCallId, it.toolName)) {
-                        if (updateTodos) {
-                            todoParser.of(it.toolName, it.input)?.let { parsed -> committedTodos = parsed }
-                        }
-                    } else {
+                    if (!isTodoCall(it.toolCallId, it.toolName)) {
                         target.appendTool(
                             ChatItem.ToolActivity(
                                 it.toolCallId, it.toolName, ToolStatus.Running, it.preview, it.input,
@@ -869,8 +839,8 @@ class ChatTimeline(
      * thinking/text frames accumulate into one assistant bubble (joined "\n" like the
      * message-history flatten) and tool frames break bubbles into their own grouped
      * rows — mirroring how live deltas and tool rows interleave. The sub-agent's own
-     * todo tool calls are suppressed exactly like the live path (no widget renders
-     * them). Row ids are the server frame/turn ids, so [prependTranscript] pages and
+     * todo tool calls are suppressed exactly like the live path (its `todo` frame feeds
+     * the page's dock — ticket 178). Row ids are the server frame/turn ids, so [prependTranscript] pages and
      * refetches dedup cleanly.
      */
     private fun flatten(target: MutableList<ChatItem>, turn: TranscriptTurn) {
@@ -906,9 +876,7 @@ class ChatTimeline(
                         }
                     is TranscriptFrame.Tool -> {
                         flushBubble()
-                        if (isTodoCall(frame.toolCallId, frame.name)) {
-                            todoParser.of(frame.name, frame.input)?.let { parsed -> committedTodos = parsed }
-                        } else {
+                        if (!isTodoCall(frame.toolCallId, frame.name)) {
                             // The same enrichment as every other row path (ticket 098)
                             // — transcript frames carry input and output in one frame.
                             target.appendTool(

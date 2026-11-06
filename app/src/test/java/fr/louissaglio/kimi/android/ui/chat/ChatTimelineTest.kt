@@ -4,7 +4,6 @@ import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.ORIGIN_KIND_COMPACTION_SUMMARY
 import fr.louissaglio.kimi.android.data.chat.PromptStatus
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
-import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.ToolPayload
 import fr.louissaglio.kimi.android.data.chat.TranscriptFrame
 import fr.louissaglio.kimi.android.data.chat.TranscriptState
@@ -1007,13 +1006,14 @@ class ChatTimelineTest {
         assertEquals(listOf(ChatItem.UserMessage("msg_9", "stop counting")), timeline.items())
     }
 
-    // Ticket 042: TodoList tool calls feed the composer widget instead of the timeline.
+    // Ticket 042: TodoList tool calls render no timeline rows — the widget above the
+    // composer replaces them. Its list is the `todo` frame's (ticket 178), never the
+    // timeline's: these tests only pin the row suppression.
 
     private val todoInput = """{"todos": [{"title": "one", "status": "done"}, {"title": "two", "status": "pending"}]}"""
-    private val expectedTodos = listOf(Todo("one", Todo.Status.Done), Todo("two", Todo.Status.Pending))
 
     @Test
-    fun `a history todo call renders no rows and derives the widget state`() {
+    fun `a history todo call renders no rows, nor does its result`() {
         val timeline = testChatTimeline()
 
         timeline.replaceHistory(
@@ -1033,11 +1033,10 @@ class ChatTimelineTest {
         )
 
         assertEquals(listOf(ChatItem.AssistantMessage("msg_1", "planning", "")), timeline.items())
-        assertEquals(expectedTodos, timeline.todos())
     }
 
     @Test
-    fun `a live todo call renders no rows and derives the widget state`() {
+    fun `a live todo call renders no rows, nor does its result`() {
         val timeline = testChatTimeline()
         timeline.apply(SessionEvent.TurnStarted())
 
@@ -1047,81 +1046,33 @@ class ChatTimelineTest {
         timeline.apply(SessionEvent.ToolCallResult("tool_1", false))
 
         assertEquals(emptyList<ChatItem>(), timeline.items())
-        assertEquals(expectedTodos, timeline.todos())
     }
 
     @Test
-    fun `the latest todo call wins across history and live events`() {
-        val timeline = testChatTimeline()
-        timeline.replaceHistory(
+    fun `a transcript todo frame renders no row`() {
+        val timeline = testChatTimeline(historyBacked = false)
+
+        timeline.replaceTranscript(
             listOf(
-                ChatMessage(
-                    "msg_1",
-                    ChatMessage.Role.Assistant,
-                    listOf(ChatMessage.Part.ToolUse("tool_1", "TodoList", input = todoInput)),
+                TranscriptTurn(
+                    "t0", 0, TranscriptState.Completed, prompt = null,
+                    steps = listOf(
+                        TranscriptStep(
+                            "t0.1", TranscriptState.Completed,
+                            listOf(
+                                TranscriptFrame.Tool(
+                                    "t0.1.f1", "tool_t", "TodoList", running = false, preview = "",
+                                    input = todoInput, output = "Todo list updated.",
+                                ),
+                            ),
+                        ),
+                    ),
                 ),
             ),
             keepLive = false,
         )
-        timeline.apply(SessionEvent.TurnStarted())
 
-        timeline.apply(
-            SessionEvent.ToolCallStarted(
-                "tool_2",
-                "TodoList",
-                input = """{"todos": [{"title": "new", "status": "in_progress"}]}""",
-            ),
-        )
-
-        assertEquals(listOf(Todo("new", Todo.Status.InProgress)), timeline.todos())
-    }
-
-    @Test
-    fun `an empty todos array hides the widget again`() {
-        val timeline = testChatTimeline()
-        timeline.apply(SessionEvent.TurnStarted())
-        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "TodoList", input = todoInput))
-
-        timeline.apply(SessionEvent.ToolCallStarted("tool_2", "TodoList", input = """{"todos": []}"""))
-
-        assertEquals(emptyList<Todo>(), timeline.todos())
-    }
-
-    @Test
-    fun `a mid-turn refetch keeps a live todo state the server has not committed yet`() {
-        val timeline = testChatTimeline()
-        timeline.apply(SessionEvent.TurnStarted())
-        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "TodoList", input = todoInput))
-
-        // The refetch predates the call: the live state is newer and must survive.
-        timeline.replaceHistory(listOf(userMessage("msg_1", "hi")), keepLive = true)
-
-        assertEquals(expectedTodos, timeline.todos())
-    }
-
-    @Test
-    fun `the turn-end refetch re-derives the widget state from the canonical history`() {
-        val timeline = testChatTimeline()
-        timeline.apply(SessionEvent.TurnStarted())
-        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "TodoList", input = todoInput))
-
-        // History without any todo call: the live leftover is gone.
-        timeline.replaceHistory(listOf(userMessage("msg_1", "hi")), keepLive = false)
-        assertEquals(null, timeline.todos())
-
-        // History carrying the call (now committed): same state, derived from history.
-        timeline.apply(SessionEvent.TurnStarted())
-        timeline.replaceHistory(
-            listOf(
-                ChatMessage(
-                    "msg_2",
-                    ChatMessage.Role.Assistant,
-                    listOf(ChatMessage.Part.ToolUse("tool_1", "TodoList", input = todoInput)),
-                ),
-            ),
-            keepLive = false,
-        )
-        assertEquals(expectedTodos, timeline.todos())
+        assertEquals(emptyList<ChatItem>(), timeline.items())
     }
 
     @Test
@@ -1297,7 +1248,7 @@ class ChatTimelineTest {
     }
 
     @Test
-    fun `prependHistory leaves the live rows and the todo widget untouched`() {
+    fun `prependHistory leaves the live rows untouched`() {
         val timeline = testChatTimeline()
         timeline.replaceHistory(listOf(userMessage("msg_2", "second")), keepLive = true)
         timeline.apply(SessionEvent.TurnStarted())
@@ -2445,7 +2396,7 @@ class ChatTimelineTest {
     // --- cold-start seeds (ticket 176) -------------------------------------------------
 
     @Test
-    fun `the running-turn seed flattens frames into live rows, todo calls into the widget`() {
+    fun `the running-turn seed flattens frames into live rows, todo calls into none`() {
         val timeline = testChatTimeline()
         timeline.replaceHistory(
             listOf(ChatMessage("msg_1", ChatMessage.Role.User, listOf(ChatMessage.Part.Text("go")))),
@@ -2486,7 +2437,6 @@ class ChatTimelineTest {
         val tool = (items[2] as ChatItem.ToolGroup).tools.single()
         assertEquals(ToolStatus.Error, tool.status)
         assertEquals("boom", tool.output)
-        assertEquals(listOf(Todo("write", Todo.Status.Pending)), timeline.todos())
         // A live delta extends the running step's bubble.
         timeline.apply(SessionEvent.AssistantDelta("…"))
         assertEquals("Retrying…", (timeline.items().last() as ChatItem.AssistantMessage).text)

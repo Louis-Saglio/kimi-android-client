@@ -64,7 +64,15 @@
   (`running`/`idle`); `usage` → `ContextUsageUpdated` only with a positive
   `max_context_tokens` (absent/zero = unknown, never a 0/0 ring). They precede
   the subscribe ack, so the first pair is the chat's seed — there is no REST
-  status read (`/status` is gone). Ticket 171 decodes the flat `interaction`
+  status read (`/status` is gone). Ticket 178 decodes the flat `todo` frame
+  (`TodoFrame` → `toTodos()`: blank titles skipped, an unknown status is
+  Pending) into `SessionEvent.TodoUpdated(items, agentId)` for EVERY agent:
+  main's replaces `UiState.todos` wholesale (`[]` clears the widget; the first
+  frame precedes the ack, so it is the cold-start seed, and the server re-sends
+  it after an undo or a cold restore), a child's is sub-agent-scoped and
+  replaces its `SubagentRecord.todos`. The list is never derived from
+  `TodoList` tool calls — `ChatTimeline` only suppresses their rows and results
+  (ticket 042, by `TODO_LIST_TOOL_NAME`) and holds no todo state. Ticket 171 decodes the flat `interaction`
   frame (no `payload`, no `seq`; `InteractionFrame`, mapped by the pure
   `ChatMessageMapper.toInteractionEvent`, which dispatches on `kind` to
   `toApprovalEvent`/`toQuestionEvent`): an approval `pending` →
@@ -439,8 +447,9 @@
   question payload; card id = the interaction id), each guarded against a live
   event overtaking the fetch. A turn event landing mid-fetch (a resync with the
   socket open) keeps the live tail as-is. The bound model/effort, permission
-  mode, busy state and ring are not part of the cold start: the subscribe's
-  `agent`/`usage` frames seed them (ticket 177).
+  mode, busy state, ring and todo list are not part of the cold start: the
+  subscribe's `agent`/`usage` frames seed them (ticket 177), and its `todo` frame
+  the widget (ticket 178).
   The fetch is cached per session only until the session is LEFT:
   `SubagentStreamStore.release` calls `TranscriptColdStart.forget`, so the next entry
   re-fetches (one cheap round per entry — no process-lifetime cache of mutable
@@ -553,7 +562,8 @@
   duplicate record, the main-owned listing itself stays JobsStore's — which
   removes the affordance.
   The record also owns the page's dock data: the sub-agent's own todo list
-  (the record timeline's `todos()` — the chat's ticket-042 mechanism) and its
+  (`SubagentRecord.todos`, replaced by the child's agent-tagged `todo` frame —
+  ticket 178; outside the timeline, so no transcript replace touches it) and its
   own background tasks (the live `task.*` frames stamped with its id, upserted
   into `SubagentRecord.jobs` via the shared `TaskInfo.toJob()` mapping — no
   REST seed exists, REST `/tasks` being main-agent-only; on a cold open the

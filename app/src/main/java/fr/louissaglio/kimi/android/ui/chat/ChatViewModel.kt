@@ -26,7 +26,6 @@ import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.SocketEvent
 import fr.louissaglio.kimi.android.data.chat.SwitchConfirm
 import fr.louissaglio.kimi.android.data.chat.Todo
-import fr.louissaglio.kimi.android.data.chat.TodoParser
 import fr.louissaglio.kimi.android.data.chat.TranscriptFrame
 import fr.louissaglio.kimi.android.data.chat.isSubagentScoped
 import fr.louissaglio.kimi.android.data.sessions.Session
@@ -67,7 +66,6 @@ class ChatViewModel internal constructor(
     private val subagentStore: SubagentStreamStore,
     private val coldStart: TranscriptColdStart,
     private val routeArgs: Chat,
-    private val todoParser: TodoParser,
     private val unreadStore: UnreadSessionsStore,
     // Default mirrors the DI value (AppModule) for direct construction in tests;
     // pass 0 to publish every delta immediately (the pre-conflation behavior).
@@ -89,7 +87,6 @@ class ChatViewModel internal constructor(
         subagentStore: SubagentStreamStore,
         coldStart: TranscriptColdStart,
         savedStateHandle: SavedStateHandle,
-        todoParser: TodoParser,
         unreadStore: UnreadSessionsStore,
         @StreamCoalesceWindowMillis streamCoalesceWindowMillis: Long,
     ) : this(
@@ -100,7 +97,6 @@ class ChatViewModel internal constructor(
         subagentStore,
         coldStart,
         savedStateHandle.toRoute<Chat>(),
-        todoParser,
         unreadStore,
         streamCoalesceWindowMillis,
     )
@@ -237,8 +233,10 @@ class ChatViewModel internal constructor(
          * (the subscribe's seed, then every live change — ticket 177); a frame without
          * a limit leaves it as it is. */
         val contextUsage: ContextUsage? = null,
-        /** The agent's latest todo list, mirrored from its TodoList tool calls
-         * (ticket 042); null or empty hides the widget above the composer. */
+        /** The main agent's todo list, replaced wholesale by every `todo` frame
+         * (ticket 178 — the first precedes the subscribe ack, later ones follow every
+         * change, undo included); null (no frame yet) or empty hides the widget above
+         * the composer (ticket 042). Never derived from TodoList tool calls. */
         val todos: List<Todo>? = null,
         /** Background tasks of the session (ticket 092): background sub-agents and
          * bash, fed by the JobsStore collaborator (REST seed + task.* events). The
@@ -485,7 +483,7 @@ class ChatViewModel internal constructor(
         onTasksSeed = { tasks -> subagentStore.applyTaskList(sessionId, tasks) },
     )
 
-    private val timeline = ChatTimeline(todoParser)
+    private val timeline = ChatTimeline()
 
     /** The `before_id` cursor of the next older page (ticket 043): the oldest loaded
      * history message's id, tracked ViewModel-side like ticket 010 — the timeline rows
@@ -655,7 +653,6 @@ class ChatViewModel internal constructor(
         uiState.update {
             it.copy(
                 items = timeline.items(),
-                todos = timeline.todos(),
                 error = null,
                 hasMoreHistory = bundle.messages.hasMore,
                 isWorking = if (!turnStale) bundle.busy else it.isWorking,
@@ -758,10 +755,10 @@ class ChatViewModel internal constructor(
      * apply racing the live stream drops its stale queue replace. */
     private val approvalsSeedGuard = SeedGuard()
 
-    /** Publishes the timeline's current rows+todos — the coalescer's publish point
+    /** Publishes the timeline's current rows — the coalescer's publish point
      * and [applySessionEvent]'s for timeline-bound events. */
     private fun publishTimeline() {
-        uiState.update { it.copy(items = timeline.items(), todos = timeline.todos()) }
+        uiState.update { it.copy(items = timeline.items()) }
     }
 
     /** The delta-coalescing state machine (ticket 065): every timeline-bound socket
@@ -798,7 +795,6 @@ class ChatViewModel internal constructor(
             uiState.update {
                 it.copy(
                     items = timeline.items(),
-                    todos = timeline.todos(),
                     error = null,
                     hasMoreHistory = page.hasMore,
                 )
@@ -1308,7 +1304,7 @@ class ChatViewModel internal constructor(
             is SessionEvent.TurnStarted -> {
                 turnSeedGuard.bump()
                 timeline.apply(event)
-                uiState.update { it.copy(isWorking = true, stepRetry = null, items = timeline.items(), todos = timeline.todos()) }
+                uiState.update { it.copy(isWorking = true, stepRetry = null, items = timeline.items()) }
             }
             is SessionEvent.TurnEnded -> {
                 turnSeedGuard.bump()
@@ -1330,7 +1326,6 @@ class ChatViewModel internal constructor(
                         agentActiveSince = null,
                         runningTool = null,
                         items = timeline.items(),
-                        todos = timeline.todos(),
                     )
                 }
                 // Replace live rows with the canonical committed turn.
@@ -1408,6 +1403,11 @@ class ChatViewModel internal constructor(
                 // carrier. The funnel no-ops on everything else.
                 subagentStore.apply(sessionId, event)
             }
+            // The `todo` frame (ticket 178): the full list, applied wholesale — `[]`
+            // clears the widget. The subscribe's first one is the cold-start seed; an
+            // undo that rewinds a TodoList call re-sends the restored list.
+            is SessionEvent.TodoUpdated ->
+                uiState.update { it.copy(todos = event.items) }
             // The `usage` frame (ticket 177): the subscribe's first one seeds the ring,
             // later ones grow it live. A frame without a usable limit never gets here.
             is SessionEvent.ContextUsageUpdated ->

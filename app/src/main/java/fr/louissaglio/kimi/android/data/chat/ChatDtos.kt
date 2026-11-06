@@ -225,6 +225,25 @@ data class UsageFrame(
 )
 
 /**
+ * The flat `todo` state frame (docs/server-api.md, Todos — server 2.5.0, ticket 178):
+ * the agent's FULL todo list, sent when the agent joins the subscription (before the
+ * subscribe ack) and on every change, undo and cold restore included. It replaces the
+ * client's list wholesale; `[]` clears it. Mapped by [toTodos].
+ */
+@Serializable
+data class TodoFrame(
+    @SerialName("agent_id") val agentId: String = MAIN_AGENT_ID,
+    val items: List<TodoItemDto> = emptyList(),
+)
+
+/** One `todo` frame item: `{title, status:"pending"|"in_progress"|"done"}`. */
+@Serializable
+data class TodoItemDto(
+    val title: String? = null,
+    val status: String? = null,
+)
+
+/**
  * The flat `interaction` frame (docs/server-api.md, Interactions → The `interaction`
  * frame — tickets 171/172): one approval or question of any agent of the session, sent on
  * every state change and re-sent for every still-pending one after each accepted

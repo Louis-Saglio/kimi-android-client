@@ -13,7 +13,6 @@ import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.awaitState
 import fr.louissaglio.kimi.android.testutil.testChatRepository
 import fr.louissaglio.kimi.android.testutil.testSessionsRepository
-import fr.louissaglio.kimi.android.testutil.testTodoParser
 import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
@@ -1169,7 +1168,6 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             subagentStore,
             coldStart,
             Chat("session_1", title = "Fix the bug", cwd = "/home/ubuntu/kimi-android-client"),
-            todoParser = testTodoParser(),
             unreadStore = unreadStore,
         )
 
@@ -1187,7 +1185,6 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             subagentStore,
             coldStart,
             Chat("session_1", cwd = "/home/ubuntu/kimi-android-client"),
-            todoParser = testTodoParser(),
             unreadStore = unreadStore,
         )
 
@@ -1279,7 +1276,6 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             subagentStore,
             coldStart,
             Chat("session_1"),
-            todoParser = testTodoParser(),
             unreadStore = unreadStore,
         )
         startedViewModels += recreated
@@ -1312,7 +1308,6 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             subagentStore,
             coldStart,
             Chat("session_1"),
-            todoParser = testTodoParser(),
             unreadStore = unreadStore,
         )
         startedViewModels += recreated
@@ -1760,7 +1755,6 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             subagentStore,
             coldStart,
             Chat("session_1"),
-            todoParser = testTodoParser(),
             unreadStore = unreadStore,
         )
         startedViewModels += recreated

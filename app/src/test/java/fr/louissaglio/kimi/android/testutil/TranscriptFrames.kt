@@ -56,6 +56,17 @@ object TranscriptFrames {
             """"event_created_at":"2026-11-04T19:25:52.679Z","context_tokens":$contextTokens""" +
             (maxContextTokens?.let { ""","max_context_tokens":$it""" } ?: "") + "}"
 
+    /** The flat `todo` state frame (ticket 178), shaped after the verbatim capture
+     * (docs/server-api.md, Todos): [items] are `title to status` pairs, the full list. */
+    fun todoFrame(
+        vararg items: Pair<String, String>,
+        agentId: String = "main",
+        sessionId: String = "session_1",
+    ): String =
+        """{"type":"todo","session_id":"$sessionId","agent_id":"$agentId",""" +
+            """"event_created_at":"2026-11-04T19:34:17.194Z","items":[""" +
+            items.joinToString(",") { (title, status) -> """{"title":"$title","status":"$status"}""" } + "]}"
+
     /**
      * The flat approval `interaction` frame (ticket 171), shaped after the verbatim
      * 2.4.0/2.5.0 captures (docs/server-api.md, Interactions): `pending` carries the

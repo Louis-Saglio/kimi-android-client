@@ -171,12 +171,12 @@ class SubagentViewModelTest {
         )
 
         // The dock's data rides the same entry mapping: the sub-agent's own todo list
-        // (its TodoList calls) and its own background tasks (its task.* frames).
+        // (its `todo` frame — ticket 178) and its own background tasks (its task.*
+        // frames).
         store.apply(
             "session_1",
-            SessionEvent.ToolCallStarted(
-                "tool_t", "TodoList",
-                input = """{"todos":[{"title":"write","status":"done"},{"title":"verify","status":"pending"}]}""",
+            SessionEvent.TodoUpdated(
+                listOf(Todo("write", Todo.Status.Done), Todo("verify", Todo.Status.Pending)),
                 agentId = "agent-12",
             ),
         )

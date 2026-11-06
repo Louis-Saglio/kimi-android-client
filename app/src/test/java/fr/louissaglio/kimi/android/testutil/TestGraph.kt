@@ -11,7 +11,6 @@ import fr.louissaglio.kimi.android.data.chat.FileHistoryApi
 import fr.louissaglio.kimi.android.data.chat.ModelsRepository
 import fr.louissaglio.kimi.android.data.chat.SessionPrefsStore
 import fr.louissaglio.kimi.android.data.chat.SessionSocket
-import fr.louissaglio.kimi.android.data.chat.TodoParser
 import fr.louissaglio.kimi.android.data.chat.TranscriptSyncApi
 import fr.louissaglio.kimi.android.data.network.ApiClient
 import fr.louissaglio.kimi.android.data.network.ConnectionChecker
@@ -38,10 +37,8 @@ import okhttp3.OkHttpClient
  * built graph, like AppModule's singleton.
  */
 
-fun testTodoParser(): TodoParser = TodoParser(Json { ignoreUnknownKeys = true })
-
 fun testChatTimeline(historyBacked: Boolean = true): ChatTimeline =
-    ChatTimeline(testTodoParser(), historyBacked)
+    ChatTimeline(historyBacked)
 
 fun testChatRepository(
     dataStore: DataStore<Preferences>,
@@ -97,7 +94,6 @@ fun testSubagentStreamStore(
     lateinit var store: SubagentStreamStore
     return SubagentStreamStore(
         json,
-        TodoParser(json),
         repository,
         settings,
         // Tests sharing one cold start per session (the production singleton shape)

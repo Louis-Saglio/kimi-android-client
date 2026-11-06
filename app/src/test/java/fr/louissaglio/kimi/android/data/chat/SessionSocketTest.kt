@@ -14,6 +14,7 @@ import fr.louissaglio.kimi.android.testutil.TranscriptFrames.questionFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.resetFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.stepOp
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.textOp
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames.todoFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.toolOp
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.turnOp
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.undoOp
@@ -154,20 +155,21 @@ class SessionSocketTest {
     }
 
     @Test
-    fun `the subscribe-time agent and usage frames seed the state, the rest and the reset emit nothing`() = runBlocking {
+    fun `the subscribe-time agent, usage and todo frames seed the state, the rest and the reset emit nothing`() = runBlocking {
         // The verbatim subscribe order: per-agent state frames, transcript.reset, ack.
-        // The agent/usage pair is the chat's seed (ticket 177); the reset's items are
-        // always empty — it must neither render nor clear.
+        // The agent/usage pair (ticket 177) and the todo list (ticket 178) are the
+        // chat's seed; the reset's items are always empty — it must neither render nor
+        // clear.
         val emitted = runSocketEvents(
             """{"type":"task.list","session_id":"session_1","agent_id":"main","tasks":[]}""",
             agentFrame(model = "deepseek/deepseek-v4-flash", thinking = "max", permissionMode = "auto"),
             usageFrame(22433, 1_000_000),
             """{"type":"goal","session_id":"session_1","agent_id":"main","event_created_at":"2026-11-04T19:25:52.679Z"}""",
-            """{"type":"todo","session_id":"session_1","agent_id":"main","items":[]}""",
+            todoFrame("List files" to "in_progress", "Reply done" to "pending"),
             resetFrame(seq = 18),
             ackFrame(),
             opsFrame(promptOp("msg_1", "running"), seq = 19),
-            eventCount = 7,
+            eventCount = 8,
             settleMillis = 100,
         )
 
@@ -178,6 +180,11 @@ class SessionSocketTest {
                 SocketEvent.Event(SessionEvent.SessionPermissionUpdated("auto")),
                 SocketEvent.Event(SessionEvent.AgentBusyUpdated(running = false)),
                 SocketEvent.Event(SessionEvent.ContextUsageUpdated(ContextUsage(22433, 1_000_000))),
+                SocketEvent.Event(
+                    SessionEvent.TodoUpdated(
+                        listOf(Todo("List files", Todo.Status.InProgress), Todo("Reply done", Todo.Status.Pending)),
+                    ),
+                ),
                 // The accepted ack resets the approval and question queues (tickets
                 // 171/172) — empty here.
                 SocketEvent.Event(SessionEvent.ApprovalsReset(emptyList())),
@@ -253,6 +260,52 @@ class SessionSocketTest {
             AgentStateFrame(thinking = "low").toSessionEvents(),
         )
         assertEquals(null, UsageFrame(contextTokens = null, maxContextTokens = 100).toSessionEvent())
+    }
+
+    // --- todo state frames (ticket 178) ----------------------------------------------
+
+    @Test
+    fun `every todo frame emits the full list, tagged with its agent, and an empty one clears`() = runBlocking {
+        // A child's list is tagged with its id (the sub-agent store's, never the chat's);
+        // a foreign session's frame is dropped like every other session frame.
+        val emitted = runSocketEvents(
+            todoFrame("Read a file" to "done"),
+            todoFrame("Explore" to "in_progress", agentId = "agent-0"),
+            todoFrame("Not ours" to "pending", sessionId = "session_2"),
+            todoFrame(),
+            eventCount = 3,
+            settleMillis = 150,
+        )
+
+        assertEquals(
+            listOf(
+                SessionEvent.TodoUpdated(listOf(Todo("Read a file", Todo.Status.Done))),
+                SessionEvent.TodoUpdated(listOf(Todo("Explore", Todo.Status.InProgress)), agentId = "agent-0"),
+                SessionEvent.TodoUpdated(emptyList()),
+            ),
+            emitted.sessionEvents(),
+        )
+    }
+
+    @Test
+    fun `the todo frame mapping degrades unknown statuses to pending and skips untitled items`() {
+        val frame = Json { ignoreUnknownKeys = true }.decodeFromString<TodoFrame>(
+            """{"type":"todo","agent_id":"main","items":[""" +
+                """{"title":"write","status":"done"},{"title":"wire","status":"in_progress"},""" +
+                """{"title":"ship","status":"pending"},{"title":"x","status":"blocked"},{"title":"y"},""" +
+                """{"status":"done"},{"title":"  ","status":"done"}]}""",
+        )
+
+        assertEquals(
+            listOf(
+                Todo("write", Todo.Status.Done),
+                Todo("wire", Todo.Status.InProgress),
+                Todo("ship", Todo.Status.Pending),
+                Todo("x", Todo.Status.Pending),
+                Todo("y", Todo.Status.Pending),
+            ),
+            frame.toTodos(),
+        )
     }
 
     // --- transcript.ops → domain events ------------------------------------------------

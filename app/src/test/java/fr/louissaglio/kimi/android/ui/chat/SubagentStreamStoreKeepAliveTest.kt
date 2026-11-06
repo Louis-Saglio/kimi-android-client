@@ -18,7 +18,6 @@ import fr.louissaglio.kimi.android.testutil.testSessionsRepository
 import fr.louissaglio.kimi.android.testutil.testColdStart
 import fr.louissaglio.kimi.android.testutil.testSubagentStreamStore
 import fr.louissaglio.kimi.android.testutil.webSocketUpgradeResponse
-import fr.louissaglio.kimi.android.testutil.testTodoParser
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.io.path.createTempDirectory
 import kotlinx.coroutines.CoroutineScope
@@ -338,7 +337,6 @@ class SubagentStreamStoreKeepAliveTest {
         store,
         coldStart,
         Chat("session_1"),
-        todoParser = testTodoParser(),
         unreadStore = unreadStore,
         streamCoalesceWindowMillis = 0,
     ).also { startedViewModels += it }

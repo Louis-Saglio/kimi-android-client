@@ -1734,28 +1734,46 @@ class SubagentStreamStoreTest {
     }
 
     @Test
-    fun `the todo list surfaces from the sub-agent's live TodoList call`() = runBlocking {
+    fun `the todo list is the sub-agent's own todo frame, replaced wholesale`() = runBlocking {
+        // Ticket 178: the child's agent-tagged `todo` frame feeds the page's dock; a
+        // TodoList call renders no row and derives nothing.
         store.apply(SESSION_ID, spawned("agent-12"))
-
         store.apply(
             SESSION_ID,
             SessionEvent.ToolCallStarted(
                 "tool_t", "TodoList",
-                input = """{"todos":[{"title":"write","status":"done"},{"title":"verify","status":"in_progress"}]}""",
+                input = """{"todos":[{"title":"stale","status":"done"}]}""",
                 agentId = "agent-12",
             ),
         )
+        assertEquals(null, entry("agent-12")!!.todos)
 
+        store.apply(
+            SESSION_ID,
+            SessionEvent.TodoUpdated(
+                listOf(Todo("write", Todo.Status.Done), Todo("verify", Todo.Status.InProgress)),
+                agentId = "agent-12",
+            ),
+        )
         assertEquals(
             listOf(Todo("write", Todo.Status.Done), Todo("verify", Todo.Status.InProgress)),
             entry("agent-12")!!.todos,
         )
+
+        store.apply(SESSION_ID, SessionEvent.TodoUpdated(listOf(Todo("verify", Todo.Status.Done)), agentId = "agent-12"))
+        assertEquals(listOf(Todo("verify", Todo.Status.Done)), entry("agent-12")!!.todos)
+
+        store.apply(SESSION_ID, SessionEvent.TodoUpdated(emptyList(), agentId = "agent-12"))
+        assertEquals(emptyList<Todo>(), entry("agent-12")!!.todos)
+        assertEquals(emptyList<ChatItem>(), entry("agent-12")!!.items)
     }
 
     @Test
-    fun `the todo list surfaces from a cold-open transcript page`() = runBlocking {
-        // The committed path: a finished sub-agent's TodoList call reaches the record
-        // through the transcript fetch, exactly like the chat's history (ticket 042).
+    fun `a transcript page leaves the todo frame's list alone`() = runBlocking {
+        // The frame's list is live state outside the timeline: no page replace (whose
+        // TodoList frames render no row) touches it.
+        store.apply(SESSION_ID, spawned("agent-12"))
+        store.apply(SESSION_ID, SessionEvent.TodoUpdated(listOf(Todo("write", Todo.Status.Pending)), agentId = "agent-12"))
         val turn = TranscriptTurn(
             "t0", 0, TranscriptState.Completed, null,
             listOf(
@@ -1775,10 +1793,8 @@ class SubagentStreamStoreTest {
 
         store.applyTranscriptPage(SESSION_ID, "agent-12", transcriptPage(listOf(turn)), keepLive = false)
 
-        assertEquals(
-            listOf(Todo("write", Todo.Status.Done), Todo("verify", Todo.Status.Pending)),
-            entry("agent-12")!!.todos,
-        )
+        assertEquals(listOf(Todo("write", Todo.Status.Pending)), entry("agent-12")!!.todos)
+        assertEquals(emptyList<ChatItem>(), entry("agent-12")!!.items)
     }
 
     private companion object {

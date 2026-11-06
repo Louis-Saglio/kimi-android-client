@@ -380,8 +380,15 @@ class SessionSocket @Inject constructor(
             "interaction" -> decodeFlat<InteractionFrame>(frame.type, text)
                 ?.let(mapper::toInteractionEvent)
                 ?.let { onEvent(it) }
-            // The other flat state frames (goal, todo, task.list, task) are tickets
-            // 178–182: ignored, but logged so a server rename shows up during
+            // The flat todo frame (docs/server-api.md, Todos — ticket 178): the agent's
+            // full list, sent before the subscribe ack (the cold-start seed) and on
+            // every change, undo and cold restore included. Every agent's is emitted,
+            // tagged with its agent id: the chat applies main's, the sub-agent store a
+            // child's (SessionEvent.isSubagentScoped).
+            "todo" -> decodeFlat<TodoFrame>(frame.type, text)
+                ?.let { onEvent(SessionEvent.TodoUpdated(it.toTodos(), it.agentId)) }
+            // The other flat state frames (goal, task.list, task) are tickets 179–182
+            // or out of scope: ignored, but logged so a server rename shows up during
             // development.
             else -> Log.d(TAG, "Ignoring '${frame.type}' frame")
         }

@@ -281,6 +281,17 @@ sealed interface SessionEvent {
         override val agentId: String = MAIN_AGENT_ID,
     ) : SessionEvent, AgentScopedEvent
 
+    /** The agent's full todo list (the flat `todo` frame — server 2.5.0, ticket 178):
+     * replaces the widget's list wholesale, an empty [items] clears it. The first one
+     * precedes the subscribe ack (the cold-start seed) and the server re-sends it on
+     * every change, undo and cold restore included — the list is never derived from
+     * `TodoList` tool calls. Agent-scoped: main's feeds the chat's widget, a child's
+     * its sub-agent page's dock. */
+    data class TodoUpdated(
+        val items: List<Todo>,
+        override val agentId: String = MAIN_AGENT_ID,
+    ) : SessionEvent, AgentScopedEvent
+
     /** `compaction.started` (docs/server-api.md, Compact — ticket 056): the server
      * began summarizing the session — no turn events, compaction is not a turn. */
     data class CompactionStarted(val trigger: String, val instruction: String?) : SessionEvent

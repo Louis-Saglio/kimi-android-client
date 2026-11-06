@@ -16,7 +16,6 @@ import fr.louissaglio.kimi.android.data.chat.SubagentRosterPhase
 import fr.louissaglio.kimi.android.data.chat.SwarmResultParser
 import fr.louissaglio.kimi.android.data.chat.TaskInfo
 import fr.louissaglio.kimi.android.data.chat.Todo
-import fr.louissaglio.kimi.android.data.chat.TodoParser
 import fr.louissaglio.kimi.android.data.chat.TranscriptPage
 import fr.louissaglio.kimi.android.data.chat.TranscriptState
 import fr.louissaglio.kimi.android.data.chat.TranscriptTurn
@@ -96,7 +95,6 @@ enum class SubagentStatus { Queued, Working, Suspended, Completed, Failed, Cance
 @Singleton
 class SubagentStreamStore @Inject constructor(
     private val json: Json,
-    private val todoParser: TodoParser,
     private val chatRepository: ChatRepository,
     private val settingsRepository: SettingsRepository,
     /** The transcript cold-start owner (ticket 176, 085's role): the keep-alive
@@ -126,8 +124,8 @@ class SubagentStreamStore @Inject constructor(
         /** True while older transcript turns exist beyond the loaded ones (ticket 046). */
         val hasMoreTurns: Boolean = false,
         val items: List<ChatItem> = emptyList(),
-        /** The sub-agent's own latest todo list, mirrored from its TodoList tool calls
-         * (the same timeline mechanism as the chat's, ticket 042). */
+        /** The sub-agent's own todo list: its agent-tagged `todo` frame, applied
+         * wholesale like the chat's (ticket 178); null until the first frame. */
         val todos: List<Todo>? = null,
         /** The sub-agent's own background tasks (nested background bash/sub-agents),
          * fed live by its agent-tagged task.* frames and healed on a cold open by the
@@ -220,7 +218,6 @@ class SubagentStreamStore @Inject constructor(
     private inner class SubagentRecord(
         val id: String,
         val sessionId: String,
-        todoParser: TodoParser,
     ) {
         // Identity: first non-blank writer wins (spawned → roster → call args/result →
         // transcript placeholder), never cleared once set.
@@ -354,7 +351,11 @@ class SubagentStreamStore @Inject constructor(
             }
         }
 
-        val timeline = ChatTimeline(todoParser, historyBacked = false)
+        val timeline = ChatTimeline(historyBacked = false)
+
+        /** The latest `todo` frame's list (ticket 178) — live state, outside the
+         * timeline so no transcript replace touches it. */
+        var todos: List<Todo>? = null
 
         /** The shared delta-coalescing state machine (ticket 065); every
          * timeline-bound transcript frame routes through it. */
@@ -416,7 +417,7 @@ class SubagentStreamStore @Inject constructor(
                 .orEmpty()
             return SubagentState(
                 id, name, description, runInBackground, status, resultSummary, error,
-                hasMoreTurns, promptBubble + timeline.items(), timeline.todos(), jobs.values.toList(),
+                hasMoreTurns, promptBubble + timeline.items(), todos, jobs.values.toList(),
                 swarmIndex, taskId, model, thinkingEffort, suspendReason, ghost, resumeHint, nextStep,
             )
         }
@@ -604,7 +605,7 @@ class SubagentStreamStore @Inject constructor(
 
     private fun spawn(sessionId: String, event: SessionEvent.SubagentSpawned) {
         val record = records.getOrPut(sessionId) { mutableMapOf() }
-            .getOrPut(event.subagentId) { SubagentRecord(event.subagentId, sessionId, todoParser) }
+            .getOrPut(event.subagentId) { SubagentRecord(event.subagentId, sessionId) }
         // The highest identity source: fills blanks on seed-created records, no-ops
         // on a duplicate spawned (same content), never touches status or timeline.
         if (event.name.isNotBlank()) record.name = event.name
@@ -639,7 +640,7 @@ class SubagentStreamStore @Inject constructor(
         for (entry in roster) {
             if (entry.id.isBlank()) continue
             val record = records.getOrPut(sessionId) { mutableMapOf() }
-                .getOrPut(entry.id) { SubagentRecord(entry.id, sessionId, todoParser).also { changed = true } }
+                .getOrPut(entry.id) { SubagentRecord(entry.id, sessionId).also { changed = true } }
             if (record.name.isBlank()) record.name = entry.subagentType
             if (record.description.isBlank()) record.description = entry.description
             if (record.parentToolCallId == null && entry.parentToolCallId.isNotBlank()) {
@@ -725,7 +726,7 @@ class SubagentStreamStore @Inject constructor(
         val sessionRecords = records.getOrPut(sessionId) { mutableMapOf() }
         val existing = sessionRecords[subagentId]
         if (existing == null) {
-            val record = SubagentRecord(subagentId, sessionId, todoParser)
+            val record = SubagentRecord(subagentId, sessionId)
             record.name = resultText?.let { resultField(it, "actual_subagent_type") }
                 ?: agentArg(argsJson, "subagent_type").orEmpty()
             record.description = agentArg(argsJson, "description")
@@ -816,7 +817,7 @@ class SubagentStreamStore @Inject constructor(
             if (member.notStarted) continue // the ghost backfill below owns those
             val agentId = member.agentId ?: continue
             val record = sessionRecords.getOrPut(agentId) {
-                SubagentRecord(agentId, sessionId, todoParser).also { changed = true }
+                SubagentRecord(agentId, sessionId).also { changed = true }
             }
             if (record.description.isBlank() && member.item != null) record.description = member.item
             if (record.parentToolCallId == null) record.parentToolCallId = toolCallId
@@ -854,7 +855,7 @@ class SubagentStreamStore @Inject constructor(
                 .forEach { (index, member) ->
                     val ghostId = "$toolCallId:ghost:$index"
                     if (sessionRecords.containsKey(ghostId)) return@forEach
-                    val ghost = SubagentRecord(ghostId, sessionId, todoParser)
+                    val ghost = SubagentRecord(ghostId, sessionId)
                     ghost.description = member.item.orEmpty()
                     ghost.ghost = true
                     ghost.applyStatus(SubagentStatus.Cancelled, StatusSource.Result, error = member.stopReason)
@@ -891,7 +892,7 @@ class SubagentStreamStore @Inject constructor(
         // creates nothing: the page keeps its "no transcript" empty state.
         if (existing == null && page.turns.isEmpty()) return
         val record = existing ?: records.getOrPut(sessionId) { mutableMapOf() }.getOrPut(subagentId) {
-            SubagentRecord(subagentId, sessionId, todoParser)
+            SubagentRecord(subagentId, sessionId)
         }
         // Any coalesced text must apply BEFORE the replace wipes/dedups the live rows.
         record.coalescer.flush()
@@ -1111,6 +1112,13 @@ class SubagentStreamStore @Inject constructor(
                     return
                 }
             }
+        }
+        if (event is SessionEvent.TodoUpdated) {
+            // The child's `todo` frame (ticket 178): the dock's list, replaced
+            // wholesale — not a timeline event.
+            record.todos = event.items
+            publish(sessionId)
+            return
         }
         if (event is SessionEvent.TurnStarted) record.liveTurnsStarted++
         // The coalescer conflates deltas and flushes-before-apply for anything else

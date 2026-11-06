@@ -17,7 +17,6 @@ import fr.louissaglio.kimi.android.testutil.testSessionsRepository
 import fr.louissaglio.kimi.android.testutil.testColdStart
 import fr.louissaglio.kimi.android.testutil.testSubagentStreamStore
 import fr.louissaglio.kimi.android.testutil.webSocketUpgradeResponse
-import fr.louissaglio.kimi.android.testutil.testTodoParser
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -466,7 +465,6 @@ abstract class ChatViewModelTestBase {
             subagentStore,
             coldStart,
             Chat("session_1"),
-            todoParser = testTodoParser(),
             unreadStore = unreadStore,
             // The suite asserts per-event application: 0 publishes every delta on
             // arrival (the pre-conflation behavior), no timer involved.
@@ -511,7 +509,6 @@ abstract class ChatViewModelTestBase {
         subagentStore,
         coldStart,
         Chat("session_1"),
-        todoParser = testTodoParser(),
         unreadStore = unreadStore,
         streamCoalesceWindowMillis = streamCoalesceWindowMillis,
     ).also { startedViewModels += it }
