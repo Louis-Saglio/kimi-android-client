@@ -544,9 +544,11 @@ class SessionSocket @Inject constructor(
             // The flat agent/usage state frames (docs/server-api.md, Session frames —
             // ticket 177): sent before the subscribe ack (the chat's seed) and again on
             // every change. Their fields sit beside `type`, so the frame text itself is
-            // decoded. Only the main agent's feed the chat; a child's are ticket 182's.
+            // decoded. Every agent's `agent` frame is emitted, tagged with its agent id:
+            // main's feeds the chat, a child's — part of its announcement when it
+            // joins the connection — routes to the sub-agent store (ticket 182). Only
+            // main's `usage` is consumed (the page has no context ring).
             "agent" -> decodeFlat<AgentStateFrame>(frame.type, text)
-                ?.takeIf { it.agentId == MAIN_AGENT_ID }
                 ?.toSessionEvents()
                 ?.forEach { onEvent(it) }
             "usage" -> decodeFlat<UsageFrame>(frame.type, text)

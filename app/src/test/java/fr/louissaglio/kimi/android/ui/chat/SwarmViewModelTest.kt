@@ -5,6 +5,8 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.SocketEvent
+import fr.louissaglio.kimi.android.data.chat.TaskOutcome
+import fr.louissaglio.kimi.android.data.chat.TaskState
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
 import fr.louissaglio.kimi.android.navigation.Swarm
@@ -136,22 +138,25 @@ class SwarmViewModelTest {
         awaitCondition { connected.get() }
     }
 
+    /** One swarm member's main-owned spawn `task` frame (ticket 182). */
+    private fun memberFrame(
+        id: String,
+        taskId: String,
+        status: TaskState.Status = TaskState.Status.Running,
+        outcome: TaskOutcome? = null,
+    ) = SessionEvent.TaskUpdated(
+        TaskState(
+            taskId, TaskState.Kind.Subagent, status, detached = false, description = "doc-verify",
+            outcome = outcome, phase = "working".takeIf { status == TaskState.Status.Running },
+            childAgentId = id, parentToolCallId = "tool_swarm",
+        ),
+    )
+
     /** Spawns one swarm member (running, task id known — the stoppable shape) and
      * waits for the ViewModel's member collection to show it. */
-    private suspend fun spawnMember(viewModel: SwarmViewModel, id: String, taskId: String?) {
-        subagentStore.apply(
-            "session_1",
-            SessionEvent.SubagentSpawned(
-                subagentId = id,
-                name = "explore",
-                parentToolCallId = "tool_swarm",
-                description = "doc-verify",
-                runInBackground = false,
-                taskId = taskId,
-            ),
-        )
-        subagentStore.apply("session_1", SessionEvent.SubagentStarted(id))
-        awaitState(viewModel.uiState) { state -> state.members.any { it.id == id && it.stoppable == (taskId != null) } }
+    private suspend fun spawnMember(viewModel: SwarmViewModel, id: String, taskId: String) {
+        subagentStore.apply("session_1", memberFrame(id, taskId))
+        awaitState(viewModel.uiState) { state -> state.members.any { it.id == id && it.stoppable } }
     }
 
     @Test
@@ -194,26 +199,17 @@ class SwarmViewModelTest {
     }
 
     @Test
-    fun `a terminal or task-id-less member offers no stop`() = runBlocking {
+    fun `a terminal or unknown member offers no stop`() = runBlocking {
         connectSocket()
         val viewModel = newViewModel()
         val effects = collectEffects(viewModel)
-        spawnMember(viewModel, "agent-1", taskId = null)
+        subagentStore.apply("session_1", memberFrame("agent-2", "agent-t2"))
         subagentStore.apply(
             "session_1",
-            SessionEvent.SubagentSpawned(
-                subagentId = "agent-2",
-                name = "explore",
-                parentToolCallId = "tool_swarm",
-                description = "doc-verify",
-                runInBackground = false,
-                taskId = "agent-t2",
-            ),
+            memberFrame("agent-2", "agent-t2", TaskState.Status.Ended, TaskOutcome.Completed),
         )
-        subagentStore.apply("session_1", SessionEvent.SubagentCompleted("agent-2", "done"))
-        awaitState(viewModel.uiState) { state -> state.members.any { it.id == "agent-2" } }
+        awaitState(viewModel.uiState) { state -> state.members.any { it.id == "agent-2" && it.status == SubagentStatus.Completed } }
 
-        viewModel.onStopMember("agent-1") // no task id — no task.stop target
         viewModel.onStopMember("agent-2") // terminal — never stoppable
         viewModel.onStopMember("agent-99") // unknown
 

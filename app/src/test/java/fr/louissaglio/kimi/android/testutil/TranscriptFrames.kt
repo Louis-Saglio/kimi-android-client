@@ -98,6 +98,46 @@ object TranscriptFrames {
         """{"type":"task","session_id":"$sessionId","agent_id":"$agentId",""" +
             """"event_created_at":"2026-11-04T19:30:00.000Z",""" + state.removePrefix("{")
 
+    /** A sub-agent spawn's task state (ticket 182), shaped after the 2.5.0 capture
+     * (docs/server-api.md, Sub-agents): `kind:"subagent"` with the child agent id and
+     * the spawning tool call. Running frames carry [phase]; an ended one [outcome]. */
+    fun spawnTaskState(
+        taskId: String,
+        childAgentId: String,
+        parentToolCallId: String,
+        status: String = "running",
+        phase: String? = "working",
+        detached: Boolean = false,
+        outcome: String? = null,
+        description: String = "Reply fg-ok",
+        resultSummary: String? = null,
+    ): String = taskState(
+        taskId, kind = "subagent", status = status, detached = detached, outcome = outcome,
+        description = description,
+        endedAt = "2026-11-04T19:31:00.000Z".takeIf { status == "ended" },
+        extra = (phase?.let { ""","phase":"$it"""" } ?: "") +
+            ""","child_agent_id":"$childAgentId","parent_tool_call_id":"$parentToolCallId",""" +
+            """"model":"deepseek/deepseek-v4-flash","thinking":"max"""" +
+            (resultSummary?.let { ""","result_summary":"$it"""" } ?: ""),
+    )
+
+    /** A main-owned `task` frame for [spawnTaskState]. */
+    fun spawnTaskFrame(
+        taskId: String,
+        childAgentId: String,
+        parentToolCallId: String,
+        status: String = "running",
+        phase: String? = "working",
+        detached: Boolean = false,
+        outcome: String? = null,
+        resultSummary: String? = null,
+    ): String = taskFrame(
+        spawnTaskState(
+            taskId, childAgentId, parentToolCallId, status, phase.takeIf { status == "running" }, detached, outcome,
+            resultSummary = resultSummary,
+        ),
+    )
+
     /** The flat `task.list` frame: the agent's running tasks ([taskState] objects). */
     fun taskListFrame(vararg states: String, agentId: String = "main", sessionId: String = "session_1"): String =
         """{"type":"task.list","session_id":"$sessionId","agent_id":"$agentId","tasks":[""" +

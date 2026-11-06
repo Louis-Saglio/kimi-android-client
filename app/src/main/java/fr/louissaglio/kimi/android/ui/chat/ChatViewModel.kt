@@ -494,38 +494,9 @@ class ChatViewModel internal constructor(
     private val screenVisible = MutableStateFlow(false)
 
     init {
-        // The socket gate (ticket 045): the session socket is collected while the chat
-        // is visible OR a sub-agent page of this session is open. While it runs, this
-        // collection is the sub-agent store's feeder — the chatCollectionStarted/
-        // Stopped pair (ticket 064) keeps the store's own keep-alive collection off,
-        // so exactly one collection per session exists in every state combination (two
-        // concurrent ones would double-feed the store on every cursor replay). The
-        // gate still outlives navigation to a page, so chat → page → chat costs no
-        // reconnect. Gate flips cancel/restart the collection (collectLatest),
-        // matching the old explicit start/cancel for the chat-only case.
+        // (The socket gate is started by the class body's LAST init block, at the
+        // end of the file — it can run inline, before later properties exist.)
         //
-        // The FIRST opening awaits the session's transcript cold start (ticket 176)
-        // before subscribing: the cold-start apply IS the initial load, and the
-        // seeded resume watermark makes the first subscribe replay from exactly the
-        // fetched transcript page (`transcript_since`), gapless. The chat claims the
-        // feeder role BEFORE the cold start: the store's keep-alive must not keep
-        // folding the session socket while this chat rebuilds its rows.
-        viewModelScope.launch {
-            combine(screenVisible, subagentStore.openPageCount(sessionId)) { visible, openPages ->
-                visible || openPages > 0
-            }.distinctUntilChanged()
-                .collectLatest { holdSocket ->
-                    if (holdSocket) {
-                        subagentStore.chatCollectionStarted(sessionId)
-                        try {
-                            ensureColdStart().join()
-                            collectSessionSocket()
-                        } finally {
-                            subagentStore.chatCollectionStopped(sessionId)
-                        }
-                    }
-                }
-        }
         // The swarm cards' aggregate input (ticket 135): the store's per-call member
         // lists, live — every member status flip republishes them, so the card's bar
         // and counts advance mid-swarm.
@@ -535,7 +506,7 @@ class ChatViewModel internal constructor(
             }
         }
         // The approval card's sub-agent badge names (ticket 139): live from the store —
-        // a member's spawned frame can land AFTER its approval request, and the badge
+        // a member's spawn task frame can land AFTER its approval request, and the badge
         // gains its name the moment the record exists.
         viewModelScope.launch {
             subagentStore.displayNames(sessionId).collect { names ->
@@ -727,7 +698,7 @@ class ChatViewModel internal constructor(
         }
     }
 
-    /** Re-drives the store's session link registry (ticket 091 — spawned / roster /
+    /** Re-drives the store's session link registry (ticket 091 — spawn task frame /
      * result marker, one owner; one-to-many since 134, a swarm's members sharing one
      * toolCallId) into the timeline's rows. Runs after every store-affecting apply:
      * the timeline's own healing keeps links across refetches, but only the store's
@@ -1216,8 +1187,8 @@ class ChatViewModel internal constructor(
             .collect { event ->
                 val sessionEvent = (event as? SocketEvent.Event)?.event
                 when {
-                    // Sub-agent frames — transcript frames tagged with their own
-                    // agentId, and subagent.* lifecycle — route to the store
+                    // Sub-agent frames — every agent-scoped event a child emits
+                    // (its ops, reset signal, agent/todo/task frames) — route to the store
                     // (ticket 045): they must never touch the main timeline, the
                     // working state, or an open main delta burst (ticket 044).
                     sessionEvent != null && sessionEvent.isSubagentScoped() ->
@@ -1261,19 +1232,18 @@ class ChatViewModel internal constructor(
             }
     }
 
-    /** Routes one sub-agent-scoped event into the store (the funnel registers the
-     * spawn's row link in the session registry, ticket 091); a spawn then re-drives
-     * the registry onto the timeline's `Agent` rows. */
+    /** Routes one sub-agent-scoped event (a child agent's own frames) into the store.
+     * The spawn's row link comes from the MAIN-owned spawn task frame instead
+     * ([applySessionEvent]'s task branches, ticket 182). */
     private suspend fun onSubagentEvent(event: SessionEvent) {
         subagentStore.apply(sessionId, event)
-        if (event is SessionEvent.SubagentSpawned) applySubagentLinks()
     }
 
     /** Mines the timeline's `Agent`/`AgentSwarm` rows into the store (ticket 091;
      * AgentSwarm added in 134 — the store's swarm branch keeps the call's label and,
      * since 136, heals the member states from the settled call's
      * `<agent_swarm_result>`; the members' live state still arrives through their own
-     * spawned/roster frames): the row's
+     * spawn task frames): the row's
      * args/result carry the identity, task prompt, lifecycle status and result
      * summary — the store resolves the sub-agent through its link registry or the
      * result's `agent_id:` marker, healing existing records per its precedence
@@ -1391,17 +1361,21 @@ class ChatViewModel internal constructor(
             is SessionEvent.QuestionResolved -> questions.onResolved(event)
             is SessionEvent.QuestionsReset -> questions.onReset(event)
             // Background tasks (tickets 092/179): the collaborator owns the list,
-            // including the frame → job mapping. A main-owned subagent-kind task still
-            // concerns the store when its child_agent_id names a member: it carries the
-            // member's task id, background flag, model/effort and — `killed` — its
-            // cancelled truth (tickets 135/137/138). The funnel no-ops on the rest.
+            // including the frame → job mapping. A main-owned subagent-kind task is
+            // also the spawn record of the child it names (ticket 182): the store
+            // creates/updates the record (task id, row link, background flag,
+            // model/effort, status). The registry it just learned then re-drives onto
+            // the `Agent` rows, and the rows' args (subagent type, task prompt) mine
+            // into the fresh record. The funnel no-ops on shell/other tasks.
             is SessionEvent.TaskListed -> {
                 jobsStore.onListed(event.tasks)
                 subagentStore.apply(sessionId, event)
+                mineAgentRowsIntoStore()
             }
             is SessionEvent.TaskUpdated -> {
                 jobsStore.onUpdated(event.task)
                 subagentStore.apply(sessionId, event)
+                mineAgentRowsIntoStore()
             }
             // The `todo` frame (ticket 178): the full list, applied wholesale — `[]`
             // clears the widget. The subscribe's first one is the cold-start seed; an
@@ -1730,6 +1704,46 @@ class ChatViewModel internal constructor(
             if (storedPermissionPick != null) {
                 uiState.update { it.copy(sessionPermission = storedPermissionPick) }
             }
+        }
+    }
+
+    // Kept as the class body's LAST initializer: with a sub-agent page already open
+    // (the restored-page case) the gate opens at once, and on Main.immediate its
+    // cold start runs inline — every property it touches (the seed guards, the cold
+    // start job, the coalescer) must be initialized by then, and none may be reset
+    // by an initializer running after it.
+    init {
+        // The socket gate (ticket 045): the session socket is collected while the chat
+        // is visible OR a sub-agent page of this session is open. While it runs, this
+        // collection is the sub-agent store's feeder — the chatCollectionStarted/
+        // Stopped pair (ticket 064) keeps the store's own keep-alive collection off,
+        // so exactly one collection per session exists in every state combination (two
+        // concurrent ones would double-feed the store on every cursor replay). The
+        // gate still outlives navigation to a page, so chat → page → chat costs no
+        // reconnect. Gate flips cancel/restart the collection (collectLatest),
+        // matching the old explicit start/cancel for the chat-only case.
+        //
+        // The FIRST opening awaits the session's transcript cold start (ticket 176)
+        // before subscribing: the cold-start apply IS the initial load, and the
+        // seeded resume watermark makes the first subscribe replay from exactly the
+        // fetched transcript page (`transcript_since`), gapless. The chat claims the
+        // feeder role BEFORE the cold start: the store's keep-alive must not keep
+        // folding the session socket while this chat rebuilds its rows.
+        viewModelScope.launch {
+            combine(screenVisible, subagentStore.openPageCount(sessionId)) { visible, openPages ->
+                visible || openPages > 0
+            }.distinctUntilChanged()
+                .collectLatest { holdSocket ->
+                    if (holdSocket) {
+                        subagentStore.chatCollectionStarted(sessionId)
+                        try {
+                            ensureColdStart().join()
+                            collectSessionSocket()
+                        } finally {
+                            subagentStore.chatCollectionStopped(sessionId)
+                        }
+                    }
+                }
         }
     }
 }

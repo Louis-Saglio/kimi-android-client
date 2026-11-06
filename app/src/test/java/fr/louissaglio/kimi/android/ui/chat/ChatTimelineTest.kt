@@ -1077,7 +1077,7 @@ class ChatTimelineTest {
 
     @Test
     fun `an Agent tool row gains its subagentId from the live spawned linkage`() {
-        // subagent.spawned names the Agent call it answers (parentToolCallId); the
+        // The spawn task frame names the Agent call it answers (parent_tool_call_id); the
         // ChatViewModel forwards the link here (ticket 045).
         val timeline = testChatTimeline()
         timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Agent", "doc-verify"))

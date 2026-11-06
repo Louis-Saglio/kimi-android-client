@@ -7,15 +7,16 @@ import androidx.lifecycle.viewModelScope
 import fr.louissaglio.kimi.android.data.attachments.AttachmentStore
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
-import fr.louissaglio.kimi.android.testutil.TranscriptFrames
+import fr.louissaglio.kimi.android.data.chat.TaskState
 import fr.louissaglio.kimi.android.data.sessions.UnreadSessionsStore
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
 import fr.louissaglio.kimi.android.navigation.Chat
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.testChatRepository
-import fr.louissaglio.kimi.android.testutil.testSessionsRepository
 import fr.louissaglio.kimi.android.testutil.testColdStart
+import fr.louissaglio.kimi.android.testutil.testSessionsRepository
 import fr.louissaglio.kimi.android.testutil.testSubagentStreamStore
 import fr.louissaglio.kimi.android.testutil.webSocketUpgradeResponse
 import java.util.concurrent.CopyOnWriteArrayList
@@ -188,7 +189,7 @@ class SubagentStreamStoreKeepAliveTest {
 
         awaitCondition { entry("agent-12")?.items?.isNotEmpty() == true }
         val state = entry("agent-12")!!
-        assertEquals("explore", state.name)
+        assertEquals("doc-verify", state.description)
         assertEquals(SubagentStatus.Working, state.status)
         assertEquals(
             listOf(ChatItem.AssistantMessage("live_0", "live after process death", thinking = "")),
@@ -355,11 +356,18 @@ class SubagentStreamStoreKeepAliveTest {
         return serverSocket!!
     }
 
-    /** The sub-agent's record and Working status, through the store's lifecycle funnel:
-     * the 2.5.0 spawn carrier (the `task` frame) is ticket 182's. */
+    /** The sub-agent's record and Working status, through its main-owned spawn
+     * `task` frame (ticket 182). */
     private suspend fun spawnAgent12() {
-        store.apply(SESSION_ID, SessionEvent.SubagentSpawned("agent-12", "explore", "tool_agent", "doc-verify", runInBackground = false))
-        store.apply(SESSION_ID, SessionEvent.SubagentStarted("agent-12"))
+        store.apply(
+            SESSION_ID,
+            SessionEvent.TaskUpdated(
+                TaskState(
+                    "agent-t12", TaskState.Kind.Subagent, TaskState.Status.Running, detached = false,
+                    description = "doc-verify", phase = "working", childAgentId = "agent-12", parentToolCallId = "tool_agent",
+                ),
+            ),
+        )
     }
 
     /** One sub-agent text chunk: a fresh text frame per call, tagged agent-12. */

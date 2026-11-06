@@ -62,10 +62,17 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         awaitState(viewModel.uiState) { it.items != null }
-        subagentStore.apply(
-            "session_1",
-            SessionEvent.SubagentSpawned("agent-12", "explore", "tool_agent", "doc-verify", runInBackground = false),
+        // The spawn: the main agent's Agent call (its subagent_type is the badge
+        // name) and the child's spawn task frame.
+        socket.send(
+            TranscriptFrames.opsFrame(
+                TranscriptFrames.toolOp(
+                    "tool_agent", "Agent", "running",
+                    ""","input":{"subagent_type":"explore","description":"doc-verify","prompt":"Reply ok"}""",
+                ),
+            ),
         )
+        socket.send(TranscriptFrames.spawnTaskFrame("agent-t12", "agent-12", "tool_agent"))
 
         socket.send(TranscriptFrames.approvalFrame("approval_1", command = "echo one"))
         socket.send(
@@ -475,33 +482,29 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     }
 
     @Test
-    fun `sub-agent frames route to the store and never touch the main chat`() = runBlocking {
+    fun `a live foreground spawn links its row and streams the child's ops into the store`() = runBlocking {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         awaitState(viewModel.uiState) { it.items != null }
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
-        // The sub-agent's record exists (its spawn carrier — the `task` frame — is
-        // ticket 182's, so the record is seeded through the store's spawn funnel), and
-        // the main agent's Agent call streams as a tool frame.
-        subagentStore.apply(
-            "session_1",
-            SessionEvent.SubagentSpawned("agent-12", "explore", "tool_agent", "doc-verify", runInBackground = false),
-        )
+        // Ticket 182, the verified 2.5.0 sequence: the main agent's Agent call
+        // streams as a tool frame, its spawn task frame names the child and the call,
+        // then the child announces itself (reset + agent frame) and streams its own
+        // transcript ops — all on the same connection.
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.promptOp("msg_1", "running"), TranscriptFrames.turnOp("t1", "running")))
         socket.send(
             TranscriptFrames.opsFrame(
                 TranscriptFrames.toolOp(
                     "tool_agent", "Agent", "running",
                     ""","input":{"subagent_type":"explore","description":"doc-verify","prompt":"Reply ok"}""",
-                    turnId = "tx",
+                    turnId = "t1",
                 ),
             ),
         )
-        awaitState(viewModel.uiState) { state ->
-            state.items?.filterIsInstance<ChatItem.ToolGroup>()?.flatMap { it.tools }?.any { it.id == "tool_agent" } == true
-        }
-
-        // The sub-agent's whole turn streams tagged with its own agent_id.
+        socket.send(TranscriptFrames.spawnTaskFrame("agent-fe31xobl", "agent-12", "tool_agent"))
+        socket.send(TranscriptFrames.resetFrame(agentId = "agent-12", seq = 0))
+        socket.send(TranscriptFrames.agentFrame(status = "running", model = "kimi-code/k3", thinking = "high", agentId = "agent-12"))
         socket.send(subTurnStartedFrame())
         socket.send(subContextSplicedFrame())
         socket.send(subAssistantDeltaFrame("sub reply"))
@@ -510,23 +513,71 @@ class ChatViewModelTest : ChatViewModelTestBase() {
                 ?.items?.filterIsInstance<ChatItem.AssistantMessage>()?.singleOrNull()?.text == "sub reply"
         }
 
-        // Main chat: the Agent row only — no foreign bubble, no working-state flip.
+        // The Agent row opens the page (ticket 157's navigation), from the task frame.
+        awaitState(viewModel.uiState) { state ->
+            state.items?.filterIsInstance<ChatItem.ToolGroup>()?.flatMap { it.tools }
+                ?.singleOrNull { it.id == "tool_agent" }?.subagentId == "agent-12"
+        }
+        // Main chat: the Agent row only — no foreign bubble, the working state is main's.
         val mainItems = viewModel.uiState.value.items.orEmpty()
-        assertEquals(1, mainItems.size)
-        assertTrue(mainItems.single() is ChatItem.ToolGroup)
-        assertFalse(viewModel.uiState.value.isWorking)
+        assertEquals(listOf("tool_agent"), mainItems.filterIsInstance<ChatItem.ToolGroup>().flatMap { g -> g.tools.map { it.id } })
+        assertTrue(mainItems.none { it is ChatItem.AssistantMessage })
 
-        // The store accumulated the sub-agent's own stream: the task-turn splice was
-        // lifted into the record's prompt field (ticket 091), the deltas stream below.
+        // The store's record: identity from the task frame + the call's args, the
+        // child's agent frame's model, the task prompt lifted, the deltas below.
         val entry = subagentEntry("agent-12")!!
         assertEquals("explore", entry.name)
+        assertEquals("Reply fg-ok", entry.description)
+        assertEquals("agent-fe31xobl", entry.taskId)
+        assertEquals("kimi-code/k3", entry.model)
+        assertEquals(SubagentStatus.Working, entry.status)
+        assertFalse(entry.runInBackground)
         assertEquals(
             listOf(
-                ChatItem.UserMessage("seeded_prompt", "sub task"),
+                ChatItem.UserMessage("seeded_prompt", "Reply ok"),
                 ChatItem.AssistantMessage("live_0", "sub reply", thinking = ""),
             ),
             entry.items,
         )
+
+        // The ended frame settles it with its result summary.
+        socket.send(
+            TranscriptFrames.spawnTaskFrame(
+                "agent-fe31xobl", "agent-12", "tool_agent", status = "ended", outcome = "completed", resultSummary = "fg-ok",
+            ),
+        )
+        awaitCondition { subagentEntry("agent-12")?.status == SubagentStatus.Completed }
+        assertEquals("fg-ok", subagentEntry("agent-12")!!.resultSummary)
+        // A deliberate stop is Cancelled, never Failed.
+        socket.send(TranscriptFrames.spawnTaskFrame("agent-t13", "agent-13", "tool_other"))
+        socket.send(TranscriptFrames.spawnTaskFrame("agent-t13", "agent-13", "tool_other", status = "ended", outcome = "killed"))
+        awaitCondition { subagentEntry("agent-13")?.status == SubagentStatus.Cancelled }
+    }
+
+    @Test
+    fun `a background spawn keeps streaming into its record after the main turn ends`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.promptOp("msg_1", "running"), TranscriptFrames.turnOp("t1", "running")))
+        socket.send(TranscriptFrames.spawnTaskFrame("agent-v93x0tjv", "agent-1", "call_bg", detached = true))
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.turnOp("t1", "completed"), TranscriptFrames.promptOp("msg_1", "completed")))
+        awaitState(viewModel.uiState) { !it.isWorking }
+
+        // The main turn is idle; the background child still streams on the connection.
+        socket.send(TranscriptFrames.resetFrame(agentId = "agent-1", seq = 0))
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.turnOp("t0", "running"), agentId = "agent-1"))
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.textOp("t0.1.f1", "bg-ok", turnId = "t0"), agentId = "agent-1"))
+        awaitCondition {
+            subagentEntry("agent-1")?.items?.filterIsInstance<ChatItem.AssistantMessage>()?.singleOrNull()?.text == "bg-ok"
+        }
+
+        val entry = subagentEntry("agent-1")!!
+        assertTrue(entry.runInBackground)
+        assertEquals(SubagentStatus.Working, entry.status)
+        assertFalse(viewModel.uiState.value.isWorking)
+        assertTrue(viewModel.uiState.value.items.orEmpty().none { it is ChatItem.AssistantMessage })
     }
 
     // --- Ticket 175: the subscribe_v2 transcript stream -------------------------------
@@ -689,7 +740,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
 
     @Test
     fun `a sub-agent that ran before the app connected is seeded from history`() = runBlocking {
-        // Louis's cold-open case: the app opens after the whole run — no subagent.*
+        // The cold-open case: the app opens after the whole run — no spawn task
         // frame will ever arrive, but history carries the Agent call and its result
         // (docs/server-api.md, Sub-agents). The page shows the seeded identity, status
         // and summary instead of the empty state.
@@ -722,8 +773,8 @@ class ChatViewModelTest : ChatViewModelTestBase() {
 
     @Test
     fun `a settled swarm's cold open rebuilds the roster from the result xml`() = runBlocking {
-        // Ticket 136: reopened after the swarm settled — the roster cleared on the
-        // main agent's next turn and no subagent.* frame ever replays, so the only
+        // Ticket 136: reopened after the swarm settled — ended task frames are
+        // live-only and task.list never re-lists them, so the only
         // per-member record left is the call's <agent_swarm_result> (member shapes
         // verbatim from the upstream render, swarm.test.ts at 0.43.1).
         val resultXml = (
@@ -1371,8 +1422,8 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         val socket = awaitServerSocket()
         socket.send(TranscriptFrames.agentFrame(model = "deepseek/deepseek-v4-pro", thinking = "low"))
 
-        awaitState(viewModel.uiState) { it.sessionModel == "deepseek/deepseek-v4-pro" }
-        assertEquals("low", viewModel.uiState.value.sessionEffort)
+        // Model and effort land as separate state updates: await both.
+        awaitState(viewModel.uiState) { it.sessionModel == "deepseek/deepseek-v4-pro" && it.sessionEffort == "low" }
 
         // Persisted: the next prompt carries the server-reported values. The
         // write-through lands off the frame's call stack (syncServerSessionModel

@@ -978,7 +978,7 @@ internal fun ToolRow(
 
 /** Where an `agent_call` spawn row's tap navigates (ticket 157): the spawn's own deep
  * link — the sub-agent page for a foreground spawn (the 045 link, learned from
- * `subagent.spawned`/roster as today), the job screen for a background one (the 096
+ * the spawn task frame's `parent_tool_call_id` — ticket 182), the job screen for a background one (the 096
  * link — the spawn result's `task_id: agent-…` head). Null while the link is unknown:
  * the row is inert then, like any unlinked row. */
 internal sealed interface AgentSpawnTap {

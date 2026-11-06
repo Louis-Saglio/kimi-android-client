@@ -67,6 +67,10 @@ class SubagentViewModel internal constructor(
         val name: String? = null,
         val description: String? = null,
         val status: SubagentStatus? = null,
+        /** The spawn runs in the background (its task frame's `detached:true` —
+         * `run_in_background:true` or a `task.background` conversion, ticket 182):
+         * the top bar badges it; the main turn may be idle while it streams. */
+        val runInBackground: Boolean = false,
         val items: List<ChatItem> = emptyList(),
         /** True while the initial transcript fetch runs with nothing to show yet. */
         val isLoading: Boolean = false,
@@ -126,6 +130,10 @@ class SubagentViewModel internal constructor(
     /** Last status the entry collector observed — the reconcile trigger's edge detector. */
     private var lastSeenStatus: SubagentStatus? = null
 
+    /** Last [SubagentStreamStore.SubagentState.resyncGeneration] observed (null before
+     * the first entry): a bump is a stale child journal — refetch (ticket 182). */
+    private var lastSeenResync: Int? = null
+
     /** The paged-history loader (ticket 074), shared with the main chat: it owns the
      * fetch jobs and their guards (newest-page latest-wins, the 061 race guards); the
      * callbacks are this page's parameterization — transcript backing, the store-owned
@@ -176,6 +184,7 @@ class SubagentViewModel internal constructor(
                         name = entry?.name,
                         description = entry?.description,
                         status = entry?.status,
+                        runInBackground = entry?.runInBackground == true,
                         items = entry?.items.orEmpty(),
                         hasMoreHistory = entry?.hasMoreTurns == true,
                         todos = entry?.todos,
@@ -188,6 +197,7 @@ class SubagentViewModel internal constructor(
                     )
                 }
                 maybeReconcile(entry?.status)
+                maybeResync(entry?.resyncGeneration)
             }
         }
         // Cold open: nothing fetched yet for this sub-agent (a reopened page trusts the
@@ -210,6 +220,19 @@ class SubagentViewModel internal constructor(
         if (previous == null || previous.isTerminal()) return
         if (!status.isTerminal()) return
         historyPager.refresh(keepLive = false)
+    }
+
+    /** The child's op journal could not cover its resume watermark while this page
+     * is watched (ticket 182 — the store bumps the record's resync generation): the
+     * live rows may hold a partial turn, so the newest page is refetched and replaces
+     * them (the store re-seeds the running turn and the child's fold from it). The
+     * first observed generation never refetches — the cold-open load covers it. */
+    private fun maybeResync(generation: Int?) {
+        val previous = lastSeenResync
+        lastSeenResync = generation
+        if (previous != null && generation != null && generation > previous) {
+            historyPager.refresh(keepLive = false)
+        }
     }
 
     /** Scroll-to-top trigger (ticket 043's mechanics on turn cursors): the shared

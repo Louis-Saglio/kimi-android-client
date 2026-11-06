@@ -60,7 +60,7 @@ import kotlinx.coroutines.launch
  * come from the owning record's jobs in [SubagentStreamStore] (fed by the child's
  * task frames, healed by transcript task origins), the Output section shows an
  * explicit unavailable placeholder, and Stop is hidden (the sub-agent page's own
- * task controls are ticket 182's).
+ * task controls are not wired — no ticket owns them yet).
  */
 @HiltViewModel
 class JobDetailViewModel internal constructor(

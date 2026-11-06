@@ -30,7 +30,8 @@ import fr.louissaglio.kimi.android.data.chat.Todo
  * unresolvable tap is a no-op and keeps the sheet open. [onOpenJob] and [onCancelJob]
  * are optional: null hides the affordance. The sub-agent page wires [onOpenJob] too
  * (ticket 098 — the job screen's store-backed mode covers sub-agent-owned tasks) but
- * keeps [onCancelJob] null: its own task controls are ticket 182's.
+ * keeps [onCancelJob] null: its own task controls are not wired (no ticket owns
+ * them yet).
  */
 @Composable
 internal fun TodoJobsDock(

@@ -58,7 +58,7 @@ import fr.louissaglio.kimi.android.ui.theme.warningColor
  * the sub-agent's own todo list and its own background tasks. Background `Bash` rows
  * — timeline and jobs sheet alike — open the job screen (ticket 098), which runs
  * store-backed for these sub-agent-owned tasks; the sheet stays without a Stop
- * (the sub-agent's own task controls are ticket 182's).
+ * (the sub-agent's own task controls are not wired — no ticket owns them yet).
  * The top bar's overflow hosts "To background" (ticket 138) while the record is a
  * running FOREGROUND member with a known task id — the single home of the detach
  * affordance, covering plain agents and swarm members alike since both open this
@@ -179,9 +179,14 @@ internal fun SubagentContent(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        uiState.name?.takeIf { it.isNotBlank() }?.let { name ->
+                        // The subagent type, and the background badge (ticket 182:
+                        // the spawn task frame's `detached:true`).
+                        listOfNotNull(
+                            uiState.name?.takeIf { it.isNotBlank() },
+                            "Background".takeIf { uiState.runInBackground },
+                        ).joinToString(" · ").takeIf { it.isNotEmpty() }?.let { subtitle ->
                             Text(
-                                text = name,
+                                text = subtitle,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 style = MaterialTheme.typography.bodySmall,
@@ -246,7 +251,7 @@ internal fun SubagentContent(
                     )
                 }
                 // The sub-agent's own todos/jobs — the chat's dock, minus the
-                // cancel (the sub-agent's own task controls are ticket 182's).
+                // cancel (the sub-agent's own task controls are not wired yet).
                 TodoJobsDock(
                     todos = uiState.todos,
                     jobs = uiState.jobs,

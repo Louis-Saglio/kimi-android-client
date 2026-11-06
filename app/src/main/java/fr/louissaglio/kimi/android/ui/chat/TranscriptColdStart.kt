@@ -6,7 +6,6 @@ import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.MAIN_AGENT_ID
 import fr.louissaglio.kimi.android.data.chat.MessagePage
 import fr.louissaglio.kimi.android.data.chat.PromptQueue
-import fr.louissaglio.kimi.android.data.chat.SubagentRosterEntry
 import fr.louissaglio.kimi.android.data.chat.TranscriptFrame
 import fr.louissaglio.kimi.android.data.chat.TranscriptPage
 import fr.louissaglio.kimi.android.data.chat.TranscriptTurn
@@ -173,10 +172,7 @@ class TranscriptColdStart @Inject constructor(
         result.onSuccess { bundle ->
             chatRepository.seedTranscript(sessionId, bundle.transcript)
             val store = subagentStore.get()
-            store.applyRoster(
-                sessionId,
-                bundle.transcript.agents.filterNot { it.isMain }.map { SubagentRosterEntry(id = it.id) },
-            )
+            store.applyRoster(sessionId, bundle.transcript.agents)
             mineAgentCalls(bundle).forEach { call ->
                 // The miner filters on AGENT_TOOL_NAME, so the call is always a plain
                 // `Agent` one — AgentSwarm calls are mined by ChatViewModel only

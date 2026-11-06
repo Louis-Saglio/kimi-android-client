@@ -499,7 +499,12 @@ class JobDetailViewModelTest {
     private fun seedStoreJob() = runBlocking {
         subagentStore.apply(
             "session_1",
-            SessionEvent.SubagentSpawned("agent-3", "explore", "tool_1", "doc-verify", runInBackground = false),
+            SessionEvent.TaskUpdated(
+                TaskState(
+                    "agent-t3", TaskState.Kind.Subagent, TaskState.Status.Running, detached = false,
+                    description = "doc-verify", phase = "working", childAgentId = "agent-3", parentToolCallId = "tool_1",
+                ),
+            ),
         )
         subagentStore.apply("session_1", SessionEvent.TaskUpdated(ownTask(running = true), agentId = "agent-3"))
     }
@@ -589,7 +594,12 @@ class JobDetailViewModelTest {
         // origin into the record's jobs, and this screen collects the result.
         subagentStore.apply(
             "session_1",
-            SessionEvent.SubagentSpawned("agent-3", "explore", "tool_1", "doc-verify", runInBackground = false),
+            SessionEvent.TaskUpdated(
+                TaskState(
+                    "agent-t3", TaskState.Kind.Subagent, TaskState.Status.Running, detached = false,
+                    description = "doc-verify", phase = "working", childAgentId = "agent-3", parentToolCallId = "tool_1",
+                ),
+            ),
         )
         subagentStore.applyTranscriptPage(
             "session_1", "agent-3",

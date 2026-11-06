@@ -26,21 +26,13 @@ interface AgentScopedEvent {
     val agentId: String
 }
 
-/** `subagent.*` lifecycle frames (docs/server-api.md, Sub-agents): they arrive tagged
- * `agentId:"main"` but describe one sub-agent, named by [subagentId]. Only
- * [SessionEvent.SubagentSpawned] carries identity metadata. */
-sealed interface SubagentLifecycleEvent : SessionEvent {
-    val subagentId: String
-}
-
 /** True when the event belongs to a sub-agent's stream and must be routed to the
- * sub-agent stream store instead of the main chat: transcript frames tagged with a
- * sub-agent id, or `subagent.*` lifecycle frames (tagged "main", see above). */
-fun SessionEvent.isSubagentScoped(): Boolean = when (this) {
-    is SubagentLifecycleEvent -> true
-    is AgentScopedEvent -> agentId != MAIN_AGENT_ID
-    else -> false
-}
+ * sub-agent stream store instead of the main chat: every agent-scoped event a child
+ * agent emits (its transcript ops and reset signal, its `agent`/`todo` state frames,
+ * its own `task.list`/`task` frames). A child's SPAWN record is a main-owned `task`
+ * frame (`kind:"subagent"`, ticket 182) — main-scoped here, so the chat sees it too
+ * (its jobs widget) and forwards it to the store. */
+fun SessionEvent.isSubagentScoped(): Boolean = this is AgentScopedEvent && agentId != MAIN_AGENT_ID
 
 /** The `agent_call` rendering of a tool frame's `display` (0.31.0 —
  * docs/server-api.md, Sub-agents — ticket 157): the typed model of an `Agent`
@@ -151,46 +143,6 @@ sealed interface SessionEvent {
         val messages: List<ChatMessage>,
         override val agentId: String = MAIN_AGENT_ID,
     ) : SessionEvent, AgentScopedEvent
-
-    /** `subagent.spawned`: the only carrier of a sub-agent's identity metadata —
-     * [parentToolCallId] links the spawning `Agent`/`AgentSwarm` tool row, [name] is
-     * the subagent type (e.g. "explore"). Later lifecycle frames carry only the id.
-     * [swarmIndex] is the member's position inside an `AgentSwarm` call (schema-only
-     * upstream, never captured live — docs/server-api.md:3311): parsed for ordering,
-     * never depended on. [taskId] is the member's background-task registration id
-     * (0.38.0). Both are null for a plain `Agent` spawn. [model]/[thinkingEffort]
-     * are the run's bound model/effort (0.34.0) — the swarm aggregate's shared-model
-     * line reads them (ticket 135). */
-    data class SubagentSpawned(
-        override val subagentId: String,
-        val name: String,
-        val parentToolCallId: String,
-        val description: String,
-        val runInBackground: Boolean,
-        val swarmIndex: Int? = null,
-        val taskId: String? = null,
-        val model: String? = null,
-        val thinkingEffort: String? = null,
-    ) : SubagentLifecycleEvent
-
-    /** `subagent.started`; re-fires when a suspended sub-agent resumes. */
-    data class SubagentStarted(override val subagentId: String) : SubagentLifecycleEvent
-
-    data class SubagentCompleted(override val subagentId: String, val resultSummary: String) : SubagentLifecycleEvent
-
-    data class SubagentFailed(override val subagentId: String, val error: String) : SubagentLifecycleEvent
-
-    /** `subagent.suspended` (upstream schema: `{subagentId, reason}`); not terminal —
-     * a later [SubagentStarted] marks the resume. [reason] is the suspend cause,
-     * shown as the swarm roster row's activity line (ticket 136); blank when the
-     * frame carried none. */
-    data class SubagentSuspended(override val subagentId: String, val reason: String) : SubagentLifecycleEvent
-
-    /** `subagent.cancelled` (upstream schema-level, never captured live): the run was
-     * stopped on purpose. The LIVE carrier of the same truth is the member's ended
-     * `task` frame with `outcome:"killed"` (docs/server-api.md — ticket 179); both
-     * map to the store's Cancelled state (ticket 135). */
-    data class SubagentCancelled(override val subagentId: String) : SubagentLifecycleEvent
 
     /** A tool call waits on the user's decision (a `pending` approval `interaction`
      * frame — ticket 171). [approvalId] is the interaction id; [summary] is the compact

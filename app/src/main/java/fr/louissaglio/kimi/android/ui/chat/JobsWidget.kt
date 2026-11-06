@@ -85,7 +85,7 @@ internal fun JobsSummaryRow(
  * (oldest first), then terminal (newest first) — with its kind badge, plain-English
  * status, and ticking elapsed time (startedAt → endedAt ?: now). Running rows get a
  * trailing Stop button (`task.stop`) when [onCancel] is non-null (null = read-only
- * sheet — the sub-agent page's own task controls are ticket 182's); tapping a
+ * sheet — the sub-agent page's own task controls are not wired); tapping a
  * sub-agent row opens its page, tapping a bash row opens its job screen (ticket 096)
  * when [onOpenJob] is non-null (null = the row is not tappable). The sub-agent tap
  * reports the whole [Job]: a transcript-healed job (ticket 099) carries no agentId,

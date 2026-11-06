@@ -140,8 +140,8 @@ class JobsWidgetTest {
 
     @Test
     fun nullOnCancelHidesTheStopButton() {
-        // The sub-agent page's sheet is read-only (its own task controls are ticket
-        // 182's): no Stop affordance on running rows.
+        // The sub-agent page's sheet is read-only (its own task controls are not
+        // wired — no ticket owns them yet): no Stop affordance on running rows.
         sheet(
             jobs = listOf(
                 Job(

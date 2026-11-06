@@ -100,7 +100,7 @@ fun JobDetailScreen(
                 },
                 actions = {
                     // No Stop in store-backed mode (ticket 098): the sub-agent's own
-                    // task controls are ticket 182's.
+                    // task controls are not wired (no ticket owns them yet).
                     if (!uiState.storeBacked && uiState.status == Job.Status.Running) {
                         TextButton(onClick = viewModel::onStop) {
                             Text("Stop", color = MaterialTheme.colorScheme.error)

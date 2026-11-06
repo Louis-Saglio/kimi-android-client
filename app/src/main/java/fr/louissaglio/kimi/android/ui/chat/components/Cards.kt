@@ -72,7 +72,7 @@ internal fun ApprovalCard(
             )
             // Ticket 139 (web parity): a sub-agent's request names the asking member —
             // the record's name/description from the store, or the plain fallback while
-            // the record has not landed (the request can race ahead of subagent.spawned).
+            // the record has not landed (the request can race ahead of the spawn task frame).
             if (approval.agentId != MAIN_AGENT_ID) {
                 Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.small) {
                     Text(
@@ -208,7 +208,7 @@ internal fun QuestionCard(
             // Ticket 156 (the approval badge's idiom, 139 — byte-identical): a
             // sub-agent's question names the asking member — the record's
             // name/description from the store, or the plain fallback while the record
-            // has not landed (the request can race ahead of subagent.spawned).
+            // has not landed (the request can race ahead of the spawn task frame).
             if (question.agentId != MAIN_AGENT_ID) {
                 Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.small) {
                     Text(

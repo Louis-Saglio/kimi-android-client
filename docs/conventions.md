@@ -427,7 +427,7 @@
   sheets and the sub-agent tap's timeline resolution (a transcript-healed job
   has no `child_agent_id`); the chat mounts it above
   the composer, the sub-agent page as its bottom bar — there with a null cancel
-  callback only (the sub-agent's own task controls are ticket 182's): bash rows open the
+  callback only (the sub-agent's own task controls are not wired yet): bash rows open the
   job screen's store-backed mode (ticket 098), wired exactly like the chat's.
   The job screen's main-agent mode (`JobDetailViewModel`) reads the socket's
   task record (`observeTask` — status, timestamps, description, command) and
@@ -493,10 +493,9 @@
   keep-alive both await it; the chat claims the feeder role before awaiting, so the
   keep-alive never folds the socket while the chat rebuilds). On success it seeds the
   socket (main's fold + watermark from the transcript page), applies the roster to
-  the store (`applyRoster` — the transcript `agents` carry identity only, so
-  `SubagentRosterEntry` defaults everything else and the phase is `Unknown`: the
-  entries create the child records live ops accumulate into; ticket 182 fills the
-  rest from `task` frames) and mines the messages page + the running turn's tool
+  the store (`applyRoster(sessionId, page.agents)` — the transcript `agents` carry
+  identity only: each child gets an identity-only record live ops accumulate into;
+  the spawn `task` frames fill the rest, ticket 182) and mines the messages page + the running turn's tool
   frames for `Agent` calls (`applyAgentCall` — chat-independent, so the page-on-top
   restore recovers prompts/links too), then hands the chat-side `Bundle` to the
   calling ChatViewModel: `applyColdStart` replaces history (live tail cleared) and
@@ -534,7 +533,7 @@
   fresh cold start instead of trusting a partial replay. A failed probe proves
   nothing; the replay stays the resume.
   The transcript cold status reads the real turn states (`cancelled`/`failed`
-  → Failed, 0.31.1) for the window the roster cannot cover.
+  → Failed, 0.31.1) for a child no live task frame describes.
 - Sub-agent streams (045, state model reimplemented in 091): `SessionSocket` tags
   transcript events with the emitting agent (the ops batch's `agent_id` since 175 —
   the server auto-subscribes children; no second `subscribe_v2` is sent); sub-agent-scoped events route to
@@ -544,31 +543,39 @@
   transcript fetch cannot wipe them; delta coalescing via the `DeltaCoalescer`
   shared with ChatViewModel, ticket 065). Every source reaches the record through
   one funnel method per source kind, writing only the fields it is authoritative
-  for (precedence high→low: live lifecycle pins `status` → fresh roster → result
+  for (precedence high→low: the live spawn task frame pins `status` → result
   text → transcript turn states; identity/prompt/link first-writer-wins): live
   frames via `apply` (the FIRST turn's first `ContextSpliced` user message — an
   `undo` marker splice since 175 — is the task prompt — lifted into `record.prompt`, never a timeline row; later splices
-  stay user bubbles), the session roster via `applyRoster` (re-applicable on every
-  entry — a fresh roster heals non-live-pinned statuses), `Agent` calls from any
+  stay user bubbles), the transcript `agents` roster via `applyRoster`
+  (identity-only records, never touching an existing one), `Agent` calls from any
   carrier (history rows, the cold start's messages page, the running transcript
-  turn's tool frames) via `applyAgentCall`,
-  transcript pages via `applyTranscriptPage`/`prependTranscriptPage`. Ticket 135
-  adds the member `Cancelled` status with three carriers — the member's ended
-  `task` frame with `outcome:"killed"` (ticket 179: a subagent-kind task whose
-  `child_agent_id` names the record, pinning like any live lifecycle write),
-  the schema-level `subagent.cancelled` frame, and the roster's `cancelled`
-  phase — plus the member `model`/`thinkingEffort` pair (the spawned frame
-  overwrites when non-blank, the roster and the spawn task frame blank-fill).
-  Since 179 every subagent-kind `task.list`/`task` entry (main-owned spawns
-  above all, foreground ones included) merges into the EXISTING record its
-  `child_agent_id` names (`mergeSpawnTask`, no record creation — the rest of
-  the task-frame derivation is ticket 182's): the task id (first writer wins —
-  the `task.stop`/`task.background` handle, so foreground members are now
-  stoppable/detachable), `detached:true` → `runInBackground`, the model/effort
-  blank-fill and the killed pin. The
-  `toolCallId → subagentIds` link registry lives in the store (learned from
-  spawned/roster/result-marker); ChatViewModel re-drives `store.linksFor` into its
-  timeline after every store-affecting apply. One-to-many since 134: an
+  turn's tool frames) via `applyAgentCall` (the subagent type, the task prompt,
+  the result's status/summary/continuation blocks),
+  transcript pages via `applyTranscriptPage`/`prependTranscriptPage`.
+  The spawn record (ticket 182 — 2.5.0 removed `subagent.*` and the snapshot
+  roster): every subagent-kind `task.list`/`task` entry, whoever owns it,
+  creates or updates the record its `child_agent_id` names (`applySpawnTask`):
+  the task id (first writer — the `task.stop`/`task.background` handle), the
+  `parent_tool_call_id` row link (registered in the link registry) and the owning
+  agent, the description and swarm index (first writer), `detached:true` →
+  `runInBackground` (never back), the model/effort pair when present, and the
+  status, pinned Live: running + `phase:"suspended"` → Suspended (`state_reason`
+  is the suspend cause), any other running phase → Working; ended → Completed /
+  Cancelled (`killed` — ticket 135, a stop is no failure) / Failed
+  (`failed`/`timed_out`/`lost`), `result_summary`/`error` riding along (the
+  summary stands in as the final bubble while the timeline is empty). A
+  `task.list` that no longer names a live-pinned running spawn of its owner
+  releases the pin (the ended frame was missed — the list holds running tasks
+  only), so the result/transcript heal lands. A child's own frames (its ops,
+  `todo`, `task`, `agent` — the socket emits a child's `agent` frame tagged with
+  its id; its model/effort update the record, its busy/permission render nothing)
+  create the record when they outrun the spawn frame. ChatViewModel forwards the
+  main-owned task frames to the store and then re-mines its `Agent` rows (the
+  fresh link names the record, the args fill type and prompt). The
+  `toolCallId → subagentIds` link registry lives in the store (learned from the
+  spawn task frames and result markers); ChatViewModel re-drives `store.linksFor`
+  into its timeline after every store-affecting apply. One-to-many since 134: an
   `AgentSwarm` call's members all register under the call's toolCallId in
   spawn-arrival order, `swarmMembers(sessionId, toolCallId)` serves them sorted by
   `swarmIndex` (nulls last), and `applyAgentCall`'s AgentSwarm branch keeps the
@@ -577,19 +584,17 @@
   render pinned from source, never captured live): members match by `agent_id`
   (completed/failed/aborted → Completed/Failed/Cancelled, the member's
   stop_reason riding as the record's error line) at the Result precedence tier.
-  Ticket 137 refined that tier's rule: TERMINAL pins keep winning (a live-settled
-  record, 135's killed-task Cancelled, a roster's terminal phase), but a
-  NON-terminal pin (live or roster) the member's LATEST call owns yields to the
-  parse — the result only exists once every member settled server-side, and a
-  cancelled FOREGROUND member gets no `subagent.completed`/`failed` frame
-  (only a deliberate stop's killed task frame), so the parse is its terminal
-  carrier; the new `latestToolCallId` record field (last writer wins,
+  Ticket 137 refined that tier's rule: TERMINAL pins keep winning (an ended
+  spawn task frame, 135's killed Cancelled included), but a NON-terminal live pin
+  the member's LATEST call owns yields to the parse — the result only exists once
+  every member settled server-side, so a running pin means the ended frame was
+  missed; the `latestToolCallId` record field (last writer wins,
   unlike the first-writer-wins row link) guards the heal against an old call's
   re-mined result flipping a member since resumed under a new call — and
   `not_started` items backfill as ghost records (Cancelled, item-excerpt label,
   page-less rows). The roster rows' other
   136 piece is `SubagentState.activityLine`: the one-line muted activity (last
-  assistant text while Working, the `subagent.suspended` reason while Suspended,
+  assistant text while Working, the suspended task frame's `state_reason` while Suspended,
   the resultSummary/error's first line once terminal). Timeline row driving stays single-`Agent`:
   a swarm row never carries `subagentId` — it renders as the swarm card
   navigating to `SwarmScreen` by the tool call id. The card's aggregate (135)
@@ -642,14 +647,24 @@
   status into the record's jobs — ticket 099, a live ended frame stays
   authoritative over the origin); the page mounts the
   shared `TodoJobsDock` as its bottom bar, with the job screen wired
-  (store-backed mode, ticket 098) but no cancel (ticket 182's).
+  (store-backed mode, ticket 098) but no cancel (not wired yet).
   Transcript backing (046): the page's history comes
   from `GET .../transcript?agent_id=…` (`ChatApi.transcript` →
   turn/step/frame domain model in `data/chat/Transcript.kt`, NOT
-  `ChatMessage`); `SubagentViewModel` fetches the newest page on cold open
-  (keepLive merge under the live tail), refetches canonically when the
-  sub-agent reaches a terminal state, and pages older turns with
-  `before_turn` on scroll-to-top (prepend, dedup by turn id). That paging
+  `ChatMessage`); `SubagentViewModel` fetches the newest page on cold open,
+  refetches canonically when the sub-agent reaches a terminal state or its
+  resync generation bumps (a child `TranscriptStale`: its journal could not cover
+  the resume watermark — the record's live rows are flagged stale), and pages
+  older turns with `before_turn` on scroll-to-top (prepend, dedup by turn id).
+  The newest page hands the live stream over (ticket 182) whenever it replaces the
+  live rows — a reconcile, a cold open with no live rows, a stale flag, or a
+  still-running newest turn: the running turn renders as LIVE rows
+  (`ChatTimeline.seedRunningTurn`) and the child's socket fold + watermark are
+  seeded from the page (`ChatRepository.seedTranscript`), so the ops after it
+  extend the rows instead of duplicating the in-flight bubble — the main cold
+  start's model. Only a fully settled page under a live tail keeps the tail
+  (pruned of what it committed) and leaves the fold alone. The top bar's subtitle
+  badges a background spawn (`UiState.runInBackground`). That paging
   machinery is NOT a second implementation: both this page and the main chat
   drive the shared `HistoryPager` (ui/chat, internal — ticket 074, the root
   fix for the 061/062 drift), which owns the fetch jobs and their guards

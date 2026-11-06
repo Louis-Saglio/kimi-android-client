@@ -88,6 +88,10 @@ class ChatTimeline(
 
     fun items(): List<ChatItem> = rows.toList()
 
+    /** True while rows sit past the committed boundary — the live tail a socket fold
+     * is feeding (the sub-agent store's transcript hand-over test, ticket 182). */
+    val hasLiveRows: Boolean get() = rows.size > liveStart
+
     /**
      * Replaces committed rows from a fresh history fetch. With [keepLive] (mid-turn
      * refetch), the live tail survives — minus the rows the server has since committed.
@@ -732,8 +736,8 @@ class ChatTimeline(
         }
     }
 
-    /** Live row→sub-agent linkage (ticket 045): `subagent.spawned` names the `Agent`
-     * call it answers, so the row gains its open affordance. The whole timeline is
+    /** Live row→sub-agent linkage (ticket 045): the spawn `task` frame's
+     * `parent_tool_call_id` names the `Agent` call it answers (ticket 182), so the row gains its open affordance. The whole timeline is
      * searched — a mid-turn refetch may have committed the running row already.
      * Single-`Agent` only (ticket 134): an `AgentSwarm` row never carries a
      * subagentId — it fans out many members, and the swarm card navigates by the

@@ -246,22 +246,32 @@ class SessionSocketTest {
     }
 
     @Test
-    fun `child agents' state frames and foreign sessions' never reach the chat`() = runBlocking {
-        // A child's agent/usage frames are ticket 182's; the main chat must not take its
-        // model, permission or ring from them.
+    fun `a child's agent frame is emitted tagged, its usage and foreign sessions' are not`() = runBlocking {
+        // Ticket 182: a child's `agent` frame (part of its announcement) routes to the
+        // sub-agent store by its agent id — isSubagentScoped keeps it off the main chat.
+        // A child's usage frame is dropped (the page has no context ring), and a
+        // foreign session's frames never surface.
         val emitted = runSocketEvents(
             agentFrame(status = "running", model = "kimi-code/k3", thinking = "high", agentId = "agent-0"),
             usageFrame(10, 1_000, agentId = "agent-0"),
             agentFrame(status = "running", model = "kimi-code/k3", sessionId = "session_2"),
             usageFrame(700, 262_144),
-            eventCount = 1,
+            eventCount = 4,
             settleMillis = 150,
         )
 
+        val events = emitted.sessionEvents()
         assertEquals(
-            listOf(SessionEvent.ContextUsageUpdated(ContextUsage(700, 262_144))),
-            emitted.sessionEvents(),
+            listOf(
+                SessionEvent.SessionModelUpdated("kimi-code/k3", "high", agentId = "agent-0"),
+                SessionEvent.SessionPermissionUpdated("auto", agentId = "agent-0"),
+                SessionEvent.AgentBusyUpdated(running = true, agentId = "agent-0"),
+                SessionEvent.ContextUsageUpdated(ContextUsage(700, 262_144)),
+            ),
+            events,
         )
+        assertTrue(events.take(3).all { it.isSubagentScoped() })
+        assertFalse(events.last().isSubagentScoped())
     }
 
     @Test
