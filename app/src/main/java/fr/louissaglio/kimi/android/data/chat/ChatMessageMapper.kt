@@ -1,6 +1,7 @@
 package fr.louissaglio.kimi.android.data.chat
 
 import android.util.Log
+import fr.louissaglio.kimi.android.data.parseOrNull
 import java.time.Instant
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -157,7 +158,7 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
             parts = dto.content.mapNotNull { toDomain(it, stripEnvelopes = domainRole == ChatMessage.Role.User, notices) } +
                 attachments.map { it.toDomain() },
             // A malformed timestamp must not fail the whole message: drop it, keep the rest.
-            createdAt = dto.createdAt?.let { runCatching { Instant.parse(it) }.getOrNull() },
+            createdAt = dto.createdAt?.let { parseOrNull { Instant.parse(it) } },
             originKind = dto.originKind,
         )
     }
@@ -313,9 +314,9 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
         return when (frame.status) {
             "pending" -> {
                 val request = frame.request?.let {
-                    runCatching { json.decodeFromJsonElement<ApprovalInteractionRequestDto>(it) }
-                        .onFailure { e -> Log.w(TAG, "Dropping undecodable approval '${frame.interactionId}'", e) }
-                        .getOrNull()
+                    parseOrNull(onFailure = { e -> Log.w(TAG, "Dropping undecodable approval '${frame.interactionId}'", e) }) {
+                        json.decodeFromJsonElement<ApprovalInteractionRequestDto>(it)
+                    }
                 } ?: return null
                 SessionEvent.ApprovalRequested(
                     approvalId = frame.interactionId,
@@ -344,9 +345,9 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
         return when (frame.status) {
             "pending" -> {
                 val request = frame.request?.let {
-                    runCatching { json.decodeFromJsonElement<QuestionRequestDto>(it) }
-                        .onFailure { e -> Log.w(TAG, "Dropping undecodable question '${frame.interactionId}'", e) }
-                        .getOrNull()
+                    parseOrNull(onFailure = { e -> Log.w(TAG, "Dropping undecodable question '${frame.interactionId}'", e) }) {
+                        json.decodeFromJsonElement<QuestionRequestDto>(it)
+                    }
                 } ?: return null
                 SessionEvent.QuestionRequested(
                     toPendingQuestion(request, frame.interactionId, frame.toolCallId, frame.agentId),
@@ -362,9 +363,9 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
      * the entity with a Log.w, never the page. */
     private fun toPendingApproval(entity: InteractionEntityDto): PendingApprovalRequest? {
         val request = entity.request?.let {
-            runCatching { json.decodeFromJsonElement<TranscriptApprovalRequestDto>(it) }
-                .onFailure { e -> Log.w(TAG, "Dropping undecodable approval '${entity.interactionId}'", e) }
-                .getOrNull()
+            parseOrNull(onFailure = { e -> Log.w(TAG, "Dropping undecodable approval '${entity.interactionId}'", e) }) {
+                json.decodeFromJsonElement<TranscriptApprovalRequestDto>(it)
+            }
         } ?: return null
         return PendingApprovalRequest(
             approvalId = entity.interactionId,
@@ -381,9 +382,9 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
      * request; the entity names no asker (main until a frame says otherwise). */
     private fun toPendingQuestion(entity: InteractionEntityDto): PendingQuestion? {
         val request = entity.request?.let {
-            runCatching { json.decodeFromJsonElement<QuestionRequestDto>(it) }
-                .onFailure { e -> Log.w(TAG, "Dropping undecodable question '${entity.interactionId}'", e) }
-                .getOrNull()
+            parseOrNull(onFailure = { e -> Log.w(TAG, "Dropping undecodable question '${entity.interactionId}'", e) }) {
+                json.decodeFromJsonElement<QuestionRequestDto>(it)
+            }
         } ?: return null
         return toPendingQuestion(request, entity.interactionId, entity.toolCallId, agentId = null)
     }
@@ -441,37 +442,50 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
                 ?.let { TranscriptFrame.Text(dto.frameId, role, it) }
         }
         "tool" -> dto.toolCallId?.let { toolCallId ->
-            val name = dto.name.orEmpty()
-            // A running call's `input` may still be absent while `inputText` streams:
-            // a complete one parses (the live fold's rule), a partial fragment renders
-            // nothing — the row's first-writer-wins input must not lock onto it.
-            val args = dto.input ?: dto.inputText?.let {
-                runCatching { json.parseToJsonElement(it) as? JsonObject }.getOrNull()
-            }
-            val display = dto.display?.let {
-                runCatching { json.decodeFromJsonElement<ToolInputDisplayDto>(it) }.getOrNull()
-            }
+            val rendering = toolRendering(dto)
             // 2.5.1 (ticket 184): a media result's `output` is a content-part array.
             val output = toolOutput(dto.output)
             TranscriptFrame.Tool(
                 id = dto.frameId,
                 toolCallId = toolCallId,
-                name = name,
+                name = rendering.name,
                 running = dto.state == "running",
-                preview = preview(name, args, display),
-                input = formatDetail(args),
+                preview = rendering.preview,
+                input = rendering.input,
                 // The volatile progress tail stands in while no definitive output exists
                 // (a media-only result is definitive: its text stays blank).
                 output = if (output.text.isBlank() && output.media.isEmpty()) progressText(dto.progress) else output.text,
                 media = output.media,
                 // The raw args object (ticket 118) — null when the frame carries no
                 // `input` object, leaving the pretty string as the row's fallback.
-                args = args,
-                agentCall = agentCall(display),
+                args = rendering.args,
+                agentCall = rendering.agentCall,
                 failed = dto.state == "error",
             )
         }
         else -> null
+    }
+
+    /**
+     * A tool frame's row rendering — the ONE derivation behind the live fold's
+     * `ToolCallStarted` and the REST transcript's [TranscriptFrame.Tool] (the cold
+     * start seeds rows the live ops then heal in place, so both must render a call
+     * alike): the `input` object or, while the call streams, `inputText` once it
+     * parses as a complete object (a partial fragment renders no args — the row's
+     * first-writer-wins preview must not lock onto it), plus the server's `display`
+     * (command, `agent_call`).
+     */
+    internal fun toolRendering(dto: TranscriptFrameDto): ToolRendering {
+        val name = dto.name.orEmpty()
+        val args = dto.input ?: dto.inputText?.let { parseOrNull { json.parseToJsonElement(it) as? JsonObject } }
+        val display = dto.display?.let { parseOrNull { json.decodeFromJsonElement<ToolInputDisplayDto>(it) } }
+        return ToolRendering(
+            name = name,
+            preview = preview(name, args, display),
+            input = formatDetail(args),
+            args = args,
+            agentCall = agentCall(display),
+        )
     }
 
     private fun transcriptState(state: String): TranscriptState = when (state) {
@@ -506,3 +520,12 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
             Regex("""^f_(?:[0-9A-Za-z]{26}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})(?=-)""")
     }
 }
+
+/** A tool frame's rendered call ([ChatMessageMapper.toolRendering]). */
+internal data class ToolRendering(
+    val name: String,
+    val preview: String,
+    val input: String,
+    val args: JsonObject?,
+    val agentCall: AgentCallDisplay?,
+)

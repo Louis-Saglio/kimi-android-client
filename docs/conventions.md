@@ -182,7 +182,11 @@
   `text`/`image`/`video`) yields its text parts joined "\n" — a bare
   `<image …>`/`</image>` wrapper tag dropped when the array carried media — plus one
   `ToolMedia(fileId, kind, name?)` per `session_media` image/video part (other part
-  types and sources ignored); any other value keeps `formatDetail`'s rendering. The
+  types and sources ignored); any other value keeps `formatDetail`'s rendering.
+  Likewise a tool FRAME's call rendering — name, preview, pretty input, raw args,
+  `agent_call` — is ONE derivation, `toolRendering` (ticket 185), shared by the
+  live fold's `ToolCallStarted` and the REST transcript's `TranscriptFrame.Tool`,
+  so a cold-start-seeded row and the live op that heals it render alike. The
   media ride `Part.ToolResult`/`TranscriptFrame.Tool`/`ToolCallResult` to
   `ChatItem.ToolActivity.media` under the output's merge rules; a tool call's raw
   `args` JsonObject rides the domain/end-to-end
@@ -351,7 +355,13 @@
   FileProvider URIs). Composables never touch `ContentResolver`/`File`.
 - Errors: repositories return `Result` + sealed `DataError`; ViewModels map them
   with `toUserMessage()` (kept next to `DataError`). Dropped WebSocket frames
-  get a `Log.w` — never swallow silently.
+  get a `Log.w` — never swallow silently. A parse that tolerates malformed wire
+  input goes through `parseOrNull` (`data/ParseOrNull.kt`, ticket 185), which
+  catches only the parsers' failures (`IllegalArgumentException` — kotlinx
+  serialization's — and `DateTimeParseException`), never `runCatching`: an
+  `Error` or a mapper bug must crash, not turn into a silently dropped frame.
+  (Older call sites outside `data/chat`'s socket/fold/mapper/tasks paths still
+  use `runCatching`; convert them when touched.)
 - `ui/<screen>/` — screen composable + ViewModel. Chat building blocks live in
   `ui/chat/components/` (same package, `internal` — androidTests import them; the
   `ModelPickerSheet` doubles as the Settings screen's server-default model/effort

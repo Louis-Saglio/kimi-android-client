@@ -81,3 +81,48 @@ Tests
   hand-rolled too; restyle them together if wanted.
 - Coil adoption, `stringResource`, `runTest` instead of the real-I/O harness:
   documented project choices (see the review's "Conflicts" sections).
+
+## Implementation notes — 1-data
+
+*2026-11-06.* Skills loaded: `android-dev`, `android-data-layer`,
+`kotlin-coroutines`, `kotlin-flows`. No skill rule conflicted with a documented
+project convention for these two findings.
+
+- **A2 — done.** New `parseOrNull(onFailure = {}) { … }` (`data/ParseOrNull.kt`,
+  `internal inline`) catches only `IllegalArgumentException` (which covers
+  kotlinx.serialization's `SerializationException` and the
+  `jsonObject`/`jsonPrimitive` casts) and `DateTimeParseException`
+  (`Instant.parse`), so an `Error`, a mapper bug or a `CancellationException`
+  propagates. The review's suggestion had two helpers (a plain one and a `Log.w`
+  variant). One helper with an `onFailure` lambda does both, and it builds the
+  log message only on failure. Every `runCatching` in the four named files is
+  gone: `SessionSocket.decodeFlat` and the older `decodePayload`,
+  `TranscriptFold` (op decode, step retry, undo/compaction markers),
+  `ChatMessageMapper` (approval/question frames and entities, the
+  `createdAt` timestamp, and the tool frame's `inputText`/`display`, which now
+  live in `toolRendering`), and `Tasks.kt` (`toInstantOrNull`, `bashArgsOf`).
+  Valid input behaves the same, and malformed input is still dropped with the
+  same `Log.w`. Other `runCatching` sites outside this range (`ResolvedQuestion`,
+  `ModelsRepository`, `OkHttpSessionListSocket.decodePayload`, `data/sessions/*`,
+  `AttachmentStore`, `ui/*`) are left alone. docs/conventions.md (Errors) says to
+  convert them when they are next touched. B5 handles the `ui/chat` one.
+  Test: `ParseOrNullTest` checks that a valid parse passes through, that
+  malformed JSON, a missing field, a non-object `jsonObject` and a bad instant
+  are all dropped and reported, and that an `IllegalStateException` and a
+  `StackOverflowError` propagate.
+- **A3 — done as suggested.** `ChatMessageMapper.toolRendering(TranscriptFrameDto)`
+  returns `ToolRendering(name, preview, input, args, agentCall)`. That data
+  class moved out of `TranscriptFold`'s privates and is now `internal`
+  top-level in `ChatMessageMapper.kt`. `TranscriptFold.onToolFrame` calls it in
+  place of its own `render`, which is deleted. The mapper's `"tool"` branch of
+  `toDomain(TranscriptFrameDto)` builds `TranscriptFrame.Tool` from it.
+  `toolRendering`'s KDoc now holds the partial-`inputText` rule that both copies
+  used to state. This is a pure refactor, and the existing fold and mapper tests
+  pass unchanged. New test:
+  `TranscriptFoldTest."a live tool frame renders exactly like the same frame on a REST transcript page"`
+  feeds the same frame body (partial `inputText`, complete `inputText`, Bash
+  with description plus display, `agent_call`, an undecodable `display`) through
+  the fold and through the REST page mapping, and asserts that all five fields
+  match.
+- Docs: docs/conventions.md has the `toolRendering` note next to the
+  `toolOutput` "one parse" paragraph, and the `parseOrNull` rule under Errors.

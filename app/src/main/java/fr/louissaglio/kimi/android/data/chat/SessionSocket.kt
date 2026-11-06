@@ -3,6 +3,7 @@ package fr.louissaglio.kimi.android.data.chat
 import android.util.Log
 import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.network.SocketStallWatchdog
+import fr.louissaglio.kimi.android.data.parseOrNull
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import java.io.IOException
 import java.util.UUID
@@ -626,15 +627,15 @@ class SessionSocket @Inject constructor(
 
     private inline fun <reified T> WsFrame.decodePayload(): T? =
         payload?.let {
-            runCatching { json.decodeFromJsonElement<T>(it) }
-                .onFailure { e -> Log.w(TAG, "Dropping undecodable '$type' payload", e) }
-                .getOrNull()
+            parseOrNull(onFailure = { e -> Log.w(TAG, "Dropping undecodable '$type' payload", e) }) {
+                json.decodeFromJsonElement<T>(it)
+            }
         }
 
     private inline fun <reified T> decodeFlat(type: String, text: String): T? =
-        runCatching { json.decodeFromString<T>(text) }
-            .onFailure { e -> Log.w(TAG, "Dropping undecodable '$type' frame", e) }
-            .getOrNull()
+        parseOrNull(onFailure = { e -> Log.w(TAG, "Dropping undecodable '$type' frame", e) }) {
+            json.decodeFromString<T>(text)
+        }
 
     private fun buildWsUrl(settings: ServerSettings): HttpUrl? =
         // OkHttp's HttpUrl holds only http/https; newWebSocket derives ws/wss itself.
