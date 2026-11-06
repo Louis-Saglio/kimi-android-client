@@ -1206,15 +1206,20 @@ class ChatRepositoryTest {
         val emitted = CopyOnWriteArrayList<SocketEvent>()
         val job = launch { repository.observeSession(settings(), "session_1").collect { emitted += it } }
         try {
-            awaitCondition { emitted.count { it is SocketEvent.Event } >= 2 }
+            awaitCondition { emitted.count { it is SocketEvent.Event } >= 3 }
         } finally {
             job.cancel()
         }
 
         assertEquals(SocketEvent.Connected, emitted.first())
         assertEquals(
-            // The accepted ack resets the approval queue (ticket 171), then the op.
-            listOf(SessionEvent.ApprovalsReset(emptyList()), SessionEvent.AssistantDelta("ok")),
+            // The accepted ack resets the approval and question queues (tickets
+            // 171/172), then the op.
+            listOf(
+                SessionEvent.ApprovalsReset(emptyList()),
+                SessionEvent.QuestionsReset(emptyList()),
+                SessionEvent.AssistantDelta("ok"),
+            ),
             emitted.filterIsInstance<SocketEvent.Event>().map { it.event },
         )
         val subscribe = clientFrames.first()
@@ -1322,94 +1327,21 @@ class ChatRepositoryTest {
         assertEquals(emptyList<ChatItem>(), timeline.items())
     }
 
-    @Test
-    fun `getPendingQuestions parses the poll list`() = runBlocking {
-        // The poll items carry the 0.38.0 dual-id shape (docs/server-api.md,
-        // Questions — ticket 106).
-        server.enqueue(
-            MockResponse(body = 
-                """
-                {"code":0,"msg":"success","data":{"items":[
-                  {"type":"event.question.requested","question_id":"question_q1","session_id":"session_1",
-                   "turn_id":0,"tool_call_id":"tool_q1",
-                   "questions":[{"id":"q_0","question":"Red or blue?","header":"Color",
-                                 "options":[{"id":"opt_0_0","label":"red"},
-                                            {"id":"opt_0_1","label":"blue","description":"cool color"}],
-                                 "allow_other":true}],
-                   "created_at":"2026-07-20T06:06:49.808Z","agentId":"main","sessionId":"session_1"}
-                ]},"request_id":"01KX"}
-                """.trimIndent(),
-            ),
-        )
-
-        val result = repository.getPendingQuestions(settings(), "session_1")
-
-        assertEquals("/api/v1/sessions/session_1/questions?status=pending", server.takeRequest().target)
-        assertEquals(
-            listOf(
-                PendingQuestion(
-                    questionId = "question_q1",
-                    toolCallId = "tool_q1",
-                    items = listOf(
-                        PendingQuestion.Item(
-                            id = "q_0",
-                            header = "Color",
-                            text = "Red or blue?",
-                            options = listOf(
-                                PendingQuestion.Option("opt_0_0", "red", null),
-                                PendingQuestion.Option("opt_0_1", "blue", "cool color"),
-                            ),
-                            allowOther = true,
-                        ),
-                    ),
-                ),
-            ),
-            result.getOrThrow(),
-        )
-    }
+    // --- Question responses on the interactions route (ticket 172) --------------------
 
     @Test
-    fun `pending question items decode the 2_0_2 agent_id stamp`() = runBlocking {
-        // Verbatim 2.0.2 pending-poll item (docs/server-api.md, the 2.0.2 drift
-        // block — ticket 156): the poll's items gained the optional snake_case
-        // `agent_id`. The second entry is the same shape stamped with a member's
-        // id — a sub-agent's question names the asking member.
+    fun `answerQuestion posts the per-item answers to the interactions route`() = runBlocking {
+        // The verbatim 2.4.0+ success (docs/server-api.md, Interactions → Respond).
         server.enqueue(
             MockResponse(body =
-                """
-                {"code":0,"msg":"success","data":{"items":[
-                  {"question_id":"question_be59fa0e-0fe6-4437-b407-29cc6b7dd723","session_id":"session_...",
-                   "questions":[{"id":"q_0","question":"Cake or pie?",
-                                 "options":[{"id":"opt_0_0","label":"Cake"},{"id":"opt_0_1","label":"Pie"}],
-                                 "header":"Dessert","allow_other":true}],
-                   "created_at":"2026-09-19T19:32:06.261Z","agent_id":"main","turn_id":1,
-                   "tool_call_id":"tool_5gF7ty3rd1ssoctEgV3yoPuQ"},
-                  {"question_id":"question_q2","session_id":"session_...",
-                   "questions":[{"id":"q_0","question":"Cake or pie?","options":[],"allow_other":false}],
-                   "created_at":"2026-09-19T19:32:06.261Z","agent_id":"agent-1","turn_id":1,
-                   "tool_call_id":"tool_q2"}
-                ]},"request_id":"01KX"}
-                """.trimIndent(),
-            ),
-        )
-
-        val questions = repository.getPendingQuestions(settings(), "session_1").getOrThrow()
-
-        assertEquals(listOf("main", "agent-1"), questions.map { it.agentId })
-    }
-
-    @Test
-    fun `answerQuestion posts the per-item answers keyed by item id`() = runBlocking {
-        server.enqueue(
-            MockResponse(body = 
-                """{"code":0,"msg":"success","data":{"resolved":true,"resolved_at":"2026-07-20T06:08:12.548Z"},"request_id":"01KX"}""",
+                """{"code":0,"msg":"success","data":{"outcome":"answered","ended_at":"2026-10-28T19:28:18.858Z"},"request_id":"01KX"}""",
             ),
         )
 
         val result = repository.answerQuestion(
             settings(),
             "session_1",
-            "tool_q1",
+            "question_10025aea",
             listOf(
                 QuestionAnswer.OptionPick("q_0", "opt_0_1"),
                 QuestionAnswer.Other("q_1", "ramen"),
@@ -1419,26 +1351,27 @@ class ChatRepositoryTest {
         assertTrue(result.isSuccess)
         val request = server.takeRequest()
         assertEquals("POST", request.method)
-        assertEquals("/api/v1/sessions/session_1/questions/tool_q1", request.target)
+        assertEquals("/api/v1/sessions/session_1/interactions/question_10025aea", request.target)
         assertEquals(
-            """{"answers":{"q_0":{"kind":"single","option_id":"opt_0_1"},"q_1":{"kind":"other","text":"ramen"}}}""",
+            """{"kind":"question","answers":{"q_0":{"kind":"single","option_id":"opt_0_1"},""" +
+                """"q_1":{"kind":"other","text":"ramen"}}}""",
             request.body!!.utf8(),
         )
     }
 
     @Test
     fun `answerQuestion serializes the multi-select answer kinds`() = runBlocking {
-        // Ticket 090: verified live against server 0.31.1 (docs/server-api.md).
+        // Ticket 090's mapping, unchanged by the 2.4.0 route move (ticket 172).
         server.enqueue(
             MockResponse(body =
-                """{"code":0,"msg":"success","data":{"resolved":true,"resolved_at":"2026-07-20T06:08:12.548Z"},"request_id":"01KX"}""",
+                """{"code":0,"msg":"success","data":{"outcome":"answered","ended_at":"2026-10-28T19:28:18.858Z"},"request_id":"01KX"}""",
             ),
         )
 
         val result = repository.answerQuestion(
             settings(),
             "session_1",
-            "tool_q1",
+            "question_1",
             listOf(
                 QuestionAnswer.Multi("q_0", listOf("opt_0_0", "opt_0_2")),
                 QuestionAnswer.MultiWithOther("q_1", listOf("opt_1_0"), "Fish"),
@@ -1447,87 +1380,63 @@ class ChatRepositoryTest {
 
         assertTrue(result.isSuccess)
         assertEquals(
-            """{"answers":{"q_0":{"kind":"multi","option_ids":["opt_0_0","opt_0_2"]},""" +
+            """{"kind":"question","answers":{"q_0":{"kind":"multi","option_ids":["opt_0_0","opt_0_2"]},""" +
                 """"q_1":{"kind":"multi_with_other","option_ids":["opt_1_0"],"other_text":"Fish"}}}""",
             server.takeRequest().body!!.utf8(),
         )
     }
 
     @Test
-    fun `pending questions poll parses multi_select and defaults it to false`() = runBlocking {
+    fun `answerQuestion surfaces the ended 40902 and the unknown 40404 as Api errors`() = runBlocking {
+        // Verbatim error envelopes (docs/server-api.md, Interactions → Respond).
         server.enqueue(
             MockResponse(body =
-                """
-                {"code":0,"msg":"success","data":{"items":[
-                  {"type":"event.question.requested","question_id":"tool_q1","session_id":"session_1",
-                   "turn_id":0,"tool_call_id":"tool_q1",
-                   "questions":[
-                     {"id":"q_0","question":"Colors?","header":"Palette",
-                      "options":[{"id":"opt_0_0","label":"red"}],
-                      "allow_other":true,"multi_select":true},
-                     {"id":"q_1","question":"Mode?","header":"Mode",
-                      "options":[{"id":"opt_1_0","label":"fast"}],
-                      "allow_other":false,"multi_select":false},
-                     {"id":"q_2","question":"Confirm?","header":"Confirm",
-                      "options":[{"id":"opt_2_0","label":"yes"}],
-                      "allow_other":false}
-                   ],
-                   "created_at":"2026-07-20T06:06:49.808Z","agentId":"main","sessionId":"session_1"}
-                ]},"request_id":"01KX"}
-                """.trimIndent(),
+                """{"code":40902,"msg":"interaction question_0c93eb23 has ended","data":null,"request_id":"01KX"}""",
             ),
         )
-
-        val result = repository.getPendingQuestions(settings(), "session_1")
-
-        assertEquals(
-            listOf(true, false, false),
-            result.getOrThrow().single().items.map { it.multiSelect },
+        server.enqueue(
+            MockResponse(body =
+                """{"code":40404,"msg":"interaction question_00000000 not found","data":null,"request_id":"01KX"}""",
+            ),
         )
+        val answers = listOf(QuestionAnswer.OptionPick("q_0", "opt_0_1"))
+
+        val ended = repository.answerQuestion(settings(), "session_1", "question_0c93eb23", answers).exceptionOrNull()
+        val unknown = repository.answerQuestion(settings(), "session_1", "question_00000000", answers).exceptionOrNull()
+
+        assertEquals(DataError.Api(40902, "interaction question_0c93eb23 has ended"), ended)
+        assertEquals(DataError.Api(40404, "interaction question_00000000 not found"), unknown)
     }
 
     @Test
-    fun `answerQuestion maps an already-resolved question to Api error`() = runBlocking {
+    fun `dismissQuestion posts dismissed true and succeeds on the code 0 dismissed outcome`() = runBlocking {
+        // 2.4.0+: a dismissal is an ordinary code-0 success (no 40909 special case).
         server.enqueue(
-            MockResponse(body = """{"code":40405,"msg":"question tool_q1 not found","data":null,"request_id":"01KX"}"""),
-        )
-
-        val result = repository.answerQuestion(
-            settings(), "session_1", "tool_q1", listOf(QuestionAnswer.OptionPick("q_0", "opt_0_1")),
-        )
-
-        assertTrue(result.exceptionOrNull() is DataError.Api)
-    }
-
-    @Test
-    fun `dismissQuestion treats the 40909 envelope as success`() = runBlocking {
-        // docs/server-api.md: a successful dismiss is HTTP 200 with the non-zero code
-        // 40909 — success is data.dismissed, not code == 0.
-        server.enqueue(
-            MockResponse(body = 
-                """{"code":40909,"msg":"question tool_q1 dismissed",""" +
-                    """"data":{"dismissed":true,"dismissed_at":"2026-07-20T06:17:24.711Z"},"request_id":"01KX"}""",
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"outcome":"dismissed","ended_at":"2026-10-28T19:30:02.112Z"},"request_id":"01KX"}""",
             ),
         )
 
-        val result = repository.dismissQuestion(settings(), "session_1", "tool_q1")
+        val result = repository.dismissQuestion(settings(), "session_1", "question_1")
 
         assertTrue(result.isSuccess)
         val request = server.takeRequest()
         assertEquals("POST", request.method)
-        assertEquals("/api/v1/sessions/session_1/questions/tool_q1:dismiss", request.target)
-        assertEquals("{}", request.body!!.utf8())
+        assertEquals("/api/v1/sessions/session_1/interactions/question_1", request.target)
+        assertEquals("""{"kind":"question","dismissed":true}""", request.body!!.utf8())
     }
 
     @Test
-    fun `dismissQuestion maps an already-resolved question to Api error`() = runBlocking {
+    fun `dismissQuestion maps a non-zero code to Api error`() = runBlocking {
         server.enqueue(
-            MockResponse(body = """{"code":40405,"msg":"question tool_q1 not found","data":null,"request_id":"01KX"}"""),
+            MockResponse(body =
+                """{"code":40902,"msg":"interaction question_1 has ended","data":null,"request_id":"01KX"}""",
+            ),
         )
 
-        val result = repository.dismissQuestion(settings(), "session_1", "tool_q1")
+        val result = repository.dismissQuestion(settings(), "session_1", "question_1")
 
-        assertTrue(result.exceptionOrNull() is DataError.Api)
+        assertEquals(DataError.Api(40902, "interaction question_1 has ended"), result.exceptionOrNull())
     }
 
     @Test

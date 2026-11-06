@@ -55,8 +55,8 @@
   sub-agent ops route to the store exactly as before. Since 175 the legacy
   frame branches (approval/question/agent-status/task/subagent/compaction
   families) are deleted, and the domain events documented below for those
-  features have no live feed until tickets 172/178–182 re-feed them from
-  the 2.5.0 frames (171 re-fed approvals, below). Ticket 177 adds the main agent's flat `agent`/`usage`
+  features have no live feed until tickets 178–182 re-feed them from
+  the 2.5.0 frames (171/172 re-fed approvals and questions, below). Ticket 177 adds the main agent's flat `agent`/`usage`
   state frames (decoded from the frame text — their fields sit beside `type`;
   a child agent's are ignored until 182): `agent` → `SessionModelUpdated`
   (only when it names a model or effort — a model-less session omits both, a
@@ -66,21 +66,35 @@
   the subscribe ack, so the first pair is the chat's seed — there is no REST
   status read (`/status` is gone). Ticket 171 decodes the flat `interaction`
   frame (no `payload`, no `seq`; `InteractionFrame`, mapped by the pure
-  `ChatMessageMapper.toApprovalEvent`): an approval `pending` →
+  `ChatMessageMapper.toInteractionEvent`, which dispatches on `kind` to
+  `toApprovalEvent`/`toQuestionEvent`): an approval `pending` →
   `ApprovalRequested` (card id = the interaction id, summary over
   `tool_input_display`/`action`, the asking `agent_id`), `ended` →
   `ApprovalResolved` for every outcome — the card closes on that frame, never
   on the POST response, and a turn end does not clear it (an abort ends its
   approvals with `outcome:"cancelled"`; a background sub-agent's outlives the
-  main turn); question frames stay 172's. Each connection collects the pending
-  approvals of its `transcript.reset` snapshots (`snapshot.interactions` holds
-  ended entities too — `ChatMessageMapper.pendingApprovals` filters them), and
-  an ack accepting the session emits `ApprovalsReset` with them (empty on a
-  resumed subscribe, which sends no reset): the ViewModel REPLACES its queue,
-  and the standalone pending frames the server re-sends right after the ack
-  dedup into it by interaction id, in place. Decisions POST
-  `{"kind":"approval","decision":…}` to `.../interactions/{interaction_id}`
-  (`ChatApi.postApprovalDecision`)),
+  main turn). Ticket 172 does the same for questions: `pending` →
+  `QuestionRequested` (question id = the interaction id, `tool_call_id` links
+  the `AskUserQuestion` row, `agent_id` the asker, `request.questions[]`
+  through `QuestionRequestDto`/`QuestionItemDto`), `ended` →
+  `QuestionResolved` for every outcome (an abort ends a question
+  `outcome:"dismissed"`); a turn end clears nothing and nothing polls — the
+  `/questions` routes are gone. Each connection collects the pending
+  approvals and questions of its `transcript.reset` snapshots
+  (`snapshot.interactions` holds ended entities too —
+  `ChatMessageMapper.pendingApprovals`/`pendingQuestions` filter them), and an
+  ack accepting the session emits `ApprovalsReset` and `QuestionsReset` with
+  them (empty on a resumed subscribe, which sends no reset): the ViewModel
+  REPLACES both queues, and the standalone pending frames the server re-sends
+  right after the ack dedup into them by interaction id, in place.
+  `QuestionWizard` stashes the drafts of a head question the reset dropped and
+  restores them when its re-sent frame makes it the head again, so a network
+  blip never wipes a half-filled wizard. Both kinds answer through
+  `.../interactions/{interaction_id}` (`ChatApi.postApprovalDecision`:
+  `{"kind":"approval","decision":…}`; `answerQuestion`:
+  `{"kind":"question","answers":{…}}`; `dismissQuestion`:
+  `{"kind":"question","dismissed":true}`, an ordinary code-0 success); `40404`/
+  `40902` surface as `DataError.Api` with the server message),
   `ModelsRepository` (models/config caches; catalog items map their optional
   `upgrade` retirement guidance — ticket 166 — and its `clientConfigs` fetches
   the two named cloud policies, `model_switch_confirm`/`effort_switch_confirm`,

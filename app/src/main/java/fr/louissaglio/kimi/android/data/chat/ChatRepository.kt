@@ -212,13 +212,9 @@ class ChatRepository @Inject constructor(
         approved: Boolean,
     ): Result<Unit> = chatApi.postApprovalDecision(settings, sessionId, approvalId, approved)
 
-    /** Polls the pending questions of the session — the source of truth used to
-     * re-derive the pending question after a reconnect or a history refetch. */
-    suspend fun getPendingQuestions(settings: ServerSettings, sessionId: String): Result<List<PendingQuestion>> =
-        chatApi.pendingQuestions(settings, sessionId)
-
-    /** Posts the user's answers for one question; the pending UI clears when the
-     * `event.question.answered` frame arrives over the WebSocket. */
+    /** Posts the user's answers for one question interaction ([questionId] = the
+     * interaction id); the pending UI clears when the `ended` `interaction` frame
+     * arrives over the WebSocket (ticket 172). */
     suspend fun answerQuestion(
         settings: ServerSettings,
         sessionId: String,
@@ -226,8 +222,9 @@ class ChatRepository @Inject constructor(
         answers: List<QuestionAnswer>,
     ): Result<Unit> = chatApi.answerQuestion(settings, sessionId, questionId, answers)
 
-    /** Dismisses one pending question; the pending UI clears when the
-     * `event.question.dismissed` frame arrives over the WebSocket. */
+    /** Dismisses one pending question interaction; the pending UI clears when the
+     * `ended` (`outcome:"dismissed"`) `interaction` frame arrives over the WebSocket
+     * (ticket 172). */
     suspend fun dismissQuestion(
         settings: ServerSettings,
         sessionId: String,

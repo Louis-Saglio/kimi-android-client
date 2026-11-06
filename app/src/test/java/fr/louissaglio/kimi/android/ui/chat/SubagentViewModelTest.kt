@@ -72,7 +72,7 @@ class SubagentViewModelTest {
 
     /** When set, an older-page (`before_turn`) transcript response is held back
      * server-side until the test releases it — the ticket 061 race harness (the
-     * ChatViewModelTestBase questionsResponseGate pattern). */
+     * ChatViewModelTestBase transcriptResponseGate pattern). */
     @Volatile
     private var olderTranscriptGate: CountDownLatch? = null
 

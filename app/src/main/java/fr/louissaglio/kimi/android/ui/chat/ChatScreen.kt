@@ -554,7 +554,7 @@ private fun ChatContent(
                     )
                 }
                 // Questions are input, not a yes/no guard: the card collects the
-                // answers and stays until the matching question.answered/dismissed event.
+                // answers and stays until the matching `ended` interaction frame.
                 // Minimized (ticket 088): nothing renders — the pending AskUserQuestion
                 // tool row in the timeline reopens the card.
                 if (uiState.resolvedQuestionView == null && !uiState.questionCardMinimized) {

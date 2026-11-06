@@ -205,7 +205,7 @@ class ChatApiTest {
     @Test
     fun `detach of an already-background or terminal task surfaces the refusal`() = runBlocking {
         // The refusal rides envelope code 0 (docs/server-api.md): success is
-        // data.detached, not code == 0 — the dismissQuestion shape.
+        // data.detached, not code == 0.
         server.enqueue(
             MockResponse(body =
                 """{"code":0,"msg":"success","data":{"detached":false,"status":"completed"},"request_id":"r"}""",

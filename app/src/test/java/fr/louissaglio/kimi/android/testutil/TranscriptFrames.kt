@@ -101,6 +101,52 @@ object TranscriptFrames {
             """"turnId":"t1","toolCallId":"call_$interactionId","toolName":"Bash","action":"Running: $command",""" +
             """"display":{"kind":"command","command":"$command"}}}"""
 
+    /** The verbatim pending question's single-select item (docs/server-api.md,
+     * Interactions → The `interaction` frame). */
+    const val CAKE_OR_PIE: String =
+        """[{"id":"q_0","question":"Cake or pie?","options":[{"id":"opt_0_0","label":"Cake","description":""},""" +
+            """{"id":"opt_0_1","label":"Pie","description":""}],"header":"Dessert","allow_other":true}]"""
+
+    /**
+     * The flat question `interaction` frame (ticket 172), shaped after the verbatim
+     * 2.4.0/2.5.0 captures: `pending` carries `request:{questions[]}` ([questions] is
+     * the raw item array); `ended` adds [outcome], `ended_at` and — when answered — the
+     * `response.answers` keyed by question text.
+     */
+    fun questionFrame(
+        interactionId: String,
+        status: String = "pending",
+        outcome: String? = null,
+        questions: String = CAKE_OR_PIE,
+        toolCallId: String = "call_00_$interactionId",
+        agentId: String = "main",
+        sessionId: String = "session_1",
+    ): String {
+        val ended = if (status == "ended") {
+            """"outcome":"$outcome","ended_at":"2026-10-28T19:28:18.858Z","""
+        } else {
+            ""
+        }
+        val response = if (outcome == "answered") ""","response":{"answers":{"Cake or pie?":"Cake"}}""" else ""
+        return """{"type":"interaction","session_id":"$sessionId","agent_id":"$agentId",""" +
+            """"event_created_at":"2026-10-28T19:28:18.527Z","interaction_id":"$interactionId",""" +
+            """"status":"$status",$ended"tool_call_id":"$toolCallId","kind":"question",""" +
+            """"request":{"questions":$questions}$response}"""
+    }
+
+    /** One question entity of `transcript.reset.snapshot.interactions` / the REST
+     * transcript (the snake_case request with `question_id`, `tool_call_id`, `turn_id`,
+     * `created_at` — docs/server-api.md, Pending state on REST). */
+    fun questionEntity(
+        interactionId: String,
+        state: String = "pending",
+        questions: String = CAKE_OR_PIE,
+        toolCallId: String = "call_00_$interactionId",
+    ): String =
+        """{"interactionId":"$interactionId","interactionKind":"question","toolCallId":"$toolCallId",""" +
+            """"state":"$state","request":{"question_id":"$interactionId","questions":$questions,""" +
+            """"created_at":"2026-11-05T10:00:00.000Z","turn_id":"t1","tool_call_id":"$toolCallId"}}"""
+
     fun promptOp(promptId: String, status: String, extra: String = ""): String =
         """{"op":"prompt.upsert","prompt":{"promptId":"$promptId","status":"$status","userMessageId":"$promptId",""" +
             """"content":[{"type":"text","text":"hi"}],"createdAt":"2026-11-04T19:25:50.000Z"$extra}}"""

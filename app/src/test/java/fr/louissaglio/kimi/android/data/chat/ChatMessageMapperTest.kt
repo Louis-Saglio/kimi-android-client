@@ -63,6 +63,60 @@ class ChatMessageMapperTest {
     }
 
     @Test
+    fun `pendingQuestions keeps pending question entities once, keyed on the interaction id`() {
+        // Ticket 172: the reset snapshot's full entity list (ended included) and the REST
+        // transcript's pending ids select the same questions; approvals stay out.
+        val frames = fr.louissaglio.kimi.android.testutil.TranscriptFrames
+        val entities = json.decodeFromString<List<InteractionEntityDto>>(
+            "[" + listOf(
+                frames.questionEntity("question_0", state = "answered"),
+                frames.questionEntity("question_1", toolCallId = "call_q1"),
+                frames.questionEntity("question_1", toolCallId = "call_q1"),
+                frames.approvalEntity("approval_1"),
+                frames.questionEntity("question_2", state = ""),
+                """{"interactionId":"question_3","interactionKind":"question","state":"pending","request":{"questions":7}}""",
+            ).joinToString(",") + "]",
+        )
+
+        val pending = mapper.pendingQuestions(entities)
+        assertEquals(listOf("question_1"), pending.map { it.questionId })
+        assertEquals("call_q1", pending.single().toolCallId)
+        assertEquals(MAIN_AGENT_ID, pending.single().agentId)
+        assertEquals(listOf("Cake", "Pie"), pending.single().items.single().options.map { it.label })
+        assertEquals(
+            listOf("question_1", "question_2"),
+            mapper.pendingQuestions(entities, pendingIds = setOf("question_2")).map { it.questionId },
+        )
+    }
+
+    @Test
+    fun `a question interaction frame maps by status and ignores approvals and unknown statuses`() {
+        fun frame(text: String) = json.decodeFromString<InteractionFrame>(text)
+        val frames = fr.louissaglio.kimi.android.testutil.TranscriptFrames
+        val pending = frame(frames.questionFrame("question_1", toolCallId = "call_00_q", agentId = "agent-3"))
+
+        val question = (mapper.toQuestionEvent(pending) as SessionEvent.QuestionRequested).question
+        assertEquals("question_1", question.questionId)
+        assertEquals("call_00_q", question.toolCallId)
+        assertEquals("agent-3", question.agentId)
+        assertEquals(listOf("q_0"), question.items.map { it.id })
+        listOf("answered", "dismissed", "cancelled").forEach { outcome ->
+            val ended = frame(frames.questionFrame("question_1", status = "ended", outcome = outcome))
+            assertEquals(SessionEvent.QuestionResolved("question_1"), mapper.toQuestionEvent(ended))
+            assertEquals(SessionEvent.QuestionResolved("question_1"), mapper.toInteractionEvent(ended))
+        }
+        assertNull(mapper.toQuestionEvent(pending.copy(kind = "approval")))
+        assertNull(mapper.toQuestionEvent(pending.copy(status = "expired")))
+        assertNull(mapper.toQuestionEvent(pending.copy(request = null)))
+        assertNull(mapper.toQuestionEvent(pending.copy(interactionId = "")))
+        // The dispatcher routes each kind to its own mapping, and nothing else.
+        assertEquals(mapper.toQuestionEvent(pending), mapper.toInteractionEvent(pending))
+        val approval = frame(frames.approvalFrame("approval_1"))
+        assertEquals(mapper.toApprovalEvent(approval), mapper.toInteractionEvent(approval))
+        assertNull(mapper.toInteractionEvent(pending.copy(kind = "survey")))
+    }
+
+    @Test
     fun `a started bash call's description beats the server display command`() {
         // ticket 095: the live tool-frame path prefers display.command — for Bash a
         // non-blank args.description (the human-written label) must win over it.

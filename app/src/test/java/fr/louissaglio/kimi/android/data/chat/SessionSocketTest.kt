@@ -9,6 +9,8 @@ import fr.louissaglio.kimi.android.testutil.TranscriptFrames.approvalEntity
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.approvalFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.opsFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.promptOp
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames.questionEntity
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames.questionFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.resetFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.stepOp
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.textOp
@@ -165,7 +167,7 @@ class SessionSocketTest {
             resetFrame(seq = 18),
             ackFrame(),
             opsFrame(promptOp("msg_1", "running"), seq = 19),
-            eventCount = 6,
+            eventCount = 7,
             settleMillis = 100,
         )
 
@@ -176,8 +178,10 @@ class SessionSocketTest {
                 SocketEvent.Event(SessionEvent.SessionPermissionUpdated("auto")),
                 SocketEvent.Event(SessionEvent.AgentBusyUpdated(running = false)),
                 SocketEvent.Event(SessionEvent.ContextUsageUpdated(ContextUsage(22433, 1_000_000))),
-                // The accepted ack resets the approval queue (ticket 171) — empty here.
+                // The accepted ack resets the approval and question queues (tickets
+                // 171/172) — empty here.
                 SocketEvent.Event(SessionEvent.ApprovalsReset(emptyList())),
+                SocketEvent.Event(SessionEvent.QuestionsReset(emptyList())),
                 SocketEvent.Event(SessionEvent.PromptUpdated("msg_1", PromptStatus.Running)),
             ),
             emitted,
@@ -281,16 +285,16 @@ class SessionSocketTest {
     }
 
     @Test
-    fun `question interaction frames, foreign sessions and undecodable requests emit nothing`() = runBlocking {
+    fun `foreign sessions, unknown kinds and undecodable requests emit nothing`() = runBlocking {
         val emitted = runSocketEvents(
-            // The verbatim pending question shape (ticket 172's, not consumed here).
-            """{"type":"interaction","session_id":"session_1","agent_id":"main",""" +
-                """"event_created_at":"2026-10-28T19:28:18.527Z","interaction_id":"question_1",""" +
-                """"status":"pending","tool_call_id":"call_q","kind":"question",""" +
-                """"request":{"questions":[{"id":"q_0","question":"Cake or pie?","options":[]}]}}""",
             approvalFrame("approval_9", sessionId = "session_2"),
+            questionFrame("question_9", sessionId = "session_2"),
             """{"type":"interaction","session_id":"session_1","agent_id":"main","interaction_id":"approval_8",""" +
                 """"status":"pending","kind":"approval","request":{"tool_name":42}}""",
+            """{"type":"interaction","session_id":"session_1","agent_id":"main","interaction_id":"question_8",""" +
+                """"status":"pending","kind":"question","request":{"questions":"none"}}""",
+            """{"type":"interaction","session_id":"session_1","agent_id":"main","interaction_id":"x_1",""" +
+                """"status":"pending","kind":"survey","request":{}}""",
             approvalFrame("approval_1"),
             eventCount = 1,
             settleMillis = 150,
@@ -300,7 +304,61 @@ class SessionSocketTest {
     }
 
     @Test
-    fun `an accepted ack resets the approvals to the reset snapshot's pending ones before the re-sent frames`() = runBlocking {
+    fun `a pending question interaction frame requests the wizard and every ended outcome resolves it`() = runBlocking {
+        // The verbatim 2.4.0/2.5.0 pending question (docs/server-api.md, Interactions):
+        // card id = interaction id, the row link = tool_call_id, the asker = agent_id.
+        val multi = """[{"id":"q_0","question":"Colors?","header":"Palette","options":[{"id":"opt_0_0","label":"red"}],""" +
+            """"allow_other":false,"multi_select":true},{"id":"q_1","question":"Mode?","header":"Mode",""" +
+            """"options":[{"id":"opt_1_0","label":"fast"}],"allow_other":false,"multi_select":false},""" +
+            """{"id":"q_2","question":"Confirm?","header":"Confirm","options":[]}]"""
+        val emitted = runSocketEvents(
+            questionFrame("question_10025aea", toolCallId = "call_00_IMrajNNAe1wdV1kRD3Zq6099"),
+            questionFrame("question_2", questions = multi, agentId = "agent-1"),
+            questionFrame("question_10025aea", status = "ended", outcome = "answered"),
+            questionFrame("question_2", status = "ended", outcome = "dismissed"),
+            questionFrame("question_3", status = "ended", outcome = "cancelled"),
+            eventCount = 5,
+            settleMillis = 100,
+        )
+
+        val events = emitted.sessionEvents()
+        assertEquals(
+            SessionEvent.QuestionRequested(
+                PendingQuestion(
+                    questionId = "question_10025aea",
+                    toolCallId = "call_00_IMrajNNAe1wdV1kRD3Zq6099",
+                    items = listOf(
+                        PendingQuestion.Item(
+                            id = "q_0",
+                            header = "Dessert",
+                            text = "Cake or pie?",
+                            options = listOf(
+                                PendingQuestion.Option("opt_0_0", "Cake", ""),
+                                PendingQuestion.Option("opt_0_1", "Pie", ""),
+                            ),
+                            allowOther = true,
+                        ),
+                    ),
+                ),
+            ),
+            events[0],
+        )
+        val subagentQuestion = (events[1] as SessionEvent.QuestionRequested).question
+        assertEquals("agent-1", subagentQuestion.agentId)
+        // multi_select decodes in both forms; absent = false.
+        assertEquals(listOf(true, false, false), subagentQuestion.items.map { it.multiSelect })
+        assertEquals(
+            listOf(
+                SessionEvent.QuestionResolved("question_10025aea"),
+                SessionEvent.QuestionResolved("question_2"),
+                SessionEvent.QuestionResolved("question_3"),
+            ),
+            events.drop(2),
+        )
+    }
+
+    @Test
+    fun `an accepted ack resets the approvals and questions to the reset snapshot's pending ones before the re-sent frames`() = runBlocking {
         // The verbatim subscribe order (docs/server-api.md, Interactions): the reset's
         // snapshot holds the full entity list (ended included), then the ack, then the
         // still-pending ones re-sent as standalone frames. A child's reset carrying the
@@ -308,28 +366,40 @@ class SessionSocketTest {
         val interactions = "[" + listOf(
             approvalEntity("approval_0", state = "approved"),
             approvalEntity("approval_1", command = "rm -rf target"),
-            """{"interactionId":"question_1","interactionKind":"question","state":"pending","request":{"questions":[]}}""",
+            questionEntity("question_0", state = "answered"),
+            questionEntity("question_1"),
         ).joinToString(",") + "]"
         val emitted = runSocketEvents(
             resetFrame(seq = 18, interactions = interactions),
             resetFrame(agentId = "agent-0", seq = 0, interactions = interactions),
             ackFrame(),
             approvalFrame("approval_1", command = "rm -rf target"),
-            eventCount = 2,
+            questionFrame("question_1"),
+            eventCount = 4,
             settleMillis = 100,
         )
 
+        val events = emitted.sessionEvents()
         assertEquals(
             listOf(
                 SessionEvent.ApprovalsReset(listOf(PendingApprovalRequest("approval_1", "Bash", "rm -rf target"))),
                 SessionEvent.ApprovalRequested("approval_1", "Bash", "rm -rf target"),
             ),
-            emitted.sessionEvents(),
+            events.filter { it is SessionEvent.ApprovalsReset || it is SessionEvent.ApprovalRequested },
         )
+        // Ticket 172: the question queue resets the same way — the answered entity
+        // stays out, the child's duplicate list does not double the pending one, and
+        // the re-sent frame follows the ack.
+        val reset = events.filterIsInstance<SessionEvent.QuestionsReset>().single()
+        assertEquals(listOf("question_1"), reset.pending.map { it.questionId })
+        assertEquals("call_00_question_1", reset.pending.single().toolCallId)
+        assertEquals("Cake or pie?", reset.pending.single().items.single().text)
+        assertTrue(events.indexOf(reset) < events.indexOfFirst { it is SessionEvent.QuestionRequested })
+        assertEquals("question_1", (events.last() as SessionEvent.QuestionRequested).question.questionId)
     }
 
     @Test
-    fun `a resumed subscribe without a reset resets the approvals to none, a refused or foreign ack resets nothing`() = runBlocking {
+    fun `a resumed subscribe without a reset resets the approvals and questions to none, a refused or foreign ack resets nothing`() = runBlocking {
         // A resume replays ops instead of a reset (no snapshot): the queue empties and
         // the re-sent pending frames rebuild it. A refused or foreign ack resets nothing.
         val emitted = runSocketEvents(
@@ -338,13 +408,14 @@ class SessionSocketTest {
             ackFrame(id = "u1"),
             ackFrame(),
             approvalFrame("approval_1"),
-            eventCount = 2,
+            eventCount = 3,
             settleMillis = 100,
         )
 
         assertEquals(
             listOf(
                 SessionEvent.ApprovalsReset(emptyList()),
+                SessionEvent.QuestionsReset(emptyList()),
                 SessionEvent.ApprovalRequested("approval_1", "Bash", "echo hi"),
             ),
             emitted.sessionEvents(),

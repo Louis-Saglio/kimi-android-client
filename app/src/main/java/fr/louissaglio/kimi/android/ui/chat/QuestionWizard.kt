@@ -43,9 +43,24 @@ internal class QuestionWizard(
     private val sendEffect: suspend (ChatViewModel.Effect) -> Unit,
 ) {
 
-    /** Bumped on every question.requested/question.resolved event, so [seed] can drop
-     * a response that a newer question event has already overtaken. */
+    /** Bumped on every live question event (request, end, the ack's reset), so
+     * [applyColdStart] can drop a fetch that a newer question event has overtaken. */
     private val seedGuard = SeedGuard()
+
+    /** The head question's drafts as of an ack reset that dropped it (ticket 172): a
+     * resumed subscribe carries no reset snapshot, so its reset is empty and the
+     * still-pending head only comes back with the re-sent frame a moment later — the
+     * stash carries the user's half-filled answers over that gap. Only touched from
+     * the ViewModel's event dispatch. */
+    private var droppedHeadDrafts: HeadDrafts? = null
+
+    private data class HeadDrafts(
+        val questionId: String,
+        val selections: Map<String, Set<String>>,
+        val otherTexts: Map<String, String>,
+        val step: Int,
+        val minimized: Boolean,
+    )
 
     /** Picks (or re-picks) the option answering one single-select item of the head question. */
     fun onOptionPicked(itemId: String, optionId: String) {
@@ -165,9 +180,11 @@ internal class QuestionWizard(
         }
     }
 
-    /** POSTs the drafted answers for the head question. No-ops while an item is
-     * unanswered. The card clears on the server's question.answered event — for our own
-     * answers too — so a failed POST leaves the card up and only reports the error. */
+    /** POSTs the drafted answers for the head question
+     * (`{"kind":"question","answers":…}` to `.../interactions/{id}` — ticket 172). No-ops
+     * while an item is unanswered. The card clears on the server's `ended` interaction
+     * frame — for our own answers too — so a failed POST (`40902` already ended, `40404`
+     * unknown) leaves the card up and only reports the server's message. */
     fun onSubmit() {
         val current = state()
         val question = current.pendingQuestions.firstOrNull() ?: return
@@ -195,8 +212,9 @@ internal class QuestionWizard(
         }
     }
 
-    /** POSTs `:dismiss` for the head question; the card clears on the server's
-     * question.dismissed event, so a failed POST leaves the card up. */
+    /** POSTs `{"kind":"question","dismissed":true}` for the head question (ticket 172);
+     * the card clears on the server's `outcome:"dismissed"` frame, so a failed POST
+     * leaves the card up. */
     fun onDismiss() {
         val question = state().pendingQuestions.firstOrNull() ?: return
         scope().launch {
@@ -206,23 +224,46 @@ internal class QuestionWizard(
         }
     }
 
-    /** A question.requested event from the socket: queues the card, deduped — a
-     * reconnect replay must not queue the same request twice. */
+    /** A pending question `interaction` frame (ticket 172): queues the card, deduped by
+     * question id IN PLACE — the post-ack re-send of a question the reset already
+     * queued must neither double it nor move it behind newer ones (it may stamp the
+     * asking agent the reset's entity lacked). */
     fun onRequested(event: SessionEvent.QuestionRequested) {
         seedGuard.bump()
+        val question = event.question
+        val stash = droppedHeadDrafts?.takeIf { it.questionId == question.questionId }
+        if (stash != null) droppedHeadDrafts = null
         updateState {
-            it.copy(
-                pendingQuestions = it.pendingQuestions
-                    .filterNot { q -> q.questionId == event.question.questionId } +
-                    event.question,
+            val queue = it.pendingQuestions
+            val next = it.copy(
+                pendingQuestions = if (queue.any { q -> q.questionId == question.questionId }) {
+                    queue.map { q -> if (q.questionId == question.questionId) question else q }
+                } else {
+                    queue + question
+                },
             ).prunedQuestionDrafts(it)
+            // The re-send of the head an ack reset dropped: it heads the queue again
+            // with the drafts it had.
+            if (stash != null && next.pendingQuestions.firstOrNull()?.questionId == question.questionId) {
+                val itemIds = question.items.map { item -> item.id }.toSet()
+                next.copy(
+                    questionSelections = stash.selections.filterKeys { id -> id in itemIds },
+                    questionOtherTexts = stash.otherTexts.filterKeys { id -> id in itemIds },
+                    questionStep = stash.step.coerceIn(0, maxOf(question.items.lastIndex, 0)),
+                    questionCardMinimized = stash.minimized,
+                )
+            } else {
+                next
+            }
         }
     }
 
-    /** A question.resolved event from the socket (answered or dismissed): the card
-     * clears — for our own decisions too, so a failed POST leaves it up. */
+    /** An `ended` question frame (answered, dismissed — an abort included — or
+     * cancelled): the card clears, for our own decisions too, so a failed POST leaves
+     * it up. */
     fun onResolved(event: SessionEvent.QuestionResolved) {
         seedGuard.bump()
+        if (droppedHeadDrafts?.questionId == event.questionId) droppedHeadDrafts = null
         updateState {
             it.copy(
                 pendingQuestions = it.pendingQuestions.filterNot { q -> q.questionId == event.questionId },
@@ -230,37 +271,25 @@ internal class QuestionWizard(
         }
     }
 
-    /**
-     * Re-derives the pending questions from the questions endpoint (the documented
-     * source of truth, docs/server-api.md): runs on reconnect and turn.ended so the
-     * card survives history refetches and heals after an abort. A failure leaves the
-     * current state untouched.
-     */
-    fun refresh() {
-        scope().launch {
-            chatRepository.getPendingQuestions(settingsRepository.current(), sessionId)
-                .onSuccess { questions ->
-                    updateState { it.copy(pendingQuestions = questions).prunedQuestionDrafts(it) }
-                }
+    /** An accepted subscribe (ticket 172): the queue becomes the reset snapshots'
+     * pending questions before the server's re-sent pending frames land — a question
+     * answered elsewhere while disconnected clears. A head the reset keeps keeps its
+     * drafts; one it drops stashes them for its re-send ([droppedHeadDrafts]). */
+    fun onReset(event: SessionEvent.QuestionsReset) {
+        seedGuard.bump()
+        val current = state()
+        val head = current.pendingQuestions.firstOrNull()
+        droppedHeadDrafts = head?.takeIf { h -> event.pending.none { it.questionId == h.questionId } }?.let {
+            HeadDrafts(
+                questionId = it.questionId,
+                selections = current.questionSelections,
+                otherTexts = current.questionOtherTexts,
+                step = current.questionStep,
+                minimized = current.questionCardMinimized,
+            )
         }
-    }
-
-    /**
-     * Screen-start variant of [refresh]: the socket streams live events from connect
-     * on, so a question.requested/question.resolved landing while this poll is in flight
-     * is newer than its snapshot — the late response is dropped instead of clearing (or
-     * resurrecting) a card. The reconnect and turn.ended polls stay unconditional:
-     * their snapshots are fresh and re-derivation is the point there.
-     */
-    fun seed() {
-        val eventsAtSeed = seedGuard.capture()
-        scope().launch {
-            chatRepository.getPendingQuestions(settingsRepository.current(), sessionId)
-                .onSuccess { questions ->
-                    if (!seedGuard.isStale(eventsAtSeed)) {
-                        updateState { it.copy(pendingQuestions = questions).prunedQuestionDrafts(it) }
-                    }
-                }
+        updateState {
+            it.copy(pendingQuestions = event.pending.distinctBy { q -> q.questionId }).prunedQuestionDrafts(it)
         }
     }
 
@@ -270,10 +299,9 @@ internal class QuestionWizard(
 
     /**
      * Applies the cold start's pending questions (ticket 176 — the pending question
-     * interactions of `GET .../transcript`, replacing 085's snapshot list) — the
-     * cold-start / resync queue rebuild, with [seed]'s guarded semantics: a live
-     * requested/resolved event newer than the fetch ([eventsAtFetch]) wins over the
-     * fetched queue.
+     * interactions of `GET .../transcript`) — the cold-start / resync queue rebuild,
+     * guarded: a live question event newer than the fetch ([eventsAtFetch]) wins over
+     * the fetched queue.
      */
     fun applyColdStart(questions: List<PendingQuestion>, eventsAtFetch: Int) {
         if (seedGuard.isStale(eventsAtFetch)) return

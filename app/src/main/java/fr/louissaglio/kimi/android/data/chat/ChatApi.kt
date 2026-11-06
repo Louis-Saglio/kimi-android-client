@@ -10,14 +10,13 @@ import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.booleanOrNull
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonObject
 import okhttp3.MultipartBody
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 
@@ -228,32 +227,31 @@ class ChatApi @Inject constructor(
             put("kind", "approval")
             put("decision", if (approved) "approved" else "rejected")
         }
-        return api.post(settings, "/api/v1/sessions/$sessionId/interactions/$approvalId", body) { responseBody ->
-            api.json.decodeFromString<Envelope<JsonObject>>(responseBody).toAckResult()
-        }
+        return postInteraction(settings, sessionId, approvalId, body)
     }
 
-    /**
-     * Polls the pending questions of the session
-     * (`GET /api/v1/sessions/{id}/questions?status=pending`, docs/server-api.md) — the
-     * source of truth used to re-derive the pending question after a reconnect or a
-     * history refetch, since `GET .../questions/{qid}` does not exist.
-     */
-    suspend fun pendingQuestions(settings: ServerSettings, sessionId: String): Result<List<PendingQuestion>> =
-        api.get(settings, "/api/v1/sessions/$sessionId/questions?status=pending") { body ->
-            api.json.decodeFromString<Envelope<QuestionListData>>(body).toResult().map { data ->
-                data.items.map { mapper.toDomain(it) }
-            }
+    /** The one response route of both interaction kinds
+     * (`POST /api/v1/sessions/{id}/interactions/{interactionId}`): any non-zero code is
+     * a [DataError.Api] failure. */
+    private suspend fun postInteraction(
+        settings: ServerSettings,
+        sessionId: String,
+        interactionId: String,
+        body: RequestBody,
+    ): Result<Unit> =
+        api.post(settings, "/api/v1/sessions/$sessionId/interactions/$interactionId", body) { responseBody ->
+            api.json.decodeFromString<Envelope<JsonObject>>(responseBody).toAckResult()
         }
 
     /**
-     * Posts the user's answers for one question
-     * (`POST /api/v1/sessions/{id}/questions/{questionId}`, docs/server-api.md): keys are
-     * the per-question item ids, values are a discriminated union on `kind` (`single` /
+     * Posts the user's answers for one question interaction
+     * (`POST /api/v1/sessions/{id}/interactions/{questionId}`, docs/server-api.md →
+     * Interactions — ticket 172) with `{"kind":"question","answers":{…}}`: keys are the
+     * per-question item ids, values are a discriminated union on `kind` (`single` /
      * `other` / `multi` / `multi_with_other`, the last two for multi-select items —
-     * ticket 090). The ack
-     * only confirms the answers were registered; the pending UI clears when the
-     * `event.question.answered` frame arrives over the WebSocket.
+     * ticket 090). Success (`data:{outcome, ended_at}`) only confirms the answers: the
+     * card clears on the `ended` `interaction` frame. `40404` (unknown interaction) and
+     * `40902` (already ended) are [DataError.Api] failures like any other code.
      */
     suspend fun answerQuestion(
         settings: ServerSettings,
@@ -262,6 +260,7 @@ class ChatApi @Inject constructor(
         answers: List<QuestionAnswer>,
     ): Result<Unit> {
         val body = api.jsonBody {
+            put("kind", "question")
             putJsonObject("answers") {
                 for (answer in answers) {
                     putJsonObject(answer.itemId) {
@@ -288,32 +287,28 @@ class ChatApi @Inject constructor(
                 }
             }
         }
-        return api.post(settings, "/api/v1/sessions/$sessionId/questions/$questionId", body) { responseBody ->
-            api.json.decodeFromString<Envelope<JsonObject>>(responseBody).toAckResult()
-        }
+        return postInteraction(settings, sessionId, questionId, body)
     }
 
     /**
-     * Dismisses one pending question (`POST /api/v1/sessions/{id}/questions/{questionId}:dismiss`,
-     * docs/server-api.md). Beware: a successful dismiss comes back with the non-zero
-     * envelope code 40909 — success is `data.dismissed`, not `code == 0`. The pending UI
-     * clears when the `event.question.dismissed` frame arrives over the WebSocket.
+     * Dismisses one pending question interaction
+     * (`POST /api/v1/sessions/{id}/interactions/{questionId}` with
+     * `{"kind":"question","dismissed":true}`, docs/server-api.md → Interactions —
+     * ticket 172). Success is the ordinary `code:0` with `outcome:"dismissed"`; the card
+     * clears on the `ended` `interaction` frame.
      */
     suspend fun dismissQuestion(
         settings: ServerSettings,
         sessionId: String,
         questionId: String,
     ): Result<Unit> =
-        api.post(settings, "/api/v1/sessions/$sessionId/questions/$questionId:dismiss", api.jsonBody {}) { body ->
-            // Dismiss acks succeed with envelope code 40909 (docs/server-api.md):
-            // gate on `data.dismissed`.
-            val envelope = api.json.decodeFromString<Envelope<JsonObject>>(body)
-            val dismissed = envelope.data?.get("dismissed")?.jsonPrimitive?.booleanOrNull == true
-            when {
-                envelope.code == 0 || dismissed -> Result.success(Unit)
-                else -> Result.failure(DataError.Api(envelope.code, envelope.msg))
-            }
-        }
+        postInteraction(
+            settings, sessionId, questionId,
+            api.jsonBody {
+                put("kind", "question")
+                put("dismissed", true)
+            },
+        )
 
     /**
      * Starts a compaction (`POST /api/v1/sessions/{id}:compact`, docs/server-api.md,
@@ -390,9 +385,8 @@ class ChatApi @Inject constructor(
      * fires for it, and completion follows the background lifecycle, all over the
      * WebSocket, so success carries no payload. Beware the ack shape: an
      * already-background or terminal task answers envelope code 0 with
-     * `{"detached":false,"status":<current>}` — success is `data.detached` (the
-     * dismissQuestion shape), and the refusal surfaces as [DataError.Api] like any
-     * envelope error (an unknown task's 40406 included, via the [toResult] idiom).
+     * `{"detached":false,"status":<current>}` — success is `data.detached`, and the
+     * refusal surfaces as [DataError.Api] like any envelope error (an unknown task's 40406 included, via the [toResult] idiom).
      */
     suspend fun detachTask(settings: ServerSettings, sessionId: String, taskId: String): Result<Unit> =
         api.post(settings, "/api/v1/sessions/$sessionId/tasks/$taskId:detach", api.jsonBody {}) { body ->

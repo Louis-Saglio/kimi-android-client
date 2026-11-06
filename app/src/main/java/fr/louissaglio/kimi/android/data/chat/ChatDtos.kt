@@ -226,12 +226,12 @@ data class UsageFrame(
 
 /**
  * The flat `interaction` frame (docs/server-api.md, Interactions → The `interaction`
- * frame — ticket 171): one approval or question of any agent of the session, sent on
+ * frame — tickets 171/172): one approval or question of any agent of the session, sent on
  * every state change and re-sent for every still-pending one after each accepted
  * `subscribe_v2`. No `payload` and no `seq`: the fields sit beside `type`. [status] is
  * `pending`/`ended`; [outcome] is set on `ended` only. [request] stays raw — its shape
- * depends on [kind] ([ApprovalInteractionRequestDto] for `approval`; questions are
- * ticket 172's).
+ * depends on [kind] ([ApprovalInteractionRequestDto] for `approval`,
+ * [QuestionRequestDto] for `question` — ticket 172).
  */
 @Serializable
 data class InteractionFrame(
@@ -289,25 +289,19 @@ data class ToolInputDisplayDto(
 )
 
 /**
- * `event.question.requested` payload (docs/server-api.md, Questions); the same
- * shape comes back as items of `GET .../questions?status=pending` and — since
- * 2.5.0 — as the `request` of a pending question interaction on
- * `GET .../transcript` (ticket 176's cold seed). Since 0.38.0 `question_id` is a dedicated
- * `question_<uuid>` interaction id and [toolCallId] is distinct (they were equal
- * before): answer/dismiss route by `question_id`, the transcript row carries
- * `tool_call_id`. There is no v2 camelCase duplicate of this event family.
+ * The `request` of a question interaction (docs/server-api.md, Interactions): the
+ * flat `interaction` frame carries `{questions[]}` only (ticket 172); the transcript
+ * entity's `request` (`GET .../transcript` and `transcript.reset.snapshot.
+ * interactions`) adds `question_id`, `tool_call_id`, `turn_id` and `created_at`. The
+ * mapper always keys the card on the interaction id — the one the response route
+ * takes — and prefers the frame's/entity's own `tool_call_id`. The asking agent is
+ * the frame's `agent_id`; the entity's request carries none (main, until the post-ack
+ * re-send stamps it).
  */
 @Serializable
-data class QuestionRequestedPayload(
-    @SerialName("question_id") val questionId: String = "",
+data class QuestionRequestDto(
     @SerialName("tool_call_id") val toolCallId: String = "",
     val questions: List<QuestionItemDto> = emptyList(),
-    /** The ASKING agent (2.0.2 — ticket 156), optional in the schema: the pending
-     * poll's items and the live frame stamp snake_case `agent_id` (the transcript
-     * interaction's request carries none); absent = the main agent. Unlike approvals there is
-     * no camelCase twin to decode — the frame's trailing `agentId` is the envelope
-     * mirror, not the asker. */
-    @SerialName("agent_id") val agentId: String? = null,
 )
 
 @Serializable
@@ -327,12 +321,6 @@ data class QuestionOptionDto(
     val label: String = "",
     // Omitted when the option has none.
     val description: String? = null,
-)
-
-/** `data` of `GET .../questions?status=pending`. */
-@Serializable
-data class QuestionListData(
-    val items: List<QuestionRequestedPayload> = emptyList(),
 )
 
 // --- REST /tasks + task.* WS events (docs/server-api.md, Background lifecycle —
@@ -384,7 +372,7 @@ data class TaskCancelData(
 /** `data` of `POST .../tasks/{id}:detach` (0.39.0 — ticket 138): a converted
  * foreground task answers `detached:true, status:"running"`; an already-background
  * or terminal task answers envelope code 0 with `detached:false` and the current
- * status — success is `data.detached`, not `code == 0` (the dismissQuestion shape). */
+ * status — success is `data.detached`, not `code == 0`. */
 @Serializable
 data class TaskDetachData(
     val detached: Boolean = false,

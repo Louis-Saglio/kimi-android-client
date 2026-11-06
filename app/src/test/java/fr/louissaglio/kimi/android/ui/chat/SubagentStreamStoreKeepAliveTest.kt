@@ -126,8 +126,6 @@ class SubagentStreamStoreKeepAliveTest {
                     path.startsWith("/api/v1/sessions/session_1/messages") ->
                         MockResponse(body = messagesBody)
                     path == "/api/v1/sessions/session_1/status" -> MockResponse(body = STATUS_BODY)
-                    path.startsWith("/api/v1/sessions/session_1/questions") ->
-                        MockResponse(body = QUESTIONS_BODY)
                     path == "/api/v1/models" -> MockResponse(body = MODELS_BODY)
                     path == "/api/v1/config" -> MockResponse(body = CONFIG_BODY)
                     path.startsWith("/api/v1/ws") ->
@@ -388,8 +386,6 @@ class SubagentStreamStoreKeepAliveTest {
 
         const val STATUS_BODY = """{"code":0,"msg":"success","data":{"busy":false,"context_tokens":0,""" +
             """"max_context_tokens":1048576,"context_usage":0.0},"request_id":"r"}"""
-
-        const val QUESTIONS_BODY = """{"code":0,"msg":"success","data":{"items":[]},"request_id":"r"}"""
 
         const val MODELS_BODY = """{"code":0,"msg":"success","data":{"items":[""" +
             """{"provider":"managed:kimi-code","model":"kimi-code/kimi-for-coding",""" +

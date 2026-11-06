@@ -89,8 +89,10 @@ abstract class ChatViewModelTestBase {
     @Volatile
     protected var abortsSucceed = true
 
+    /** When set, a question response (`"kind":"question"` on `.../interactions/{id}` —
+     * ticket 172) answers this envelope instead of the `{outcome, ended_at}` success. */
     @Volatile
-    protected var answersSucceed = true
+    protected var questionFailureBody: String? = null
 
     @Volatile
     protected var uploadsSucceed = true
@@ -111,10 +113,6 @@ abstract class ChatViewModelTestBase {
 
     @Volatile
     protected var takeoversSucceed = true
-
-    @Volatile
-    protected var questionsBody =
-        """{"code":0,"msg":"success","data":{"items":[]},"request_id":"r"}"""
 
     /** Served for GET /tasks (ticket 092 — the jobs widget's cold-start seed). */
     @Volatile
@@ -253,14 +251,9 @@ abstract class ChatViewModelTestBase {
         }
     }
 
-    /** When set, the /questions response is held back server-side until the test
-     * releases it, so a test can make a socket event win over the in-flight seed on
-     * purpose. */
-    @Volatile
-    protected var questionsResponseGate: CountDownLatch? = null
-
-    /** Same as [questionsResponseGate], for the /api/v1/files upload (ticket 033): parks
-     * the response so a test can observe the send while the upload is in flight. */
+    /** When set, the /api/v1/files upload (ticket 033) response is held back
+     * server-side until the test releases it, so a test can observe the send while the
+     * upload is in flight. */
     @Volatile
     protected var filesResponseGate: CountDownLatch? = null
 
@@ -280,7 +273,7 @@ abstract class ChatViewModelTestBase {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 val path = request.target.orEmpty()
                 requestedTargets += path
-                // Stamped at arrival, not at response time: the /questions and transcript
+                // Stamped at arrival, not at response time: the transcript
                 // responses may be parked behind a test gate below, and the WS upgrade's
                 // quiet window must not wait for those. The WS path is itself a GET but
                 // is excluded — the window measures the poll burst only.
@@ -372,45 +365,25 @@ abstract class ChatViewModelTestBase {
                             )
                         }
                     // The 2.4.0+ response route (docs/server-api.md, Interactions →
-                    // Respond — ticket 171): success carries {outcome, ended_at}; the
-                    // failure is the verbatim already-ended 40902.
-                    path.startsWith("/api/v1/sessions/session_1/interactions/") ->
-                        if (approvalsSucceed) {
-                            MockResponse(body =
+                    // Respond — tickets 171/172): success carries {outcome, ended_at};
+                    // an approval's failure is the verbatim already-ended 40902, a
+                    // question's is [questionFailureBody].
+                    path.startsWith("/api/v1/sessions/session_1/interactions/") -> {
+                        val body = request.body?.utf8().orEmpty()
+                        when {
+                            "\"kind\":\"question\"" in body -> questionFailureBody?.let { MockResponse(body = it) }
+                                ?: MockResponse(body =
+                                    """{"code":0,"msg":"success","data":{"outcome":""" +
+                                        (if ("\"dismissed\":true" in body) "\"dismissed\"" else "\"answered\"") +
+                                        ""","ended_at":"2026-10-28T19:28:18.858Z"},"request_id":"r"}""",
+                                )
+                            approvalsSucceed -> MockResponse(body =
                                 """{"code":0,"msg":"success","data":{"outcome":"approved",""" +
                                     """"ended_at":"2026-10-28T19:27:20.145Z"},"request_id":"r"}""",
                             )
-                        } else {
-                            MockResponse(body =
+                            else -> MockResponse(body =
                                 """{"code":40902,"msg":"interaction approval_1 has ended","data":null,"request_id":"r"}""",
                             )
-                        }
-                    path.startsWith("/api/v1/sessions/session_1/questions") -> when {
-                        path.endsWith(":dismiss") ->
-                            if (answersSucceed) {
-                                MockResponse(body = 
-                                    """{"code":40909,"msg":"question tool_q1 dismissed",""" +
-                                        """"data":{"dismissed":true,"dismissed_at":"2026-07-20T06:17:24.711Z"},"request_id":"r"}""",
-                                )
-                            } else {
-                                MockResponse(body = 
-                                    """{"code":40405,"msg":"question tool_q1 not found","data":null,"request_id":"r"}""",
-                                )
-                            }
-                        request.method == "POST" ->
-                            if (answersSucceed) {
-                                MockResponse(body = 
-                                    """{"code":0,"msg":"success","data":{"resolved":true,""" +
-                                        """"resolved_at":"2026-07-20T06:08:12.548Z"},"request_id":"r"}""",
-                                )
-                            } else {
-                                MockResponse(body = 
-                                    """{"code":40405,"msg":"question tool_q1 not found","data":null,"request_id":"r"}""",
-                                )
-                            }
-                        else -> {
-                            questionsResponseGate?.await(5, TimeUnit.SECONDS)
-                            MockResponse(body = questionsBody)
                         }
                     }
                     path.startsWith("/api/v1/sessions/session_1/tasks") ->

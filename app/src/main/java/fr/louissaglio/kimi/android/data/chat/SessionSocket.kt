@@ -39,8 +39,8 @@ import okhttp3.WebSocketListener
  * frame dispatch — `transcript.ops` batches folded into [SessionEvent]s by the
  * session's [TranscriptFold] (server 2.5.0, ticket 175), the main agent's flat `agent`/
  * `usage` state frames mapped to its model/permission/busy/context events (ticket 177),
- * the flat `interaction` frame mapped to the approval card's events and the ack-time
- * pending-approvals reset (ticket 171) — plus the per-agent resume watermarks every
+ * the flat `interaction` frame mapped to the approval card's and question wizard's
+ * events and the ack-time pending-interaction resets (tickets 171/172) — plus the per-agent resume watermarks every
  * subscribe sends back as `transcript_since` (ticket 176).
  */
 @Singleton
@@ -251,9 +251,10 @@ class SessionSocket @Inject constructor(
     }
 
     /** The per-connection state [handleFrame] reads; [resumed] are the agents the
-     * connection's subscribe sent a watermark for. [resetApprovals] collects the pending
-     * approvals of this connection's `transcript.reset` snapshots (ticket 171), by
-     * interaction id — the ack's [SessionEvent.ApprovalsReset]. */
+     * connection's subscribe sent a watermark for. [resetApprovals]/[resetQuestions]
+     * collect the pending approvals/questions of this connection's `transcript.reset`
+     * snapshots (tickets 171/172), by interaction id — the ack's
+     * [SessionEvent.ApprovalsReset]/[SessionEvent.QuestionsReset]. */
     private class FrameContext(
         val sessionId: String,
         val subscribeId: String,
@@ -263,6 +264,7 @@ class SessionSocket @Inject constructor(
         val watchdog: SocketStallWatchdog,
     ) {
         val resetApprovals = LinkedHashMap<String, PendingApprovalRequest>()
+        val resetQuestions = LinkedHashMap<String, PendingQuestion>()
     }
 
     /** One bad frame must not kill the connection: parse failures are dropped. Returns
@@ -311,11 +313,13 @@ class SessionSocket @Inject constructor(
             // and the collector rebuilds the agent's rows from REST — never a partial
             // replay.
             // Its snapshot's interactions (the session's full entity list, ended ones
-            // included) hold the pending approvals the ack's reset carries (ticket 171).
+            // included) hold the pending approvals and questions the ack's resets carry
+            // (tickets 171/172).
             "transcript.reset" -> frame.decodePayload<TranscriptResetPayload>()
                 ?.let { reset ->
                     reset.snapshot?.interactions?.let { entities ->
                         mapper.pendingApprovals(entities).forEach { context.resetApprovals.putIfAbsent(it.approvalId, it) }
+                        mapper.pendingQuestions(entities).forEach { context.resetQuestions.putIfAbsent(it.questionId, it) }
                     }
                     context.watermarks[reset.agentId] = reset.seq
                     if (reset.agentId in context.resumed) {
@@ -329,10 +333,11 @@ class SessionSocket @Inject constructor(
             // The subscribe_v2 ack (docs/server-api.md, Control frames): an unknown
             // session answers code 0 with its id in not_found — a load failure, never
             // silence. A malformed subscribe answers code 1; there is nothing to retry.
-            // An accepted subscribe resets the approval queue to the reset snapshots'
-            // pending approvals (ticket 171): the server re-sends every still-pending
-            // interaction as a standalone frame right after the ack, so a decision
-            // missed while away clears and the re-sent frames dedup into the queue.
+            // An accepted subscribe resets the approval and question queues to the
+            // reset snapshots' pending interactions (tickets 171/172): the server
+            // re-sends every still-pending interaction as a standalone frame right
+            // after the ack, so a decision missed while away clears and the re-sent
+            // frames dedup into the queues.
             "ack" -> if (frame.id == context.subscribeId) {
                 val ack = frame.decodePayload<AckPayload>()
                 if (frame.code != 0) {
@@ -342,6 +347,7 @@ class SessionSocket @Inject constructor(
                     return false
                 } else if (ack?.accepted?.contains(sessionId) == true) {
                     onEvent(SessionEvent.ApprovalsReset(context.resetApprovals.values.toList()))
+                    onEvent(SessionEvent.QuestionsReset(context.resetQuestions.values.toList()))
                 }
             }
             // App-level heartbeat (docs/server-api.md, Heartbeat): the server pings every
@@ -367,12 +373,12 @@ class SessionSocket @Inject constructor(
                 ?.takeIf { it.agentId == MAIN_AGENT_ID }
                 ?.toSessionEvent()
                 ?.let { onEvent(it) }
-            // The flat interaction frame (docs/server-api.md, Interactions — ticket 171):
-            // approvals of every agent, pending and ended; never journaled, re-sent for
-            // the pending ones after each accepted subscribe. Question frames are
-            // ticket 172's and map to nothing yet.
+            // The flat interaction frame (docs/server-api.md, Interactions — tickets
+            // 171/172): approvals and questions of every agent, pending and ended;
+            // never journaled, re-sent for the pending ones after each accepted
+            // subscribe.
             "interaction" -> decodeFlat<InteractionFrame>(frame.type, text)
-                ?.let(mapper::toApprovalEvent)
+                ?.let(mapper::toInteractionEvent)
                 ?.let { onEvent(it) }
             // The other flat state frames (goal, todo, task.list, task) are tickets
             // 178–182: ignored, but logged so a server rename shows up during

@@ -217,16 +217,26 @@ sealed interface SessionEvent {
      * the standalone pending frames the server re-sends after the ack dedup into it. */
     data class ApprovalsReset(val pending: List<PendingApprovalRequest>) : SessionEvent
 
-    /** The agent asks the user a structured question (event.question.requested); the
-     * payload carries the full question inline — there is no detail endpoint to fetch.
-     * The question's [PendingQuestion.agentId] is the ASKING agent (2.0.2 — ticket
-     * 156), presentation only like an approval's: the request resolves through the
-     * session-level questions route whoever asked, so this stays main-chat-routed. */
+    /** The agent asks the user a structured question (a `pending` question
+     * `interaction` frame — ticket 172); the frame carries the full question inline —
+     * there is no detail endpoint to fetch. [PendingQuestion.questionId] is the
+     * interaction id; [PendingQuestion.agentId] is the ASKING agent (ticket 156) —
+     * presentation only, deliberately NOT an [AgentScopedEvent]: the request resolves
+     * through the session-level interactions route whoever asked, so this stays
+     * main-chat-routed. */
     data class QuestionRequested(val question: PendingQuestion) : SessionEvent
 
-    /** The question was answered or dismissed — by this client or another one
-     * (event.question.answered / event.question.dismissed share the consumed shape). */
+    /** The question ended — answered or dismissed by this client or another one, or
+     * dismissed with its aborted turn (an `ended` question `interaction` frame, any
+     * outcome — ticket 172). */
     data class QuestionResolved(val questionId: String) : SessionEvent
+
+    /** The session's pending questions as of an accepted `subscribe_v2` (ticket 172 —
+     * [ApprovalsReset]'s twin): the pending questions of the connection's
+     * `transcript.reset` snapshots (empty on a resumed subscribe). The queue is
+     * REPLACED, and the pending frames the server re-sends after the ack dedup into it
+     * by question id. */
+    data class QuestionsReset(val pending: List<PendingQuestion>) : SessionEvent
 
     /** Live context window fill (the `usage` state frame — server 2.5.0, ticket 177).
      * Only emitted when the frame carries the used tokens AND a positive limit: an

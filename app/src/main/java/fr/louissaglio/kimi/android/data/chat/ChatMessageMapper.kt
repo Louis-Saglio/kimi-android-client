@@ -61,10 +61,18 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
         return AgentCallDisplay(name, display.prompt.orEmpty(), display.background)
     }
 
-    fun toDomain(payload: QuestionRequestedPayload): PendingQuestion = PendingQuestion(
-        questionId = payload.questionId,
-        toolCallId = payload.toolCallId,
-        items = payload.questions.map { item ->
+    /** A question interaction's request → the wizard's domain question. [questionId] is
+     * the interaction id (the one the response route takes); [toolCallId] links the
+     * card to its `AskUserQuestion` row; [agentId] is the asking agent (ticket 156). */
+    private fun toPendingQuestion(
+        request: QuestionRequestDto,
+        questionId: String,
+        toolCallId: String?,
+        agentId: String?,
+    ): PendingQuestion = PendingQuestion(
+        questionId = questionId,
+        toolCallId = toolCallId?.takeIf { it.isNotBlank() } ?: request.toolCallId,
+        items = request.questions.map { item ->
             PendingQuestion.Item(
                 id = item.id,
                 header = item.header,
@@ -74,8 +82,7 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
                 multiSelect = item.multiSelect,
             )
         },
-        // The stamp is optional on the wire; absent = the main agent (ticket 156).
-        agentId = payload.agentId ?: MAIN_AGENT_ID,
+        agentId = agentId?.takeIf { it.isNotBlank() } ?: MAIN_AGENT_ID,
     )
 
     fun toDomain(dto: MessageDto): ChatMessage {
@@ -175,7 +182,6 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
         // The pending set is `pending_interactions` (the ids still waiting); the entity
         // list also holds ended interactions. An entity whose own state says pending
         // counts too — the two views are the same server state.
-        val waiting = dto.interactions.filter { it.interactionId in pending || it.state == "pending" }
         return TranscriptPage(
             agentId = dto.agentId,
             turns = dto.items.filter { it.kind == "turn" }.map(::toDomain),
@@ -188,7 +194,7 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
                 TranscriptPrompt(it.promptId, promptStatus(it.status))
             },
             pendingApprovals = pendingApprovals(dto.interactions, pending),
-            pendingQuestions = waiting.filter { it.interactionKind == "question" }.mapNotNull(::toPendingQuestion),
+            pendingQuestions = pendingQuestions(dto.interactions, pending),
         )
     }
 
@@ -219,13 +225,34 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
             .distinctBy { it.interactionId }
             .mapNotNull(::toPendingApproval)
 
+    /** The pending questions of an interaction entity list — [pendingApprovals]' filter
+     * for question-kind entities (ticket 172): the REST transcript's cold seed and the
+     * `transcript.reset` snapshots the subscribe ack's question reset carries. */
+    fun pendingQuestions(
+        entities: List<InteractionEntityDto>,
+        pendingIds: Set<String> = emptySet(),
+    ): List<PendingQuestion> =
+        entities
+            .filter { it.interactionKind == "question" && (it.state == "pending" || it.interactionId in pendingIds) }
+            .filter { it.interactionId.isNotBlank() }
+            .distinctBy { it.interactionId }
+            .mapNotNull(::toPendingQuestion)
+
+    /** The flat `interaction` frame → the card events of its [InteractionFrame.kind]:
+     * [toApprovalEvent] or [toQuestionEvent]; any other kind maps to nothing. */
+    fun toInteractionEvent(frame: InteractionFrame): SessionEvent? = when (frame.kind) {
+        "approval" -> toApprovalEvent(frame)
+        "question" -> toQuestionEvent(frame)
+        else -> null
+    }
+
     /**
      * The flat `interaction` frame → the approval card's events (ticket 171): `pending`
      * → [SessionEvent.ApprovalRequested] (card id = the interaction id, the one the
      * response route takes; [summary] over the display command, else the action; the
      * asking agent from the frame), `ended` → [SessionEvent.ApprovalResolved] whatever
-     * the outcome (`approved`/`rejected`/`cancelled`). Question frames are ticket 172's
-     * and map to nothing here, like an unknown status or an undecodable request.
+     * the outcome (`approved`/`rejected`/`cancelled`). A question frame maps to nothing
+     * here ([toQuestionEvent]'s), like an unknown status or an undecodable request.
      */
     fun toApprovalEvent(frame: InteractionFrame): SessionEvent? {
         if (frame.kind != "approval" || frame.interactionId.isBlank()) return null
@@ -248,6 +275,33 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
         }
     }
 
+    /**
+     * The flat `interaction` frame → the question wizard's events (ticket 172):
+     * `pending` → [SessionEvent.QuestionRequested] (card id = the interaction id,
+     * `tool_call_id` links the `AskUserQuestion` row, `agent_id` is the asker, the
+     * `request.questions[]` items decode through [QuestionItemDto]), `ended` →
+     * [SessionEvent.QuestionResolved] whatever the outcome (`answered`/`dismissed`/
+     * `cancelled` — an abort ends a pending question `dismissed`). An approval frame, an
+     * unknown status or an undecodable request maps to nothing.
+     */
+    fun toQuestionEvent(frame: InteractionFrame): SessionEvent? {
+        if (frame.kind != "question" || frame.interactionId.isBlank()) return null
+        return when (frame.status) {
+            "pending" -> {
+                val request = frame.request?.let {
+                    runCatching { json.decodeFromJsonElement<QuestionRequestDto>(it) }
+                        .onFailure { e -> Log.w(TAG, "Dropping undecodable question '${frame.interactionId}'", e) }
+                        .getOrNull()
+                } ?: return null
+                SessionEvent.QuestionRequested(
+                    toPendingQuestion(request, frame.interactionId, frame.toolCallId, frame.agentId),
+                )
+            }
+            "ended" -> SessionEvent.QuestionResolved(frame.interactionId)
+            else -> null
+        }
+    }
+
     /** A pending approval entity → the card's domain request: the transcript request is
      * camelCase (docs/server-api.md, Pending state on REST); an undecodable one drops
      * the entity with a Log.w, never the page. */
@@ -266,21 +320,16 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
     }
 
     /** A pending question entity → the wizard's domain question: the request keeps the
-     * snake_case question payload shape. The card id is the INTERACTION id (the one the
+     * snake_case question shape. The card id is the INTERACTION id (the one the
      * response route takes); the row's tool call id comes from the entity, else the
-     * request. */
+     * request; the entity names no asker (main until a frame says otherwise). */
     private fun toPendingQuestion(entity: InteractionEntityDto): PendingQuestion? {
         val request = entity.request?.let {
-            runCatching { json.decodeFromJsonElement<QuestionRequestedPayload>(it) }
+            runCatching { json.decodeFromJsonElement<QuestionRequestDto>(it) }
                 .onFailure { e -> Log.w(TAG, "Dropping undecodable question '${entity.interactionId}'", e) }
                 .getOrNull()
         } ?: return null
-        return toDomain(
-            request.copy(
-                questionId = entity.interactionId,
-                toolCallId = entity.toolCallId?.takeIf { it.isNotBlank() } ?: request.toolCallId,
-            ),
-        )
+        return toPendingQuestion(request, entity.interactionId, entity.toolCallId, agentId = null)
     }
 
     private fun toDomain(dto: TranscriptItemDto): TranscriptTurn = TranscriptTurn(

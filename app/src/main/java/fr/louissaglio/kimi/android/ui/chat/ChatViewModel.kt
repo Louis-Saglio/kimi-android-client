@@ -835,17 +835,16 @@ class ChatViewModel internal constructor(
      * server replays the missed window — a turn that ended while the app was away
      * takes its ghost live rows with it, and its `agent`/`usage` frames re-seed the
      * model, permission, busy and context state — ticket 177), [verifyResume] checks
-     * the journal covered it, plus the questions seed. Every start re-applies the stored
-     * permission pick. Also fires when the app returns to the foreground. */
+     * the journal covered it (the re-subscribe's ack resets the approval/question
+     * cards and the re-sent pending frames refill them — tickets 171/172). Every start
+     * re-applies the stored permission pick. Also fires when the app returns to the
+     * foreground. */
     fun onScreenStarted() {
         screenVisible.value = true
         // The web clears a session's unread marker when it becomes the visible session
         // (ticket 145 backstop: a process-death restore lands here without a list tap).
         viewModelScope.launch { unreadStore.clear(settingsRepository.current().serverUrl, sessionId) }
-        if (coldStartDone) {
-            verifyResume()
-            questions.seed()
-        }
+        if (coldStartDone) verifyResume()
         seedStoredPermissionPick()
         refreshSessionInfo()
         loadModels()
@@ -1232,9 +1231,9 @@ class ChatViewModel internal constructor(
                                 // The re-subscribe carried the resume watermark: the
                                 // server replays the window the drop missed (a turn
                                 // end above all, ticket 176). Verify the journal could
-                                // cover it; the questions still re-derive from REST.
+                                // cover it; the ack's resets and the re-sent pending
+                                // frames rebuild the approval/question cards (171/172).
                                 verifyResume()
-                                questions.refresh()
                             }
                             SocketEvent.Disconnected ->
                                 uiState.update { it.copy(isReconnecting = true) }
@@ -1312,8 +1311,9 @@ class ChatViewModel internal constructor(
                 turnSeedGuard.bump()
                 // Pending approvals are NOT cleared here (ticket 171): an abort ends them
                 // with their own `cancelled` interaction frame, and a background
-                // sub-agent's approval outlives the main turn. A pending question
-                // survives turn.ended too and is re-derived instead of being cleared.
+                // sub-agent's approval outlives the main turn. Pending questions stay too
+                // (ticket 172): an abort ends them with an `outcome:"dismissed"` frame,
+                // and a background question outlives its turn.
                 // The early-stop footer (ticket 155) lands now; the refetch below
                 // re-appends it over the canonical rows.
                 timeline.onTurnEnded(event.interruptReason, event.errorMessage)
@@ -1332,7 +1332,6 @@ class ChatViewModel internal constructor(
                 }
                 // Replace live rows with the canonical committed turn.
                 refreshHistory(clearLive = true)
-                questions.refresh()
             }
             // LLM retry (ticket 058): a transient status line on the in-flight turn —
             // the retrying frame opens it, the replacement step.started (new stepId),
@@ -1386,6 +1385,7 @@ class ChatViewModel internal constructor(
             // lifecycle, including the seed guard's bump (ticket 072).
             is SessionEvent.QuestionRequested -> questions.onRequested(event)
             is SessionEvent.QuestionResolved -> questions.onResolved(event)
+            is SessionEvent.QuestionsReset -> questions.onReset(event)
             // Background tasks (ticket 092): the collaborator owns the list, including
             // the core→wire status mapping.
             is SessionEvent.TaskStarted -> {
