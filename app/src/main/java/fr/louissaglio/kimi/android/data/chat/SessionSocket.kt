@@ -705,9 +705,9 @@ class SessionSocket @Inject constructor(
 /**
  * The `agent` state frame → the chat's events (ticket 177): the model/effort binding
  * when the frame names either (blank or absent = "nothing said" — a model-less session
- * omits both), the effective permission mode, and the busy state (`running`/`idle`; an
- * unknown status emits nothing). The mode booleans are not mapped (ticket 174 owns
- * swarm mode).
+ * omits both), the effective permission mode, the swarm mode (ticket 174; absent =
+ * nothing said), and the busy state (`running`/`idle`; an unknown status emits
+ * nothing). `plan_mode`/`tower_mode` are not mapped.
  */
 internal fun AgentStateFrame.toSessionEvents(): List<SessionEvent> = buildList {
     val boundModel = model?.takeIf { it.isNotBlank() }
@@ -716,6 +716,7 @@ internal fun AgentStateFrame.toSessionEvents(): List<SessionEvent> = buildList {
         add(SessionEvent.SessionModelUpdated(boundModel, boundEffort, agentId))
     }
     permissionMode?.takeIf { it.isNotBlank() }?.let { add(SessionEvent.SessionPermissionUpdated(it, agentId)) }
+    swarmMode?.let { add(SessionEvent.SessionSwarmModeUpdated(it, agentId)) }
     when (status) {
         "running" -> add(SessionEvent.AgentBusyUpdated(running = true, agentId = agentId))
         "idle" -> add(SessionEvent.AgentBusyUpdated(running = false, agentId = agentId))

@@ -40,7 +40,7 @@ class ChatAttachmentsTest : ChatViewModelTestBase() {
         assertEquals(
             """{"content":[""" +
                 """{"type":"file","file_id":"f_1","name":"a.txt","media_type":"text/plain","size":5},""" +
-                """{"type":"text","text":"see attached"}],"model":"kimi-code/k3"}""",
+                """{"type":"text","text":"see attached"}],"model":"kimi-code/k3","swarm_mode":false}""",
             prompt.body!!.utf8(),
         )
         // Chips and text clear on success, like a text-only send.
@@ -95,7 +95,7 @@ class ChatAttachmentsTest : ChatViewModelTestBase() {
         val prompt = awaitRequest("/prompts", method = "POST")
         assertEquals(
             """{"content":[{"type":"file","file_id":"f_1","name":"a.txt","media_type":"text/plain","size":5}],""" +
-                """"model":"kimi-code/k3"}""",
+                """"model":"kimi-code/k3","swarm_mode":false}""",
             prompt.body!!.utf8(),
         )
         awaitState(viewModel.uiState) { it.attachments.isEmpty() && !it.isSending }
@@ -150,7 +150,7 @@ class ChatAttachmentsTest : ChatViewModelTestBase() {
 
         val prompt = awaitRequest("/prompts", method = "POST")
         assertEquals(
-            """{"content":[{"type":"text","text":"just text"}],"model":"kimi-code/k3"}""",
+            """{"content":[{"type":"text","text":"just text"}],"model":"kimi-code/k3","swarm_mode":false}""",
             prompt.body!!.utf8(),
         )
         // No upload happened for the removed chip.

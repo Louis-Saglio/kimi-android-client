@@ -137,7 +137,10 @@ class ChatApi @Inject constructor(
      * docs/server-api.md); null leaves the field out. [permissionMode] is the
      * per-prompt permission-mode stamp (ticket 141, manual/yolo/auto): it binds the
      * session for its remaining turns; null leaves the field out (the session follows
-     * the server). [attachments] become content items
+     * the server). [swarmMode] is the composer's swarm chip (ticket 174), ALWAYS sent:
+     * the server applies `swarm_mode` before enqueueing and an omitted field leaves the
+     * session's mode unchanged, so `false` must be explicit to turn it off. [attachments]
+     * become content items
      * before the text item (ticket 033): an `image` part for image MIME types, a `file`
      * part otherwise (docs/server-api.md, Prompts). A blank [text] adds no text item — the
      * caller guarantees text and attachments are not both empty. */
@@ -149,6 +152,7 @@ class ChatApi @Inject constructor(
         model: String?,
         thinking: String?,
         permissionMode: String?,
+        swarmMode: Boolean,
     ): Result<String> {
         val body = api.jsonBody {
             putJsonArray("content") {
@@ -181,6 +185,7 @@ class ChatApi @Inject constructor(
             if (model != null) put("model", model)
             if (thinking != null) put("thinking", thinking)
             if (permissionMode != null) put("permission_mode", permissionMode)
+            put("swarm_mode", swarmMode)
         }
         return api.post(settings, "/api/v1/sessions/$sessionId/prompts", body) { responseBody ->
             api.json.decodeFromString<Envelope<PromptData>>(responseBody).toResult().map { it.promptId }

@@ -72,14 +72,17 @@ class ChatRepository @Inject constructor(
      * WebSocket (docs/server-api.md). Success carries the ACK's prompt id — equal to
      * the user message id, so it keys the chat's optimistic local echo (ticket 154).
      * [attachments] (already uploaded, ticket 033) go into the content array before the
-     * text item; [text] may be blank when attachments are present. Success records
-     * [sessionId] in the [SessionActivityStore] so the session list bumps its row.
+     * text item; [text] may be blank when attachments are present. [swarmMode] is the
+     * composer's swarm chip (ticket 174), sent as `swarm_mode` whatever its value.
+     * Success records [sessionId] in the [SessionActivityStore] so the session list
+     * bumps its row.
      */
     suspend fun sendPrompt(
         settings: ServerSettings,
         sessionId: String,
         text: String,
         attachments: List<FileMeta> = emptyList(),
+        swarmMode: Boolean = false,
     ): Result<String> {
         val model = promptModel(settings, sessionId)
         return chatApi.postPrompt(
@@ -90,6 +93,7 @@ class ChatRepository @Inject constructor(
             model,
             promptThinking(settings, sessionId, model),
             promptPermissionMode(sessionId),
+            swarmMode,
         )
             .onSuccess { activity.record(sessionId) }
     }
@@ -99,7 +103,8 @@ class ChatRepository @Inject constructor(
      * posted as usual — while busy the server queues it — then `prompts:steer` injects the
      * queued prompt into the active turn. Success carries the posted prompt's id like
      * [sendPrompt] (the echo's key); the steered user message echoes over the
-     * WebSocket (context.spliced) like a regular one. Success records [sessionId] in the
+     * WebSocket (context.spliced) like a regular one. The posted prompt carries
+     * [swarmMode] like [sendPrompt]'s. Success records [sessionId] in the
      * [SessionActivityStore] like [sendPrompt].
      */
     suspend fun steer(
@@ -107,6 +112,7 @@ class ChatRepository @Inject constructor(
         sessionId: String,
         text: String,
         attachments: List<FileMeta> = emptyList(),
+        swarmMode: Boolean = false,
     ): Result<String> {
         val model = promptModel(settings, sessionId)
         val promptId = chatApi.postPrompt(
@@ -117,6 +123,7 @@ class ChatRepository @Inject constructor(
             model,
             promptThinking(settings, sessionId, model),
             promptPermissionMode(sessionId),
+            swarmMode,
         )
             .getOrElse { return Result.failure(it) }
         return chatApi.postSteer(settings, sessionId, promptId)

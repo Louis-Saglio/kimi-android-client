@@ -228,6 +228,11 @@ class ChatViewModel internal constructor(
          * `permission_mode`, ticket 177); null until either lands — the composer's
          * permission chip stays hidden meanwhile. */
         val sessionPermission: String? = null,
+        /** The composer's swarm chip (ticket 174): seeded from the subscribe's first
+         * `agent` frame (`swarm_mode`) and following every later one, unless an unsent
+         * local toggle is in force; every prompt carries it as `swarm_mode`. Off until
+         * the first frame lands. */
+        val swarmMode: Boolean = false,
         /** Context window fill for the composer's ring (041, moved into the composer
          * in 053); null until the first `usage` frame carrying a real limit arrives
          * (the subscribe's seed, then every live change — ticket 177); a frame without
@@ -878,10 +883,13 @@ class ChatViewModel internal constructor(
             val settings = settingsRepository.current()
             // Upload phase: null = a chip failed its upload, the send aborts here.
             val uploaded = attachments.uploadAll(settings, state.attachments) ?: return@launch
+            // The chip's value at send time (ticket 174): sent true AND false — an
+            // omitted swarm_mode would leave the server's mode unchanged.
+            val swarmMode = uiState.value.swarmMode
             val result = if (state.isWorking) {
-                chatRepository.steer(settings, sessionId, text, uploaded)
+                chatRepository.steer(settings, sessionId, text, uploaded, swarmMode)
             } else {
-                chatRepository.sendPrompt(settings, sessionId, text, uploaded)
+                chatRepository.sendPrompt(settings, sessionId, text, uploaded, swarmMode)
             }
             result
                 .onSuccess { promptId ->
@@ -890,6 +898,9 @@ class ChatViewModel internal constructor(
                     pendingModelPick = false
                     pendingEffortPick = false
                     pendingPermissionPick = false
+                    // Same for swarm mode — unless the chip was toggled again while
+                    // the POST was in flight: that newer pick is still unsent.
+                    if (uiState.value.swarmMode == swarmMode) pendingSwarmPick = false
                     occupiedFailureStreak = 0
                     // The optimistic local echo (ticket 154): the bubble shows at once
                     // — for a prompt queued while the agent is busy, the context.spliced
@@ -1410,6 +1421,11 @@ class ChatViewModel internal constructor(
             // (ticket 141); the store read is the recreation-proof half of that guard.
             is SessionEvent.SessionPermissionUpdated ->
                 syncServerSessionPermission(event.permission, chatRepository.getSessionPermission(sessionId))
+            // The `agent` frame's `swarm_mode` (ticket 174): the first frame seeds the
+            // chip, later ones follow the server — the change a sent prompt applied or
+            // a profile write from another client.
+            is SessionEvent.SessionSwarmModeUpdated ->
+                if (!pendingSwarmPick) uiState.update { it.copy(swarmMode = event.swarmMode) }
             // Compaction (ticket 056; transcript markers since ticket 181): no turn ops
             // fire for it — the `compaction` markers alone drive the divider and the
             // compacting state, the `undo` marker between them is a plain splice (kept
@@ -1477,6 +1493,13 @@ class ChatViewModel internal constructor(
      * because the server always reports a mode — unlike the model binding, a fresh
      * session's report would otherwise clobber an unsent pick after a recreation. */
     private var pendingPermissionPick = false
+
+    /** An unsent swarm-chip toggle (ticket 174): the server learns it only from the
+     * next prompt's `swarm_mode`, so until that send succeeds `agent` frames still
+     * report the previous mode and must not flip the chip back. In memory only — a
+     * recreated ViewModel re-seeds from the subscribe's `agent` frame, which mirrors
+     * the server. */
+    private var pendingSwarmPick = false
 
     /**
      * Loads the model picker's data (ticket 031): the server's model list, its default,
@@ -1642,6 +1665,13 @@ class ChatViewModel internal constructor(
         pendingPermissionPick = true
         uiState.update { it.copy(sessionPermission = mode.wire) }
         viewModelScope.launch { chatRepository.setSessionPermission(sessionId, mode.wire) }
+    }
+
+    /** Flips the composer's swarm chip (ticket 174). Nothing is written here: the
+     * next prompt carries the new value as `swarm_mode` (no profile call). */
+    fun onSwarmModeToggled() {
+        pendingSwarmPick = true
+        uiState.update { it.copy(swarmMode = !it.swarmMode) }
     }
 
     /**

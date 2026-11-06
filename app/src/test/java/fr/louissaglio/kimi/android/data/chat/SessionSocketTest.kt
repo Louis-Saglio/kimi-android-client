@@ -183,7 +183,7 @@ class SessionSocketTest {
             resetFrame(seq = 18),
             ackFrame(),
             opsFrame(promptOp("msg_1", "running"), seq = 19),
-            eventCount = 9,
+            eventCount = 10,
             settleMillis = 100,
         )
 
@@ -193,6 +193,7 @@ class SessionSocketTest {
                 SocketEvent.Event(SessionEvent.TaskListed(emptyList())),
                 SocketEvent.Event(SessionEvent.SessionModelUpdated("deepseek/deepseek-v4-flash", "max")),
                 SocketEvent.Event(SessionEvent.SessionPermissionUpdated("auto")),
+                SocketEvent.Event(SessionEvent.SessionSwarmModeUpdated(false)),
                 SocketEvent.Event(SessionEvent.AgentBusyUpdated(running = false)),
                 SocketEvent.Event(SessionEvent.ContextUsageUpdated(ContextUsage(22433, 1_000_000))),
                 SocketEvent.Event(
@@ -215,14 +216,15 @@ class SessionSocketTest {
     @Test
     fun `a model-less agent frame names no binding and a running one reports busy`() = runBlocking {
         val emitted = runSocketEvents(
-            agentFrame(status = "running", model = null, thinking = null, permissionMode = "manual"),
-            eventCount = 2,
+            agentFrame(status = "running", model = null, thinking = null, permissionMode = "manual", swarmMode = true),
+            eventCount = 3,
             settleMillis = 100,
         )
 
         assertEquals(
             listOf(
                 SessionEvent.SessionPermissionUpdated("manual"),
+                SessionEvent.SessionSwarmModeUpdated(true),
                 SessionEvent.AgentBusyUpdated(running = true),
             ),
             emitted.sessionEvents(),
@@ -256,7 +258,7 @@ class SessionSocketTest {
             usageFrame(10, 1_000, agentId = "agent-0"),
             agentFrame(status = "running", model = "kimi-code/k3", sessionId = "session_2"),
             usageFrame(700, 262_144),
-            eventCount = 4,
+            eventCount = 5,
             settleMillis = 150,
         )
 
@@ -265,12 +267,13 @@ class SessionSocketTest {
             listOf(
                 SessionEvent.SessionModelUpdated("kimi-code/k3", "high", agentId = "agent-0"),
                 SessionEvent.SessionPermissionUpdated("auto", agentId = "agent-0"),
+                SessionEvent.SessionSwarmModeUpdated(false, agentId = "agent-0"),
                 SessionEvent.AgentBusyUpdated(running = true, agentId = "agent-0"),
                 SessionEvent.ContextUsageUpdated(ContextUsage(700, 262_144)),
             ),
             events,
         )
-        assertTrue(events.take(3).all { it.isSubagentScoped() })
+        assertTrue(events.take(4).all { it.isSubagentScoped() })
         assertFalse(events.last().isSubagentScoped())
     }
 
@@ -283,6 +286,15 @@ class SessionSocketTest {
         assertEquals(
             listOf(SessionEvent.SessionModelUpdated(model = null, thinkingEffort = "low")),
             AgentStateFrame(thinking = "low").toSessionEvents(),
+        )
+        // Ticket 174: swarm_mode maps both ways; an absent one says nothing.
+        assertEquals(
+            listOf(SessionEvent.SessionSwarmModeUpdated(swarmMode = true)),
+            AgentStateFrame(swarmMode = true).toSessionEvents(),
+        )
+        assertEquals(
+            listOf(SessionEvent.SessionSwarmModeUpdated(swarmMode = false)),
+            AgentStateFrame(swarmMode = false).toSessionEvents(),
         )
         assertEquals(null, UsageFrame(contextTokens = null, maxContextTokens = 100).toSessionEvent())
     }

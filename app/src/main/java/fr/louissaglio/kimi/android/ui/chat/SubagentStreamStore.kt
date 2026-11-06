@@ -1083,7 +1083,7 @@ class SubagentStreamStore @Inject constructor(
                 return
             }
             is SessionEvent.AgentBusyUpdated, is SessionEvent.SessionPermissionUpdated,
-            is SessionEvent.ContextUsageUpdated,
+            is SessionEvent.SessionSwarmModeUpdated, is SessionEvent.ContextUsageUpdated,
             -> return
             // The child's journal could not cover its resume watermark: the socket
             // reset its fold, so the live rows may hold a partial turn. The next

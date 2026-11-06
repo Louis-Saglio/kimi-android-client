@@ -277,6 +277,7 @@ fun ChatScreen(
         onEffortSwitchConfirmed = viewModel::onEffortSwitchConfirmed,
         onEffortSwitchDismissed = viewModel::onEffortSwitchDismissed,
         onPermissionModeSelected = viewModel::onPermissionModeSelected,
+        onSwarmModeToggle = viewModel::onSwarmModeToggled,
         onOpenCompactionSummary = onOpenCompactionSummary,
         onAttach = onAttach,
         onAttachmentRemoved = viewModel::onAttachmentRemoved,
@@ -403,6 +404,7 @@ private fun ChatContent(
     onEffortSwitchConfirmed: () -> Unit = {},
     onEffortSwitchDismissed: () -> Unit = {},
     onPermissionModeSelected: (PermissionMode) -> Unit,
+    onSwarmModeToggle: () -> Unit,
     onOpenCompactionSummary: (ChatItem.CompactionDivider) -> Unit = {},
     onAttach: () -> Unit,
     onAttachmentRemoved: (String) -> Unit,
@@ -620,11 +622,15 @@ private fun ChatContent(
                     // The permission chip (ticket 141): the session's effective mode,
                     // hidden until the `agent` frame or a stored pick lands.
                     permissionMode = uiState.currentPermissionMode,
+                    // The swarm chip (ticket 174): seeded and followed from the `agent`
+                    // frame's swarm_mode; its value rides every prompt.
+                    swarmMode = uiState.swarmMode,
                     contextUsage = uiState.contextUsage,
                     compactEnabled = canCompact,
                     onCompact = onCompact,
                     onModelClick = { showModelPicker = true },
                     onPermissionClick = { showPermissionPicker = true },
+                    onSwarmModeToggle = onSwarmModeToggle,
                     onTextChange = onInputChange,
                     // Send/Steer both funnel here; bump first so the jump rides
                     // the same recomposition as the ViewModel's echo append.
@@ -921,6 +927,7 @@ private fun ChatContentPreview() {
             onModelSelected = {},
             onEffortSelected = {},
             onPermissionModeSelected = {},
+            onSwarmModeToggle = {},
             onAttach = {},
             onAttachmentRemoved = {},
             onImageClick = {},

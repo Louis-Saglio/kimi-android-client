@@ -1158,7 +1158,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         val prompt = awaitRequest("/prompts", method = "POST")
         assertEquals("POST", prompt.method)
         assertEquals("/api/v1/sessions/session_1/prompts", prompt.target)
-        assertEquals("""{"content":[{"type":"text","text":"Stop counting"}],"model":"kimi-code/k3"}""", prompt.body!!.utf8())
+        assertEquals("""{"content":[{"type":"text","text":"Stop counting"}],"model":"kimi-code/k3","swarm_mode":false}""", prompt.body!!.utf8())
         val steer = awaitRequest("prompts:steer")
         assertEquals("POST", steer.method)
         assertEquals("/api/v1/sessions/session_1/prompts:steer", steer.target)
@@ -1182,7 +1182,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         val request = awaitRequest("/prompts", method = "POST")
         assertEquals("POST", request.method)
         assertEquals("/api/v1/sessions/session_1/prompts", request.target)
-        assertEquals("""{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/k3"}""", request.body!!.utf8())
+        assertEquals("""{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/k3","swarm_mode":false}""", request.body!!.utf8())
         // A plain prompt marks the session busy; no steer call follows.
         awaitState(viewModel.uiState) { it.isWorking }
         assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
@@ -1836,6 +1836,69 @@ class ChatViewModelTest : ChatViewModelTestBase() {
 
         assertEquals("manual", viewModel.uiState.value.sessionPermission)
         assertEquals("manual", dataStore.data.first()[stringPreferencesKey("permission_for_session_session_1")])
+    }
+
+    // --- Swarm mode chip (ticket 174) ---------------------------------------------------
+
+    @Test
+    fun `the chip seeds from the first agent frame and a send carries it as swarm_mode true`() = runBlocking {
+        viewModel.onScreenStarted()
+        assertFalse(viewModel.uiState.value.swarmMode)
+        val socket = awaitServerSocket()
+
+        socket.send(TranscriptFrames.agentFrame(swarmMode = true))
+        awaitState(viewModel.uiState) { it.swarmMode }
+
+        viewModel.onInputChange("review these three files")
+        viewModel.onSend()
+        val body = awaitRequest("/prompts", method = "POST").body!!.utf8()
+        assertTrue(body, body.contains(""""swarm_mode":true"""))
+    }
+
+    @Test
+    fun `toggling the chip off sends swarm_mode false explicitly`() = runBlocking {
+        // An omitted swarm_mode leaves the server's mode unchanged: off must be said.
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(TranscriptFrames.agentFrame(swarmMode = true))
+        awaitState(viewModel.uiState) { it.swarmMode }
+
+        viewModel.onSwarmModeToggled()
+        assertFalse(viewModel.uiState.value.swarmMode)
+        viewModel.onInputChange("just one agent")
+        viewModel.onSend()
+
+        val body = awaitRequest("/prompts", method = "POST").body!!.utf8()
+        assertTrue(body, body.contains(""""swarm_mode":false"""))
+    }
+
+    @Test
+    fun `an unsent toggle survives agent frames, then the chip follows the server again`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(TranscriptFrames.agentFrame(swarmMode = false))
+        socket.send(TranscriptFrames.usageFrame(10, 262144))
+        awaitState(viewModel.uiState) { it.contextUsage != null }
+
+        viewModel.onSwarmModeToggled()
+        assertTrue(viewModel.uiState.value.swarmMode)
+        // The server has not seen the toggle yet (it rides the next prompt): its
+        // still-off report must not flip the chip back.
+        socket.send(TranscriptFrames.agentFrame(status = "running", swarmMode = false))
+        awaitState(viewModel.uiState) { it.agentActiveSince != null }
+        delay(200)
+        assertTrue(viewModel.uiState.value.swarmMode)
+
+        viewModel.onInputChange("fan this out")
+        viewModel.onSend()
+        val body = awaitRequest("/prompts", method = "POST").body!!.utf8()
+        assertTrue(body, body.contains(""""swarm_mode":true"""))
+        awaitState(viewModel.uiState) { !it.isSending }
+
+        // Sent: the server's reports are authoritative again — a later frame reporting
+        // swarm mode off (left by the engine or another client) is adopted.
+        socket.send(TranscriptFrames.agentFrame(swarmMode = false))
+        awaitState(viewModel.uiState) { !it.swarmMode }
     }
 
     // --- Compact session (ticket 056) ---------------------------------------------------

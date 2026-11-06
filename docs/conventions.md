@@ -61,7 +61,9 @@
   state frames (decoded from the frame text — their fields sit beside `type`;
   a child agent's are ignored until 182): `agent` → `SessionModelUpdated`
   (only when it names a model or effort — a model-less session omits both, a
-  blank is "nothing said"), `SessionPermissionUpdated` and `AgentBusyUpdated`
+  blank is "nothing said"), `SessionPermissionUpdated`,
+  `SessionSwarmModeUpdated` (ticket 174, `swarm_mode`; absent = nothing said —
+  `plan_mode`/`tower_mode` stay unmapped) and `AgentBusyUpdated`
   (`running`/`idle`); `usage` → `ContextUsageUpdated` only with a positive
   `max_context_tokens` (absent/zero = unknown, never a 0/0 ring). They precede
   the subscribe ack, so the first pair is the chat's seed — there is no REST
@@ -167,7 +169,12 @@
   self-heals via the per-prompt `permission_mode` stamp. The `agent` frame's
   `permission_mode` (ticket 177, after 165's live variant) follows the same
   guard for the chip — read-only, never written through; the ViewModel shows
-  the stored pick on every start, ahead of the frame), `ChatMessageMapper`
+  the stored pick on every start, ahead of the frame. The composer's swarm chip
+  (ticket 174) is NOT stored at all: `UiState.swarmMode` seeds from the
+  subscribe's first `agent` frame and follows every later one unless an unsent
+  toggle is in force (`pendingSwarmPick`, cleared by the send that carries it);
+  `ChatApi.postPrompt` ALWAYS sends `swarm_mode` — true and false alike, since an
+  omitted field leaves the server's mode unchanged — on sends and steers), `ChatMessageMapper`
   (DTO→domain; a tool result's `output` goes through ONE parse, `toolOutput` →
   `ToolOutput(text, media)` (ticket 184 — server 2.5.1's media results), shared by
   the history `tool_result` part, the REST transcript tool frame and the live fold:
@@ -535,7 +542,7 @@
   question payload; card id = the interaction id), each guarded against a live
   event overtaking the fetch. A turn event landing mid-fetch (a resync with the
   socket open) keeps the live tail as-is. The bound model/effort, permission
-  mode, busy state, ring and todo list are not part of the cold start: the
+  mode, swarm mode, busy state, ring and todo list are not part of the cold start: the
   subscribe's `agent`/`usage` frames seed them (ticket 177), and its `todo` frame
   the widget (ticket 178).
   The fetch is cached per session only until the session is LEFT:

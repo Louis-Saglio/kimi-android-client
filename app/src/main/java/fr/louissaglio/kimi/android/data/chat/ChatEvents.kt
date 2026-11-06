@@ -224,6 +224,15 @@ sealed interface SessionEvent {
         override val agentId: String = MAIN_AGENT_ID,
     ) : SessionEvent, AgentScopedEvent
 
+    /** The session's swarm mode as the server reports it (the `agent` frame's
+     * `swarm_mode` — ticket 174): re-sent on every change, including the one a prompt's
+     * own `swarm_mode` field makes and a profile write from another client. The
+     * composer's swarm chip follows it unless an unsent local toggle is in force. */
+    data class SessionSwarmModeUpdated(
+        val swarmMode: Boolean,
+        override val agentId: String = MAIN_AGENT_ID,
+    ) : SessionEvent, AgentScopedEvent
+
     /** The agent's busy state (the `agent` frame's `status` — ticket 177, replacing
      * 148's phase variant of the removed `agent.status.updated`): [running] while a turn
      * or background work keeps the agent busy, false on `idle`. An unknown status

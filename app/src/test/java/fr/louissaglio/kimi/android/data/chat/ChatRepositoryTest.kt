@@ -653,7 +653,7 @@ class ChatRepositoryTest {
         assertEquals("POST", request.method)
         assertEquals("/api/v1/sessions/session_1/prompts", request.target)
         assertEquals(
-            """{"content":[{"type":"text","text":"Reply with exactly: ok"}]}""",
+            """{"content":[{"type":"text","text":"Reply with exactly: ok"}],"swarm_mode":false}""",
             request.body!!.utf8(),
         )
     }
@@ -698,7 +698,7 @@ class ChatRepositoryTest {
         val prompt = server.takeRequest()
         assertEquals("POST", prompt.method)
         assertEquals("/api/v1/sessions/session_1/prompts", prompt.target)
-        assertEquals("""{"content":[{"type":"text","text":"Stop counting"}]}""", prompt.body!!.utf8())
+        assertEquals("""{"content":[{"type":"text","text":"Stop counting"}],"swarm_mode":false}""", prompt.body!!.utf8())
         val steer = server.takeRequest()
         assertEquals("POST", steer.method)
         assertEquals("/api/v1/sessions/session_1/prompts:steer", steer.target)
@@ -798,7 +798,7 @@ class ChatRepositoryTest {
         assertEquals("/api/v1/config", server.takeRequest().target)
         val prompt = server.takeRequest()
         assertEquals(
-            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/k3"}""",
+            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/k3","swarm_mode":false}""",
             prompt.body!!.utf8(),
         )
     }
@@ -823,7 +823,7 @@ class ChatRepositoryTest {
         assertEquals("/api/v1/config", server.takeRequest().target)
         val prompt = server.takeRequest()
         assertEquals(
-            """{"content":[{"type":"text","text":"Stop counting"}],"model":"kimi-code/k3"}""",
+            """{"content":[{"type":"text","text":"Stop counting"}],"model":"kimi-code/k3","swarm_mode":false}""",
             prompt.body!!.utf8(),
         )
     }
@@ -884,7 +884,7 @@ class ChatRepositoryTest {
         assertTrue(second.isSuccess)
         assertEquals("/api/v1/config", server.takeRequest().target)
         assertEquals(
-            """{"content":[{"type":"text","text":"one"}]}""",
+            """{"content":[{"type":"text","text":"one"}],"swarm_mode":false}""",
             server.takeRequest().body!!.utf8(),
         )
         // Failures are not cached: the next send retries the config fetch.
@@ -983,7 +983,7 @@ class ChatRepositoryTest {
         val prompt = server.takeRequest()
         assertEquals("/api/v1/sessions/session_1/prompts", prompt.target)
         assertEquals(
-            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/kimi-for-coding-highspeed"}""",
+            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/kimi-for-coding-highspeed","swarm_mode":false}""",
             prompt.body!!.utf8(),
         )
     }
@@ -1003,7 +1003,7 @@ class ChatRepositoryTest {
         assertTrue(result.isSuccess)
         val prompt = server.takeRequest()
         assertEquals(
-            """{"content":[{"type":"text","text":"Stop counting"}],"model":"kimi-code/kimi-for-coding-highspeed"}""",
+            """{"content":[{"type":"text","text":"Stop counting"}],"model":"kimi-code/kimi-for-coding-highspeed","swarm_mode":false}""",
             prompt.body!!.utf8(),
         )
         assertEquals("/api/v1/sessions/session_1/prompts:steer", server.takeRequest().target)
@@ -1045,7 +1045,7 @@ class ChatRepositoryTest {
         val prompt = server.takeRequest()
         assertEquals("/api/v1/sessions/session_1/prompts", prompt.target)
         assertEquals(
-            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/k3","thinking":"low"}""",
+            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/k3","thinking":"low","swarm_mode":false}""",
             prompt.body!!.utf8(),
         )
     }
@@ -1067,7 +1067,7 @@ class ChatRepositoryTest {
         assertTrue(result.isSuccess)
         val prompt = server.takeRequest()
         assertEquals(
-            """{"content":[{"type":"text","text":"Stop counting"}],"model":"kimi-code/k3","thinking":"max"}""",
+            """{"content":[{"type":"text","text":"Stop counting"}],"model":"kimi-code/k3","thinking":"max","swarm_mode":false}""",
             prompt.body!!.utf8(),
         )
         assertEquals("/api/v1/sessions/session_1/prompts:steer", server.takeRequest().target)
@@ -1083,7 +1083,7 @@ class ChatRepositoryTest {
 
         assertTrue(result.isSuccess)
         assertEquals(
-            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/k3"}""",
+            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/k3","swarm_mode":false}""",
             server.takeRequest().body!!.utf8(),
         )
     }
@@ -1101,7 +1101,7 @@ class ChatRepositoryTest {
 
         assertTrue(result.isSuccess)
         assertEquals(
-            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/kimi-for-coding"}""",
+            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/kimi-for-coding","swarm_mode":false}""",
             server.takeRequest().body!!.utf8(),
         )
     }
@@ -1121,7 +1121,7 @@ class ChatRepositoryTest {
         val prompt = server.takeRequest()
         assertEquals("/api/v1/sessions/session_1/prompts", prompt.target)
         assertEquals(
-            """{"content":[{"type":"text","text":"hello"}],"permission_mode":"manual"}""",
+            """{"content":[{"type":"text","text":"hello"}],"permission_mode":"manual","swarm_mode":false}""",
             prompt.body!!.utf8(),
         )
     }
@@ -1143,7 +1143,7 @@ class ChatRepositoryTest {
         assertEquals("/api/v1/config", server.takeRequest().target)
         val prompt = server.takeRequest()
         assertEquals(
-            """{"content":[{"type":"text","text":"Stop counting"}],"permission_mode":"yolo"}""",
+            """{"content":[{"type":"text","text":"Stop counting"}],"permission_mode":"yolo","swarm_mode":false}""",
             prompt.body!!.utf8(),
         )
         assertEquals("/api/v1/sessions/session_1/prompts:steer", server.takeRequest().target)
@@ -1161,9 +1161,51 @@ class ChatRepositoryTest {
         assertTrue(result.isSuccess)
         assertEquals("/api/v1/config", server.takeRequest().target)
         assertEquals(
-            """{"content":[{"type":"text","text":"hello"}]}""",
+            """{"content":[{"type":"text","text":"hello"}],"swarm_mode":false}""",
             server.takeRequest().body!!.utf8(),
         )
+    }
+
+    @Test
+    fun `sendPrompt carries swarm_mode true when the chip is on and false when off`() = runBlocking {
+        // Ticket 174: the server applies swarm_mode before enqueueing and an omitted
+        // field leaves the mode unchanged — so false is sent explicitly, never dropped.
+        enqueueConfigWithoutDefaultModel()
+        enqueuePromptAck()
+        enqueuePromptAck()
+
+        assertTrue(repository.sendPrompt(settings(), "session_1", "fan out", swarmMode = true).isSuccess)
+        assertTrue(repository.sendPrompt(settings(), "session_1", "back to one", swarmMode = false).isSuccess)
+
+        assertEquals("/api/v1/config", server.takeRequest().target)
+        assertEquals(
+            """{"content":[{"type":"text","text":"fan out"}],"swarm_mode":true}""",
+            server.takeRequest().body!!.utf8(),
+        )
+        assertEquals(
+            """{"content":[{"type":"text","text":"back to one"}],"swarm_mode":false}""",
+            server.takeRequest().body!!.utf8(),
+        )
+    }
+
+    @Test
+    fun `steer carries the swarm chip on its posted prompt`() = runBlocking {
+        enqueueConfigWithoutDefaultModel()
+        enqueuePromptAck()
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"steered":true,"prompt_ids":["msg_1"]},"request_id":"01KX"}""",
+            ),
+        )
+
+        assertTrue(repository.steer(settings(), "session_1", "split it", swarmMode = true).isSuccess)
+
+        assertEquals("/api/v1/config", server.takeRequest().target)
+        assertEquals(
+            """{"content":[{"type":"text","text":"split it"}],"swarm_mode":true}""",
+            server.takeRequest().body!!.utf8(),
+        )
+        assertEquals("/api/v1/sessions/session_1/prompts:steer", server.takeRequest().target)
     }
 
     @Test
@@ -1498,7 +1540,7 @@ class ChatRepositoryTest {
             """{"content":[""" +
                 """{"type":"image","source":{"kind":"file","file_id":"f_img"}},""" +
                 """{"type":"file","file_id":"f_txt","name":"notes.txt","media_type":"text/plain","size":27},""" +
-                """{"type":"text","text":"look at these"}]}""",
+                """{"type":"text","text":"look at these"}],"swarm_mode":false}""",
             server.takeRequest().body!!.utf8(),
         )
     }
@@ -1518,7 +1560,7 @@ class ChatRepositoryTest {
         assertTrue(result.isSuccess)
         assertEquals("/api/v1/config", server.takeRequest().target)
         assertEquals(
-            """{"content":[{"type":"file","file_id":"f_txt","name":"notes.txt","media_type":"text/plain","size":27}]}""",
+            """{"content":[{"type":"file","file_id":"f_txt","name":"notes.txt","media_type":"text/plain","size":27}],"swarm_mode":false}""",
             server.takeRequest().body!!.utf8(),
         )
     }
@@ -1533,7 +1575,7 @@ class ChatRepositoryTest {
         assertTrue(result.isSuccess)
         assertEquals("/api/v1/config", server.takeRequest().target)
         assertEquals(
-            """{"content":[{"type":"text","text":"hello"}]}""",
+            """{"content":[{"type":"text","text":"hello"}],"swarm_mode":false}""",
             server.takeRequest().body!!.utf8(),
         )
     }

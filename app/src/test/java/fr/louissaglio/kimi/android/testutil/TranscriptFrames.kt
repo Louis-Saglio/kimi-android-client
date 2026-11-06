@@ -39,13 +39,14 @@ object TranscriptFrames {
         permissionMode: String? = "auto",
         agentId: String = "main",
         sessionId: String = "session_1",
+        swarmMode: Boolean = false,
     ): String =
         """{"type":"agent","session_id":"$sessionId","agent_id":"$agentId",""" +
             """"event_created_at":"2026-11-04T19:25:52.678Z","status":"$status",""" +
             (model?.let { """"model":"$it",""" } ?: "") +
             (thinking?.let { """"thinking":"$it",""" } ?: "") +
             (permissionMode?.let { """"permission_mode":"$it",""" } ?: "") +
-            """"plan_mode":false,"swarm_mode":false,"tower_mode":false}"""
+            """"plan_mode":false,"swarm_mode":$swarmMode,"tower_mode":false}"""
 
     /** The flat `usage` state frame (ticket 177); a null [maxContextTokens] omits the
      * optional limit. */

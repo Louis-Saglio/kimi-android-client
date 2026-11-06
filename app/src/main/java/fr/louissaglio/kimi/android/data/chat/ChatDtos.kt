@@ -200,8 +200,8 @@ data class WsFrame(
  * again on every change, replacing the client copy wholesale. [status] is
  * `idle`/`running` (running while a turn or background work keeps the agent busy);
  * [model]/[thinking] are omitted on a model-less session; [permissionMode] is the
- * effective `manual`/`yolo`/`auto`. The mode booleans (`plan_mode`/`swarm_mode`/
- * `tower_mode`) are not consumed here.
+ * effective `manual`/`yolo`/`auto`. Of the mode booleans only [swarmMode] is consumed
+ * (ticket 174 — the composer's swarm chip); `plan_mode`/`tower_mode` are ignored.
  */
 @Serializable
 data class AgentStateFrame(
@@ -210,6 +210,7 @@ data class AgentStateFrame(
     val model: String? = null,
     val thinking: String? = null,
     @SerialName("permission_mode") val permissionMode: String? = null,
+    @SerialName("swarm_mode") val swarmMode: Boolean? = null,
 )
 
 /**
