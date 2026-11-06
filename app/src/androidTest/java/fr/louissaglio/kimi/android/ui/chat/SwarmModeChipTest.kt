@@ -18,19 +18,20 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** The composer's swarm chip (ticket 174): a toggle with a stable test tag and the
- * "Swarm mode" content description (icon-only since ticket 185), and a send made
- * while it is on hands `swarmMode = true` to the send path (the fake below stands in for
- * `ChatViewModel.onSend` → `ChatRepository.sendPrompt`, whose body is covered by the
- * JVM tests). */
+/** The composer's swarm chip (ticket 174): a Switch-role toggle found by its "Swarm
+ * mode" content description (icon-only since ticket 185), plus the stable test tag
+ * ticket 174 promised. The chip's state reaching the prompt (`swarm_mode`) is not a
+ * Compose concern — `ChatInputBar.onSend` carries no swarm argument — and is covered on
+ * the JVM: `ChatViewModelTest` ("…a send carries it as swarm_mode true", "toggling the
+ * chip off sends swarm_mode false explicitly") and `ChatRepositoryTest` ("sendPrompt
+ * carries swarm_mode true…"). */
 @RunWith(AndroidJUnit4::class)
 class SwarmModeChipTest {
 
     @get:Rule
     val composeTestRule = createComposeRule()
 
-    /** Every send's swarm flag, in order — the repository fake's record. */
-    private val sentSwarmModes = mutableListOf<Boolean>()
+    private var sends = 0
 
     private fun inputBar(initialSwarmMode: Boolean = false) {
         composeTestRule.setContent {
@@ -52,7 +53,7 @@ class SwarmModeChipTest {
                     onPermissionClick = {},
                     onSwarmModeToggle = { swarmMode = !swarmMode },
                     onTextChange = {},
-                    onSend = { sentSwarmModes += swarmMode },
+                    onSend = { sends++ },
                     onStop = {},
                     onAttach = {},
                     onAttachmentRemoved = {},
@@ -61,37 +62,42 @@ class SwarmModeChipTest {
         }
     }
 
+    private fun chip() = composeTestRule.onNodeWithContentDescription("Swarm mode")
+
     @Test
-    fun chipExposesItsTagAndContentDescriptionAndToggles() {
+    fun chipIsAnAccessibleToggleWithItsStableTag() {
         inputBar()
 
-        composeTestRule.onNodeWithContentDescription("Swarm mode").assertIsDisplayed()
-        val chip = composeTestRule.onNodeWithTag(SWARM_MODE_CHIP_TAG)
-        chip.assertIsOff()
+        chip().assertIsDisplayed()
+        chip().assertIsOff()
 
-        chip.performClick()
-        chip.assertIsOn()
+        chip().performClick()
+        chip().assertIsOn()
 
-        chip.performClick()
-        chip.assertIsOff()
+        chip().performClick()
+        chip().assertIsOff()
+        // Ticket 174's stable tag stays on the same node.
+        composeTestRule.onNodeWithTag(SWARM_MODE_CHIP_TAG).assertIsOff()
     }
 
+    /** Wiring only: toggling never sends, and Send is still one onSend with the chip
+     * on. The swarm flag on that send is the JVM tests' (see the class KDoc). */
     @Test
-    fun aSendWithTheChipOnCarriesSwarmModeTrue() {
+    fun togglingTheChipNeverSendsAndSendInvokesOnSendOnce() {
         inputBar()
 
-        composeTestRule.onNodeWithTag(SWARM_MODE_CHIP_TAG).performClick()
-        composeTestRule.onNodeWithContentDescription("Send").performClick()
-        composeTestRule.onNodeWithTag(SWARM_MODE_CHIP_TAG).performClick()
-        composeTestRule.onNodeWithContentDescription("Send").performClick()
+        chip().performClick()
+        composeTestRule.runOnIdle { assertEquals(0, sends) }
 
-        assertEquals(listOf(true, false), sentSwarmModes)
+        composeTestRule.onNodeWithContentDescription("Send").performClick()
+        composeTestRule.runOnIdle { assertEquals(1, sends) }
+        chip().assertIsOn()
     }
 
     @Test
     fun chipStartsOnWhenTheSessionIsInSwarmMode() {
         inputBar(initialSwarmMode = true)
 
-        composeTestRule.onNodeWithTag(SWARM_MODE_CHIP_TAG).assertIsOn()
+        chip().assertIsOn()
     }
 }

@@ -1905,16 +1905,19 @@ class ToolRowTest {
         }
 
         // Collapsed: only the small indicator, no media yet.
-        composeTestRule.onNodeWithTag("toolMediaIndicator").assertContentDescriptionEquals("1 image, 1 video")
-        composeTestRule.onNodeWithTag("toolMediaImage").assertDoesNotExist()
+        composeTestRule.onNodeWithContentDescription("1 image, 1 video").assertIsDisplayed()
+        composeTestRule.onNodeWithTag(TOOL_MEDIA_IMAGE_TAG).assertDoesNotExist()
+        composeTestRule.onNodeWithContentDescription("Video").assertDoesNotExist()
 
-        // Empty text with only media still expands to the media.
+        // Empty text with only media still expands to the media. The image container
+        // has no user-visible semantics while its thumbnail is unloaded (the loader
+        // below returns null), hence the shared tag.
         composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
-        composeTestRule.onNodeWithTag("toolMediaImage").assertIsDisplayed()
+        composeTestRule.onNodeWithTag(TOOL_MEDIA_IMAGE_TAG).assertIsDisplayed()
         composeTestRule.onNodeWithText("one.png").assertIsDisplayed()
         // Ticket 185 (C8): the video chip reads as one description, not its "▶" glyph.
         composeTestRule.onNodeWithContentDescription("Video").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("toolMediaVideoChip").assertContentDescriptionEquals("Video")
+        composeTestRule.onNodeWithText("▶ video").assertDoesNotExist()
         composeTestRule.waitForIdle()
         // The video is never handed to the image loader.
         assertEquals(listOf<String?>("f_img"), requested)
@@ -1954,6 +1957,10 @@ class ToolRowTest {
     fun resultWithoutMediaShowsNoIndicator() {
         toolRow(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, preview = "ls", output = "a.txt"))
 
-        composeTestRule.onNodeWithTag("toolMediaIndicator").assertDoesNotExist()
+        // The row itself is present, so the absence checks below are not vacuous.
+        composeTestRule.onNodeWithText("ls").assertIsDisplayed()
+        // No indicator description of either kind ("1 image", "2 videos", …).
+        composeTestRule.onNodeWithContentDescription("image", substring = true).assertDoesNotExist()
+        composeTestRule.onNodeWithContentDescription("video", substring = true).assertDoesNotExist()
     }
 }

@@ -35,6 +35,7 @@ import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.concurrent.thread
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -555,9 +556,12 @@ class SessionSocketTest {
             }
             try {
                 val chunks = CopyOnWriteArrayList<TaskOutputChunk>()
-                val watcher = launch { socket.observeTaskOutput("session_1", "main", "bash-1").collect { chunks += it } }
+                // UNDISPATCHED: the collector subscribes to the replay-less chunk flow
+                // before launch returns, so no chunk can arrive ahead of it.
+                val watcher = launch(start = CoroutineStart.UNDISPATCHED) {
+                    socket.observeTaskOutput("session_1", "main", "bash-1").collect { chunks += it }
+                }
                 awaitCondition { socket.observeConnection("session_1").value != null }
-                delay(50) // let the watcher subscribe
 
                 val result = socket.watchTask("session_1", "main", "bash-1", sinceOffset = 42, tailBytes = 32768)
 

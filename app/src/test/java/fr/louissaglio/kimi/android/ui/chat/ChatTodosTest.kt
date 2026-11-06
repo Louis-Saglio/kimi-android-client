@@ -4,7 +4,6 @@ import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames
 import fr.louissaglio.kimi.android.testutil.awaitState
 import java.util.concurrent.TimeUnit
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -78,14 +77,13 @@ class ChatTodosTest : ChatViewModelTestBase() {
     fun `a cold open shows the list of the frame preceding the ack, and no TodoList row`() = runBlocking {
         // The history page carries a TodoList call whose input names a STALE list: it
         // renders no row and derives nothing.
-        messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
-            """{"id":"msg_1","role":"user","content":[{"type":"text","text":"plan it"}]},""" +
+        val staleTodoItems = """{"id":"msg_1","role":"user","content":[{"type":"text","text":"plan it"}]},""" +
             """{"id":"msg_2","role":"assistant","content":[{"type":"text","text":"Planning."},""" +
             """{"type":"tool_use","tool_call_id":"todo_1","tool_name":"TodoList",""" +
             """"input":{"todos":[{"title":"stale","status":"pending"}]}}]},""" +
             """{"id":"msg_3","role":"tool","content":[{"type":"tool_result","tool_call_id":"todo_1",""" +
-            """"output":"Todo list updated.","is_error":false}]}""" +
-            """],"has_more":false},"request_id":"r"}"""
+            """"output":"Todo list updated.","is_error":false}]}"""
+        messagesBody = """{"code":0,"msg":"success","data":{"items":[$staleTodoItems],"has_more":false},"request_id":"r"}"""
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
 
@@ -100,11 +98,16 @@ class ChatTodosTest : ChatViewModelTestBase() {
         assertTrue(viewModel.uiState.value.toolNames().none { it == "TodoList" })
 
         // A later canonical history replace (the turn-end refetch) leaves the list alone.
+        // The refetched page adds msg_4, so its arrival in the state proves the replace
+        // was applied before the assertions.
+        messagesBody = """{"code":0,"msg":"success","data":{"items":[$staleTodoItems,""" +
+            """{"id":"msg_4","role":"assistant","content":[{"type":"text","text":"Planned."}]}""" +
+            """],"has_more":false},"request_id":"r"}"""
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
         socket.send(turnStartedFrame())
         socket.send(turnEndedFrame(reason = "completed"))
         awaitRequest("/messages")
-        delay(200)
+        awaitState(viewModel.uiState) { it.items?.any { item -> item.id == "msg_4" } == true }
         assertEquals(expected, viewModel.uiState.value.todos)
         assertTrue(viewModel.uiState.value.toolNames().none { it == "TodoList" })
     }

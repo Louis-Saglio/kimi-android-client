@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 import kotlinx.serialization.json.Json
 import mockwebserver3.MockWebServer
 import okhttp3.OkHttpClient
@@ -197,7 +198,10 @@ class OkHttpSessionListSocketTest {
                 // The next page landed; session_1 left the set (mode switch), but the
                 // observed set only grows for the life of the connection.
                 sessionIds.value = linkedSetOf("session_3")
-                delay(100)
+                // The socket's id collector runs on this runBlocking event loop: the
+                // assignment above queued its resumption, so yielding once lets it add
+                // session_3 before the frames below are even sent. No timing margin.
+                yield()
                 ws.send(metaUpdatedFrame("session_3", "Paged in"))
                 ws.send(metaUpdatedFrame("session_1", "Still observed"))
                 awaitCondition { events.size == 3 }

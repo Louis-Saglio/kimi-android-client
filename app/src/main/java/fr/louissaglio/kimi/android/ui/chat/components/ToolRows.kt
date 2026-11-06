@@ -48,7 +48,6 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -1010,9 +1009,7 @@ private fun ToolMediaIndicator(media: List<ToolMedia>, tint: Color) {
         videos.takeIf { it > 0 }?.let { if (it == 1) "1 video" else "$it videos" },
     ).joinToString(", ")
     Row(
-        modifier = Modifier
-            .semantics(mergeDescendants = true) { contentDescription = description }
-            .testTag("toolMediaIndicator"),
+        modifier = Modifier.semantics(mergeDescendants = true) { contentDescription = description },
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(2.dp),
     ) {
@@ -1038,7 +1035,7 @@ private fun ToolMediaBlock(
         media.forEach { item ->
             val image = item.toImagePart()
             if (image != null) {
-                Column(Modifier.testTag("toolMediaImage")) {
+                Column(Modifier.testTag(TOOL_MEDIA_IMAGE_TAG)) {
                     HistoryImageThumbnail(
                         image = image,
                         loadImageBytes = loadImageBytes,
@@ -1062,7 +1059,6 @@ private fun ToolMediaBlock(
                     shape = MaterialTheme.shapes.small,
                     // One description instead of the decorative "▶" glyph's text.
                     modifier = Modifier.clearAndSetSemantics {
-                        testTag = "toolMediaVideoChip"
                         contentDescription = item.name?.let { "Video $it" } ?: "Video"
                     },
                 ) {
@@ -1078,6 +1074,11 @@ private fun ToolMediaBlock(
         }
     }
 }
+
+/** Test tag of one tool-result image's container (thumbnail + name caption): a
+ * thumbnail still loading or failed has no description of its own, so no user-visible
+ * semantics identifies it. Shared with the instrumented tests (ticket 185). */
+internal const val TOOL_MEDIA_IMAGE_TAG = "toolMediaImage"
 
 /** Where an `agent_call` spawn row's tap navigates (ticket 157): the spawn's own deep
  * link — the sub-agent page for a foreground spawn (the 045 link, learned from

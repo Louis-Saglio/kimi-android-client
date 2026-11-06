@@ -8,7 +8,6 @@ import androidx.compose.ui.test.assertWidthIsAtLeast
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
-import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -74,7 +73,7 @@ class ComposerLayoutTest {
         inputBar(isWorking = false)
 
         composeTestRule.onNodeWithContentDescription("Send").assertRightEdgeWithinRoot()
-        composeTestRule.onNodeWithTag(SWARM_MODE_CHIP_TAG).assertRightEdgeWithinRoot()
+        composeTestRule.onNodeWithContentDescription("Swarm mode").assertRightEdgeWithinRoot()
     }
 
     @Test
@@ -83,7 +82,7 @@ class ComposerLayoutTest {
 
         composeTestRule.onNodeWithContentDescription("Stop").assertRightEdgeWithinRoot()
         composeTestRule.onNodeWithText("Steer").assertRightEdgeWithinRoot()
-        composeTestRule.onNodeWithTag(SWARM_MODE_CHIP_TAG).assertRightEdgeWithinRoot()
+        composeTestRule.onNodeWithContentDescription("Swarm mode").assertRightEdgeWithinRoot()
     }
 
     /** Ticket 185 (C1): on a 360dp phone the swarm chip must not starve the model chip
@@ -94,14 +93,14 @@ class ComposerLayoutTest {
         inputBar(isWorking = false, width = 360.dp)
 
         composeTestRule.onNodeWithContentDescription("Model:", substring = true).assertWidthIsAtLeast(48.dp)
-        composeTestRule.onNodeWithTag(SWARM_MODE_CHIP_TAG).assertWidthIsAtLeast(48.dp)
+        composeTestRule.onNodeWithContentDescription("Swarm mode").assertWidthIsAtLeast(48.dp)
     }
 
     @Test
     fun onA360dpPhoneMidTurnTheChipsKeepTheirTouchTargets() {
         inputBar(isWorking = true, width = 360.dp)
 
-        composeTestRule.onNodeWithTag(SWARM_MODE_CHIP_TAG).assertWidthIsAtLeast(48.dp)
+        composeTestRule.onNodeWithContentDescription("Swarm mode").assertWidthIsAtLeast(48.dp)
         composeTestRule.onNodeWithContentDescription("Permission mode:", substring = true).assertWidthIsAtLeast(48.dp)
         composeTestRule.onNodeWithContentDescription("Context usage:", substring = true).assertWidthIsAtLeast(48.dp)
     }

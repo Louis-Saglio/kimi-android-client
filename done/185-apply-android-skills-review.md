@@ -329,3 +329,93 @@ run.
   `JobOutputBlockTest`, `SwarmModeChipTest` and `ToolRowTest` cases only compile here.
   The 360dp mid-turn width assertion relies on the layout arithmetic above (a margin
   of about 5–10dp at font scale 1.0), so check it first on the runner.
+
+## Implementation notes — 4-tests
+
+*2026-11-06.* Skills loaded: `android-testing`, `kotlin-coroutines`, `kotlin-flows`,
+`compose`. One project convention won over a skill rule: the unit tests keep the
+real-I/O harness (`runBlocking`, real-clock `awaitCondition`/`awaitState`, an
+Unconfined Main) instead of android-testing's `runTest` on one shared scheduler, as
+the review's "Conflicts" section and this ticket's Out of scope say. The fixes make
+that harness honest where it was not; they do not replace it. Only tests changed,
+plus the media-row test tags in `ToolRows.kt`.
+
+- **D1 — done as suggested, plus a sentinel.** `opening a running job streams its
+  output with one watch and no poll` now advances the Main test scheduler
+  (`mainDispatcher`, already a field since B2) by 2.5 s and runs it, so any
+  `viewModelScope` timer really fires. The 2.5 s of wall time is gone. An
+  OkHttp send is asynchronous, so the test then calls `onScreenStopped()`: its
+  `task.unwatch` goes out on the same socket after anything a timer sent, and the
+  test awaits it before asserting one watch, one unwatch (the sentinel's own) and no
+  REST request. Confirmed red: a temporary `delay(2_000)` + `watchTaskOutput` on
+  `viewModelScope` in `onScreenStarted` failed this test (and the B2 retry test).
+  The old `delay(2_500)` would have stayed green. The change was then reverted.
+- **D2 — done as suggested.** `newViewModel` records each instance in
+  `viewModels`, and `connect()` records its collection in `socketJobs`. `tearDown`
+  cancels and joins both in `runBlocking` before `appScope.cancel()`,
+  `server.close()` and `resetMain()`.
+- **D3 — done as suggested.** `SessionSocketTest`'s watcher is launched
+  `CoroutineStart.UNDISPATCHED`. `observeTaskOutput` is a `filter` on the
+  `MutableSharedFlow`, so the collector subscribes before `launch` returns. The
+  `delay(50)` is gone.
+- **D4 — done, second option.** The compaction-failure test drops the `uiState`
+  collector and the `Thread.sleep(100)`. After the `CompactionFailed` effect, it
+  asserts `isCompacting == false` and that no `CompactionDivider` exists. The
+  comment now says it proves the end state only: a conflated `StateFlow` collector
+  could never prove "never entered". `delay(100)` would only have made a
+  claim run that it could not prove.
+- **D5 — done.**
+  - `TranscriptColdStartTest` (one pending approval seen three times): a trailing
+    `taskFrame(taskState("bash-sentinel"))` is awaited (`jobs.isNotEmpty()`) in
+    place of `delay(300)`.
+  - `ChatJobsTest` (to background): a trailing `bash-sentinel-2` task frame is
+    awaited in place of `delay(150)`, and the row list must be exactly
+    `[bash-sentinel, agent-fg, bash-sentinel-2]`. I also removed the `delay(100)` in
+    `a background question task is never rendered as a job`: it came after an
+    already-awaited sentinel and added nothing.
+  - `ChatTodosTest` (cold open): before the turn ends, `messagesBody` switches to
+    the same page plus `msg_4`. The test awaits `msg_4` in the state, which only the
+    refetched page produces, in place of `delay(200)`.
+  - `SearchViewModelTest` (disabled 50001): it consumes the first request, then
+    checks `isLoading`/`isLoadingMore` straight after each of
+    `onRetry`/`onSearch`/`onEndReached`. A load flips them at launch, synchronously
+    under the Unconfined Main. It ends with `assertNull(server.takeRequest(200 ms))`.
+  - `OkHttpSessionListSocketTest` (newly loaded ids): `delay(100)` became `yield()`,
+    with a different reason than the review gave. On inspection, the socket's id
+    collector is an `UNDISPATCHED` child running on the test's `runBlocking` event
+    loop. The `sessionIds` assignment queues its resumption, so one `yield()`
+    applies the ids before the frames are even sent. No production "ids applied"
+    signal is needed, and the old delay was not racy either, just slower.
+  - Not touched, outside the review's list: the `delay(200)` settles in
+    `OkHttpSessionListSocketTest`'s ping/reconnect tests, and the other
+    `delay(100/150)` negatives in `JobDetailViewModelTest`.
+- **D6 — done as suggested.** `SwarmModeChipTest` and `ComposerLayoutTest` now
+  click, check on/off and measure bounds through
+  `onNodeWithContentDescription("Swarm mode")`. C1 renamed the description from the
+  review's "Toggle swarm mode". One
+  `onNodeWithTag(SWARM_MODE_CHIP_TAG).assertIsOff()` keeps ticket 174's stable tag
+  covered.
+- **D7 — done.** The indicator is selected by `"1 image, 1 video"`.
+  `resultWithoutMediaShowsNoIndicator` first asserts the row's `"ls"` preview is
+  displayed, so the absence checks are not vacuous, then asserts no `"image"` and no
+  `"video"` description (substring). The video chip's tag lookup is dropped. Since C8
+  it is `clearAndSetSemantics`, so the "▶ video" text is not in the semantics: the
+  test asserts the `"Video"` description, and that `"▶ video"` text does not exist.
+  In production, the `toolMediaIndicator` and `toolMediaVideoChip` tags are deleted
+  (nothing else used them). The image container keeps a tag, because an unloaded
+  thumbnail has no semantics of its own. That tag is now
+  `internal const val TOOL_MEDIA_IMAGE_TAG` (`ToolRows.kt`), shared with the test.
+- **D8 — done, turned into a wiring check.** `aSendWithTheChipOnCarriesSwarmModeTrue`
+  became `togglingTheChipNeverSendsAndSendInvokesOnSendOnce` (a tap on the chip
+  sends nothing, and Send is one `onSend`, with the chip still on). The class KDoc no
+  longer claims that the swarm flag reaches the send. It points to the JVM tests that
+  cover it (`ChatViewModelTest` swarm-chip cases, `ChatRepositoryTest`
+  "sendPrompt carries swarm_mode…").
+- Docs: docs/conventions.md has a new Tests bullet with the harness's rules: the
+  virtual Main clock for `viewModelScope` timers, trailing sentinels instead of
+  margins, `UNDISPATCHED` SharedFlow collectors, cancel-and-join teardown, and
+  semantics-first selectors with shared `internal const` tags.
+- Gate: `./gradlew :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin` is
+  green (1098 tests, 0 failures, 1 skipped; forced re-run). The instrumented suite
+  was not run in this step: the updated `SwarmModeChipTest`, `ComposerLayoutTest` and
+  `ToolRowTest` media cases only compile here.

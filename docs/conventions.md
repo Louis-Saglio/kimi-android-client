@@ -762,3 +762,31 @@
   recomposition/layout churn rather than parse cost — the value stays
   (no regression measured; phone-frame eyeball is Louis's). The
   window is injectable (`streamCoalesceWindowMillis`; 0 in unit tests).
+- Tests (ticket 185 tightened these): the real-I/O unit harness (a real socket and
+  `MockWebServer`, `runBlocking`, real-clock `awaitCondition`/`awaitState` from
+  `testutil/Await.kt`) is a deliberate choice over `runTest` — the socket does real
+  I/O. Its rules:
+  - `Dispatchers.Main` is an `UnconfinedTestDispatcher` kept in a field, so every
+    `viewModelScope` timer runs on ITS virtual clock: nothing advances it under
+    `runBlocking`, so a real-time `delay` never fires one. A test about a timer (a
+    poll that must not exist, a control's timeout) drives it with
+    `main.scheduler.advanceTimeBy(…)` + `runCurrent()` (`JobDetailViewModelTest`).
+  - A negative assertion ("nothing else happened") ends on a trailing sentinel on
+    the same ordered channel and awaits it — a later task frame
+    (`bash-sentinel`), a later main todo frame, a refetched page carrying a new
+    item, an unwatch sent after the timer window — never on a `delay`/`Thread.sleep`
+    margin. Where the call under test launches on the Unconfined Main, a state flag
+    it flips at launch (`isLoading`) is checked synchronously instead.
+  - A collector of a replay-less `SharedFlow` is launched with
+    `CoroutineStart.UNDISPATCHED`, so it is subscribed before `launch` returns.
+  - `tearDown` cancels AND joins every ViewModel scope and socket collection the
+    test started, while Main is still set and the server still up, before
+    `resetMain` (the ticket-049 crash): `ChatViewModelTestBase.startedViewModels`,
+    `JobDetailViewModelTest.viewModels`/`socketJobs`, `SubagentViewModelTest.socketJobs`.
+  - Compose tests select by semantics first (text, content description,
+    `assertIsOn/Off`); a test tag only where no user-visible semantics identifies the
+    node, as an `internal const` shared with production (`SWARM_MODE_CHIP_TAG`,
+    `APPROVAL_PLAN_TAG`, `TOOL_MEDIA_IMAGE_TAG`) — never a duplicated literal, which
+    lets an absence check pass after a rename. A Compose test asserts what the
+    composable owns (render state, emit callbacks); a behaviour behind a callback
+    (e.g. the swarm flag on a send) is the state holder's JVM test.
