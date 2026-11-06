@@ -5,6 +5,8 @@ import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.ackFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.agentFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.appendOp
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames.approvalEntity
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames.approvalFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.opsFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.promptOp
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.resetFrame
@@ -163,7 +165,7 @@ class SessionSocketTest {
             resetFrame(seq = 18),
             ackFrame(),
             opsFrame(promptOp("msg_1", "running"), seq = 19),
-            eventCount = 5,
+            eventCount = 6,
             settleMillis = 100,
         )
 
@@ -174,6 +176,8 @@ class SessionSocketTest {
                 SocketEvent.Event(SessionEvent.SessionPermissionUpdated("auto")),
                 SocketEvent.Event(SessionEvent.AgentBusyUpdated(running = false)),
                 SocketEvent.Event(SessionEvent.ContextUsageUpdated(ContextUsage(22433, 1_000_000))),
+                // The accepted ack resets the approval queue (ticket 171) — empty here.
+                SocketEvent.Event(SessionEvent.ApprovalsReset(emptyList())),
                 SocketEvent.Event(SessionEvent.PromptUpdated("msg_1", PromptStatus.Running)),
             ),
             emitted,
@@ -248,6 +252,104 @@ class SessionSocketTest {
     }
 
     // --- transcript.ops → domain events ------------------------------------------------
+
+    // --- interaction frames (ticket 171) ----------------------------------------------
+
+    @Test
+    fun `a pending approval interaction frame requests the card and every ended outcome resolves it`() = runBlocking {
+        val emitted = runSocketEvents(
+            approvalFrame("approval_1", command = "rm -rf /path/to/project/target"),
+            // No tool_input_display: the action is the summary; a sub-agent asks.
+            approvalFrame("approval_2", toolName = "Write", action = "Writing /tmp/a.txt", command = null, agentId = "agent-0"),
+            approvalFrame("approval_1", status = "ended", outcome = "approved"),
+            approvalFrame("approval_2", status = "ended", outcome = "rejected"),
+            approvalFrame("approval_3", status = "ended", outcome = "cancelled"),
+            eventCount = 5,
+            settleMillis = 100,
+        )
+
+        assertEquals(
+            listOf(
+                SessionEvent.ApprovalRequested("approval_1", "Bash", "rm -rf /path/to/project/target"),
+                SessionEvent.ApprovalRequested("approval_2", "Write", "Writing /tmp/a.txt", agentId = "agent-0"),
+                SessionEvent.ApprovalResolved("approval_1"),
+                SessionEvent.ApprovalResolved("approval_2"),
+                SessionEvent.ApprovalResolved("approval_3"),
+            ),
+            emitted.sessionEvents(),
+        )
+    }
+
+    @Test
+    fun `question interaction frames, foreign sessions and undecodable requests emit nothing`() = runBlocking {
+        val emitted = runSocketEvents(
+            // The verbatim pending question shape (ticket 172's, not consumed here).
+            """{"type":"interaction","session_id":"session_1","agent_id":"main",""" +
+                """"event_created_at":"2026-10-28T19:28:18.527Z","interaction_id":"question_1",""" +
+                """"status":"pending","tool_call_id":"call_q","kind":"question",""" +
+                """"request":{"questions":[{"id":"q_0","question":"Cake or pie?","options":[]}]}}""",
+            approvalFrame("approval_9", sessionId = "session_2"),
+            """{"type":"interaction","session_id":"session_1","agent_id":"main","interaction_id":"approval_8",""" +
+                """"status":"pending","kind":"approval","request":{"tool_name":42}}""",
+            approvalFrame("approval_1"),
+            eventCount = 1,
+            settleMillis = 150,
+        )
+
+        assertEquals(listOf(SessionEvent.ApprovalRequested("approval_1", "Bash", "echo hi")), emitted.sessionEvents())
+    }
+
+    @Test
+    fun `an accepted ack resets the approvals to the reset snapshot's pending ones before the re-sent frames`() = runBlocking {
+        // The verbatim subscribe order (docs/server-api.md, Interactions): the reset's
+        // snapshot holds the full entity list (ended included), then the ack, then the
+        // still-pending ones re-sent as standalone frames. A child's reset carrying the
+        // same session-wide list must not double it.
+        val interactions = "[" + listOf(
+            approvalEntity("approval_0", state = "approved"),
+            approvalEntity("approval_1", command = "rm -rf target"),
+            """{"interactionId":"question_1","interactionKind":"question","state":"pending","request":{"questions":[]}}""",
+        ).joinToString(",") + "]"
+        val emitted = runSocketEvents(
+            resetFrame(seq = 18, interactions = interactions),
+            resetFrame(agentId = "agent-0", seq = 0, interactions = interactions),
+            ackFrame(),
+            approvalFrame("approval_1", command = "rm -rf target"),
+            eventCount = 2,
+            settleMillis = 100,
+        )
+
+        assertEquals(
+            listOf(
+                SessionEvent.ApprovalsReset(listOf(PendingApprovalRequest("approval_1", "Bash", "rm -rf target"))),
+                SessionEvent.ApprovalRequested("approval_1", "Bash", "rm -rf target"),
+            ),
+            emitted.sessionEvents(),
+        )
+    }
+
+    @Test
+    fun `a resumed subscribe without a reset resets the approvals to none, a refused or foreign ack resets nothing`() = runBlocking {
+        // A resume replays ops instead of a reset (no snapshot): the queue empties and
+        // the re-sent pending frames rebuild it. A refused or foreign ack resets nothing.
+        val emitted = runSocketEvents(
+            """{"type":"ack","id":"c_1","code":1,"msg":"invalid subscribe_v2 payload","payload":null}""",
+            ackFrame(accepted = emptyList(), notFound = listOf("session_other")),
+            ackFrame(id = "u1"),
+            ackFrame(),
+            approvalFrame("approval_1"),
+            eventCount = 2,
+            settleMillis = 100,
+        )
+
+        assertEquals(
+            listOf(
+                SessionEvent.ApprovalsReset(emptyList()),
+                SessionEvent.ApprovalRequested("approval_1", "Bash", "echo hi"),
+            ),
+            emitted.sessionEvents(),
+        )
+    }
 
     @Test
     fun `a live prompt round streams the turn, thinking, text and a tool call`() = runBlocking {

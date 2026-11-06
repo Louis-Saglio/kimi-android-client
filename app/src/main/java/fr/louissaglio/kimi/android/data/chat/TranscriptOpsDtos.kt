@@ -25,9 +25,10 @@ data class TranscriptResetPayload(
 )
 
 /** The reset's baseline. [prompts] are the prompt entities (all statuses),
- * [interactions] the interactions in entity form; [items] and [attachments] are kept
- * raw. Nothing here is consumed: the cold start reads the same state from
- * `GET .../transcript` (ticket 176) — a reset only matters as a resume signal. */
+ * [interactions] the session's interactions in entity form (ended ones included);
+ * [items] and [attachments] are kept raw. Only [interactions] is consumed — their
+ * pending approvals feed the subscribe ack's approval reset (ticket 171); the cold
+ * start reads the rest from `GET .../transcript` (ticket 176). */
 @Serializable
 data class TranscriptSnapshotDto(
     val items: List<JsonElement> = emptyList(),

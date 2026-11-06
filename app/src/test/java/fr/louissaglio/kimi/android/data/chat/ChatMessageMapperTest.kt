@@ -18,6 +18,50 @@ class ChatMessageMapperTest {
 
     private val mapper = ChatMessageMapper(Json { ignoreUnknownKeys = true })
 
+    private val json = Json { ignoreUnknownKeys = true }
+
+    @Test
+    fun `pendingApprovals keeps pending approval entities once, by state or pending id, in entity order`() {
+        // transcript.reset.snapshot.interactions holds ended entities too (ticket 171).
+        val entities = json.decodeFromString<List<InteractionEntityDto>>(
+            "[" + listOf(
+                fr.louissaglio.kimi.android.testutil.TranscriptFrames.approvalEntity("approval_0", state = "approved"),
+                fr.louissaglio.kimi.android.testutil.TranscriptFrames.approvalEntity("approval_1", command = "ls", agentId = "agent-0"),
+                fr.louissaglio.kimi.android.testutil.TranscriptFrames.approvalEntity("approval_1", command = "ls", agentId = "agent-0"),
+                """{"interactionId":"question_1","interactionKind":"question","state":"pending","request":{}}""",
+                """{"interactionId":"approval_2","interactionKind":"approval","state":"","request":{"toolName":"Write","action":"Writing a.txt"}}""",
+            ).joinToString(",") + "]",
+        )
+
+        assertEquals(
+            listOf(PendingApprovalRequest("approval_1", "Bash", "ls", agentId = "agent-0")),
+            mapper.pendingApprovals(entities),
+        )
+        assertEquals(
+            listOf(
+                PendingApprovalRequest("approval_1", "Bash", "ls", agentId = "agent-0"),
+                PendingApprovalRequest("approval_2", "Write", "Writing a.txt"),
+            ),
+            mapper.pendingApprovals(entities, pendingIds = setOf("approval_2")),
+        )
+    }
+
+    @Test
+    fun `an approval interaction frame maps by status and ignores questions and unknown statuses`() {
+        fun frame(text: String) = json.decodeFromString<InteractionFrame>(text)
+        val pending = frame(fr.louissaglio.kimi.android.testutil.TranscriptFrames.approvalFrame("approval_1", command = "echo hi"))
+        assertEquals(SessionEvent.ApprovalRequested("approval_1", "Bash", "echo hi"), mapper.toApprovalEvent(pending))
+        listOf("approved", "rejected", "cancelled").forEach { outcome ->
+            val ended = frame(
+                fr.louissaglio.kimi.android.testutil.TranscriptFrames.approvalFrame("approval_1", status = "ended", outcome = outcome),
+            )
+            assertEquals(SessionEvent.ApprovalResolved("approval_1"), mapper.toApprovalEvent(ended))
+        }
+        assertNull(mapper.toApprovalEvent(pending.copy(kind = "question")))
+        assertNull(mapper.toApprovalEvent(pending.copy(status = "expired")))
+        assertNull(mapper.toApprovalEvent(pending.copy(request = null)))
+    }
+
     @Test
     fun `a started bash call's description beats the server display command`() {
         // ticket 095: the live tool-frame path prefers display.command — for Bash a

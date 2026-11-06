@@ -187,7 +187,7 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
             prompts = dto.prompts.filter { it.promptId.isNotBlank() }.map {
                 TranscriptPrompt(it.promptId, promptStatus(it.status))
             },
-            pendingApprovals = waiting.filter { it.interactionKind == "approval" }.mapNotNull(::toPendingApproval),
+            pendingApprovals = pendingApprovals(dto.interactions, pending),
             pendingQuestions = waiting.filter { it.interactionKind == "question" }.mapNotNull(::toPendingQuestion),
         )
     }
@@ -202,6 +202,50 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
         "blocked" -> PromptStatus.Blocked
         "failed" -> PromptStatus.Failed
         else -> null
+    }
+
+    /** The pending approvals of an interaction entity list — the REST transcript's
+     * (pre-filtered against `pending_interactions`) and `transcript.reset.snapshot.
+     * interactions`, which also holds ended entities (docs/server-api.md, Interactions):
+     * approval-kind entities whose state is `pending` or whose id is in [pendingIds],
+     * deduped by interaction id, in entity order. */
+    fun pendingApprovals(
+        entities: List<InteractionEntityDto>,
+        pendingIds: Set<String> = emptySet(),
+    ): List<PendingApprovalRequest> =
+        entities
+            .filter { it.interactionKind == "approval" && (it.state == "pending" || it.interactionId in pendingIds) }
+            .filter { it.interactionId.isNotBlank() }
+            .distinctBy { it.interactionId }
+            .mapNotNull(::toPendingApproval)
+
+    /**
+     * The flat `interaction` frame → the approval card's events (ticket 171): `pending`
+     * → [SessionEvent.ApprovalRequested] (card id = the interaction id, the one the
+     * response route takes; [summary] over the display command, else the action; the
+     * asking agent from the frame), `ended` → [SessionEvent.ApprovalResolved] whatever
+     * the outcome (`approved`/`rejected`/`cancelled`). Question frames are ticket 172's
+     * and map to nothing here, like an unknown status or an undecodable request.
+     */
+    fun toApprovalEvent(frame: InteractionFrame): SessionEvent? {
+        if (frame.kind != "approval" || frame.interactionId.isBlank()) return null
+        return when (frame.status) {
+            "pending" -> {
+                val request = frame.request?.let {
+                    runCatching { json.decodeFromJsonElement<ApprovalInteractionRequestDto>(it) }
+                        .onFailure { e -> Log.w(TAG, "Dropping undecodable approval '${frame.interactionId}'", e) }
+                        .getOrNull()
+                } ?: return null
+                SessionEvent.ApprovalRequested(
+                    approvalId = frame.interactionId,
+                    toolName = request.toolName,
+                    summary = summary(request.toolInputDisplay, request.action),
+                    agentId = frame.agentId.takeIf { it.isNotBlank() } ?: MAIN_AGENT_ID,
+                )
+            }
+            "ended" -> SessionEvent.ApprovalResolved(frame.interactionId)
+            else -> null
+        }
     }
 
     /** A pending approval entity → the card's domain request: the transcript request is

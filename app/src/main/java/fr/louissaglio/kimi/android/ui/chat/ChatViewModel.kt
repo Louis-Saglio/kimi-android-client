@@ -751,8 +751,8 @@ class ChatViewModel internal constructor(
      * ([applyColdStart]) can drop a response a newer turn event has overtaken. */
     private val turnSeedGuard = SeedGuard()
 
-    /** Bumped on every approval event, so a cold-start apply racing the live stream
-     * drops its stale queue replace. */
+    /** Bumped on every approval event (request, end, the ack's reset), so a cold-start
+     * apply racing the live stream drops its stale queue replace. */
     private val approvalsSeedGuard = SeedGuard()
 
     /** Publishes the timeline's current rows+todos — the coalescer's publish point
@@ -1151,8 +1151,8 @@ class ChatViewModel internal constructor(
     fun onDeny() = postDecision(approved = false)
 
     /** Decides the head of the queue (arrival order). The card clears on the server's
-     * approval.resolved event — for our own decisions too — so a failed POST leaves the
-     * card up and only reports the error. */
+     * `ended` interaction frame — for our own decisions too (ticket 171) — so a failed
+     * POST leaves the card up and only reports the error. */
     private fun postDecision(approved: Boolean) {
         val approval = uiState.value.pendingApprovals.firstOrNull() ?: return
         viewModelScope.launch {
@@ -1310,9 +1310,10 @@ class ChatViewModel internal constructor(
             }
             is SessionEvent.TurnEnded -> {
                 turnSeedGuard.bump()
-                // A turn that ends takes its pending approvals with it (e.g. abort) — but
-                // not its questions: a pending question survives turn.ended and is
-                // re-derived from the questions endpoint instead of being cleared here.
+                // Pending approvals are NOT cleared here (ticket 171): an abort ends them
+                // with their own `cancelled` interaction frame, and a background
+                // sub-agent's approval outlives the main turn. A pending question
+                // survives turn.ended too and is re-derived instead of being cleared.
                 // The early-stop footer (ticket 155) lands now; the refetch below
                 // re-appends it over the canonical rows.
                 timeline.onTurnEnded(event.interruptReason, event.errorMessage)
@@ -1325,7 +1326,6 @@ class ChatViewModel internal constructor(
                         // running (background work) re-opens the line.
                         agentActiveSince = null,
                         runningTool = null,
-                        pendingApprovals = emptyList(),
                         items = timeline.items(),
                         todos = timeline.todos(),
                     )
@@ -1349,12 +1349,30 @@ class ChatViewModel internal constructor(
             is SessionEvent.TranscriptStale -> rebuildFromTranscript()
             is SessionEvent.ApprovalRequested -> {
                 approvalsSeedGuard.bump()
+                val approval = PendingApproval(event.approvalId, event.toolName, event.summary, event.agentId)
                 uiState.update {
-                    // Deduped: a reconnect replay must not queue the same request twice.
+                    // Deduped by interaction id, in place: the post-ack re-send of a
+                    // request the reset already queued must neither double it nor move
+                    // it behind newer ones.
+                    val queue = it.pendingApprovals
                     it.copy(
-                        pendingApprovals = it.pendingApprovals
-                            .filterNot { a -> a.approvalId == event.approvalId } +
-                            PendingApproval(event.approvalId, event.toolName, event.summary, event.agentId),
+                        pendingApprovals = if (queue.any { a -> a.approvalId == event.approvalId }) {
+                            queue.map { a -> if (a.approvalId == event.approvalId) approval else a }
+                        } else {
+                            queue + approval
+                        },
+                    )
+                }
+            }
+            // An accepted subscribe (ticket 171): the queue becomes the reset snapshots'
+            // pending approvals before the server's re-sent pending frames land.
+            is SessionEvent.ApprovalsReset -> {
+                approvalsSeedGuard.bump()
+                uiState.update {
+                    it.copy(
+                        pendingApprovals = event.pending
+                            .map { a -> PendingApproval(a.approvalId, a.toolName, a.summary, a.agentId) }
+                            .distinctBy { a -> a.approvalId },
                     )
                 }
             }

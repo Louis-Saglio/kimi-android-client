@@ -37,6 +37,180 @@ import org.junit.Test
  */
 class ChatViewModelTest : ChatViewModelTestBase() {
 
+    // --- Approvals on the `interaction` frame (ticket 171) ---------------------------
+
+    @Test
+    fun `a pending approval frame shows the card live and the ended frame clears it`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+
+        socket.send(TranscriptFrames.approvalFrame("approval_1", command = "echo hi"))
+        awaitState(viewModel.uiState) { it.pendingApprovals.isNotEmpty() }
+        assertEquals(
+            listOf(ChatViewModel.PendingApproval("approval_1", "Bash", "echo hi")),
+            viewModel.uiState.value.pendingApprovals,
+        )
+        // No snapshot or other REST read was needed for the card.
+        assertTrue(requestedTargets.none { "/snapshot" in it })
+
+        // Decided from another client: the ended frame reaches every subscriber.
+        socket.send(TranscriptFrames.approvalFrame("approval_1", status = "ended", outcome = "approved"))
+        awaitState(viewModel.uiState) { it.pendingApprovals.isEmpty() }
+    }
+
+    @Test
+    fun `approvals queue in arrival order, a sub-agent's carries its badge name and a repeat never doubles`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        subagentStore.apply(
+            "session_1",
+            SessionEvent.SubagentSpawned("agent-12", "explore", "tool_agent", "doc-verify", runInBackground = false),
+        )
+
+        socket.send(TranscriptFrames.approvalFrame("approval_1", command = "echo one"))
+        socket.send(
+            TranscriptFrames.approvalFrame(
+                "approval_2", toolName = "Write", action = "Writing /tmp/a.txt", command = null, agentId = "agent-12",
+            ),
+        )
+        // A repeated pending frame (the post-ack re-send) keeps its queue position.
+        socket.send(TranscriptFrames.approvalFrame("approval_1", command = "echo one"))
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.promptOp("msg_9", "completed")))
+        awaitState(viewModel.uiState) { it.pendingApprovals.size == 2 }
+        delay(200)
+
+        val queue = viewModel.uiState.value.pendingApprovals
+        assertEquals(listOf("approval_1", "approval_2"), queue.map { it.approvalId })
+        // Without a command display, the human-readable action is the summary.
+        assertEquals("Writing /tmp/a.txt", queue[1].summary)
+        assertEquals("agent-12", queue[1].agentId)
+        awaitState(viewModel.uiState) { it.subagentNames["agent-12"] == "explore" }
+
+        socket.send(TranscriptFrames.approvalFrame("approval_1", status = "ended", outcome = "rejected"))
+        awaitState(viewModel.uiState) { it.pendingApprovals.size == 1 }
+        assertEquals("approval_2", viewModel.uiState.value.pendingApprovals.single().approvalId)
+    }
+
+    @Test
+    fun `allow posts the approved decision to the interactions route and the card clears only on the ended frame`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        socket.send(TranscriptFrames.approvalFrame("approval_3c06aff8", command = "echo hi"))
+        awaitState(viewModel.uiState) { it.pendingApprovals.isNotEmpty() }
+
+        viewModel.onAllow()
+
+        val request = awaitRequest("/interactions/")
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/sessions/session_1/interactions/approval_3c06aff8", request.target)
+        assertEquals("""{"kind":"approval","decision":"approved"}""", request.body!!.utf8())
+
+        // The {outcome, ended_at} ack alone must not clear the card.
+        delay(300)
+        assertEquals(1, viewModel.uiState.value.pendingApprovals.size)
+        socket.send(TranscriptFrames.approvalFrame("approval_3c06aff8", status = "ended", outcome = "approved"))
+        awaitState(viewModel.uiState) { it.pendingApprovals.isEmpty() }
+    }
+
+    @Test
+    fun `deny posts the rejected decision to the interactions route`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        socket.send(TranscriptFrames.approvalFrame("approval_1", command = "rm -rf target"))
+        awaitState(viewModel.uiState) { it.pendingApprovals.isNotEmpty() }
+
+        viewModel.onDeny()
+
+        val request = awaitRequest("/interactions/")
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/sessions/session_1/interactions/approval_1", request.target)
+        assertEquals("""{"kind":"approval","decision":"rejected"}""", request.body!!.utf8())
+        socket.send(TranscriptFrames.approvalFrame("approval_1", status = "ended", outcome = "rejected"))
+        awaitState(viewModel.uiState) { it.pendingApprovals.isEmpty() }
+    }
+
+    @Test
+    fun `a failed decision post keeps the card and emits ApprovalFailed with the server message`() = runBlocking {
+        approvalsSucceed = false
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        socket.send(TranscriptFrames.approvalFrame("approval_1"))
+        awaitState(viewModel.uiState) { it.pendingApprovals.isNotEmpty() }
+
+        val effects = CopyOnWriteArrayList<ChatViewModel.Effect>()
+        val effectJob = launch { viewModel.effects.collect { effects += it } }
+        try {
+            viewModel.onAllow()
+            awaitRequest("/interactions/")
+            awaitCondition { effects.isNotEmpty() }
+
+            // 40902 (already ended) rides the ordinary DataError.Api path.
+            assertEquals(ChatViewModel.Effect.ApprovalFailed("interaction approval_1 has ended"), effects.single())
+            assertEquals(1, viewModel.uiState.value.pendingApprovals.size)
+        } finally {
+            effectJob.cancel()
+        }
+    }
+
+    @Test
+    fun `aborting a turn clears its approval through the cancelled frame and posts no decision`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        socket.send(turnStartedFrame())
+        socket.send(TranscriptFrames.approvalFrame("approval_1"))
+        awaitState(viewModel.uiState) { it.pendingApprovals.isNotEmpty() && it.isWorking }
+
+        viewModel.onStop()
+        awaitRequest(":abort")
+        // The abort's turn end does not drop the card on its own (a background
+        // sub-agent's approval outlives the main turn) — the cancelled frame does.
+        socket.send(turnEndedFrame("cancelled"))
+        awaitState(viewModel.uiState) { !it.isWorking }
+        assertEquals(1, viewModel.uiState.value.pendingApprovals.size)
+        socket.send(TranscriptFrames.approvalFrame("approval_1", status = "ended", outcome = "cancelled"))
+        awaitState(viewModel.uiState) { it.pendingApprovals.isEmpty() }
+
+        delay(200)
+        assertTrue(requestedTargets.none { "/interactions/" in it })
+    }
+
+    @Test
+    fun `a re-subscribe rebuilds exactly one card from the reset and the re-sent frame and drops one decided while away`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        socket.send(TranscriptFrames.approvalFrame("approval_1", command = "rm -rf target"))
+        socket.send(TranscriptFrames.approvalFrame("approval_2", command = "ls"))
+        awaitState(viewModel.uiState) { it.pendingApprovals.size == 2 }
+
+        // Away: approval_2 is decided elsewhere and its ended frame is missed.
+        viewModel.onScreenStopped()
+        serverSocket = null
+        viewModel.onScreenStarted()
+        val resumed = awaitServerSocket()
+        awaitCondition { clientFrames.count { "\"type\":\"subscribe_v2\"" in it } >= 2 }
+
+        val interactions = "[" + TranscriptFrames.approvalEntity("approval_1", command = "rm -rf target") + "," +
+            TranscriptFrames.approvalEntity("approval_2", state = "approved", command = "ls") + "]"
+        resumed.send(TranscriptFrames.resetFrame(seq = 30, interactions = interactions))
+        resumed.send(TranscriptFrames.ackFrame(id = "c_1"))
+        resumed.send(TranscriptFrames.approvalFrame("approval_1", command = "rm -rf target"))
+        resumed.send(TranscriptFrames.opsFrame(TranscriptFrames.promptOp("msg_9", "completed")))
+
+        awaitState(viewModel.uiState) { it.pendingApprovals.map { a -> a.approvalId } == listOf("approval_1") }
+        delay(200)
+        assertEquals(
+            listOf(ChatViewModel.PendingApproval("approval_1", "Bash", "rm -rf target")),
+            viewModel.uiState.value.pendingApprovals,
+        )
+    }
+
     @Test
     fun `stream deltas publish the leading edge then coalesce until a substantive event flushes`() = runBlocking {
         val vm = newViewModel(streamCoalesceWindowMillis = 100)

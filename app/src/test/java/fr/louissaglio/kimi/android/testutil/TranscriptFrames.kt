@@ -11,9 +11,15 @@ object TranscriptFrames {
         """{"type":"transcript.ops","session_id":"$sessionId","timestamp":"2026-11-04T19:25:51.000Z",""" +
             """"payload":{"type":"transcript.ops","agent_id":"$agentId","ops":[${ops.joinToString(",")}],"seq":$seq}}"""
 
-    fun resetFrame(agentId: String = "main", seq: Long = 1, sessionId: String = "session_1"): String =
+    /** [interactions] is the snapshot's raw entity array (see [approvalEntity]). */
+    fun resetFrame(
+        agentId: String = "main",
+        seq: Long = 1,
+        sessionId: String = "session_1",
+        interactions: String = "[]",
+    ): String =
         """{"type":"transcript.reset","session_id":"$sessionId","timestamp":"2026-11-04T19:25:50.000Z",""" +
-            """"payload":{"type":"transcript.reset","agent_id":"$agentId","snapshot":{"items":[],"interactions":[],""" +
+            """"payload":{"type":"transcript.reset","agent_id":"$agentId","snapshot":{"items":[],"interactions":$interactions,""" +
             """"attachments":[],"prompts":[],"hasMoreOlder":true},"has_more_older":true,"seq":$seq}}"""
 
     fun ackFrame(id: String = "c_1", accepted: List<String> = listOf("session_1"), notFound: List<String> = emptyList()): String =
@@ -49,6 +55,51 @@ object TranscriptFrames {
         """{"type":"usage","session_id":"$sessionId","agent_id":"$agentId",""" +
             """"event_created_at":"2026-11-04T19:25:52.679Z","context_tokens":$contextTokens""" +
             (maxContextTokens?.let { ""","max_context_tokens":$it""" } ?: "") + "}"
+
+    /**
+     * The flat approval `interaction` frame (ticket 171), shaped after the verbatim
+     * 2.4.0/2.5.0 captures (docs/server-api.md, Interactions): `pending` carries the
+     * snake_case request; `ended` adds [outcome], `ended_at` and the response. A null
+     * [command] omits `tool_input_display` (the card falls back to [action]).
+     */
+    fun approvalFrame(
+        interactionId: String,
+        status: String = "pending",
+        outcome: String? = null,
+        toolName: String = "Bash",
+        action: String = "Running: echo hi",
+        command: String? = "echo hi",
+        agentId: String = "main",
+        sessionId: String = "session_1",
+    ): String {
+        val display = command?.let {
+            ""","tool_input_display":{"kind":"command","command":"$it","cwd":"/path/to/project","language":"bash"}"""
+        } ?: ""
+        val ended = if (status == "ended") {
+            """"outcome":"$outcome","ended_at":"2026-11-04T19:27:27.526Z","""
+        } else {
+            ""
+        }
+        val response = if (status == "ended") ""","response":{"decision":"$outcome"}""" else ""
+        return """{"type":"interaction","session_id":"$sessionId","agent_id":"$agentId",""" +
+            """"event_created_at":"2026-11-04T19:27:26.728Z","interaction_id":"$interactionId",""" +
+            """"status":"$status",$ended"tool_call_id":"call_00_$interactionId","kind":"approval",""" +
+            """"request":{"tool_name":"$toolName","action":"$action"$display,""" +
+            """"expires_at":"2026-11-05T19:27:26.727Z"}$response}"""
+    }
+
+    /** One approval entity of `transcript.reset.snapshot.interactions` / the REST
+     * transcript (camelCase request — docs/server-api.md, Pending state on REST). */
+    fun approvalEntity(
+        interactionId: String,
+        state: String = "pending",
+        command: String = "echo hi",
+        agentId: String = "main",
+    ): String =
+        """{"interactionId":"$interactionId","interactionKind":"approval","toolCallId":"call_$interactionId",""" +
+            """"state":"$state","request":{"id":"$interactionId","sessionId":"session_1","agentId":"$agentId",""" +
+            """"turnId":"t1","toolCallId":"call_$interactionId","toolName":"Bash","action":"Running: $command",""" +
+            """"display":{"kind":"command","command":"$command"}}}"""
 
     fun promptOp(promptId: String, status: String, extra: String = ""): String =
         """{"op":"prompt.upsert","prompt":{"promptId":"$promptId","status":"$status","userMessageId":"$promptId",""" +

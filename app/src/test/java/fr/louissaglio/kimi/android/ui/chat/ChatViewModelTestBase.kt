@@ -371,14 +371,18 @@ abstract class ChatViewModelTestBase {
                                 """{"code":40001,"msg":"no running prompt","data":null,"request_id":"r"}""",
                             )
                         }
-                    path.startsWith("/api/v1/sessions/session_1/approvals/") ->
+                    // The 2.4.0+ response route (docs/server-api.md, Interactions →
+                    // Respond — ticket 171): success carries {outcome, ended_at}; the
+                    // failure is the verbatim already-ended 40902.
+                    path.startsWith("/api/v1/sessions/session_1/interactions/") ->
                         if (approvalsSucceed) {
-                            MockResponse(body = 
-                                """{"code":0,"msg":"success","data":{"resolved":true,"resolved_at":"2026-07-19T00:00:01.000Z"},"request_id":"r"}""",
+                            MockResponse(body =
+                                """{"code":0,"msg":"success","data":{"outcome":"approved",""" +
+                                    """"ended_at":"2026-10-28T19:27:20.145Z"},"request_id":"r"}""",
                             )
                         } else {
-                            MockResponse(body = 
-                                """{"code":40401,"msg":"approval does not exist","data":null,"request_id":"r"}""",
+                            MockResponse(body =
+                                """{"code":40902,"msg":"interaction approval_1 has ended","data":null,"request_id":"r"}""",
                             )
                         }
                     path.startsWith("/api/v1/sessions/session_1/questions") -> when {

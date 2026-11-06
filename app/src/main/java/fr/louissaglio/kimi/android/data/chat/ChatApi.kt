@@ -210,10 +210,13 @@ class ChatApi @Inject constructor(
         }
 
     /**
-     * Posts the user's decision for one approval request
-     * (`POST /api/v1/sessions/{id}/approvals/{approvalId}`, docs/server-api.md). The ack
-     * only confirms the decision was registered; the pending UI clears when the
-     * `event.approval.resolved` frame arrives over the WebSocket.
+     * Posts the user's decision for one approval interaction
+     * (`POST /api/v1/sessions/{id}/interactions/{interactionId}`, docs/server-api.md →
+     * Interactions — ticket 171) with `{"kind":"approval","decision":"approved"|"rejected"}`.
+     * Success is `code:0` with `data:{outcome, ended_at}`, which only confirms the
+     * decision: the card clears on the `ended` `interaction` frame every subscriber
+     * receives. `40404` (unknown interaction) and `40902` (already ended) are
+     * [fr.louissaglio.kimi.android.data.DataError.Api] failures like any other code.
      */
     suspend fun postApprovalDecision(
         settings: ServerSettings,
@@ -222,9 +225,10 @@ class ChatApi @Inject constructor(
         approved: Boolean,
     ): Result<Unit> {
         val body = api.jsonBody {
+            put("kind", "approval")
             put("decision", if (approved) "approved" else "rejected")
         }
-        return api.post(settings, "/api/v1/sessions/$sessionId/approvals/$approvalId", body) { responseBody ->
+        return api.post(settings, "/api/v1/sessions/$sessionId/interactions/$approvalId", body) { responseBody ->
             api.json.decodeFromString<Envelope<JsonObject>>(responseBody).toAckResult()
         }
     }

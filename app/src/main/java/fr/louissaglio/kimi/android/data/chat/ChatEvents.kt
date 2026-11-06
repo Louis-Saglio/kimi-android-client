@@ -192,11 +192,12 @@ sealed interface SessionEvent {
      * follows either path, so both map to the store's Cancelled state (ticket 135). */
     data class SubagentCancelled(override val subagentId: String) : SubagentLifecycleEvent
 
-    /** A tool call waits on the user's decision. [summary] is the compact argument
-     * preview for the approval card (the command for shell calls, else the action).
-     * [agentId] is the ASKING agent (ticket 139) — "main", or the sub-agent's id:
-     * presentation only (the card's sub-agent badge), deliberately NOT an
-     * [AgentScopedEvent] — the request resolves through the session-level approvals
+    /** A tool call waits on the user's decision (a `pending` approval `interaction`
+     * frame — ticket 171). [approvalId] is the interaction id; [summary] is the compact
+     * argument preview for the approval card (the command for shell calls, else the
+     * action). [agentId] is the ASKING agent (ticket 139) — "main", or the sub-agent's
+     * id: presentation only (the card's sub-agent badge), deliberately NOT an
+     * [AgentScopedEvent] — the request resolves through the session-level interactions
      * route whoever asked, so it must stay main-chat-routed. */
     data class ApprovalRequested(
         val approvalId: String,
@@ -205,8 +206,16 @@ sealed interface SessionEvent {
         val agentId: String = MAIN_AGENT_ID,
     ) : SessionEvent
 
-    /** The request was decided — by this client or another one (event.approval.resolved). */
+    /** The request ended — decided by this client or another one, or cancelled with
+     * its turn (an `ended` approval `interaction` frame, any outcome — ticket 171). */
     data class ApprovalResolved(val approvalId: String) : SessionEvent
+
+    /** The session's pending approvals as of an accepted `subscribe_v2` (ticket 171):
+     * emitted on the ack, carrying the pending approvals of the connection's
+     * `transcript.reset` snapshots (empty on a resumed subscribe, which sends no
+     * reset). The queue is REPLACED — a decision missed while disconnected heals — and
+     * the standalone pending frames the server re-sends after the ack dedup into it. */
+    data class ApprovalsReset(val pending: List<PendingApprovalRequest>) : SessionEvent
 
     /** The agent asks the user a structured question (event.question.requested); the
      * payload carries the full question inline — there is no detail endpoint to fetch.

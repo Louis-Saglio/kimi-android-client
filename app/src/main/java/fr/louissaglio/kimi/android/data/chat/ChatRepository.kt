@@ -202,8 +202,9 @@ class ChatRepository @Inject constructor(
     suspend fun abortPrompt(settings: ServerSettings, sessionId: String): Result<Unit> =
         chatApi.abortPrompt(settings, sessionId)
 
-    /** Posts the user's decision for one approval request; the pending UI clears when
-     * the `event.approval.resolved` frame arrives over the WebSocket. */
+    /** Posts the user's decision for one approval interaction ([approvalId] = the
+     * interaction id); the pending UI clears when the `ended` `interaction` frame
+     * arrives over the WebSocket (ticket 171). */
     suspend fun postApprovalDecision(
         settings: ServerSettings,
         sessionId: String,

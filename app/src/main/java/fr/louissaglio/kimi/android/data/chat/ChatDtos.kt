@@ -225,6 +225,36 @@ data class UsageFrame(
 )
 
 /**
+ * The flat `interaction` frame (docs/server-api.md, Interactions → The `interaction`
+ * frame — ticket 171): one approval or question of any agent of the session, sent on
+ * every state change and re-sent for every still-pending one after each accepted
+ * `subscribe_v2`. No `payload` and no `seq`: the fields sit beside `type`. [status] is
+ * `pending`/`ended`; [outcome] is set on `ended` only. [request] stays raw — its shape
+ * depends on [kind] ([ApprovalInteractionRequestDto] for `approval`; questions are
+ * ticket 172's).
+ */
+@Serializable
+data class InteractionFrame(
+    @SerialName("agent_id") val agentId: String = MAIN_AGENT_ID,
+    @SerialName("interaction_id") val interactionId: String = "",
+    val status: String = "",
+    val outcome: String? = null,
+    @SerialName("tool_call_id") val toolCallId: String? = null,
+    val kind: String = "",
+    val request: JsonObject? = null,
+)
+
+/** The `request` of an approval [InteractionFrame] — snake_case, unlike the transcript
+ * entity's camelCase [TranscriptApprovalRequestDto]. `tool_input_display` is optional
+ * (the card then falls back to [action]); `expires_at` is not consumed. */
+@Serializable
+data class ApprovalInteractionRequestDto(
+    @SerialName("tool_name") val toolName: String = "",
+    val action: String = "",
+    @SerialName("tool_input_display") val toolInputDisplay: ToolInputDisplayDto? = null,
+)
+
+/**
  * `payload` of the `subscribe_v2` `ack` (docs/server-api.md, Control frames): an
  * unknown session answers `code:0` with its id in [notFound] — the socket surfaces it
  * as a load failure instead of silence (ticket 175).

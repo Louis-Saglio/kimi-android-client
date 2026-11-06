@@ -117,3 +117,44 @@ Relevant code: `data/chat/SessionSocket.kt` (frame dispatch ~line 275),
 `data/chat/ChatApi.kt` (`postApprovalDecision`), `data/chat/ChatRepository.kt`,
 `ui/chat/ChatViewModel.kt` (`postDecision`, the `ApprovalRequested`/`Resolved`
 branches). Wire reference: `docs/server-api.md` → Interactions.
+
+## Implementation notes
+
+**2026-11-06 —** `SessionSocket` decodes the flat `interaction` frame from the frame
+text (`InteractionFrame` + the snake_case `ApprovalInteractionRequestDto` in
+`ChatDtos.kt`) and maps it with the pure `ChatMessageMapper.toApprovalEvent`: an
+approval `pending` → `SessionEvent.ApprovalRequested` (card id = `interaction_id`,
+`summary` over `tool_input_display`/`action`, `agent_id` as the asking agent), `ended`
+→ `ApprovalResolved` for every outcome. Question frames, unknown statuses and
+undecodable requests map to nothing (questions are ticket 172). Each connection's
+`FrameContext` collects the pending approvals of its `transcript.reset` snapshots
+(`ChatMessageMapper.pendingApprovals`, shared with the REST transcript mapping: approval
+entities whose state is `pending` or whose id is listed pending, deduped), and an ack
+whose `accepted` lists the session emits the new `SessionEvent.ApprovalsReset(pending)`
+— empty on a resumed subscribe, which gets no reset. `ChatApi.postApprovalDecision` now
+posts `{"kind":"approval","decision":"approved"|"rejected"}` to
+`/api/v1/sessions/{id}/interactions/{interactionId}`; `40404`/`40902` fail through
+`toAckResult` as `DataError.Api` (the `ChatRepository` signature is unchanged).
+
+- `ChatViewModel`: `ApprovalsReset` replaces the queue (and bumps the seed guard, so a
+  racing cold-start apply keeps it); `ApprovalRequested` dedups by interaction id in
+  place, so the post-ack re-send neither doubles a card nor moves it. `TurnEnded` no
+  longer clears the approvals: an abort ends them with their own `cancelled` frame, and
+  a background sub-agent's approval outlives the main turn. The cold seed stays ticket
+  176's `GET .../transcript` interactions; the snapshot's `pending_approvals` path was
+  already deleted there. No `event.approval.*`/`permission.approval.*` code was left to
+  delete.
+- Tests: `SessionSocketTest` (pending/ended per outcome, action fallback, sub-agent
+  asker, question/foreign/undecodable frames ignored, the ack reset from the reset
+  snapshot with ended entities and a child's duplicate list, a resumed/refused/foreign
+  ack, the subscribe-order test now expects the empty reset), `ChatMessageMapperTest`
+  (`pendingApprovals` filtering, `toApprovalEvent`), `ChatViewModelTest` (live card
+  without any snapshot read, queue order + badge + repeat dedup, Allow/Deny URL and
+  body, card clears only on the `ended` frame, 40902 keeps the card, abort clears via
+  `cancelled` with no POST, re-subscribe rebuilds exactly one card and drops one decided
+  while away), `TranscriptColdStartTest` (one card from transcript + reset + re-send),
+  `ChatRepositoryTest` (socket test expects the ack reset). The VM harness serves
+  `/interactions/` instead of `/approvals/`; `TranscriptFrames` gained `approvalFrame`/
+  `approvalEntity` and a `resetFrame(interactions = …)` parameter.
+- Not verified live (no server access from this run): the acceptance criteria about a
+  real manual Bash prompt are covered by the captured frame shapes only.

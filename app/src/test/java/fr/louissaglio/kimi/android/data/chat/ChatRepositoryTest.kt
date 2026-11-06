@@ -1206,15 +1206,16 @@ class ChatRepositoryTest {
         val emitted = CopyOnWriteArrayList<SocketEvent>()
         val job = launch { repository.observeSession(settings(), "session_1").collect { emitted += it } }
         try {
-            awaitCondition { emitted.any { it is SocketEvent.Event } }
+            awaitCondition { emitted.count { it is SocketEvent.Event } >= 2 }
         } finally {
             job.cancel()
         }
 
         assertEquals(SocketEvent.Connected, emitted.first())
         assertEquals(
-            SocketEvent.Event(SessionEvent.AssistantDelta("ok")),
-            emitted.first { it is SocketEvent.Event },
+            // The accepted ack resets the approval queue (ticket 171), then the op.
+            listOf(SessionEvent.ApprovalsReset(emptyList()), SessionEvent.AssistantDelta("ok")),
+            emitted.filterIsInstance<SocketEvent.Event>().map { it.event },
         )
         val subscribe = clientFrames.first()
         assertTrue(subscribe.contains("\"type\":\"subscribe_v2\""))

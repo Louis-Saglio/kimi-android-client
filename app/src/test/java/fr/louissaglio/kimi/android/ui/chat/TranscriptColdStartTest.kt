@@ -5,6 +5,7 @@ import fr.louissaglio.kimi.android.testutil.TranscriptFrames
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.awaitState
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -261,6 +262,28 @@ class TranscriptColdStartTest : ChatViewModelTestBase() {
         assertEquals("call_q", question.toolCallId)
         assertEquals("Cake or pie?", question.items.single().text)
         assertEquals(listOf("Cake", "Pie"), question.items.single().options.map { it.label })
+    }
+
+    @Test
+    fun `a cold open sees one pending approval three times - transcript, reset, re-sent frame - and shows one card`() = runBlocking {
+        // Ticket 171: the REST transcript seeds the card, the subscribe's reset snapshot
+        // carries the same entity, and the ack is followed by its standalone re-send.
+        val entity = TranscriptFrames.approvalEntity("approval_1", command = "rm -rf target")
+        transcriptBody = transcriptData(interactions = "[$entity]", pendingInteractions = """["approval_1"]""")
+
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.pendingApprovals.isNotEmpty() }
+        socket.send(TranscriptFrames.resetFrame(seq = 2, interactions = "[$entity]"))
+        socket.send(TranscriptFrames.ackFrame())
+        socket.send(TranscriptFrames.approvalFrame("approval_1", command = "rm -rf target"))
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.promptOp("msg_9", "completed"), seq = 3))
+        delay(300)
+
+        assertEquals(
+            listOf(ChatViewModel.PendingApproval("approval_1", "Bash", "rm -rf target", MAIN_AGENT_ID)),
+            viewModel.uiState.value.pendingApprovals,
+        )
     }
 
     @Test

@@ -518,7 +518,7 @@ private fun ChatContent(
         bottomBar = {
             Column {
                 // The card shows the head of the approval queue and stays until the
-                // matching approval.resolved event, however the decision was made.
+                // matching `ended` interaction frame, however the decision was made.
                 uiState.pendingApprovals.firstOrNull()?.let { approval ->
                     ApprovalCard(
                         approval = approval,
