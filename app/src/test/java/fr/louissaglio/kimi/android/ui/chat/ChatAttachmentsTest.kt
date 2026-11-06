@@ -193,6 +193,21 @@ class ChatAttachmentsTest : ChatViewModelTestBase() {
         assertEquals("session-media-bytes", bytes?.let(::String))
     }
 
+    @Test
+    fun `a re-loaded session media image is served from the cache without a second fetch`() = runBlocking {
+        // Ticket 185 (C2): a thumbnail re-entering composition loads again; only the
+        // first load may reach the network.
+        val image = ChatMessage.Part.Image(base64Data = null, fileId = "f_img", isSessionMedia = true)
+        viewModel.imageBytes(image)
+        awaitRequest("/media/")
+
+        val again = viewModel.imageBytes(image)
+
+        assertEquals("session-media-bytes", again?.let(::String))
+        val later = generateSequence { server.takeRequest(300, TimeUnit.MILLISECONDS) }.toList()
+        assertTrue(later.none { it.target.orEmpty().contains("/media/") })
+    }
+
     /** Stages a composer chip the way the pick flow does, without an android.net.Uri
      * (unavailable on JVM unit tests). */
     private suspend fun stagePicked(name: String, sizeBytes: Long, mimeType: String, bytes: ByteArray) =

@@ -4,8 +4,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -25,11 +27,15 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import fr.louissaglio.kimi.android.data.chat.MAIN_AGENT_ID
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
@@ -37,9 +43,25 @@ import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 /** Test tag of the approval card's scrollable plan body (ticket 173). */
 internal const val APPROVAL_PLAN_TAG = "approval_plan"
 
-/** The plan body's cap: about a dozen lines of Markdown, leaving the card's header and
- * Allow/Deny row on screen above the composer even on a small phone. */
+/** The plan body's cap: about a dozen lines of Markdown on a portrait phone. The
+ * effective cap is [PLAN_HEIGHT_FRACTION] of the window height the keyboard leaves
+ * (ticket 185), so the card's header and Allow/Deny row stay on screen above the
+ * composer in landscape and with the IME up too; [PLAN_MIN_HEIGHT] keeps a few
+ * lines readable on the tightest window. */
 private val PLAN_MAX_HEIGHT = 240.dp
+private val PLAN_MIN_HEIGHT = 72.dp
+private const val PLAN_HEIGHT_FRACTION = 0.3f
+
+/** Read where the plan body composes (not in a keyless `remember`), so a rotation or
+ * the IME's animation re-derives it without recomposing the rest of the card. */
+@Composable
+private fun planMaxHeight(): Dp {
+    val density = LocalDensity.current
+    val windowHeightPx = LocalWindowInfo.current.containerSize.height
+    val imePx = WindowInsets.ime.getBottom(density)
+    val available = with(density) { ((windowHeightPx - imePx) * PLAN_HEIGHT_FRACTION).toDp() }
+    return available.coerceIn(PLAN_MIN_HEIGHT, PLAN_MAX_HEIGHT)
+}
 
 /** The head of the approval queue, docked above the composer. A `plan_review` request
  * (ticket 173) adds the plan Markdown in a scrollable, height-capped body; every other
@@ -49,6 +71,21 @@ internal fun ApprovalCard(
     approval: ChatViewModel.PendingApproval,
     queueSize: Int,
     subagentName: String? = null,
+    onAllow: () -> Unit,
+    onDeny: () -> Unit,
+) {
+    // Keyed by the approval: when the head resolves and the next one is also a plan
+    // review, its body must open at the top, not at the previous plan's scroll offset.
+    key(approval.approvalId) {
+        ApprovalCardBody(approval, queueSize, subagentName, onAllow, onDeny)
+    }
+}
+
+@Composable
+private fun ApprovalCardBody(
+    approval: ChatViewModel.PendingApproval,
+    queueSize: Int,
+    subagentName: String?,
     onAllow: () -> Unit,
     onDeny: () -> Unit,
 ) {
@@ -102,7 +139,7 @@ internal fun ApprovalCard(
                 ) {
                     Column(
                         modifier = Modifier
-                            .heightIn(max = PLAN_MAX_HEIGHT)
+                            .heightIn(max = planMaxHeight())
                             .verticalScroll(rememberScrollState())
                             .padding(horizontal = 10.dp, vertical = 8.dp)
                             .testTag(APPROVAL_PLAN_TAG),

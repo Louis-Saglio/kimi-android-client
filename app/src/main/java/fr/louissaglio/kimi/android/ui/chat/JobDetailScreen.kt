@@ -36,8 +36,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
@@ -264,65 +266,70 @@ private fun JobSection(title: String, modifier: Modifier = Modifier, content: @C
  * Internal for the semantics tests. */
 @Composable
 internal fun JobOutputBlock(uiState: JobDetailViewModel.UiState, modifier: Modifier = Modifier) {
-    if (uiState.storeBacked) {
+    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        val blockModifier = Modifier.weight(1f).fillMaxWidth()
+        if (uiState.storeBacked) {
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = MaterialTheme.shapes.small,
+                modifier = blockModifier,
+            ) {
+                Text(
+                    text = "Output not available for sub-agent tasks",
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            return@Column
+        }
+        uiState.outputError?.let { error ->
+            Text(
+                text = "Output unavailable: $error",
+                // The watch fails asynchronously while the user is on the screen.
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        if (uiState.isLoading && uiState.output == null) {
+            Box(blockModifier, contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(
+                    modifier = Modifier.padding(24.dp).semantics { contentDescription = "Loading output" },
+                )
+            }
+            return@Column
+        }
+        val output = uiState.output.orEmpty()
         Surface(
             color = MaterialTheme.colorScheme.surfaceVariant,
             shape = MaterialTheme.shapes.small,
-            modifier = modifier.fillMaxWidth(),
+            modifier = blockModifier,
         ) {
-            Text(
-                text = "Output not available for sub-agent tasks",
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        return
-    }
-    uiState.outputError?.let { error ->
-        Text(
-            text = "Output unavailable: $error",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.error,
-        )
-    }
-    if (uiState.isLoading && uiState.output == null) {
-        Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator(
-                modifier = Modifier.padding(24.dp).semantics { contentDescription = "Loading output" },
-            )
-        }
-        return
-    }
-    val output = uiState.output.orEmpty()
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = MaterialTheme.shapes.small,
-        modifier = modifier.fillMaxWidth(),
-    ) {
-        if (output.isBlank()) {
-            Text(
-                text = "No output yet",
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        } else {
-            val scrollState = rememberScrollState()
-            if (uiState.status == Job.Status.Running) {
-                LaunchedEffect(output) { scrollState.scrollTo(scrollState.maxValue) }
-            }
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .verticalScroll(scrollState)
-                    .padding(horizontal = 10.dp, vertical = 8.dp),
-            ) {
+            if (output.isBlank()) {
                 Text(
-                    text = output,
+                    text = "No output yet",
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
                     style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            } else {
+                val scrollState = rememberScrollState()
+                if (uiState.status == Job.Status.Running) {
+                    LaunchedEffect(output) { scrollState.scrollTo(scrollState.maxValue) }
+                }
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(scrollState)
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                ) {
+                    Text(
+                        text = output,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
             }
         }
     }

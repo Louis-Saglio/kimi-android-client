@@ -79,6 +79,8 @@ class ChatViewModel internal constructor(
     // Default mirrors the DI value, like the window above.
     @DefaultDispatcher
     private val decodeDispatcher: CoroutineDispatcher = Dispatchers.Default,
+    // A fresh cache per directly constructed (test) ViewModel; Hilt shares the singleton.
+    private val imageBytesCache: ImageBytesCache = ImageBytesCache(),
 ) : ViewModel() {
 
     // Production entry point (Hilt): the destination's SavedStateHandle is decoded
@@ -98,6 +100,7 @@ class ChatViewModel internal constructor(
         unreadStore: UnreadSessionsStore,
         @StreamCoalesceWindowMillis streamCoalesceWindowMillis: Long,
         @DefaultDispatcher decodeDispatcher: CoroutineDispatcher,
+        imageBytesCache: ImageBytesCache,
     ) : this(
         chatRepository,
         sessionsRepository,
@@ -109,6 +112,7 @@ class ChatViewModel internal constructor(
         unreadStore,
         streamCoalesceWindowMillis,
         decodeDispatcher,
+        imageBytesCache,
     )
 
     private val sessionId: String = routeArgs.sessionId
@@ -472,6 +476,7 @@ class ChatViewModel internal constructor(
         updateState = { transform -> uiState.update(transform) },
         sendEffect = { effect -> _effects.send(effect) },
         decodeDispatcher = decodeDispatcher,
+        imageBytesCache = imageBytesCache,
     )
 
     /** The question wizard (ticket 072): pending-question lifecycle, answer submission,

@@ -45,8 +45,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -1041,6 +1043,7 @@ private fun ToolMediaBlock(
                         image = image,
                         loadImageBytes = loadImageBytes,
                         onClick = { onImageClick(image) },
+                        contentDescription = item.name?.let { "Tool result image $it" } ?: "Tool result image",
                     )
                     if (item.name != null) {
                         Text(
@@ -1057,7 +1060,11 @@ private fun ToolMediaBlock(
                 Surface(
                     color = MaterialTheme.colorScheme.secondaryContainer,
                     shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.testTag("toolMediaVideoChip"),
+                    // One description instead of the decorative "▶" glyph's text.
+                    modifier = Modifier.clearAndSetSemantics {
+                        testTag = "toolMediaVideoChip"
+                        contentDescription = item.name?.let { "Video $it" } ?: "Video"
+                    },
                 ) {
                     Text(
                         text = "▶ ${item.name ?: "video"}",

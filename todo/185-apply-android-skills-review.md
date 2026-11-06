@@ -237,3 +237,95 @@ hard-coded dispatcher, as the review scoped it.
 - Gate: `./gradlew :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin` is
   green (1093 tests, 0 failures, 1 skipped). The instrumented
   suite was not run in this step.
+
+## Implementation notes — 3-compose
+
+*2026-11-06.* Skills loaded: `android-dev`, `compose`, `android-ux`, `android-testing`.
+One project convention won over a skill rule: images stay on the project's
+`HistoryImageThumbnail` + `loadImageBytes` byte loader (docs/conventions.md, media
+rows) instead of android-dev's Coil default, so C2 is the review's minimal LRU, not
+a Coil `ImageLoader`. No Robolectric in the project, so the Compose-level fixes (C1,
+C3, C4, C6, C8) are covered by instrumented tests, which compile here but were not
+run.
+
+- **C1 — done, plus one extra change.** `SwarmModeChip` is icon-only, like
+  `PermissionModeChip`. The sparkles glyph sits on the secondaryContainer fill when
+  on and is bare when off. The label moved to the semantics (`"Swarm mode"`, still
+  `toggleable(role = Role.Switch)`, so on/off is announced). The chip is
+  `sizeIn(minWidth = 48.dp, minHeight = 48.dp)` and takes a `modifier` parameter
+  (the modifier part of C7). Before shipping I redid the layout arithmetic for a
+  360dp phone mid-turn, and icon-only alone was not enough. The middle zone is about
+  145dp after attach, Stop and the default-padded Steer, and ring 48 + permission 60
+  + swarm 48 = 156dp, so the last-measured swarm chip would still get about 37dp.
+  The Steer `Button` now uses 16dp horizontal content padding instead of M3's 24dp.
+  It stays above M3's 58dp minimum width, and the zone grows to about 161dp. With
+  that, all three icon-sized controls keep 48dp. When idle at 360dp the model chip
+  gets about 72dp; before, with the label, it got about 50dp. Limit not fixed: mid-turn
+  below about 400dp the model chip still has almost no room. That is the row's
+  documented give ("the model chip ellipsizes under pressure"), and it was nearly as
+  tight before ticket 174. Fixing it means changing the layout (for example a
+  second row, or an icon-only Steer), which needs a product decision. Tests:
+  `ComposerLayoutTest` pins the bar to 360dp and asserts the model and swarm chips
+  are ≥ 48dp wide when idle, and the swarm, permission and ring controls are ≥ 48dp
+  wide mid-turn. `SwarmModeChipTest` now matches the `"Swarm mode"` description.
+- **C2 — done as the minimal fix.** New `ImageBytesCache` (ui/chat, `@Singleton`,
+  pure Kotlin so it runs on the JVM, unlike `android.util.LruCache`). It is a
+  synchronized access-ordered `LinkedHashMap` with a 16 MiB byte budget, keyed by
+  `(serverUrl, sessionId for session_media / null for /files, fileId)`. An entry
+  larger than the budget is not kept. `resolveImageBytes` checks it before the
+  session-media or `/files` GET and stores only successes, so a failed fetch retries
+  on the next entry. Inline base64 is not cached. It is injected into `ChatViewModel`
+  (passed to `ChatAttachments`) and `SubagentViewModel`, so the chat and the sub-agent
+  page share it. Their internal test constructors default to a fresh instance. The
+  decoded bitmap is still rebuilt on re-entry: that is a bounded CPU decode, not a
+  download. Tests: `ImageBytesCacheTest` (key isolation, LRU eviction order,
+  replacement accounting, oversize entry) and
+  `ChatAttachmentsTest."a re-loaded session media image is served from the cache without a second fetch"`.
+- **C3 — done, keyed inside the card.** The key is inside `ApprovalCard` rather than
+  only at the `ChatScreen` call site: `key(approval.approvalId) { ApprovalCardBody(…) }`,
+  so every caller resets the card's state, the plan's `rememberScrollState()`
+  included, when the head changes. Test (instrumented, compile-only here):
+  `ApprovalCardTest.theNextPlanReviewOpensAtTheTopOfItsPlan` scrolls plan A to its
+  end, swaps the head to plan B, and asserts that B's first step is displayed and its
+  last step is not.
+- **C4 — done, IME-aware.** `planMaxHeight()` returns 30% of
+  `LocalWindowInfo.current.containerSize.height` minus `WindowInsets.ime`, clamped to
+  72–240dp. The review's formula ignored the keyboard, but the window size does not
+  shrink when the IME opens, so the IME has to be subtracted. The function is read
+  in composition inside the plan `Surface`'s content, so a rotation or the IME's
+  animation recomposes only that scope. The `planHeight <= 240.dp` test still holds.
+- **C5 — done as suggested.** `EmptyState(message, modifier, supportingText: String? = null)`.
+  The optional line is `bodyMedium`/`onSurfaceVariant`, `TextAlign.Center`. The column
+  uses `spacedBy(8.dp, CenterVertically)`, which is the same as `Arrangement.Center`
+  for the single-text callers. `SearchDisabledState` is deleted. Its rationale (no
+  Retry) is now a comment at the call site. One small visual difference: the main
+  message is no longer `TextAlign.Center`, the same as every other `EmptyState`.
+  It fits on one line on a 360dp phone. `SearchScreenTest` matches on text and is
+  unchanged.
+- **C6 — done as suggested.** `JobOutputBlock` is one root
+  `Column(modifier.fillMaxWidth(), spacedBy(6.dp))`. The store-backed placeholder,
+  the loading box and the output `Surface` take `Modifier.weight(1f).fillMaxWidth()`,
+  the caller's former weight, so the layout is the same. The error `Text` has
+  `liveRegion = LiveRegionMode.Polite`. `JobOutputBlockTest.aWatchErrorShowsAboveTheFallbackSummary`
+  asserts the live region.
+- **C8 — done as suggested.** `HistoryImageThumbnail` takes
+  `contentDescription: String = "Attached image"`. User bubbles keep the default.
+  `ToolMediaBlock` passes `"Tool result image <name>"` (or `"Tool result image"`).
+  The video chip is `clearAndSetSemantics { testTag; contentDescription = "Video <name>" }`,
+  so TalkBack reads one description instead of the "▶" glyph's text. The visible
+  name caption under a thumbnail keeps its own semantics on purpose: it is the only
+  carrier of the name when the image fails to load, because the placeholder tiles
+  have no description. Tests: `ToolRowTest.mediaOnlyResultShowsTheIndicatorAndExpandsToTheImageAndVideoChip`
+  now finds the chip by its `"Video"` description. The new
+  `aLoadedToolResultImageIsDescribedAsSuch` loads a real 4×4 PNG and waits for
+  `"Tool result image one.png"`, with no `"Attached image"`.
+- Docs: docs/conventions.md covers the icon-only swarm chip and the Steer padding,
+  the plan cap and its key, the `EmptyState` supporting text (search, and
+  `ui/common`), the `ImageBytesCache` and the tool-image/video descriptions (media
+  rows), and the job output live region and root Column (job screen).
+- Gate: `./gradlew :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin` is
+  green (1098 tests, 0 failures, 1 skipped). The instrumented suite was not run in
+  this step: the new and updated `ComposerLayoutTest`, `ApprovalCardTest`,
+  `JobOutputBlockTest`, `SwarmModeChipTest` and `ToolRowTest` cases only compile here.
+  The 360dp mid-turn width assertion relies on the layout arithmetic above (a margin
+  of about 5–10dp at font scale 1.0), so check it first on the runner.

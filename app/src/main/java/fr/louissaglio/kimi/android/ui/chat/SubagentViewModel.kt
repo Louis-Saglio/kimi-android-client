@@ -45,6 +45,8 @@ class SubagentViewModel internal constructor(
     // Default mirrors the DI value for direct construction in tests.
     @DefaultDispatcher
     private val decodeDispatcher: CoroutineDispatcher = Dispatchers.Default,
+    // A fresh cache per directly constructed (test) ViewModel; Hilt shares the singleton.
+    private val imageBytesCache: ImageBytesCache = ImageBytesCache(),
 ) : ViewModel() {
 
     // Production entry point (Hilt): the destination's SavedStateHandle is decoded
@@ -59,7 +61,15 @@ class SubagentViewModel internal constructor(
         settingsRepository: SettingsRepository,
         savedStateHandle: SavedStateHandle,
         @DefaultDispatcher decodeDispatcher: CoroutineDispatcher,
-    ) : this(subagentStore, chatRepository, settingsRepository, savedStateHandle.toRoute<Subagent>(), decodeDispatcher)
+        imageBytesCache: ImageBytesCache,
+    ) : this(
+        subagentStore,
+        chatRepository,
+        settingsRepository,
+        savedStateHandle.toRoute<Subagent>(),
+        decodeDispatcher,
+        imageBytesCache,
+    )
 
     private val sessionId: String = routeArgs.sessionId
     private val subagentId: String = routeArgs.subagentId
@@ -252,7 +262,7 @@ class SubagentViewModel internal constructor(
      * `ReadMediaFile` results): the chat's own resolution, session media of THIS
      * session. Pull-based display data, like the chat's `imageBytes`. */
     suspend fun imageBytes(image: ChatMessage.Part.Image): ByteArray? =
-        resolveImageBytes(chatRepository, settingsRepository, sessionId, image, decodeDispatcher)
+        resolveImageBytes(chatRepository, settingsRepository, sessionId, image, decodeDispatcher, imageBytesCache)
 
     /** Retry of the failed initial load (the error state is the whole screen). */
     fun onRetry() {

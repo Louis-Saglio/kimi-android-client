@@ -7,12 +7,14 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -199,6 +201,10 @@ internal fun ChatInputBar(
                                 // M3 Buttons default to 40dp tall; the composer row
                                 // keeps every touch target at 48dp.
                                 modifier = Modifier.heightIn(min = 48.dp),
+                                // 16dp instead of M3's 24dp sides (ticket 185): on a
+                                // 360dp phone the default left the middle zone short
+                                // of the ring + permission + swarm chips' 48dp each.
+                                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                             ) {
                                 Text("Steer")
                             }
@@ -292,13 +298,14 @@ private fun PermissionModeChip(mode: PermissionMode, onClick: () -> Unit) {
 }
 
 /** Swarm-mode toggle after the permission chip (ticket 174, the web's composer
- * "Swarm" chip): the sparkles glyph plus a "Swarm" label, on the selected
- * (secondaryContainer) fill when on, transparent when off. Its state rides every
- * prompt as `swarm_mode`. The label ellipsizes rather than clipping when the
- * middle zone runs short (a running turn's Stop + Steer); 48dp touch target like
- * the other chips. */
+ * "Swarm" chip): the sparkles glyph on the selected (secondaryContainer) fill when on,
+ * bare when off. Its state rides every prompt as `swarm_mode`. Icon-only like the
+ * permission chip, for the same reason (ticket 185): a "Swarm" label took ~75dp of
+ * the middle zone, measured before the weighted model chip, so it starved that chip
+ * and was itself squeezed under 48dp mid-turn. The label lives in the semantics; the
+ * Switch role announces on/off. */
 @Composable
-private fun SwarmModeChip(selected: Boolean, onToggle: () -> Unit) {
+private fun SwarmModeChip(selected: Boolean, onToggle: () -> Unit, modifier: Modifier = Modifier) {
     val container = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent
     val content = if (selected) {
         MaterialTheme.colorScheme.onSecondaryContainer
@@ -306,35 +313,25 @@ private fun SwarmModeChip(selected: Boolean, onToggle: () -> Unit) {
         MaterialTheme.colorScheme.onSurfaceVariant
     }
     Box(
-        modifier = Modifier
-            .heightIn(min = 48.dp)
+        modifier = modifier
+            .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
             .clip(MaterialTheme.shapes.large)
             .toggleable(value = selected, role = Role.Switch, onValueChange = { onToggle() })
-            .semantics { contentDescription = "Toggle swarm mode" }
+            .semantics { contentDescription = "Swarm mode" }
             .testTag(SWARM_MODE_CHIP_TAG),
         contentAlignment = Alignment.Center,
     ) {
-        Row(
+        Box(
             modifier = Modifier
                 .clip(MaterialTheme.shapes.large)
                 .background(container)
-                .padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                .padding(8.dp),
         ) {
             Icon(
                 imageVector = SparklesIcon,
                 contentDescription = null,
                 modifier = Modifier.size(16.dp),
                 tint = content,
-            )
-            Text(
-                text = "Swarm",
-                style = MaterialTheme.typography.labelMedium,
-                color = content,
-                maxLines = 1,
-                softWrap = false,
-                overflow = TextOverflow.Ellipsis,
             )
         }
     }

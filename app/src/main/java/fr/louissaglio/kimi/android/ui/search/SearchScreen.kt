@@ -35,7 +35,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -130,7 +129,14 @@ internal fun SearchContent(
                 StaleIndexBanner()
             }
             when {
-                uiState.searchDisabled -> SearchDisabledState()
+                // Ticket 183: the server's global index is off (the 2.5.0 default). Said
+                // in phone terms, with no Retry — it could only fail the same way until
+                // the operator turns the index on.
+                uiState.searchDisabled ->
+                    EmptyState(
+                        "Search is disabled on this server",
+                        supportingText = "The server operator can enable the search index.",
+                    )
                 uiState.submittedQuery == null ->
                     EmptyState(
                         if (uiState.scopeTitle != null) {
@@ -146,32 +152,6 @@ internal fun SearchContent(
                 else -> SearchResultList(uiState, onHitClick, onEndReached)
             }
         }
-    }
-}
-
-/** Ticket 183: the server's global search index is off (the 2.5.0 default). Says so
- * in phone terms — no server config key, and no Retry: it could only fail the same
- * way until the operator turns the index on. */
-@Composable
-private fun SearchDisabledState() {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
-    ) {
-        Text(
-            text = "Search is disabled on this server",
-            style = MaterialTheme.typography.bodyLarge,
-            textAlign = TextAlign.Center,
-        )
-        Text(
-            text = "The server operator can enable the search index.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-        )
     }
 }
 

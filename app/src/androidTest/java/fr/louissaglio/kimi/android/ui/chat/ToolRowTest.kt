@@ -1,10 +1,12 @@
 package fr.louissaglio.kimi.android.ui.chat
 
+import android.graphics.Bitmap
 import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
@@ -16,6 +18,7 @@ import fr.louissaglio.kimi.android.data.chat.ToolMedia
 import fr.louissaglio.kimi.android.data.chat.ToolPayload
 import fr.louissaglio.kimi.android.data.chat.ToolPreview
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
+import java.io.ByteArrayOutputStream
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -1909,11 +1912,42 @@ class ToolRowTest {
         composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
         composeTestRule.onNodeWithTag("toolMediaImage").assertIsDisplayed()
         composeTestRule.onNodeWithText("one.png").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("toolMediaVideoChip").assertIsDisplayed()
-        composeTestRule.onNodeWithText("▶ video").assertIsDisplayed()
+        // Ticket 185 (C8): the video chip reads as one description, not its "▶" glyph.
+        composeTestRule.onNodeWithContentDescription("Video").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("toolMediaVideoChip").assertContentDescriptionEquals("Video")
         composeTestRule.waitForIdle()
         // The video is never handed to the image loader.
         assertEquals(listOf<String?>("f_img"), requested)
+    }
+
+    @Test
+    fun aLoadedToolResultImageIsDescribedAsSuch() {
+        // Ticket 185 (C8): not the user bubble's "Attached image".
+        val png = ByteArrayOutputStream().also {
+            Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888).compress(Bitmap.CompressFormat.PNG, 100, it)
+        }.toByteArray()
+        composeTestRule.setContent {
+            KimiTheme {
+                ToolRow(
+                    ChatItem.ToolActivity(
+                        "tool_1",
+                        "ReadMediaFile",
+                        ToolStatus.Done,
+                        preview = "/tmp/one.png",
+                        media = listOf(ToolMedia("f_img", ToolMedia.Kind.Image, name = "one.png")),
+                    ),
+                    loadImageBytes = { png },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+
+        composeTestRule.waitUntil(5_000) {
+            composeTestRule.onAllNodesWithContentDescription("Tool result image one.png")
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        composeTestRule.onNodeWithContentDescription("Attached image").assertDoesNotExist()
     }
 
     @Test

@@ -19,8 +19,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /** The composer's swarm chip (ticket 174): a toggle with a stable test tag and the
- * "Toggle swarm mode" content description, and a send made while it is on hands
- * `swarmMode = true` to the send path (the fake below stands in for
+ * "Swarm mode" content description (icon-only since ticket 185), and a send made
+ * while it is on hands `swarmMode = true` to the send path (the fake below stands in for
  * `ChatViewModel.onSend` → `ChatRepository.sendPrompt`, whose body is covered by the
  * JVM tests). */
 @RunWith(AndroidJUnit4::class)
@@ -65,7 +65,7 @@ class SwarmModeChipTest {
     fun chipExposesItsTagAndContentDescriptionAndToggles() {
         inputBar()
 
-        composeTestRule.onNodeWithContentDescription("Toggle swarm mode").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Swarm mode").assertIsDisplayed()
         val chip = composeTestRule.onNodeWithTag(SWARM_MODE_CHIP_TAG)
         chip.assertIsOff()
 

@@ -114,7 +114,9 @@
   `tool_input_display`/`action`, the asking `agent_id`; a `plan_review`
   display — `ExitPlanMode`, ticket 173 — also carries its plan Markdown,
   `ChatMessageMapper.planReview`, which the card renders with the chat's
-  `MarkdownBody` in a height-capped scroll area above Allow/Deny; the
+  `MarkdownBody` in a height-capped scroll area above Allow/Deny — capped at 30% of
+  the window height the IME leaves, between 72 and 240 dp, and keyed by the
+  approval id so the next plan opens at its top (ticket 185); the
   transcript entity's camelCase `display` maps the same way), `ended` →
   `ApprovalResolved` for every outcome — the card closes on that frame, never
   on the POST response, and a turn end does not clear it (an abort ends its
@@ -174,7 +176,10 @@
   `permission_mode` (ticket 177, after 165's live variant) follows the same
   guard for the chip — read-only, never written through; the ViewModel shows
   the stored pick on every start, ahead of the frame. The composer's swarm chip
-  (ticket 174) is NOT stored at all: `UiState.swarmMode` seeds from the
+  (ticket 174; icon-only since 185, like the permission chip — "Swarm mode" in the
+  semantics, a Switch role, the fill for on — so the shared middle zone keeps its
+  48 dp targets and the model chip room; the composer's Steer button runs 16 dp
+  sides for the same budget) is NOT stored at all: `UiState.swarmMode` seeds from the
   subscribe's first `agent` frame and follows every later one unless an unsent
   toggle is in force (`pendingSwarmPick`, cleared by the send that carries it);
   `ChatApi.postPrompt` ALWAYS sends `swarm_mode` — true and false alike, since an
@@ -352,7 +357,8 @@
   50001s stay a plain `DataError.Api` with the generic `toUserMessage()` error) to
   `DataError.SearchDisabled` (ticket 185 — the ViewModel never reads wire codes for
   it), which ticket 183's ViewModel turns into the terminal
-  `UiState.searchDisabled` state — a phone-level explanation, no Retry, the query
+  `UiState.searchDisabled` state — a phone-level explanation (the shared `EmptyState`
+  with its `supportingText` line, ticket 185), no Retry, the query
   field disabled and every request entry point a no-op. There is no probe: both
   magnifier entry points stay visible and the screen explains on first submit.
 - `data/attachments/` — `AttachmentStore` owns all platform file I/O (content
@@ -378,7 +384,8 @@
   `ModelPickerSheet` doubles as the Settings screen's server-default model/effort
   editor, ticket 109, and the `PermissionPickerSheet` as its server-default
   permission-mode editor, ticket 142).
-  `ui/common/` holds shared `StateViews` (loading/error/empty) and
+  `ui/common/` holds shared `StateViews` (loading/error/empty — `EmptyState` takes an
+  optional `supportingText`; widen these rather than copying them) and
   `Formatters` — reuse them instead of adding one-off copies. Large tool-payload
   content reaches its detail screen through `ToolContentStore` (ui/chat,
   process-lifetime @Singleton — ticket 119): the row's navigation callback `put`s
@@ -418,7 +425,11 @@
   the shared `resolveImageBytes` (ChatAttachments.kt — the ticket-104 session-media
   fetch; the chat's `ChatAttachments.imageBytes` and `SubagentViewModel.imageBytes`
   both call it, passing the injected `@DefaultDispatcher` the inline base64 decodes
-  on — ticket 185), labelled with `name`; a video is a "▶ name" chip, never decoded;
+  on — ticket 185 — and cached in the process-lifetime `ImageBytesCache`, a 16 MiB
+  LRU keyed by server/session/file id, so a re-entering thumbnail or the full-screen
+  open costs no second download), labelled with `name` and described as "Tool result
+  image <name>" (the bubble's "Attached image" is the parameter's default); a video
+  is a "▶ name" chip read as "Video <name>", never decoded;
   the collapsed row adds only a small media indicator —, ExitPlanMode the fixed
   "Plan ready for review" label plus option-label chips above the generic args
   table, UpdateGoal a status badge instead of a preview — colored per the
@@ -500,7 +511,9 @@
   `[… N earlier bytes not shown …]`). ON_STOP sends `task.unwatch` before the
   page count drops; an ended task unwatches once the watch's first chunk (its
   final tail) is in and is never re-watched. A watch error (`40406`, `50003`)
-  stops watching for good: `outputError` above the output, which falls back
+  stops watching for good: `outputError` above the output (a polite live region —
+  it lands while the user watches; `JobOutputBlock` is one root Column carrying the
+  caller's weight), which falls back
   to the ended frame's `result_summary`/`error` like a task with no streamed
   text. The store-backed mode sends no watch.
   The live activity status line (ticket 148) is smaller than a collaborator and
