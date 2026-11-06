@@ -24,7 +24,6 @@ import fr.louissaglio.kimi.android.data.chat.ResolvedQuestion
 import fr.louissaglio.kimi.android.data.chat.ServerModel
 import fr.louissaglio.kimi.android.data.chat.SessionAge
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
-import fr.louissaglio.kimi.android.data.chat.SessionSnapshot
 import fr.louissaglio.kimi.android.data.chat.SocketEvent
 import fr.louissaglio.kimi.android.data.chat.SwitchConfirm
 import fr.louissaglio.kimi.android.data.chat.Todo
@@ -66,7 +65,7 @@ class ChatViewModel internal constructor(
     private val settingsRepository: SettingsRepository,
     private val attachmentStore: AttachmentStore,
     private val subagentStore: SubagentStreamStore,
-    private val snapshotSync: SnapshotSync,
+    private val coldStart: TranscriptColdStart,
     private val routeArgs: Chat,
     private val todoParser: TodoParser,
     private val unreadStore: UnreadSessionsStore,
@@ -88,7 +87,7 @@ class ChatViewModel internal constructor(
         settingsRepository: SettingsRepository,
         attachmentStore: AttachmentStore,
         subagentStore: SubagentStreamStore,
-        snapshotSync: SnapshotSync,
+        coldStart: TranscriptColdStart,
         savedStateHandle: SavedStateHandle,
         todoParser: TodoParser,
         unreadStore: UnreadSessionsStore,
@@ -99,7 +98,7 @@ class ChatViewModel internal constructor(
         settingsRepository,
         attachmentStore,
         subagentStore,
-        snapshotSync,
+        coldStart,
         savedStateHandle.toRoute<Chat>(),
         todoParser,
         unreadStore,
@@ -223,9 +222,9 @@ class ChatViewModel internal constructor(
          * either lands — the composer's permission chip stays hidden meanwhile. */
         val sessionPermission: String? = null,
         /** Context window fill for the composer's ring (041, moved into the composer
-         * in 053); null until the first read carrying a real fill arrives — the
-         * snapshot (real usage since 0.38.0), the /status seed, or a live
-         * agent.status.updated frame. */
+         * in 053); null until the first read carrying a real fill arrives (the
+         * /status seed, or a live context-usage event — ticket 177 moves both to the
+         * 2.5.0 `usage` frame). */
         val contextUsage: ContextUsage? = null,
         /** The agent's latest todo list, mirrored from its TodoList tool calls
          * (ticket 042); null or empty hides the widget above the composer. */
@@ -329,8 +328,8 @@ class ChatViewModel internal constructor(
          * rebuilt — the draft is intact and the user may retry (ticket 168). */
         data class SessionReloaded(override val message: String) : Effect
 
-        /** A recovery step failed (reload, snapshot or takeover); the draft is intact
-         * and nothing was resubmitted. */
+        /** A recovery step failed (reload, cold-start resync or takeover); the draft is
+         * intact and nothing was resubmitted. */
         data class SessionRecoveryFailed(override val message: String) : Effect
 
         /** The occupancy lock was evicted (ticket 169); the user sends when ready. */
@@ -438,8 +437,7 @@ class ChatViewModel internal constructor(
      * task.* events), task cancellation. Same logic-holder contract as [questions].
      * The raw seed also feeds the sub-agent store (ticket 135): a main-owned
      * subagent-kind entry's cancelled status and model/effort pair heal the member
-     * record — the background member's only cold-start carrier, being excluded
-     * from the snapshot roster. */
+     * record — the background member's only cold-start carrier. */
     private val jobsStore = JobsStore(
         scope = { viewModelScope },
         chatRepository = chatRepository,
@@ -473,19 +471,21 @@ class ChatViewModel internal constructor(
         // reconnect. Gate flips cancel/restart the collection (collectLatest),
         // matching the old explicit start/cancel for the chat-only case.
         //
-        // The FIRST opening awaits the session's snapshot cold start (ticket 085)
-        // before subscribing: the snapshot apply IS the initial load (no legacy burst
-        // of /messages+/status+/questions), and the seeded resume cursor makes the
-        // first subscribe stitch gaplessly onto the snapshot's watermark.
+        // The FIRST opening awaits the session's transcript cold start (ticket 176)
+        // before subscribing: the cold-start apply IS the initial load, and the
+        // seeded resume watermark makes the first subscribe replay from exactly the
+        // fetched transcript page (`transcript_since`), gapless. The chat claims the
+        // feeder role BEFORE the cold start: the store's keep-alive must not keep
+        // folding the session socket while this chat rebuilds its rows.
         viewModelScope.launch {
             combine(screenVisible, subagentStore.openPageCount(sessionId)) { visible, openPages ->
                 visible || openPages > 0
             }.distinctUntilChanged()
                 .collectLatest { holdSocket ->
                     if (holdSocket) {
-                        ensureColdStart().join()
                         subagentStore.chatCollectionStarted(sessionId)
                         try {
+                            ensureColdStart().join()
                             collectSessionSocket()
                         } finally {
                             subagentStore.chatCollectionStopped(sessionId)
@@ -512,16 +512,16 @@ class ChatViewModel internal constructor(
     }
 
     /**
-     * The cold-start snapshot sync of this ViewModel instance (ticket 085): launched
-     * by the gate's first opening (and re-launched by [onRetry] after a failure),
-     * joined by every opening so the first subscribe always runs after the cursor
-     * seed. The job lives on viewModelScope (not the gate coroutine): a gate flip
-     * mid-sync cancels only the join, never the sync.
+     * The cold-start sync of this ViewModel instance (tickets 085/176): launched by the
+     * gate's first opening (and re-launched by [onRetry] after a failure), joined by
+     * every opening so the first subscribe always runs after the watermark seed. The
+     * job lives on viewModelScope (not the gate coroutine): a gate flip mid-sync
+     * cancels only the join, never the sync.
      */
     private var coldStartJob: CoroutineJob? = null
 
-    /** True once a cold-start sync completed (fresh apply or already-fresh join) —
-     * the gate from which [onScreenStarted] runs the within-process resume set. */
+    /** True once a cold-start sync completed — the gate from which [onScreenStarted]
+     * runs the within-process resume set. */
     private var coldStartDone = false
 
     private fun ensureColdStart(): CoroutineJob {
@@ -531,106 +531,102 @@ class ChatViewModel internal constructor(
     }
 
     /**
-     * The one cold start of this chat open: awaits the session's snapshot sync and
-     * applies its outcome. A [SnapshotSync.Outcome.Fresh] bundle IS the initial load
-     * (history, busy state, pending approvals/questions — a /status re-read follows
-     * for the session's bound model/effort, ticket 107; the context ring seeds from
-     * the bundle itself, ticket 161); an
-     * [SnapshotSync.Outcome.AlreadyFresh] join means the session synced since it was
-     * last left (page-on-top restore, or the chat → page → chat round trip) — the
-     * within-process resume set (ticket 048) heals instead, and the sub-agent row
-     * links re-drive from the store's surviving registry (ticket 091). A failed
-     * fetch surfaces the ordinary load-error state — no fallback to the legacy burst
-     * (the app runs against the latest server only).
+     * The one cold start of this chat open: awaits the session's transcript cold start
+     * and applies its bundle — history, the running turn's live rows, the working
+     * state, the pending approvals/questions and the queued prompts (a /status re-read
+     * follows for the session's bound model/effort, ticket 107). An
+     * [TranscriptColdStart.Outcome.AlreadyFresh] join means another collection (the
+     * store's keep-alive restoring a sub-agent page on top) fetched first: its bundle is
+     * gone and the socket may have folded past it, while this timeline is still empty
+     * — so the chat takes a fresh fetch of its own ([TranscriptColdStart.resync]). A
+     * failed fetch surfaces the ordinary load-error state — no fallback to any legacy
+     * route (the app runs against the latest server only).
      */
     private suspend fun runColdStart() {
         val guards = captureSeedGuards()
-        val outcome = snapshotSync.sync(sessionId).getOrElse { error ->
-            if (uiState.value.items.isNullOrEmpty()) {
-                uiState.update { it.copy(error = error.toUserMessage()) }
-            } else {
-                _effects.send(Effect.RefreshFailed(error.toUserMessage()))
-            }
+        val outcome = coldStart.sync(sessionId).getOrElse { error ->
+            reportLoadFailure(error)
             return
         }
-        when (outcome) {
-            is SnapshotSync.Outcome.Fresh -> applySnapshot(outcome.snapshot, guards)
-            is SnapshotSync.Outcome.AlreadyFresh -> {
-                // The store kept its records and the session's link registry — only
-                // this ViewModel's timeline died with it: re-drive the links.
-                applySubagentLinks()
-                resyncHistoryAfterDrop()
-                questions.seed()
-                seedSessionStatus()
-            }
+        val bundle = when (outcome) {
+            is TranscriptColdStart.Outcome.Fresh -> outcome.bundle
+            is TranscriptColdStart.Outcome.AlreadyFresh ->
+                coldStart.resync(sessionId).getOrElse { error ->
+                    reportLoadFailure(error)
+                    return
+                }
         }
+        applyColdStart(bundle, guards)
         // Background tasks (ticket 092): REST is only the cold-start sync — the
         // socket's task.* events feed the list from here on.
         jobsStore.seed()
         coldStartDone = true
     }
 
-    /** The guard captures for a snapshot apply racing the live stream (the socket is
-     * open on the resync/retry paths): an event landing mid-fetch is newer than the
-     * snapshot, so its tracked field skips the stale apply. */
+    /** A failed load: full-screen while nothing renders, a snackbar otherwise. */
+    private suspend fun reportLoadFailure(error: Throwable) {
+        if (uiState.value.items.isNullOrEmpty()) {
+            uiState.update { it.copy(error = error.toUserMessage()) }
+        } else {
+            _effects.send(Effect.RefreshFailed(error.toUserMessage()))
+        }
+    }
+
+    /** The guard captures for a cold-start apply racing the live stream (the socket is
+     * open on the resync paths): an event landing mid-fetch is newer than the
+     * fetched state, so its tracked field skips the stale apply. */
     private data class SeedCaptures(
         val turn: Int,
-        val contextUsage: Int,
         val approvals: Int,
         val questions: Int,
     )
 
     private fun captureSeedGuards() = SeedCaptures(
         turn = turnSeedGuard.capture(),
-        contextUsage = contextUsageSeedGuard.capture(),
         approvals = approvalsSeedGuard.capture(),
         questions = questions.captureEvents(),
     )
 
     /**
-     * Applies the chat-side snapshot bundle (ticket 085): the cold-start /
-     * 40932-recovery rebuild. The live tail survives per the snapshot's busy (the
-     * same polarity as ticket 048's status check — a finished turn has no legitimate
-     * live rows); a turn event landing mid-fetch forces keep-live (it is newer than
-     * the snapshot). The in-flight turn's pre-watermark tail seeds from the bundle
-     * (ticket 144) — the resume-cursor replay only covers frames after the watermark.
-     * The roster and the snapshot's `Agent` calls already reached the
-     * store inside [SnapshotSync]'s fetch — here the rebuilt timeline's rows are
-     * mined and the store's links re-driven onto them (ticket 091).
+     * Applies the chat-side cold-start bundle (ticket 176): the cold start and every
+     * rebuild (40932 recovery, stale journal). History replaces the committed rows and
+     * the live tail is rebuilt from the transcript's running turn
+     * ([ChatTimeline.seedRunningTurn]) — the socket fold was seeded from the same page,
+     * so the replayed/live ops after its watermark extend exactly these rows. A turn
+     * event landing mid-fetch (a resync with the socket open) is newer than the page:
+     * the live tail is then kept as-is and the working state untouched. Waiting
+     * prompts render as queued bubbles; pending approvals/questions replace the cards'
+     * queues unless a live event overtook the fetch. The roster and the `Agent` calls
+     * already reached the store inside [TranscriptColdStart]'s fetch — here the rebuilt
+     * timeline's rows are mined and the store's links re-driven onto them (ticket 091).
      */
-    private fun applySnapshot(snapshot: SessionSnapshot, guards: SeedCaptures) {
+    private fun applyColdStart(bundle: TranscriptColdStart.Bundle, guards: SeedCaptures) {
         val turnStale = turnSeedGuard.isStale(guards.turn)
         // Any coalesced text must apply BEFORE the replace wipes/dedups the live rows
         // (ticket 062; mirrors the history pager's applyNewest).
         deltaCoalescer.flush()
-        val keepLive = snapshot.busy || turnStale
-        timeline.replaceHistory(snapshot.messages.items, keepLive = keepLive)
-        // The in-flight turn's pre-watermark tail (ticket 144): the resume-cursor
-        // replay covers only frames AFTER the snapshot's watermark, so without this
-        // seed a cold open of a busy session shows a gap between the last committed
-        // message and the live stream.
-        if (keepLive) snapshot.inFlightTurn?.let(timeline::seedInFlight)
-        oldestHistoryId = snapshot.messages.items.firstOrNull()?.id
+        if (turnStale) {
+            timeline.replaceHistory(bundle.messages.items, keepLive = true)
+        } else {
+            timeline.replaceHistory(bundle.messages.items, keepLive = false)
+            bundle.runningTurn?.let(timeline::seedRunningTurn)
+        }
+        timeline.seedQueuedPrompts(bundle.queue.queued.map { it.message })
+        oldestHistoryId = bundle.messages.items.firstOrNull()?.id
         mineAgentRowsIntoStore()
         uiState.update {
             it.copy(
                 items = timeline.items(),
                 todos = timeline.todos(),
                 error = null,
-                hasMoreHistory = snapshot.messages.hasMore,
-                isWorking = if (!turnStale) snapshot.busy else it.isWorking,
-                contextUsage =
-                    if (!contextUsageSeedGuard.isStale(guards.contextUsage) && snapshot.contextUsage != null) {
-                        snapshot.contextUsage
-                    } else {
-                        it.contextUsage
-                    },
-                // The snapshot is the first REST read approvals ever had: it REPLACES
-                // the queue (a decision missed with the stream heals here), unless a
-                // live approval event overtook the fetch.
+                hasMoreHistory = bundle.messages.hasMore,
+                isWorking = if (!turnStale) bundle.busy else it.isWorking,
+                // The transcript's pending interactions are the only REST read of the
+                // approvals: they REPLACE the queue (a decision missed with the stream
+                // heals here), unless a live approval event overtook the fetch.
                 pendingApprovals =
                     if (!approvalsSeedGuard.isStale(guards.approvals)) {
-                        snapshot.pendingApprovals
+                        bundle.transcript.pendingApprovals
                             .map { a -> PendingApproval(a.approvalId, a.toolName, a.summary, a.agentId) }
                             .distinctBy { a -> a.approvalId }
                     } else {
@@ -638,12 +634,50 @@ class ChatViewModel internal constructor(
                     },
             )
         }
-        questions.applySnapshot(snapshot.pendingQuestions, guards.questions)
+        questions.applyColdStart(bundle.transcript.pendingQuestions.distinctBy { it.questionId }, guards.questions)
         // /status re-read on EVERY cold start: the session's bound model/effort
-        // (ticket 107) is served only there. The ring no longer waits on it — the
-        // bundle's real usage seeds it directly (ticket 161); the seed's guard
-        // drops the late response when a live usage frame overtakes it.
+        // (ticket 107) and the context ring are served only there (ticket 177 moves
+        // both to the subscribe's `agent`/`usage` frames).
         seedSessionStatus()
+    }
+
+    /**
+     * The resume check (ticket 176, replacing 048's status-aware REST resync): every
+     * re-subscribe carries the main agent's watermark, so the server REPLAYS what the
+     * gap missed — a turn that ended while away arrives as its own `turn.upsert` and
+     * takes the ghost live rows with it. The replay is only as good as the journal,
+     * though: this probe asks `GET .../transcript/ops` whether it still covers the
+     * watermark, and a stale answer (`complete:false`, or a restarted server's journal
+     * behind the watermark) rebuilds the chat from a fresh transcript cold start
+     * instead of trusting a partial replay. Runs on every gate reopen (ON_START) and on
+     * every `Reconnected`; latest-wins. A failed probe proves nothing — the replay
+     * stays the resume.
+     */
+    private var resumeCheckJob: CoroutineJob? = null
+
+    private fun verifyResume() {
+        val since = chatRepository.transcriptWatermark(sessionId, MAIN_AGENT_ID) ?: return
+        resumeCheckJob?.cancel()
+        resumeCheckJob = viewModelScope.launch {
+            chatRepository.getTranscriptCatchUp(settingsRepository.current(), sessionId, MAIN_AGENT_ID, since)
+                .onSuccess { catchUp -> if (catchUp.isStale) rebuildFromTranscript() }
+        }
+    }
+
+    /** The full refresh of a stale journal (ticket 176): one fresh transcript cold
+     * start — the socket fold and watermark restart from its page — applied over the
+     * timeline. One rebuild at a time: a second stale signal while one is in flight
+     * is already covered by it. */
+    private var rebuildJob: CoroutineJob? = null
+
+    private fun rebuildFromTranscript() {
+        if (rebuildJob?.isActive == true) return
+        val guards = captureSeedGuards()
+        rebuildJob = viewModelScope.launch {
+            coldStart.resync(sessionId)
+                .onSuccess { bundle -> applyColdStart(bundle, guards) }
+                .onFailure { error -> _effects.send(Effect.RefreshFailed(error.toUserMessage())) }
+        }
     }
 
     /** Re-drives the store's session link registry (ticket 091 — spawned / roster /
@@ -662,16 +696,17 @@ class ChatViewModel internal constructor(
         }
     }
 
-    /** Bumped on every turn.started/turn.ended event, so [seedSessionStatus] and
-     * [resyncHistoryAfterDrop] can drop a response a newer turn event has overtaken. */
+    /** Bumped on every turn.started/turn.ended event, so [seedSessionStatus] and a
+     * cold-start rebuild ([applyColdStart]) can drop a response a newer turn event has
+     * overtaken. */
     private val turnSeedGuard = SeedGuard()
 
     /** Bumped on every live context-usage event, so [seedSessionStatus] can drop a
      * /status snapshot a newer agent.status.updated frame has already overtaken. */
     private val contextUsageSeedGuard = SeedGuard()
 
-    /** Bumped on every approval event, so a snapshot apply (ticket 085) racing the
-     * live stream drops its stale queue replace. */
+    /** Bumped on every approval event, so a cold-start apply racing the live stream
+     * drops its stale queue replace. */
     private val approvalsSeedGuard = SeedGuard()
 
     /** Publishes the timeline's current rows+todos — the coalescer's publish point
@@ -748,19 +783,20 @@ class ChatViewModel internal constructor(
         setLoadingMore = { loading -> uiState.update { it.copy(isLoadingMoreHistory = loading) } },
     )
 
-    /** Wired to ON_START. The FIRST start of this ViewModel lets the gate's cold-start
-     * snapshot sync do the initial load (ticket 085) — none of the legacy burst runs
-     * here. Later starts are the within-process resume (ticket 048): a status-aware
-     * history re-sync (a turn that ended while the app was away takes its ghost live
-     * rows with it), the questions seed and the status seed; the socket gate opens the
-     * socket. Also fires when the app returns to the foreground. */
+    /** Wired to ON_START. The FIRST start of this ViewModel lets the gate's transcript
+     * cold start do the initial load (ticket 176). Later starts are the within-process
+     * resume (ticket 048): the socket gate re-subscribes with the resume watermark (the
+     * server replays the missed window — a turn that ended while the app was away
+     * takes its ghost live rows with it), [verifyResume] checks the journal covered it,
+     * plus the questions seed and the status seed. Also fires when the app returns to
+     * the foreground. */
     fun onScreenStarted() {
         screenVisible.value = true
         // The web clears a session's unread marker when it becomes the visible session
         // (ticket 145 backstop: a process-death restore lands here without a list tap).
         viewModelScope.launch { unreadStore.clear(settingsRepository.current().serverUrl, sessionId) }
         if (coldStartDone) {
-            resyncHistoryAfterDrop()
+            verifyResume()
             questions.seed()
             seedSessionStatus()
         }
@@ -785,8 +821,8 @@ class ChatViewModel internal constructor(
 
     fun onRetry() {
         uiState.update { it.copy(error = null) }
-        // A failed cold start retries the snapshot sync (the gate is already open —
-        // this is the only re-trigger); never the legacy burst.
+        // A failed cold start retries the transcript cold start (the gate is already
+        // open — this is the only re-trigger).
         if (!coldStartDone) ensureColdStart()
         onScreenStarted()
     }
@@ -888,8 +924,8 @@ class ChatViewModel internal constructor(
      *   `clientDisplayName` when the envelope carries it (fallback: the server's own
      *   message). Never reload, never take over automatically; the second consecutive
      *   answer offers the takeover.
-     * - 40932 `SESSION_STALE`: reload the session, rebuild from a fresh snapshot, then
-     *   tell the user to retry. A failed step reports itself and keeps the draft.
+     * - 40932 `SESSION_STALE`: reload the session, rebuild from a fresh transcript cold
+     *   start, then tell the user to retry. A failed step reports itself and keeps the draft.
      * - Anything else keeps the existing [Effect.SendFailed] Retry snackbar.
      */
     private suspend fun handleSendFailure(error: Throwable) {
@@ -932,7 +968,7 @@ class ChatViewModel internal constructor(
         }
     }
 
-    /** The 40932 recovery (ticket 168): one `:reload`, then one fresh snapshot apply.
+    /** The 40932 recovery (ticket 168): one `:reload`, then one fresh cold-start apply.
      * The prompt is NOT resubmitted; a failure at either step reports itself and the
      * draft stays in the composer. */
     private suspend fun recoverStaleSession() {
@@ -947,9 +983,9 @@ class ChatViewModel internal constructor(
             }
             .onSuccess {
                 val guards = captureSeedGuards()
-                snapshotSync.resync(sessionId)
-                    .onSuccess { snapshot ->
-                        applySnapshot(snapshot, guards)
+                coldStart.resync(sessionId)
+                    .onSuccess { bundle ->
+                        applyColdStart(bundle, guards)
                         jobsStore.seed()
                         _effects.send(
                             Effect.SessionReloaded("The session was reloaded. Review the chat, then retry your message."),
@@ -1146,13 +1182,11 @@ class ChatViewModel internal constructor(
                                 uiState.update { it.copy(isReconnecting = false) }
                             SocketEvent.Reconnected -> {
                                 uiState.update { it.copy(isReconnecting = false) }
-                                // The re-subscribe streams live ops only — the window
-                                // the drop missed (a turn end above all) heals from
-                                // REST: the status-aware resync (ticket 048) plus the
-                                // pending questions. It also runs here — not only on
-                                // ON_START — so a keep-live refetch can never race and
-                                // clobber the ON_START resync's clear-live decision.
-                                resyncHistoryAfterDrop()
+                                // The re-subscribe carried the resume watermark: the
+                                // server replays the window the drop missed (a turn
+                                // end above all, ticket 176). Verify the journal could
+                                // cover it; the questions still re-derive from REST.
+                                verifyResume()
                                 questions.refresh()
                             }
                             SocketEvent.Disconnected ->
@@ -1258,6 +1292,10 @@ class ChatViewModel internal constructor(
                 }
             is SessionEvent.StepStarted, is SessionEvent.StepCompleted ->
                 uiState.update { it.copy(stepRetry = null) }
+            // The subscribe's watermark could not be covered (ticket 176): the socket
+            // reset the fold to the new baseline — rebuild the rows from REST rather
+            // than render a partial replay.
+            is SessionEvent.TranscriptStale -> rebuildFromTranscript()
             is SessionEvent.ApprovalRequested -> {
                 approvalsSeedGuard.bump()
                 uiState.update {
@@ -1350,32 +1388,8 @@ class ChatViewModel internal constructor(
         }
     }
 
-    /**
-     * Re-sync after a connection gap (ON_START gate reopen, [SocketEvent.Reconnected] —
-     * ticket 048): a turn may have ENDED while the stream was away, and nothing says so
-     * — the re-subscribe replays nothing (ticket 176 owns `transcript_since`). A
-     * finished turn can have no legitimate live rows, so the history refetch clears
-     * them; a running turn keeps the keep-live refetch and the live ops extend it. A
-     * turn event landing while the /status GET is in
-     * flight is newer than its snapshot (the [seedSessionStatus] pattern) and
-     * downgrades the clear; a failed /status keeps the live rows too. ON_START and
-     * the resumed socket's Reconnected fire together, so resyncs are latest-wins:
-     * the newer call has the newer connection state (and the newer turn-event guard)
-     * and cancels the superseded one before it spends a /status round trip.
-     */
-    private var resyncJob: CoroutineJob? = null
-
-    private fun resyncHistoryAfterDrop() {
-        val turnEventsAtStart = turnSeedGuard.capture()
-        resyncJob?.cancel()
-        resyncJob = viewModelScope.launch {
-            val busy = chatRepository.getSessionStatus(settingsRepository.current(), sessionId).getOrNull()?.busy
-            refreshHistory(clearLive = busy == false && !turnSeedGuard.isStale(turnEventsAtStart))
-        }
-    }
-
-    /** Newest-page history refetch (initial load, turn-end commit, resync — ticket
-     * 048): the shared pager fetches and merges it, latest-wins. [clearLive] is this
+    /** Newest-page history refetch (the turn-end commit): the shared pager fetches and
+     * merges it, latest-wins. [clearLive] is this
      * screen's polarity of the pager's keepLive: a finished turn has no legitimate
      * live rows, a running one keeps its tail. */
     private fun refreshHistory(clearLive: Boolean) {

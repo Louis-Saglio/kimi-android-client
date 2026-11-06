@@ -18,7 +18,9 @@ import kotlinx.serialization.json.decodeFromJsonElement
  *   `append` emits only the NEW suffix as an [SessionEvent.AssistantDelta]/
  *   [SessionEvent.ThinkingDelta] (a frame's final `frame.upsert` replaces the
  *   accumulated text; a re-sent frame or a duplicate `append` emits nothing; an append
- *   past the local end is a gap — dropped, the REST refresh heals it, ticket 176);
+ *   past the local end is a gap — dropped: the frame's final `frame.upsert` heals the
+ *   text, the turn-end refetch the row; a journal that cannot cover the resume
+ *   watermark is the socket's stale signal, ticket 176);
  * - tool frames: the last rendering emitted, so [SessionEvent.ToolCallStarted] fires on
  *   first sight and again only when arguments/display become known, and
  *   [SessionEvent.ToolCallResult] exactly once, on `done`/`error`;
@@ -94,18 +96,71 @@ internal class TranscriptFold(
         return events
     }
 
-    private fun onPrompt(agentId: String, prompt: PromptEntityDto, events: MutableList<SessionEvent>) {
-        val status = when (prompt.status) {
-            "running" -> PromptStatus.Running
-            "queued" -> PromptStatus.Queued
-            "completed" -> PromptStatus.Completed
-            "aborted" -> PromptStatus.Aborted
-            "blocked" -> PromptStatus.Blocked
-            "failed" -> PromptStatus.Failed
-            else -> {
-                Log.w(TAG, "Dropping prompt '${prompt.promptId}' with unknown status '${prompt.status}'")
-                return
+    /** Forgets everything folded for [agentId] — its journal no longer continues from
+     * what the fold saw (a stale resume, ticket 176), or a REST page replaces it
+     * ([seed]). */
+    fun reset(agentId: String) {
+        frames.keys.removeAll { it.agentId == agentId }
+        turnStates.keys.removeAll { it.agentId == agentId }
+        stepStates.keys.removeAll { it.agentId == agentId }
+        promptStates.keys.removeAll { it.agentId == agentId }
+        seenMarkers.removeAll { it.agentId == agentId }
+    }
+
+    /**
+     * Replaces [agentId]'s fold state with a REST transcript page (the cold start,
+     * ticket 176): the page's turn/step states, its running turn's frames (the text
+     * the chat seeds its live rows from — so a replayed `append` past the seeded text
+     * extends it instead of reading as a gap, and a replayed `turn.upsert running`
+     * re-fires no TurnStarted that would clear the seeded rows) and its prompt
+     * statuses (the queue-length bookkeeping). The ops that follow the page's `seq`
+     * then fold onto exactly what the chat shows. Tool frames are seeded unrendered:
+     * the first replayed upsert of a running call re-emits its started event, which
+     * heals the seeded row in place.
+     */
+    fun seed(agentId: String, page: TranscriptPage) {
+        reset(agentId)
+        for (turn in page.turns) {
+            val turnState = when (turn.state) {
+                TranscriptState.Running -> "running"
+                TranscriptState.Completed -> "completed"
+                TranscriptState.Failed -> "failed"
+                TranscriptState.Other -> continue
             }
+            turnStates[Key(agentId, turn.id)] = turnState
+            if (turn.state != TranscriptState.Running) continue
+            for (step in turn.steps) {
+                val stepState = when (step.state) {
+                    TranscriptState.Running -> "running"
+                    TranscriptState.Completed -> "completed"
+                    TranscriptState.Failed -> "interrupted"
+                    TranscriptState.Other -> null
+                }
+                if (stepState != null) stepStates[Key(agentId, step.id)] = StepState(turn.id, stepState)
+                for (frame in step.frames) {
+                    frames[Key(agentId, frame.id)] = when (frame) {
+                        is TranscriptFrame.Thinking -> FrameState.Streamed(turn.id, thinking = true, frame.text)
+                        is TranscriptFrame.Text ->
+                            if (frame.role == TranscriptFrame.Text.Role.Assistant) {
+                                FrameState.Streamed(turn.id, thinking = false, frame.text)
+                            } else {
+                                FrameState.Ignored(turn.id)
+                            }
+                        is TranscriptFrame.Tool -> FrameState.Tool(turn.id, rendering = null, settled = !frame.running)
+                    }
+                }
+            }
+        }
+        for (prompt in page.prompts) {
+            val status = prompt.status ?: continue
+            promptStates[Key(agentId, prompt.id)] = status
+        }
+    }
+
+    private fun onPrompt(agentId: String, prompt: PromptEntityDto, events: MutableList<SessionEvent>) {
+        val status = mapper.promptStatus(prompt.status) ?: run {
+            Log.w(TAG, "Dropping prompt '${prompt.promptId}' with unknown status '${prompt.status}'")
+            return
         }
         val key = Key(agentId, prompt.promptId)
         // The server re-sends unchanged entities (a queued prompt arrives twice).
@@ -285,8 +340,9 @@ internal class TranscriptFold(
                 val local = state.text.length
                 when {
                     offset > local ->
-                        // A gap: chunks were missed (a reconnect mid-frame). Dropped — the
-                        // REST refresh heals it (ticket 176).
+                        // A gap: chunks were missed. Dropped — the frame's final upsert
+                        // carries the whole text and heals it; a resume the journal cannot
+                        // cover never gets here (the socket's stale path, ticket 176).
                         Log.w(TAG, "Dropping append past the end of frame '${target.frameId}' ($offset > $local)")
                     offset + text.length <= local -> Unit // a duplicate chunk
                     else -> {

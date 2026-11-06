@@ -230,23 +230,6 @@ data class ServerHelloPayload(
     @SerialName("heartbeat_ms") val heartbeatMs: Long? = null,
 )
 
-@Serializable
-data class ApprovalRequestedPayload(
-    @SerialName("approval_id") val approvalId: String = "",
-    @SerialName("tool_name") val toolName: String = "",
-    val action: String = "",
-    @SerialName("tool_input_display") val toolInputDisplay: ToolInputDisplayDto? = null,
-    /** The ASKING agent (0.33.0 — ticket 139): "main", or the sub-agent's id for a
-     * swarm member's request. This is the camelCase spelling the live WS frame's
-     * payload stamps; the socket reads it. */
-    val agentId: String = MAIN_AGENT_ID,
-    /** The same asking agent, snake_case spelling (2.0.2 — ticket 156): the snapshot's
-     * `pending_approvals` items and the `/approvals?status=pending` poll items stamp
-     * `agent_id` only (the 2.0.2 WS frame carries both spellings, equal). The
-     * snapshot mapping reads this one — decode per surface, never rename. */
-    @SerialName("agent_id") val agentIdSnakeCase: String = MAIN_AGENT_ID,
-)
-
 /** `tool_input_display` of an approval request; only `command` (kind "command") is consumed.
  * A tool frame's `display` has the same shape, and carries the `agent_call` kind (an
  * `Agent` spawn, 0.31.0 — docs/server-api.md, Sub-agents): [agentName]/[prompt] feed
@@ -262,8 +245,9 @@ data class ToolInputDisplayDto(
 
 /**
  * `event.question.requested` payload (docs/server-api.md, Questions); the same
- * shape comes back as items of `GET .../questions?status=pending` and of the
- * snapshot's `pending_questions`. Since 0.38.0 `question_id` is a dedicated
+ * shape comes back as items of `GET .../questions?status=pending` and — since
+ * 2.5.0 — as the `request` of a pending question interaction on
+ * `GET .../transcript` (ticket 176's cold seed). Since 0.38.0 `question_id` is a dedicated
  * `question_<uuid>` interaction id and [toolCallId] is distinct (they were equal
  * before): answer/dismiss route by `question_id`, the transcript row carries
  * `tool_call_id`. There is no v2 camelCase duplicate of this event family.
@@ -274,8 +258,8 @@ data class QuestionRequestedPayload(
     @SerialName("tool_call_id") val toolCallId: String = "",
     val questions: List<QuestionItemDto> = emptyList(),
     /** The ASKING agent (2.0.2 — ticket 156), optional in the schema: the pending
-     * poll's items, the snapshot's `pending_questions` items and the live frame all
-     * stamp snake_case `agent_id`; absent = the main agent. Unlike approvals there is
+     * poll's items and the live frame stamp snake_case `agent_id` (the transcript
+     * interaction's request carries none); absent = the main agent. Unlike approvals there is
      * no camelCase twin to decode — the frame's trailing `agentId` is the envelope
      * mirror, not the asker. */
     @SerialName("agent_id") val agentId: String? = null,
@@ -362,87 +346,6 @@ data class TaskDetachData(
     val status: String = "",
 )
 
-// --- GET /api/v1/sessions/{id}/snapshot (docs/server-api.md, Session snapshot —
-// ticket 085) ------------------------------------------------------------------
-// The cold-start/resync bundle, verified live on 0.31.1 (2026-08-01). The roster is
-// the newest surface of the API: every field stays optional/defensive.
-
-@Serializable
-data class SnapshotData(
-    @SerialName("as_of_seq") val asOfSeq: Long = 0,
-    val epoch: String = "",
-    val session: SnapshotSessionDto? = null,
-    val messages: MessageListData? = null,
-    @SerialName("in_flight_turn") val inFlightTurn: InFlightTurnDto? = null,
-    val subagents: List<SubagentRosterEntryDto> = emptyList(),
-    // The snapshot items are the legacy event.approval.requested /
-    // event.question.requested payload shapes verbatim (verified live), so the
-    // existing payload DTOs decode them.
-    @SerialName("pending_approvals") val pendingApprovals: List<ApprovalRequestedPayload> = emptyList(),
-    @SerialName("pending_questions") val pendingQuestions: List<QuestionRequestedPayload> = emptyList(),
-)
-
-/** The snapshot's rich `session` object; only [busy] and the context fill of [usage]
- * are consumed (usage carries `context_tokens`/`context_limit` — not the /status
- * `max_context_tokens` naming). The usage has been real since 0.38.0 and seeds the
- * cold-start ring directly (ticket 161); the same server version made
- * `total_cost_usd`/`context_limit`/`turn_count` optional — the snapshot omits cost
- * and turn count (never decoded here), and an absent limit decodes to 0, the
- * "unknown" marker the mapper drops like an explicit 0 (100's rule). */
-@Serializable
-data class SnapshotSessionDto(
-    val busy: Boolean = false,
-    val usage: SnapshotUsageDto? = null,
-)
-
-@Serializable
-data class SnapshotUsageDto(
-    @SerialName("context_tokens") val contextTokens: Long = 0,
-    @SerialName("context_limit") val contextLimit: Long = 0,
-)
-
-@Serializable
-data class SubagentRosterEntryDto(
-    val id: String = "",
-    @SerialName("subagent_type") val subagentType: String = "",
-    val description: String = "",
-    @SerialName("subagent_phase") val subagentPhase: String = "",
-    @SerialName("parent_tool_call_id") val parentToolCallId: String = "",
-    @SerialName("run_in_background") val runInBackground: Boolean = false,
-    // Optional (docs/server-api.md, Session snapshot roster): the member's position
-    // inside an AgentSwarm call. The roster carries no task-id field — its `id` is
-    // the subagent id (verified upstream, ticket 134).
-    @SerialName("swarm_index") val swarmIndex: Int? = null,
-    // Present once the run is terminal (the result summary tail).
-    @SerialName("output_preview") val outputPreview: String? = null,
-    // The run's bound model/effort (0.34.0, snake_case here — ticket 135).
-    val model: String? = null,
-    @SerialName("thinking_effort") val thinkingEffort: String? = null,
-)
-
-/** The active turn's live tail: the ONLY carrier of the turn's pre-watermark content
- * (the resume-cursor replay covers frames after the watermark only, and the turn's
- * messages commit to history at its end), so the cold start seeds the live tail from
- * it (ticket 144). `running_tools` entries also carry a `description` — ignored. */
-@Serializable
-data class InFlightTurnDto(
-    @SerialName("turn_id") val turnId: Long = 0,
-    @SerialName("assistant_text") val assistantText: String = "",
-    @SerialName("thinking_text") val thinkingText: String = "",
-    @SerialName("running_tools") val runningTools: List<RunningToolDto> = emptyList(),
-    @SerialName("current_prompt_id") val currentPromptId: String = "",
-)
-
-@Serializable
-data class RunningToolDto(
-    @SerialName("tool_call_id") val toolCallId: String = "",
-    val name: String = "",
-    val args: JsonObject? = null,
-    // Same shape as tool.call.started's display (the 0.31.1 verbatim capture,
-    // docs/server-api.md): it feeds the seeded row's preview.
-    val display: ToolInputDisplayDto? = null,
-)
-
 // --- GET /api/v1/sessions/{id}/transcript (docs/server-api.md, Transcript) -----------
 // Turn-granular per-agent history (046), pinned from live 0.29.2 captures. The
 // cold-rebuild path omits the warm-only fields (startedAt/endedAt, usage/timing,
@@ -453,6 +356,71 @@ data class TranscriptData(
     @SerialName("agent_id") val agentId: String = "",
     val items: List<TranscriptItemDto> = emptyList(),
     @SerialName("has_more") val hasMore: Boolean = false,
+    // The session's unpaginated global state, shipped with every page (2.5.0 — the
+    // cold-start read model replacing the removed snapshot, ticket 176). [seq] is the
+    // agent's op-batch watermark for `transcript_since` (live sessions only — absent
+    // on a cold session). [interactions] is the full entity list, ended ones
+    // included; [pendingInteractions] the ids still waiting.
+    val interactions: List<InteractionEntityDto> = emptyList(),
+    @SerialName("pending_interactions") val pendingInteractions: List<String> = emptyList(),
+    val prompts: List<PromptEntityDto> = emptyList(),
+    val agents: List<TranscriptAgentDto> = emptyList(),
+    val seq: Long? = null,
+)
+
+/** One `agents` roster entry of the transcript (2.5.0): every agent of the session,
+ * children included. [type] is `main` or `sub`. */
+@Serializable
+data class TranscriptAgentDto(
+    val agentId: String = "",
+    val type: String = "",
+    val parentAgentId: String? = null,
+)
+
+/** The `request` of a pending APPROVAL interaction on the REST transcript — camelCase,
+ * unlike the WS `interaction` frame's snake_case request (re-verified live on 2.5.1,
+ * docs/server-api.md, Pending state on REST). [display] is the same discriminated
+ * object tool frames carry; [agentId] is the asking agent. */
+@Serializable
+data class TranscriptApprovalRequestDto(
+    val toolName: String = "",
+    val action: String = "",
+    val display: ToolInputDisplayDto? = null,
+    val agentId: String? = null,
+)
+
+// --- GET /api/v1/sessions/{id}/prompts (docs/server-api.md, Prompts → Queue
+// snapshot — new in 2.5.0) ------------------------------------------------------
+
+/** `data` of the main agent's prompt queue: the running prompt and the queued ones,
+ * in queue order. */
+@Serializable
+data class PromptQueueData(
+    val active: QueuePromptDto? = null,
+    val queued: List<QueuePromptDto> = emptyList(),
+)
+
+/** One prompt of the queue view (snake_case, unlike the camelCase transcript prompt
+ * entity). [content] is the submitted content array — the history part shapes. */
+@Serializable
+data class QueuePromptDto(
+    @SerialName("prompt_id") val promptId: String = "",
+    @SerialName("user_message_id") val userMessageId: String? = null,
+    val status: String = "",
+    val content: List<ContentPartDto> = emptyList(),
+    @SerialName("created_at") val createdAt: String? = null,
+)
+
+// --- GET /api/v1/sessions/{id}/transcript/ops (docs/server-api.md, Transcript
+// catch-up — 2.5.0) -----------------------------------------------------------
+
+/** `data` of the transcript catch-up. Only the journal coverage is consumed: the
+ * batches themselves are replayed over the WebSocket by `transcript_since`. */
+@Serializable
+data class TranscriptCatchUpData(
+    @SerialName("agent_id") val agentId: String = "",
+    @SerialName("latest_seq") val latestSeq: Long = 0,
+    val complete: Boolean = false,
 )
 
 /** Flat item shape: [kind] is `turn` or `marker`, each filling only its own fields.

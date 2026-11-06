@@ -2441,4 +2441,79 @@ class ChatTimelineTest {
         assertEquals(listOf(ChatItem.UserMessage("msg_1", "hello")), timeline.items())
     }
 
+
+    // --- cold-start seeds (ticket 176) -------------------------------------------------
+
+    @Test
+    fun `the running-turn seed flattens frames into live rows, todo calls into the widget`() {
+        val timeline = testChatTimeline()
+        timeline.replaceHistory(
+            listOf(ChatMessage("msg_1", ChatMessage.Role.User, listOf(ChatMessage.Part.Text("go")))),
+            keepLive = false,
+        )
+
+        timeline.seedRunningTurn(
+            TranscriptTurn(
+                "t1", 1, TranscriptState.Running, prompt = "go",
+                steps = listOf(
+                    TranscriptStep(
+                        "t1.1", TranscriptState.Completed,
+                        listOf(
+                            TranscriptFrame.Text("t1.1.f1", TranscriptFrame.Text.Role.Assistant, "Planning."),
+                            TranscriptFrame.Tool(
+                                "t1.1.todo", "todo_1", "TodoList", running = false, preview = "",
+                                input = """{"todos":[{"title":"write","status":"pending"}]}""", output = "",
+                            ),
+                            TranscriptFrame.Tool(
+                                "t1.1.ls", "call_ls", "Bash", running = false, preview = "ls",
+                                input = "", output = "boom", failed = true,
+                            ),
+                        ),
+                    ),
+                    TranscriptStep(
+                        "t1.2", TranscriptState.Running,
+                        listOf(
+                            TranscriptFrame.Text("t1.2.f0", TranscriptFrame.Text.Role.User, "steered"),
+                            TranscriptFrame.Text("t1.2.f1", TranscriptFrame.Text.Role.Assistant, "Retrying"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        val items = timeline.items()
+        assertEquals(listOf("msg_1", "live_0", "call_ls", "live_1"), items.map(ChatItem::id))
+        val tool = (items[2] as ChatItem.ToolGroup).tools.single()
+        assertEquals(ToolStatus.Error, tool.status)
+        assertEquals("boom", tool.output)
+        assertEquals(listOf(Todo("write", Todo.Status.Pending)), timeline.todos())
+        // A live delta extends the running step's bubble.
+        timeline.apply(SessionEvent.AssistantDelta("…"))
+        assertEquals("Retrying…", (timeline.items().last() as ChatItem.AssistantMessage).text)
+    }
+
+    @Test
+    fun `seeded queued prompts show their queue position and survive a refetch until committed`() {
+        val timeline = testChatTimeline()
+        timeline.replaceHistory(emptyList(), keepLive = false)
+
+        timeline.seedQueuedPrompts(
+            listOf(
+                ChatMessage("msg_a", ChatMessage.Role.User, listOf(ChatMessage.Part.Text("first"))),
+                ChatMessage("msg_b", ChatMessage.Role.User, listOf(ChatMessage.Part.Text("second"))),
+            ),
+        )
+
+        assertEquals(listOf(1, 2), timeline.items().map { (it as ChatItem.UserMessage).queued })
+        timeline.replaceHistory(emptyList(), keepLive = false)
+        assertEquals(listOf("msg_a", "msg_b"), timeline.items().map(ChatItem::id))
+        timeline.apply(SessionEvent.PromptUpdated("msg_a", PromptStatus.Running))
+        assertNull((timeline.items().first() as ChatItem.UserMessage).queued)
+        timeline.replaceHistory(
+            listOf(ChatMessage("msg_a", ChatMessage.Role.User, listOf(ChatMessage.Part.Text("first")))),
+            keepLive = false,
+        )
+        assertEquals(listOf("msg_a", "msg_b"), timeline.items().map(ChatItem::id))
+        assertNull((timeline.items().first() as ChatItem.UserMessage).queued)
+    }
 }

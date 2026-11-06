@@ -53,8 +53,11 @@ class ChatApi @Inject constructor(
     /**
      * Fetches one page of an agent's turn-granular transcript
      * (`GET /api/v1/sessions/{id}/transcript`, docs/server-api.md, Transcript) — the
-     * history backing of the sub-agent page (ticket 046). [beforeTurn] = null fetches
-     * the newest page; turns come back ascending within the page and stay so.
+     * history backing of the sub-agent page (ticket 046) and, since 2.5.0, the main
+     * chat's cold-start read model (ticket 176: the page's running turn, pending
+     * interactions, prompt entities, agent roster and `seq` watermark). [beforeTurn] =
+     * null fetches the newest page; turns come back ascending within the page and stay
+     * so.
      */
     suspend fun transcript(
         settings: ServerSettings,
@@ -321,18 +324,6 @@ class ChatApi @Inject constructor(
             api.json.decodeFromString<Envelope<JsonObject>>(body).toAckResult()
         }
 
-    /**
-     * Fetches the session snapshot (`GET /api/v1/sessions/{id}/snapshot`,
-     * docs/server-api.md, Session snapshot — ticket 085): the whole session state as
-     * one atomic bundle at an event-stream watermark — the single cold-start/resync
-     * entry point. Everything the event stream never replays (sub-agent roster,
-     * pending approvals/questions) or never persisted arrives here.
-     */
-    suspend fun snapshot(settings: ServerSettings, sessionId: String): Result<SessionSnapshot> =
-        api.get(settings, "/api/v1/sessions/$sessionId/snapshot") { body ->
-            api.json.decodeFromString<Envelope<SnapshotData>>(body).toResult().map(mapper::toDomain)
-        }
-
     /** Lightweight live status (`GET /api/v1/sessions/{id}/status`): the mid-turn flag
      * and the context window fill (ticket 041). A data-less success envelope degrades
      * to "not busy, fill unknown" (see SessionStatus). */
@@ -342,8 +333,7 @@ class ChatApi @Inject constructor(
                 SessionStatus(
                     busy = data?.busy == true,
                     // 0.34.0: max_context_tokens is omittable, 0 decodes as the unknown
-                    // marker — drop the usage instead of leaking a phantom 0/0 fill
-                    // (same rule as the snapshot guard, ChatMessageMapper).
+                    // marker — drop the usage instead of leaking a phantom 0/0 fill.
                     contextUsage = data?.takeIf { it.maxContextTokens > 0 }
                         ?.let { ContextUsage(it.contextTokens, it.maxContextTokens) },
                     // The session's binding (ticket 107): a blank thinking_level is a

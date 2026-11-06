@@ -47,8 +47,8 @@ fun SessionEvent.isSubagentScoped(): Boolean = when (this) {
  * docs/server-api.md, Sub-agents — ticket 157): the typed model of an `Agent`
  * spawn's display, carried to the row that titles itself "{[agentName]} sub-agent",
  * previews [prompt] and badges a [background] spawn. History `tool_use` parts carry
- * no display, so this exists only on rows witnessed live (or seeded from the
- * in-flight snapshot). */
+ * no display, so this exists only on rows witnessed live (or seeded from a
+ * running transcript turn's tool frame on a cold open — ticket 176). */
 data class AgentCallDisplay(
     val agentName: String,
     val prompt: String,
@@ -69,6 +69,14 @@ sealed interface SessionEvent {
         val queueLength: Int = 0,
         override val agentId: String = MAIN_AGENT_ID,
     ) : SessionEvent, AgentScopedEvent
+
+    /** The agent's op journal could not cover the resume watermark (ticket 176): the
+     * server answered the subscribe's `transcript_since` with a fresh
+     * `transcript.reset` instead of replaying the missed batches. The socket has
+     * already reset the agent's fold; the collector rebuilds the agent's rows from
+     * REST (the main chat refetches its cold start) instead of trusting a partial
+     * replay. */
+    data class TranscriptStale(override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
 
     data class TurnStarted(override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
 

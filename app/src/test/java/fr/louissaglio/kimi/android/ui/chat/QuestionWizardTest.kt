@@ -25,26 +25,27 @@ class QuestionWizardTest : ChatViewModelTestBase() {
 
     @Test
     fun `pending question survives the turn ended refetch`() = runBlocking {
-        // The snapshot's pending_questions are the cold-start source of the card
-        // (ticket 085 — same item shape as the poll); the poll endpoint stays the
-        // source of truth the turn.ended re-derivation reads, so it keeps returning
-        // the question too.
+        // The transcript's pending question interaction is the cold-start source of
+        // the card (ticket 176 — the request keeps the poll item's shape); the poll
+        // endpoint stays the source of truth the turn.ended re-derivation reads
+        // (ticket 172 moves it), so it keeps returning the question too.
         val questionItem = """{"type":"event.question.requested","question_id":"tool_q1","session_id":"session_1",""" +
             """"turn_id":0,"tool_call_id":"tool_q1",""" +
             """"questions":[{"id":"q_0","question":"Red or blue?","header":"Color",""" +
             """"options":[{"id":"opt_0_0","label":"red"},{"id":"opt_0_1","label":"blue"}],"allow_other":false}],""" +
             """"created_at":"2026-07-20T06:06:49.808Z","agentId":"main","sessionId":"session_1"}"""
-        snapshotBody = """{"code":0,"msg":"success","data":{"as_of_seq":1,"epoch":"ep_1",""" +
-            """"session":{"id":"session_1","busy":false,"usage":{"context_tokens":0,"context_limit":1048576}},""" +
-            """"messages":{"items":[],"has_more":false},"in_flight_turn":null,"subagents":[],""" +
-            """"pending_approvals":[],"pending_questions":[$questionItem]},"request_id":"r"}"""
+        transcriptBody = transcriptData(
+            interactions = """[{"interactionId":"tool_q1","interactionKind":"question","toolCallId":"tool_q1",""" +
+                """"state":"pending","request":$questionItem}]""",
+            pendingInteractions = """["tool_q1"]""",
+        )
         questionsBody = """{"code":0,"msg":"success","data":{"items":[$questionItem]},"request_id":"r"}"""
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         awaitState(viewModel.uiState) { it.pendingQuestions.isNotEmpty() }
         socket.send(turnStartedFrame())
         awaitState(viewModel.uiState) { it.isWorking }
-        // Drain the snapshot/session/models/WS requests recorded so far so the next
+        // Drain the cold-start/session/models/WS requests recorded so far so the next
         // questions poll observed is the one turn.ended triggers.
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 

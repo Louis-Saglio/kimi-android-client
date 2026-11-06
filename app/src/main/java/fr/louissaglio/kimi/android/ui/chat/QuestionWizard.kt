@@ -264,17 +264,18 @@ internal class QuestionWizard(
         }
     }
 
-    /** Guard capture for [applySnapshot] (ticket 085): taken when the snapshot fetch
-     * fires, so a live question event landing mid-fetch drops the stale apply. */
+    /** Guard capture for [applyColdStart] (tickets 085/176): taken when the cold-start
+     * fetch fires, so a live question event landing mid-fetch drops the stale apply. */
     fun captureEvents(): Int = seedGuard.capture()
 
     /**
-     * Applies the session snapshot's pending questions (ticket 085) — the cold-start
-     * / 40932-recovery queue rebuild, with [seed]'s guarded semantics: a live
+     * Applies the cold start's pending questions (ticket 176 — the pending question
+     * interactions of `GET .../transcript`, replacing 085's snapshot list) — the
+     * cold-start / resync queue rebuild, with [seed]'s guarded semantics: a live
      * requested/resolved event newer than the fetch ([eventsAtFetch]) wins over the
-     * snapshot's queue.
+     * fetched queue.
      */
-    fun applySnapshot(questions: List<PendingQuestion>, eventsAtFetch: Int) {
+    fun applyColdStart(questions: List<PendingQuestion>, eventsAtFetch: Int) {
         if (seedGuard.isStale(eventsAtFetch)) return
         updateState { it.copy(pendingQuestions = questions).prunedQuestionDrafts(it) }
     }

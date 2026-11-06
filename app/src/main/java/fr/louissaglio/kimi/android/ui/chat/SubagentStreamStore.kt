@@ -72,7 +72,7 @@ enum class SubagentStatus { Queued, Working, Suspended, Completed, Failed, Cance
  * survives the transcript fetch that replaces the timeline wholesale precisely
  * because it is not timeline data.
  * 2. Every source reaches the record through ONE funnel method per source kind
- * ([apply] for live frames, [applyRoster] for the snapshot roster, [applyAgentCall]
+ * ([apply] for live frames, [applyRoster] for the session roster, [applyAgentCall]
  * for `Agent` call args/results from any carrier, [applyTranscriptPage]/
  * [prependTranscriptPage] for transcript pages). Each writes only the fields it is
  * authoritative for, per the precedence table on [SubagentRecord.statusSource]:
@@ -99,12 +99,13 @@ class SubagentStreamStore @Inject constructor(
     private val todoParser: TodoParser,
     private val chatRepository: ChatRepository,
     private val settingsRepository: SettingsRepository,
-    /** The snapshot cold-start owner (ticket 085): the keep-alive collection awaits
-     * the session's sync before its first subscribe — the roster seed and the resume
-     * cursor land first, so a cold-restored page streams gaplessly from frame one.
-     * [release] calls [SnapshotSync.forget]: the session's next entry re-fetches
-     * instead of joining a process-lifetime cache of mutable server state (091). */
-    private val snapshotSync: SnapshotSync,
+    /** The transcript cold-start owner (ticket 176, 085's role): the keep-alive
+     * collection awaits the session's sync before its first subscribe — the roster
+     * seed and the resume watermark land first, so a cold-restored page streams
+     * gaplessly from frame one. [release] calls [TranscriptColdStart.forget]: the
+     * session's next entry re-fetches instead of joining a process-lifetime cache of
+     * mutable server state (091). */
+    private val coldStart: TranscriptColdStart,
     // No default: an all-default @Inject constructor makes Kotlin generate a second,
     // no-arg synthetic constructor, which Dagger rejects (two injected constructors).
     @StreamCoalesceWindowMillis
@@ -114,8 +115,8 @@ class SubagentStreamStore @Inject constructor(
     /** Immutable snapshot of one sub-agent's state, as rendered by the sub-agent page. */
     data class SubagentState(
         val id: String,
-        /** The subagent type (e.g. "explore"), from subagent.spawned — or the snapshot
-         * roster / Agent-call seed on a cold open (tickets 085/045). */
+        /** The subagent type (e.g. "explore"), from subagent.spawned — or the roster /
+         * Agent-call seed on a cold open (tickets 085/045). */
         val name: String,
         val description: String,
         val runInBackground: Boolean,
@@ -137,7 +138,7 @@ class SubagentStreamStore @Inject constructor(
          * ordering hint for the swarm roster, ticket 134); null for plain `Agent` spawns. */
         val swarmIndex: Int? = null,
         /** The background-task registration id (0.38.0 spawned frame); null from the
-         * snapshot roster, which carries no such field. */
+         * roster, which carries no such field. */
         val taskId: String? = null,
         /** The run's bound model/effort (ticket 135): the spawned frame (0.34.0) is
          * the live carrier, the snapshot roster and the REST `/tasks` list the
@@ -551,16 +552,16 @@ class SubagentStreamStore @Inject constructor(
         }
     }
 
-    /** The store-owned feeder: awaits the session's snapshot cold start (ticket 085)
-     * BEFORE subscribing — the roster/cursor seed and the snapshot's `Agent`-call
-     * mining land first, so a page restored after process death starts gapless (no
+    /** The store-owned feeder: awaits the session's transcript cold start (tickets
+     * 085/176) BEFORE subscribing — the roster/watermark seed and the cold start's
+     * `Agent`-call mining land first, so a page restored after process death starts gapless (no
      * "spawn missed" drop) with the prompt already backfilled — then routes every
      * socket event through [apply]. A failed sync changes nothing: the page's
      * transcript fetch owns its error state. Main-agent events are ignored here (the
      * chat heals its own side from REST when it next opens). Connection lifecycle
      * events carry nothing the page renders. */
     private suspend fun runKeepAliveCollection(sessionId: String) {
-        snapshotSync.sync(sessionId)
+        coldStart.sync(sessionId)
         chatRepository.observeSession(settingsRepository.current(), sessionId).collect { event ->
             (event as? SocketEvent.Event)?.event?.let { apply(sessionId, it) }
         }
@@ -588,8 +589,8 @@ class SubagentStreamStore @Inject constructor(
 
     /** Releases the session's records when the whole session is left (the chat
      * ViewModel is cleared), cancelling any open coalescing bursts and the keep-alive
-     * collection — and forgetting the session's snapshot sync (ticket 091): the next
-     * entry rebuilds from a FRESH snapshot, not a process-lifetime cache. */
+     * collection — and forgetting the session's cold start (ticket 091): the next
+     * entry rebuilds from a FRESH transcript cold start, not a process-lifetime cache. */
     fun release(sessionId: String) {
         records.remove(sessionId)?.values?.forEach { it.coalescer.cancel() }
         links.remove(sessionId)
@@ -598,7 +599,7 @@ class SubagentStreamStore @Inject constructor(
         states.update { it - sessionId }
         openPages.update { it - sessionId }
         chatCollecting.update { it - sessionId }
-        snapshotSync.forget(sessionId)
+        coldStart.forget(sessionId)
     }
 
     private fun spawn(sessionId: String, event: SessionEvent.SubagentSpawned) {
@@ -622,9 +623,12 @@ class SubagentStreamStore @Inject constructor(
     }
 
     /**
-     * The roster funnel (ticket 085, re-applicable since 091): a FRESH snapshot
-     * roster is authoritative for every record not live-pinned — it creates missing
-     * records (identity + precise lifecycle phase + terminal `output_preview`), and
+     * The roster funnel (ticket 085, re-applicable since 091): a FRESH roster is
+     * authoritative for every record not live-pinned — it creates missing records
+     * (identity, plus the lifecycle phase and terminal `output_preview` when the entry
+     * carries them — the 2.5.0 cold-start feeder, the transcript `agents` roster
+     * (ticket 176), carries identity only, so its entries just create records the
+     * live ops accumulate into), and
      * on later entries HEALS stale roster/result/transcript-derived statuses instead
      * of being skipped (the 085 "never re-seed" rule died with the process-lifetime
      * cache: a fresh roster is never stale). Never touches `prompt` (the roster has
@@ -667,8 +671,8 @@ class SubagentStreamStore @Inject constructor(
 
     /**
      * The `Agent`-call funnel (the 091 replacement for row seeding): the metadata
-     * miner for `Agent` calls from ANY carrier — history rows, the snapshot's
-     * messages page, `in_flight_turn.running_tools`. The sub-agent id resolves from
+     * miner for `Agent` calls from ANY carrier — history rows, the cold start's
+     * messages page, the running transcript turn's tool frames. The sub-agent id resolves from
      * the link registry (spawned/roster) or the result's `agent_id:` marker (the
      * version-pinned wire format); without either there is nothing to learn and the
      * call is skipped. A registry hit takes the FIRST linked id — right for a plain
@@ -696,7 +700,7 @@ class SubagentStreamStore @Inject constructor(
         rowStatus: ToolStatus,
         // [AGENT_SWARM_TOOL_NAME] takes the swarm branch above, anything else the
         // plain-`Agent` path below. Defaults to `Agent`: the callers mining
-        // plain-Agent history (SnapshotSync, most tests) pass nothing.
+        // plain-Agent history (TranscriptColdStart, most tests) pass nothing.
         toolName: String = AGENT_TOOL_NAME,
     ) {
         if (toolName == AGENT_SWARM_TOOL_NAME) {

@@ -170,56 +170,15 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     }
 
     @Test
-    fun `a turn that ended while the screen was away leaves no ghost live rows`() = runBlocking {
-        // Louis's report (ticket 048): the stream is watched, the app backgrounds
-        // mid-turn, the agent finishes while away, the app comes back.
+    fun `a turn still running on return keeps its live rows and the replay extends them`() = runBlocking {
+        // The 2.5.0 resume (ticket 176, replacing 048's status-aware REST resync): the
+        // re-subscribe carries the watermark, so no history refetch runs on return —
+        // the live bubble survives and the replayed text keeps feeding it. (/status is
+        // gone on 2.5.0: its error keeps the legacy seed from writing the working state.)
+        statusBody = """{"code":40401,"msg":"not found","data":null,"request_id":"r"}"""
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         awaitState(viewModel.uiState) { it.items != null }
-        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
-
-        socket.send(turnStartedFrame())
-        socket.send(assistantDeltaFrame("partial", seq = 6))
-        awaitState(viewModel.uiState) { state ->
-            state.items?.filterIsInstance<ChatItem.AssistantMessage>()?.singleOrNull()?.text == "partial"
-        }
-        viewModel.onScreenStopped()
-
-        // While away, the turn ends: history now carries the complete message.
-        messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
-            """{"id":"msg_1","session_id":"session_1","role":"assistant",""" +
-            """"content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"partial plus the rest"}],""" +
-            """"created_at":"2026-07-29T00:00:01.000Z"}""" +
-            """],"has_more":false},"request_id":"r"}"""
-        serverSocket = null
-        viewModel.onScreenStarted()
-
-        // The re-opened gate subscribes afresh (subscribe_v2 — no replay of the missed
-        // window, ticket 176): the REST resync is what heals it.
-        awaitCondition { clientFrames.count { "\"type\":\"subscribe_v2\"" in it } >= 2 }
-
-        // A finished turn can have no live rows: the status-aware resync clears the
-        // truncated ghost bubble and the canonical message renders exactly once. The
-        // resync is a multi-round-trip path (/status, history, jobs) — give it more
-        // than the default budget on a loaded runner (ticket 163).
-        awaitState(viewModel.uiState, timeoutMs = 15_000) { state ->
-            state.items?.filterIsInstance<ChatItem.AssistantMessage>()
-                ?.singleOrNull()?.let { it.id == "msg_1" && it.text == "partial plus the rest" } == true
-        }
-        assertEquals(
-            listOf("msg_1"),
-            viewModel.uiState.value.items.orEmpty().map { it.id },
-        )
-    }
-
-    @Test
-    fun `a turn still running on return keeps its live rows`() = runBlocking {
-        statusBody = """{"code":0,"msg":"success","data":{"busy":true,"context_tokens":25050,""" +
-            """"max_context_tokens":1048576,"context_usage":0.0239},"request_id":"r"}"""
-        viewModel.onScreenStarted()
-        val socket = awaitServerSocket()
-        awaitState(viewModel.uiState) { it.items != null }
-        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
         socket.send(turnStartedFrame())
         socket.send(assistantDeltaFrame("still streaming", seq = 6))
@@ -227,79 +186,30 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             state.items?.filterIsInstance<ChatItem.AssistantMessage>()?.singleOrNull()?.text == "still streaming"
         }
         viewModel.onScreenStopped()
-
-        // The turn is still running: history carries only the user's prompt so far.
-        messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
-            """{"id":"msg_u","session_id":"session_1","role":"user",""" +
-            """"content":[{"type":"text","text":"do the thing"}],""" +
-            """"created_at":"2026-07-29T00:00:00.000Z"}""" +
-            """],"has_more":false},"request_id":"r"}"""
-        serverSocket = null
-        viewModel.onScreenStarted()
-
-        // busy:true → keep-live refetch: the committed prompt lands and the
-        // in-flight bubble survives (the resumed replay keeps feeding it).
-        awaitState(viewModel.uiState) { state ->
-            state.items?.any { it is ChatItem.UserMessage } == true
-        }
-        val bubbles = viewModel.uiState.value.items.orEmpty().filterIsInstance<ChatItem.AssistantMessage>()
-        assertEquals(1, bubbles.size)
-        assertEquals("still streaming", bubbles.single().text)
-    }
-
-    @Test
-    fun `a turn event racing the resync status fetch downgrades the clear`() = runBlocking {
-        viewModel.onScreenStarted()
-        val socket = awaitServerSocket()
-        awaitState(viewModel.uiState) { it.items != null }
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
-        socket.send(turnStartedFrame())
-        socket.send(assistantDeltaFrame("partial", seq = 6))
-        awaitState(viewModel.uiState) { state ->
-            state.items?.filterIsInstance<ChatItem.AssistantMessage>()?.singleOrNull()?.text == "partial"
-        }
-        viewModel.onScreenStopped()
 
-        // The first turn ended while away (history carries its full message), but
-        // the idle /status snapshot the resync is about to read is overtaken by a
-        // NEW turn starting on the resumed socket.
-        messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
-            """{"id":"msg_1","session_id":"session_1","role":"assistant",""" +
-            """"content":[{"type":"text","text":"partial plus the rest"}],""" +
-            """"created_at":"2026-07-29T00:00:01.000Z"}""" +
-            """],"has_more":false},"request_id":"r"}"""
-        statusResponseGate = CountDownLatch(1)
         serverSocket = null
         viewModel.onScreenStarted()
+        val resumed = awaitServerSocket()
+        awaitCondition { clientFrames.count { "\"type\":\"subscribe_v2\"" in it } >= 2 }
+        resumed.send(assistantDeltaFrame(" and more", seq = 7))
 
-        // The resync's /status GET is parked server-side; the new turn starts and
-        // streams its first text — strictly newer than the parked snapshot.
-        val socket2 = awaitServerSocket()
-        socket2.send(turnStartedFrame())
-        awaitState(viewModel.uiState) { it.isWorking }
-        socket2.send(assistantDeltaFrame("new turn text", seq = 7))
         awaitState(viewModel.uiState) { state ->
-            state.items?.filterIsInstance<ChatItem.AssistantMessage>()?.singleOrNull()?.text == "new turn text"
+            state.items?.filterIsInstance<ChatItem.AssistantMessage>()?.singleOrNull()?.text == "still streaming and more"
         }
-
-        // Releasing the idle snapshot must NOT clear the new turn's live rows.
-        statusResponseGate!!.countDown()
-        awaitState(viewModel.uiState) { state ->
-            state.items?.filterIsInstance<ChatItem.AssistantMessage>()?.any { it.id == "msg_1" } == true
-        }
-        assertEquals(
-            listOf("partial plus the rest", "new turn text"),
-            viewModel.uiState.value.items.orEmpty().filterIsInstance<ChatItem.AssistantMessage>().map { it.text },
-        )
+        assertTrue(viewModel.uiState.value.isWorking)
+        val paths = generateSequence { server.takeRequest(100, TimeUnit.MILLISECONDS) }.map { it.target.orEmpty() }.toList()
+        assertTrue(paths.toString(), paths.none { it.startsWith("/api/v1/sessions/session_1/messages") })
     }
 
     @Test
-    fun `a resync refetch landing mid burst flushes the pending deltas before replacing history`() = runBlocking {
-        // Ticket 062: the REST refetch bypasses the socket dispatcher's flush, so a
-        // keep-live response landing mid-burst dedups the committed full bubble
-        // against the live leading-edge FRAGMENT (exact-text match), keeps both, and
-        // the trailing flush grows the fragment into a duplicate bubble.
+    fun `a stale-journal rebuild landing mid burst flushes the pending deltas before replacing history`() = runBlocking {
+        // Ticket 062 on the 176 rebuild: the REST cold start bypasses the socket
+        // dispatcher's flush, so a rebuild landing mid-burst must apply the coalesced
+        // text first — otherwise the trailing flush re-appends the stranded fragment as
+        // a duplicate bubble over the canonical history.
         val vm = newViewModel(streamCoalesceWindowMillis = 100)
+        transcriptBody = transcriptData(seq = 42)
         vm.onScreenStarted()
         val socket = awaitServerSocket()
         awaitState(vm.uiState) { it.items != null }
@@ -308,43 +218,49 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         socket.send(turnStartedFrame())
         awaitState(vm.uiState) { it.isWorking }
 
-        // The resync's /status GET parks server-side, so the burst below opens
-        // strictly BEFORE the refetch lands; busy=true (a turn is streaming) makes
-        // the resync keep-live.
-        statusBody = """{"code":0,"msg":"success","data":{"busy":true,"context_tokens":0,""" +
-            """"max_context_tokens":1048576,"context_usage":0.0},"request_id":"r"}"""
+        // The server answers the watermark with a fresh baseline: the rebuild's
+        // transcript GET parks server-side, so the burst below opens strictly BEFORE
+        // the rebuild lands.
         messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
             """{"id":"msg_1","session_id":"session_1","role":"assistant",""" +
             """"content":[{"type":"text","text":"Hello world!"}],""" +
             """"created_at":"2026-07-31T00:00:01.000Z"}""" +
             """],"has_more":false},"request_id":"r"}"""
-        statusResponseGate = CountDownLatch(1)
-        vm.onScreenStarted()
+        transcriptBody = transcriptData(seq = 50)
+        transcriptResponseGate = CountDownLatch(1)
+        // The socket applies frames in order: the stale reset's rebuild is in flight
+        // before the deltas below are read.
+        socket.send(TranscriptFrames.resetFrame(agentId = "main", seq = 50))
 
-        socket.send(assistantDeltaFrame("Hello", seq = 5))
+        socket.send(assistantDeltaFrame("Hello", seq = 51))
         // The burst's leading edge renders on its own and stays the only published
         // text (the flush timer never fires in this harness — see newViewModel).
         awaitState(vm.uiState) { state ->
             state.items?.filterIsInstance<ChatItem.AssistantMessage>()?.singleOrNull()?.text == "Hello"
         }
-        socket.send(assistantDeltaFrame(" world!", seq = 6)) // coalesced, unpublished
+        socket.send(assistantDeltaFrame(" world!", seq = 52)) // coalesced, unpublished
+        // The watermark advances once the batch's events are delivered: the fragment
+        // now sits in the coalescer.
+        awaitCondition { chatRepository.transcriptWatermark("session_1", "main") == 52L }
 
-        // The committed page with the FULL bubble text lands mid-burst...
-        statusResponseGate!!.countDown()
+        // The rebuild with the FULL bubble text lands mid-burst...
+        transcriptResponseGate!!.countDown()
         awaitState(vm.uiState) { state ->
             state.items?.filterIsInstance<ChatItem.AssistantMessage>()?.any { it.id == "msg_1" } == true
         }
-        // ...then the next substantive event drives the trailing flush (in-order
-        // stream: the flush runs before the tool row applies).
+        // ...then the next substantive event drives the trailing flush.
         socket.send(
-            TranscriptFrames.opsFrame(TranscriptFrames.toolOp("call_ls", "Bash", "running", ""","input":{"command":"ls"}""", turnId = "tx")),
+            TranscriptFrames.opsFrame(
+                TranscriptFrames.toolOp("call_ls", "Bash", "running", ""","input":{"command":"ls"}""", turnId = "tx"),
+                seq = 53,
+            ),
         )
         awaitState(vm.uiState) { state ->
             state.items?.filterIsInstance<ChatItem.ToolGroup>()?.any { g -> g.tools.any { it.id == "call_ls" } } == true
         }
 
-        // One bubble, full text: the flush-before-replace made the exact-text dedup
-        // absorb the live bubble instead of stranding its fragment.
+        // One bubble, full text: the flush-before-replace kept the fragment from
+        // outliving the rebuild.
         assertEquals(
             listOf("Hello world!"),
             vm.uiState.value.items.orEmpty().filterIsInstance<ChatItem.AssistantMessage>().map { it.text },
@@ -598,52 +514,6 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     }
 
     @Test
-    fun `a swarm's members all link to the one call from the cold-start roster`() = runBlocking {
-        // Cold start mid-swarm (ticket 134): the snapshot roster's three members share
-        // the AgentSwarm call's toolCallId, the messages page carries the call itself.
-        // The store links every member (the one-to-many registry), the row stays
-        // unlinked (the swarm card navigates by the tool call id), and the UiState
-        // publishes the member list the card's aggregate reads (ticket 135).
-        snapshotBody = """{"code":0,"msg":"success","data":{"as_of_seq":18,"epoch":"ep_1",""" +
-            """"session":{"id":"session_1","busy":true,"usage":{"context_tokens":0,"context_limit":0}},""" +
-            """"messages":{"items":[""" +
-            """{"id":"msg_1","session_id":"session_1","role":"assistant",""" +
-            """"content":[{"type":"tool_use","tool_call_id":"tool_swarm","tool_name":"AgentSwarm",""" +
-            """"input":{"description":"review the docs","prompt_template":"Check {{item}}",""" +
-            """"items":["a","b","c"]}}],""" +
-            """"created_at":"2026-09-15T10:00:00.000Z"}],"has_more":false},""" +
-            """"in_flight_turn":null,""" +
-            """"subagents":[""" +
-            swarmRosterEntry("agent-1", 0, "Check a") + "," +
-            swarmRosterEntry("agent-2", 1, "Check b") + "," +
-            swarmRosterEntry("agent-3", 2, "Check c") +
-            """],"pending_approvals":[],"pending_questions":[]},"request_id":"r"}"""
-
-        viewModel.onScreenStarted()
-
-        awaitCondition {
-            subagentStore.linksFor("session_1")["tool_swarm"] == listOf("agent-1", "agent-2", "agent-3")
-        }
-        awaitState(viewModel.uiState) { it.swarmMembers["tool_swarm"]?.size == 3 }
-        // The AgentSwarm row itself never gains a subagentId (single-Agent only)...
-        val row = viewModel.uiState.value.items.orEmpty()
-            .filterIsInstance<ChatItem.ToolGroup>()
-            .flatMap { it.tools }
-            .single { it.id == "tool_swarm" }
-        assertNull(row.subagentId)
-        // ...the call's own description arg is the swarm's label...
-        assertEquals("review the docs", subagentStore.swarmDescription("session_1", "tool_swarm").first())
-        // ...and the members carry their roster-seeded index.
-        assertEquals(1, subagentEntry("agent-2")!!.swarmIndex)
-    }
-
-    private fun swarmRosterEntry(id: String, index: Int, description: String): String =
-        """{"id":"$id","session_id":"session_1","kind":"subagent","description":"$description",""" +
-            """"status":"running","subagent_phase":"working","subagent_type":"explore",""" +
-            """"parent_tool_call_id":"tool_swarm","run_in_background":false,"swarm_index":$index,""" +
-            """"created_at":"2026-09-15T10:00:00.000Z","started_at":"2026-09-15T10:00:00.100Z"}"""
-
-    @Test
     fun `a settled swarm's cold open rebuilds the roster from the result xml`() = runBlocking {
         // Ticket 136: reopened after the swarm settled — the roster cleared on the
         // main agent's next turn and no subagent.* frame ever replays, so the only
@@ -673,7 +543,8 @@ class ChatViewModelTest : ChatViewModelTestBase() {
 
         viewModel.onScreenStarted()
 
-        // The roster rebuilds from the result alone (the snapshot roster is empty):
+        // The roster rebuilds from the result alone (the transcript roster carries no
+        // member state):
         // the three healed members plus the backfilled ghost, in document order.
         awaitCondition {
             runBlocking { subagentStore.swarmMembers("session_1", "tool_swarm").first().map { it.id } } ==
@@ -794,30 +665,11 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     }
 
     @Test
-    fun `a snapshot with real usage rings immediately`() = runBlocking {
-        // Ticket 161: the bundle's usage has been real since 0.38.0 and is the
-        // cold-start ring's authority — it paints from the snapshot alone, with
-        // no /status round trip. The seed's GET is parked so nothing but the
-        // bundle can set the ring here.
-        snapshotBody = """{"code":0,"msg":"success","data":{"as_of_seq":1,"epoch":"ep_1",""" +
-            """"session":{"id":"session_1","busy":false,""" +
-            """"usage":{"context_tokens":25050,"context_limit":1048576}},""" +
-            """"messages":{"items":[],"has_more":false},"in_flight_turn":null,"subagents":[],""" +
-            """"pending_approvals":[],"pending_questions":[]},"request_id":"r"}"""
-        statusResponseGate = CountDownLatch(1)
-
-        viewModel.onScreenStarted()
-        awaitState(viewModel.uiState) { it.contextUsage == ContextUsage(25050, 1048576) }
-
-        statusResponseGate!!.countDown()
-    }
-
-    @Test
     fun `the status seed fills the ring and syncs the model on every cold start`() = runBlocking {
         // Ticket 107: the session's bound model/effort is served only by /status,
-        // so the seed runs on EVERY cold start — and with an unknown-limit bundle
-        // (the harness default: a zero limit maps to "unknown") the ring's fill
-        // rides the same read.
+        // so the seed runs on EVERY cold start — and the ring's fill rides the same
+        // read (the transcript cold start carries no usage; ticket 177 moves both to
+        // the `agent`/`usage` frames).
         statusBody = """{"code":0,"msg":"success","data":{"busy":false,""" +
             """"model":"kimi-code/kimi-for-coding","thinking_level":"low",""" +
             """"context_tokens":25050,"max_context_tokens":1048576,"context_usage":0.0239},"request_id":"r"}"""
@@ -1016,7 +868,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
 
         // docs/server-api.md, Steer: queue the prompt as usual, then steer its id in.
         // The config GET served at screen start makes the server default known (017).
-        val prompt = awaitRequest("/prompts")
+        val prompt = awaitRequest("/prompts", method = "POST")
         assertEquals("POST", prompt.method)
         assertEquals("/api/v1/sessions/session_1/prompts", prompt.target)
         assertEquals("""{"content":[{"type":"text","text":"Stop counting"}],"model":"kimi-code/k3"}""", prompt.body!!.utf8())
@@ -1040,7 +892,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         viewModel.onInputChange("hello")
         viewModel.onSend()
 
-        val request = awaitRequest("/prompts")
+        val request = awaitRequest("/prompts", method = "POST")
         assertEquals("POST", request.method)
         assertEquals("/api/v1/sessions/session_1/prompts", request.target)
         assertEquals("""{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/k3"}""", request.body!!.utf8())
@@ -1077,7 +929,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             settingsRepository,
             FakeAttachmentStore(),
             subagentStore,
-            snapshotSync,
+            coldStart,
             Chat("session_1", title = "Fix the bug", cwd = "/home/ubuntu/kimi-android-client"),
             todoParser = testTodoParser(),
             unreadStore = unreadStore,
@@ -1095,7 +947,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             settingsRepository,
             FakeAttachmentStore(),
             subagentStore,
-            snapshotSync,
+            coldStart,
             Chat("session_1", cwd = "/home/ubuntu/kimi-android-client"),
             todoParser = testTodoParser(),
             unreadStore = unreadStore,
@@ -1187,7 +1039,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             settingsRepository,
             FakeAttachmentStore(),
             subagentStore,
-            snapshotSync,
+            coldStart,
             Chat("session_1"),
             todoParser = testTodoParser(),
             unreadStore = unreadStore,
@@ -1220,7 +1072,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             settingsRepository,
             FakeAttachmentStore(),
             subagentStore,
-            snapshotSync,
+            coldStart,
             Chat("session_1"),
             todoParser = testTodoParser(),
             unreadStore = unreadStore,
@@ -1304,7 +1156,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
 
         viewModel.onInputChange("hi")
         viewModel.onSend()
-        val body = awaitRequest("/prompts").body!!.utf8()
+        val body = awaitRequest("/prompts", method = "POST").body!!.utf8()
         assertTrue(""""model":"deepseek/deepseek-v4-pro"""" in body)
         assertTrue(""""thinking":"low"""" in body)
     }
@@ -1547,7 +1399,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         // The seed left the store empty: the next prompt omits permission_mode.
         viewModel.onInputChange("hi")
         viewModel.onSend()
-        val body = awaitRequest("/prompts").body!!.utf8()
+        val body = awaitRequest("/prompts", method = "POST").body!!.utf8()
         assertFalse(body.contains("permission_mode"))
     }
 
@@ -1567,7 +1419,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
 
         viewModel.onInputChange("hi")
         viewModel.onSend()
-        val body = awaitRequest("/prompts").body!!.utf8()
+        val body = awaitRequest("/prompts", method = "POST").body!!.utf8()
         assertTrue(body, body.contains(""""permission_mode":"manual""""))
         awaitState(viewModel.uiState) { !it.isSending }
 
@@ -1579,7 +1431,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             settingsRepository,
             FakeAttachmentStore(),
             subagentStore,
-            snapshotSync,
+            coldStart,
             Chat("session_1"),
             todoParser = testTodoParser(),
             unreadStore = unreadStore,
@@ -1590,7 +1442,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
 
         recreated.onInputChange("hi again")
         recreated.onSend()
-        val recreatedBody = awaitRequest("/prompts").body!!.utf8()
+        val recreatedBody = awaitRequest("/prompts", method = "POST").body!!.utf8()
         assertTrue(recreatedBody, recreatedBody.contains(""""permission_mode":"manual""""))
     }
 

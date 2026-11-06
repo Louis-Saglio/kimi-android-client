@@ -12,6 +12,7 @@ import fr.louissaglio.kimi.android.data.chat.ModelsRepository
 import fr.louissaglio.kimi.android.data.chat.SessionPrefsStore
 import fr.louissaglio.kimi.android.data.chat.SessionSocket
 import fr.louissaglio.kimi.android.data.chat.TodoParser
+import fr.louissaglio.kimi.android.data.chat.TranscriptSyncApi
 import fr.louissaglio.kimi.android.data.network.ApiClient
 import fr.louissaglio.kimi.android.data.network.ConnectionChecker
 import fr.louissaglio.kimi.android.data.search.SearchApi
@@ -21,7 +22,7 @@ import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
 import fr.louissaglio.kimi.android.ui.chat.ChatTimeline
-import fr.louissaglio.kimi.android.ui.chat.SnapshotSync
+import fr.louissaglio.kimi.android.ui.chat.TranscriptColdStart
 import fr.louissaglio.kimi.android.ui.chat.SubagentStreamStore
 import javax.inject.Provider
 import kotlinx.coroutines.CoroutineScope
@@ -52,6 +53,7 @@ fun testChatRepository(
     return ChatRepository(
         ChatApi(api, mapper),
         FileHistoryApi(api),
+        TranscriptSyncApi(api, mapper),
         ModelsRepository(api),
         SessionPrefsStore(dataStore),
         SessionSocket(OkHttpClient(), json, mapper),
@@ -79,7 +81,7 @@ fun testSubagentStreamStore(
     streamCoalesceWindowMillis: Long,
     chatRepository: ChatRepository? = null,
     settingsRepository: SettingsRepository? = null,
-    snapshotSync: SnapshotSync? = null,
+    coldStart: TranscriptColdStart? = null,
 ): SubagentStreamStore {
     val json = Json { ignoreUnknownKeys = true }
     // Fallback data layer for tests that never open a sub-agent page: the store's
@@ -99,16 +101,16 @@ fun testSubagentStreamStore(
         repository,
         settings,
         // Tests sharing one cold start per session (the production singleton shape)
-        // pass the same SnapshotSync to the store AND the ViewModels.
-        snapshotSync ?: SnapshotSync(repository, settings, Provider { store }),
+        // pass the same TranscriptColdStart to the store AND the ViewModels.
+        coldStart ?: TranscriptColdStart(repository, settings, Provider { store }),
         streamCoalesceWindowMillis,
     ).also { store = it }
 }
 
-/** The hand-built twin of the production [SnapshotSync] singleton: tests sharing one
- * cold start per session pass the SAME instance to the store and the ViewModels. */
-fun testSnapshotSync(
+/** The hand-built twin of the production [TranscriptColdStart] singleton: tests sharing
+ * one cold start per session pass the SAME instance to the store and the ViewModels. */
+fun testColdStart(
     chatRepository: ChatRepository,
     settingsRepository: SettingsRepository,
     storeProvider: () -> SubagentStreamStore,
-): SnapshotSync = SnapshotSync(chatRepository, settingsRepository, Provider { storeProvider() })
+): TranscriptColdStart = TranscriptColdStart(chatRepository, settingsRepository, Provider { storeProvider() })

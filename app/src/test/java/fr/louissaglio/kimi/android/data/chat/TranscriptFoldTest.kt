@@ -455,4 +455,93 @@ class TranscriptFoldTest {
         assertNull(ended.errorMessage)
         assertEquals("error", ended.interruptReason)
     }
+
+    // --- seed / reset (ticket 176) -----------------------------------------------------
+
+    /** A REST page: a completed turn t0 and the running turn t1 (thinking, streamed
+     * text, a running Bash call, a user-role steer frame), plus prompt entities. */
+    private fun page() = TranscriptPage(
+        agentId = MAIN_AGENT_ID,
+        turns = listOf(
+            TranscriptTurn("t0", 0, TranscriptState.Completed, prompt = "first", steps = emptyList()),
+            TranscriptTurn(
+                "t1", 1, TranscriptState.Running, prompt = "hi",
+                steps = listOf(
+                    TranscriptStep(
+                        "t1.1", TranscriptState.Running,
+                        listOf(
+                            TranscriptFrame.Thinking("t1.1.f0", "hmm"),
+                            TranscriptFrame.Text("t1.1.f1", TranscriptFrame.Text.Role.Assistant, "abc"),
+                            TranscriptFrame.Tool(
+                                "t1.1.call_1", "call_1", "Bash", running = true,
+                                preview = "ls", input = "", output = "",
+                            ),
+                            TranscriptFrame.Text("t1.1.f2", TranscriptFrame.Text.Role.User, "steer"),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        hasMore = false,
+        seq = 42,
+        prompts = listOf(TranscriptPrompt("msg_1", PromptStatus.Running), TranscriptPrompt("msg_2", PromptStatus.Queued)),
+    )
+
+    @Test
+    fun `a seeded running turn re-fires no transition for its re-sent headers`() {
+        fold.seed(MAIN_AGENT_ID, page())
+
+        val events = fold(turn("t1", "running"), step("t1", "t1.1", "running"), prompt("msg_1", "running"), prompt("msg_2", "queued"))
+
+        assertEquals(emptyList<SessionEvent>(), events)
+    }
+
+    @Test
+    fun `a seeded text frame continues at its seeded length and a duplicate stays silent`() {
+        fold.seed(MAIN_AGENT_ID, page())
+
+        assertEquals(listOf(SessionEvent.AssistantDelta("def")), fold(append("t1.1.f1", 3, "def")))
+        assertEquals(emptyList<SessionEvent>(), fold(append("t1.1.f1", 0, "abc")))
+        assertEquals(listOf(SessionEvent.ThinkingDelta(" more")), fold(textFrame("t1.1.f0", "hmm more", kind = "thinking")))
+        // A user-role frame stays ignored, its appends too.
+        assertEquals(emptyList<SessionEvent>(), fold(append("t1.1.f2", 5, "!")))
+    }
+
+    @Test
+    fun `a seeded running tool re-renders once and settles once`() {
+        fold.seed(MAIN_AGENT_ID, page())
+
+        val events = fold(toolFrame("done", ""","input":{"command":"ls"},"output":"a.txt""""))
+
+        assertEquals(2, events.size)
+        assertTrue(events[0] is SessionEvent.ToolCallStarted)
+        assertEquals(SessionEvent.ToolCallResult("call_1", false, "a.txt"), events[1])
+        assertEquals(emptyList<SessionEvent>(), fold(toolFrame("done", ""","output":"a.txt"""")))
+    }
+
+    @Test
+    fun `a seeded ended turn ignores late ops and the queue counts the seeded prompts`() {
+        fold.seed(MAIN_AGENT_ID, page())
+
+        assertEquals(emptyList<SessionEvent>(), fold(textFrame("t0.1.f1", "late", turnId = "t0")))
+        assertEquals(
+            listOf(SessionEvent.PromptUpdated("msg_3", PromptStatus.Queued, queueLength = 2)),
+            fold(prompt("msg_3", "queued")),
+        )
+    }
+
+    @Test
+    fun `a seed replaces what the fold saw of the agent, and reset forgets it`() {
+        fold(turn("t9", "running"), textFrame("t9.1.f1", "old", turnId = "t9"))
+        fold(turn("t0", "running"), agentId = "agent-1")
+
+        fold.seed(MAIN_AGENT_ID, page())
+        // t9 is gone: its header reads as a new turn again.
+        assertEquals(listOf(SessionEvent.TurnStarted()), fold(turn("t9", "running")))
+        // The child's state is untouched by the main agent's seed.
+        assertEquals(emptyList<SessionEvent>(), fold(turn("t0", "running"), agentId = "agent-1"))
+
+        fold.reset(MAIN_AGENT_ID)
+        assertEquals(listOf(SessionEvent.TurnStarted()), fold(turn("t1", "running")))
+    }
 }

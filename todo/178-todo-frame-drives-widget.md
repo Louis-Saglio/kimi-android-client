@@ -34,7 +34,7 @@ no `TodoList` input parsing on every update.
    `[]` clears it. Keep the existing `Todo` domain model and status mapping;
    an unknown status string degrades to Pending as today.
 3. Add the frame to the cold-start path by construction: the server sends the
-   current list before the subscribe ack, so no `SnapshotSync`/transcript
+   current list before the subscribe ack, so no `TranscriptColdStart`/transcript
    mining is needed. Remove the `TodoParser` scan from the live event path;
    keep the parser only if the transcript REST page still needs it for
    historical rows (it does not — `TodoList` tool frames remain visible

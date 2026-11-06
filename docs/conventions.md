@@ -21,7 +21,19 @@
   ticket 175: one `subscribe_v2` frame per connection, grade `delta` for every
   agent (`{"*":"delta"}`); the subscription does not survive a drop, so each
   reconnect re-subscribes and emits `SocketEvent.Reconnected` (the collector's
-  REST resync — there is no resume cursor; `transcript_since` is ticket 176);
+  resume check). Ticket 176 adds the per-agent resume watermarks, held at
+  instance level next to the fold: the cold start seeds main's from the REST
+  transcript page (`seedTranscript` — the fold is reset to the page, its `seq`
+  becomes the watermark; a page without `seq`, a session that is not live, drops
+  it), every `transcript.ops` batch and `transcript.reset` advances its agent's,
+  and every `subscribe_v2` sends the whole map as `transcript_since`, so the
+  server replays the missed batches before the ack. A child never seen on this
+  process has no watermark and takes the server's baseline reset — its history
+  pages in over REST after the subscribe. A `transcript.reset` for an agent the
+  subscribe asked to RESUME is the stale signal: the journal could not cover the
+  watermark, so the agent's fold is reset and `SessionEvent.TranscriptStale`
+  emitted (the chat rebuilds from REST; the store ignores it — the page's own
+  fetch heals);
   an ack listing the session in `not_found` ends the flow with
   `SocketEvent.Failed(DataError.SessionNotFound)`, which the chat surfaces like a
   failed load. `transcript.reset` is accepted and renders nothing — its `items`
@@ -98,7 +110,8 @@
   the `Agent` spawn row — the one display-driven row (the tool frame's
   `display`, kind `agent_call`, carries
   `agent_name`/`prompt`/`background`; history parts carry no display, so only
-  witnessed or snapshot-seeded rows get it): the row titles itself "{agent_name}
+  witnessed or cold-start-seeded rows — a running transcript turn's tool frame,
+  ticket 176 — get it): the row titles itself "{agent_name}
   sub-agent", previews the prompt and badges a background spawn; the tap follows
   the spawn's kind — the sub-agent page (foreground, the 045 link) or the job
   screen (background, the result's `task_id: agent-…` head, the 096 treatment).
@@ -342,36 +355,60 @@
   `details.holder.clientDisplayName` (fallback: the server message) and offers
   takeover only on the SECOND consecutive 40931 (`onTakeOverSession` posts
   `sessions/{id}:takeover` once); 40932 `SESSION_STALE` posts `:reload` then
-  applies one fresh snapshot resync and asks the user to retry. The envelope's
+  applies one fresh cold-start resync and asks the user to retry. The envelope's
   `details` is carried only by `DataError.Api`, for 40931 only.
-- Cold start / resync (085, freshness model 091): `GET .../snapshot` is the single
-  entry point — `SnapshotSync` (ui/chat, session-scoped singleton like the store, so
-  the page-on-top restore path with no ChatViewModel runs the same rebuild) owns the
-  fetch, taken BEFORE the session's first socket subscribe (the chat's gate and the
-  store's keep-alive both await it). (Server 2.5.0 removed `/snapshot`; ticket 176
-  rebuilds this cold start — since 175 nothing seeds a socket cursor any more.) It
-  applies the roster to the store (`applyRoster`),
-  and mines the snapshot's messages page + `in_flight_turn.running_tools` for
-  `Agent` calls (`applyAgentCall` — chat-independent, so the page-on-top restore
-  recovers prompts/links too), and hands the chat-side bundle (history page,
-  busy, pending approvals/questions, and since ticket 144 the in-flight turn's
-  pre-watermark live tail — the aggregated text/thinking plus the still-running
-  tools, seeded as ordinary live rows the post-watermark replay then
-  extends/heals, closing the gap between the last committed message and the
-  live stream on a busy cold open) to the calling ChatViewModel. The bundle's
-  `session.usage` is real since 0.38.0 and seeds the context ring directly on
-  cold start (161 — a 0 or absent limit still maps to null, "unknown"), and
-  every cold start still re-reads /status: the session's bound model/effort
-  (107) is served only there, and the same response refreshes the ring
-  (seed-guarded against live agent.status.updated frames).
+- Cold start / resync (085, freshness model 091, rebuilt on the 2.5.0 surfaces by
+  176 — `/snapshot` is gone): `TranscriptColdStart` (ui/chat, session-scoped
+  singleton like the store, so the page-on-top restore path with no ChatViewModel
+  runs the same rebuild) owns the fetch — three parallel reads, `GET .../messages`
+  (the newest history page), `GET .../transcript?agent_id=main&page_size=1` (the
+  newest turn plus the session's global state: pending interactions, prompt
+  entities, the `agents` roster, the `seq` watermark — `TranscriptPage` carries
+  them, mapped in `ChatMessageMapper`) and `GET .../prompts` (the queue,
+  `TranscriptSyncApi`) — any failed read failing the whole cold start. It is taken
+  BEFORE the session's first socket subscribe (the chat's gate and the store's
+  keep-alive both await it; the chat claims the feeder role before awaiting, so the
+  keep-alive never folds the socket while the chat rebuilds). On success it seeds the
+  socket (main's fold + watermark from the transcript page), applies the roster to
+  the store (`applyRoster` — the transcript `agents` carry identity only, so
+  `SubagentRosterEntry` defaults everything else and the phase is `Unknown`: the
+  entries create the child records live ops accumulate into; ticket 182 fills the
+  rest from `task` frames) and mines the messages page + the running turn's tool
+  frames for `Agent` calls (`applyAgentCall` — chat-independent, so the page-on-top
+  restore recovers prompts/links too), then hands the chat-side `Bundle` to the
+  calling ChatViewModel: `applyColdStart` replaces history (live tail cleared) and
+  seeds the running turn's steps/frames as ordinary live rows
+  (`ChatTimeline.seedRunningTurn` — consecutive text/thinking frames share a
+  bubble, a tool frame breaks it, settled tools carry their output; what history
+  already committed is pruned by the keep-live merge), so the replayed/live ops
+  after the watermark extend exactly those rows (no gap, no duplicate: the fold
+  knows the seeded frame texts and turn states). The working state is the running
+  turn or an active queue prompt; the queued prompts render as "Queued #N" bubbles
+  through the 154 echo registry (`seedQueuedPrompts` — the turn-start splice heals
+  them in place); the transcript's pending approval/question interactions replace
+  the cards' queues (approval request camelCase, question request the snake_case
+  question payload; card id = the interaction id), each guarded against a live
+  event overtaking the fetch. A turn event landing mid-fetch (a resync with the
+  socket open) keeps the live tail as-is. Every cold start still re-reads /status
+  for the bound model/effort and the ring (107/161 — ticket 177 moves them to the
+  `agent`/`usage` frames).
   The fetch is cached per session only until the session is LEFT:
-  `SubagentStreamStore.release` calls `SnapshotSync.forget`, so the next entry
-  re-fetches (one cheap GET per entry — no process-lifetime cache of mutable server
-  state) while chat → page → chat costs zero fetches (`AlreadyFresh`).
-  The 40932 recovery re-runs it (`resync`, keepLive per the snapshot's `busy`); a
-  failed fetch is the ordinary load-error state, never a legacy-burst fallback.
-  The within-process resume is the /status-aware history resync on ON_START and on
-  every `Reconnected` (048; no cursor replay since 175).
+  `SubagentStreamStore.release` calls `TranscriptColdStart.forget`, so the next entry
+  re-fetches (one cheap round per entry — no process-lifetime cache of mutable
+  server state) while chat → page → chat costs zero fetches. A chat joining someone
+  else's fetch (`AlreadyFresh` — the keep-alive restoring a page on top) takes a
+  fresh `resync` of its own: the socket may have folded past that bundle. The 40932
+  recovery and a stale journal re-run it too (`resync`); a failed fetch is the
+  ordinary load-error state, never a fallback to any removed route.
+  The within-process resume (048, rebuilt by 176) is the watermark replay: every
+  gate reopen and reconnect re-subscribes with `transcript_since`, so a turn that
+  ended while away arrives as its own `turn.upsert` (its refetch clears the ghost
+  live rows). `verifyResume` (ON_START after the first, and every `Reconnected`)
+  probes `GET .../transcript/ops?agent_id=main&since_seq=<watermark>`; a stale
+  answer (`complete:false`, or a `latest_seq` behind the watermark — a restarted
+  server's fresh journal) or a `TranscriptStale` event rebuilds the chat from a
+  fresh cold start instead of trusting a partial replay. A failed probe proves
+  nothing; the replay stays the resume.
   The transcript cold status reads the real turn states (`cancelled`/`failed`
   → Failed, 0.31.1) for the window the roster cannot cover.
 - Sub-agent streams (045, state model reimplemented in 091): `SessionSocket` tags
@@ -387,9 +424,10 @@
   text → transcript turn states; identity/prompt/link first-writer-wins): live
   frames via `apply` (the FIRST turn's first `ContextSpliced` user message — an
   `undo` marker splice since 175 — is the task prompt — lifted into `record.prompt`, never a timeline row; later splices
-  stay user bubbles), the snapshot roster via `applyRoster` (re-applicable on every
+  stay user bubbles), the session roster via `applyRoster` (re-applicable on every
   entry — a fresh roster heals non-live-pinned statuses), `Agent` calls from any
-  carrier (history rows, snapshot messages, `running_tools`) via `applyAgentCall`,
+  carrier (history rows, the cold start's messages page, the running transcript
+  turn's tool frames) via `applyAgentCall`,
   transcript pages via `applyTranscriptPage`/`prependTranscriptPage`. Ticket 135
   adds the member `Cancelled` status with four carriers — the live
   `task.terminated` kill (`status` `killed`, keyed on the task's `agentId`,

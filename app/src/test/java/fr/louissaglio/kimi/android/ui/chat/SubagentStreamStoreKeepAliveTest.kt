@@ -15,7 +15,7 @@ import fr.louissaglio.kimi.android.navigation.Chat
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.testChatRepository
 import fr.louissaglio.kimi.android.testutil.testSessionsRepository
-import fr.louissaglio.kimi.android.testutil.testSnapshotSync
+import fr.louissaglio.kimi.android.testutil.testColdStart
 import fr.louissaglio.kimi.android.testutil.testSubagentStreamStore
 import fr.louissaglio.kimi.android.testutil.webSocketUpgradeResponse
 import fr.louissaglio.kimi.android.testutil.testTodoParser
@@ -73,18 +73,22 @@ class SubagentStreamStoreKeepAliveTest {
     private val unreadStore = UnreadSessionsStore(createTempDirectory("subagent-keep-alive-unread-test").toFile(), Json { ignoreUnknownKeys = true })
 
     /** Shared by the store and the ChatViewModel (the production singleton shape):
-     * one SessionSocket, one cursor map — the hand-off resumes, never replays twice. */
+     * one SessionSocket, one fold and watermark map — the hand-off resumes, never
+     * replays twice. */
     private lateinit var repository: ChatRepository
 
-    /** The session's cold-start owner (ticket 085), shared by the store's keep-alive
-     * and the ChatViewModels — one snapshot sync per session per process. */
-    private lateinit var snapshotSync: SnapshotSync
+    /** The session's cold-start owner (ticket 176), shared by the store's keep-alive
+     * and the ChatViewModels — one cold start per session per process. */
+    private lateinit var coldStart: TranscriptColdStart
 
-    /** The served /snapshot body (ticket 085): the keep-alive's cold start awaits it
-     * before subscribing. Default: empty roster, watermark seq 18 (just below the
-     * tests' first frame, seq 19). */
+    /** The served main transcript (ticket 176): the keep-alive's cold start awaits it
+     * before subscribing. Default: the main agent alone, watermark seq 18. */
     @Volatile
-    private var snapshotBody = SNAPSHOT_BODY
+    private var transcriptBody = transcript()
+
+    /** The served history page (the cold start's messages read). */
+    @Volatile
+    private var messagesBody = MESSAGES_BODY
 
     @Volatile
     private var serverSocket: WebSocket? = null
@@ -115,9 +119,12 @@ class SubagentStreamStoreKeepAliveTest {
                     // hand-off test; none of these bodies touches the sub-agent store.
                     path == "/api/v1/sessions/session_1" && request.method == "GET" ->
                         MockResponse(body = SESSION_BODY)
-                    path == "/api/v1/sessions/session_1/snapshot" -> MockResponse(body = snapshotBody)
+                    path.startsWith("/api/v1/sessions/session_1/transcript?agent_id=main") ->
+                        MockResponse(body = transcriptBody)
+                    path == "/api/v1/sessions/session_1/prompts" ->
+                        MockResponse(body = PROMPTS_BODY)
                     path.startsWith("/api/v1/sessions/session_1/messages") ->
-                        MockResponse(body = MESSAGES_BODY)
+                        MockResponse(body = messagesBody)
                     path == "/api/v1/sessions/session_1/status" -> MockResponse(body = STATUS_BODY)
                     path.startsWith("/api/v1/sessions/session_1/questions") ->
                         MockResponse(body = QUESTIONS_BODY)
@@ -144,12 +151,12 @@ class SubagentStreamStoreKeepAliveTest {
         )
         repository = testChatRepository(dataStore)
         settingsRepository = SettingsRepository(dataStore, appScope)
-        snapshotSync = testSnapshotSync(repository, settingsRepository) { store }
+        coldStart = testColdStart(repository, settingsRepository) { store }
         store = testSubagentStreamStore(
             streamCoalesceWindowMillis = 0,
             chatRepository = repository,
             settingsRepository = settingsRepository,
-            snapshotSync = snapshotSync,
+            coldStart = coldStart,
         )
     }
 
@@ -160,6 +167,8 @@ class SubagentStreamStoreKeepAliveTest {
         // resuming between tests crashes on the dispatcher thread (ticket 049).
         runBlocking {
             startedViewModels.forEach { it.viewModelScope.coroutineContext.job.cancelAndJoin() }
+            // The hand-off's chat resync fetches on the cold start's own scope.
+            coldStart.awaitInFlight()
             val keepAlive = store.keepAliveJob(SESSION_ID)
             store.release(SESSION_ID)
             keepAlive?.join()
@@ -268,19 +277,14 @@ class SubagentStreamStoreKeepAliveTest {
     }
 
     @Test
-    fun `the keep-alive cold start seeds the store from the snapshot roster before subscribing`() = runBlocking {
+    fun `the keep-alive cold start seeds the roster and the watermark before subscribing`() = runBlocking {
         // Process death with the page on top (ticket 064 path — no ChatViewModel
-        // exists): the store's keep-alive runs the snapshot sync (ticket 085) BEFORE
-        // its first subscribe, so a running roster entry lands the identity, the
-        // precise Working status and the resume cursor first.
-        snapshotBody = """{"code":0,"msg":"success","data":{"as_of_seq":18,"epoch":"ep_1",""" +
-            """"session":{"id":"session_1","busy":true,"usage":{"context_tokens":0,"context_limit":1048576}},""" +
-            """"messages":{"items":[],"has_more":false},"in_flight_turn":null,""" +
-            """"subagents":[{"id":"agent-12","kind":"subagent","subagent_phase":"working",""" +
-            """"subagent_type":"explore","description":"doc-verify","parent_tool_call_id":"tool_agent",""" +
-            """"run_in_background":false,"created_at":"2026-08-01T10:00:00.000Z",""" +
-            """"started_at":"2026-08-01T10:00:00.100Z"}],""" +
-            """"pending_approvals":[],"pending_questions":[]},"request_id":"r"}"""
+        // exists): the store's keep-alive runs the transcript cold start (ticket 176)
+        // BEFORE its first subscribe, so the transcript's `agents` roster lands the
+        // record and the main watermark rides the first subscribe.
+        transcriptBody = transcript(
+            agents = """[{"agentId":"main","type":"main"},{"agentId":"agent-12","type":"sub","parentAgentId":"main"}]""",
+        )
 
         store.pageOpened(SESSION_ID)
 
@@ -288,10 +292,8 @@ class SubagentStreamStoreKeepAliveTest {
         // before it.
         awaitCondition { clientFrames.isNotEmpty() }
         assertTrue(clientFrames.first(), clientFrames.first().contains("\"type\":\"subscribe_v2\""))
-        val seeded = entry("agent-12")!!
-        assertEquals("explore", seeded.name)
-        assertEquals("doc-verify", seeded.description)
-        assertEquals(SubagentStatus.Working, seeded.status)
+        assertTrue(clientFrames.first(), clientFrames.first().contains("\"transcript_since\":{\"main\":18}"))
+        assertNotNull(entry("agent-12"))
 
         // Live frames accumulate from the very first one — no "spawn missed" drop.
         val socket = awaitServerSocket()
@@ -305,33 +307,27 @@ class SubagentStreamStoreKeepAliveTest {
     }
 
     @Test
-    fun `the keep-alive cold start recovers the task prompt from the snapshot's Agent call`() = runBlocking {
+    fun `the keep-alive cold start recovers the task prompt from the history's Agent call`() = runBlocking {
         // Page-on-top cold restore (ticket 064's path — no ChatViewModel exists, so no
-        // row mining can ever run): the keep-alive's snapshot sync must seed the record
-        // INCLUDING the prompt, mined from the snapshot's messages page (ticket 091).
-        snapshotBody = """{"code":0,"msg":"success","data":{"as_of_seq":18,"epoch":"ep_1",""" +
-            """"session":{"id":"session_1","busy":true,"usage":{"context_tokens":0,"context_limit":1048576}},""" +
-            """"messages":{"items":[""" +
+        // row mining can ever run): the keep-alive's cold start must seed the record
+        // INCLUDING the prompt, mined from the messages page (ticket 091) — the result's
+        // agent_id: marker names the member.
+        messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
+            """{"id":"msg_2","session_id":"session_1","role":"tool",""" +
+            """"content":[{"type":"tool_result","tool_call_id":"tool_agent",""" +
+            """"output":"agent_id: agent-12\nactual_subagent_type: explore\nstatus: completed\n\n[summary]\nok"}],""" +
+            """"created_at":"2026-08-01T10:00:01.000Z"},""" +
             """{"id":"msg_1","session_id":"session_1","role":"assistant",""" +
             """"content":[{"type":"tool_use","tool_call_id":"tool_agent","tool_name":"Agent",""" +
             """"input":{"subagent_type":"explore","description":"doc-verify","prompt":"Reply ok"}}],""" +
-            """"created_at":"2026-08-01T10:00:00.000Z"}],"has_more":false},""" +
-            """"in_flight_turn":null,""" +
-            """"subagents":[{"id":"agent-12","kind":"subagent","subagent_phase":"working",""" +
-            """"subagent_type":"explore","description":"doc-verify","parent_tool_call_id":"tool_agent",""" +
-            """"run_in_background":false,"created_at":"2026-08-01T10:00:00.000Z",""" +
-            """"started_at":"2026-08-01T10:00:00.100Z"}],""" +
-            """"pending_approvals":[],"pending_questions":[]},"request_id":"r"}"""
+            """"created_at":"2026-08-01T10:00:00.000Z"}],"has_more":false},"request_id":"r"}"""
 
         store.pageOpened(SESSION_ID)
 
         awaitCondition { entry("agent-12") != null }
         val seeded = entry("agent-12")!!
-        assertEquals(SubagentStatus.Working, seeded.status)
-        assertEquals(
-            listOf(ChatItem.UserMessage("seeded_prompt", "Reply ok")),
-            seeded.items,
-        )
+        assertEquals(SubagentStatus.Completed, seeded.status)
+        assertEquals(ChatItem.UserMessage("seeded_prompt", "Reply ok"), seeded.items.first())
 
         store.pageClosed(SESSION_ID)
     }
@@ -342,7 +338,7 @@ class SubagentStreamStoreKeepAliveTest {
         settingsRepository,
         FakeAttachmentStore(),
         store,
-        snapshotSync,
+        coldStart,
         Chat("session_1"),
         todoParser = testTodoParser(),
         unreadStore = unreadStore,
@@ -377,10 +373,11 @@ class SubagentStreamStoreKeepAliveTest {
     private companion object {
         const val SESSION_ID = "session_1"
 
-        const val SNAPSHOT_BODY = """{"code":0,"msg":"success","data":{"as_of_seq":18,"epoch":"ep_1",""" +
-            """"session":{"id":"session_1","busy":false,"usage":{"context_tokens":0,"context_limit":1048576}},""" +
-            """"messages":{"items":[],"has_more":false},"in_flight_turn":null,"subagents":[],""" +
-            """"pending_approvals":[],"pending_questions":[]},"request_id":"r"}"""
+        fun transcript(agents: String = """[{"agentId":"main","type":"main"}]"""): String =
+            """{"code":0,"msg":"success","data":{"agent_id":"main","items":[],"has_more":false,""" +
+                """"interactions":[],"pending_interactions":[],"prompts":[],"agents":$agents,"seq":18},"request_id":"r"}"""
+
+        const val PROMPTS_BODY = """{"code":0,"msg":"success","data":{"active":null,"queued":[]},"request_id":"r"}"""
 
         const val SESSION_BODY = """{"code":0,"msg":"success","data":{"id":"session_1","title":"Fix the bug",""" +
             """"updated_at":"2026-07-20T00:00:00.000Z","busy":false,""" +

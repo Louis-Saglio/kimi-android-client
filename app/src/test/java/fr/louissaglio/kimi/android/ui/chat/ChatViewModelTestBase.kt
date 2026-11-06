@@ -14,7 +14,7 @@ import fr.louissaglio.kimi.android.testutil.TranscriptFrames
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.testChatRepository
 import fr.louissaglio.kimi.android.testutil.testSessionsRepository
-import fr.louissaglio.kimi.android.testutil.testSnapshotSync
+import fr.louissaglio.kimi.android.testutil.testColdStart
 import fr.louissaglio.kimi.android.testutil.testSubagentStreamStore
 import fr.louissaglio.kimi.android.testutil.webSocketUpgradeResponse
 import fr.louissaglio.kimi.android.testutil.testTodoParser
@@ -37,10 +37,6 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.booleanOrNull
-import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Response
@@ -75,17 +71,17 @@ abstract class ChatViewModelTestBase {
     protected val unreadStore = UnreadSessionsStore(createTempDirectory("chat-view-model-unread-test").toFile(), Json { ignoreUnknownKeys = true })
 
     /** 0 ms window: sub-agent frames apply on arrival, no flush timer involved.
-     * Shares the test's ChatRepository/SnapshotSync (the production singleton
-     * shape): its release → forget lands on the SAME sync the ViewModels use. */
+     * Shares the test's ChatRepository/TranscriptColdStart (the production singleton
+     * shape): its release → forget lands on the SAME cold start the ViewModels use. */
     protected lateinit var subagentStore: SubagentStreamStore
 
-    /** Shared by the ViewModels and the snapshot sync (the production singleton shape):
-     * one ChatRepository — one SessionSocket, one cursor map — so the seeded resume
-     * cursor lands on the very socket the ViewModel collects. */
+    /** Shared by the ViewModels and the cold start (the production singleton shape):
+     * one ChatRepository — one SessionSocket, one watermark map — so the seeded resume
+     * watermark lands on the very socket the ViewModel collects. */
     protected lateinit var chatRepository: ChatRepository
 
-    /** The session's cold-start owner (ticket 085), shared by every started ViewModel. */
-    protected lateinit var snapshotSync: SnapshotSync
+    /** The session's cold-start owner (ticket 176), shared by every started ViewModel. */
+    protected lateinit var coldStart: TranscriptColdStart
 
     @Volatile
     protected var approvalsSucceed = true
@@ -130,45 +126,45 @@ abstract class ChatViewModelTestBase {
         """{"code":0,"msg":"success","data":{"items":[],"has_more":false},"request_id":"r"}"""
 
     /**
-     * The served `/snapshot` body (ticket 085 — the cold-start bundle, fetched before
-     * the session's first socket subscribe). When null (the default), the body is
-     * DERIVED from [messagesBody] and [statusBody]: the snapshot is the cold-start
-     * history source now (busy derives from [statusBody]; its usage carries a zero
-     * limit — "unknown" — so the ring's fill converges from the /status re-read),
-     * and tests seeding those see them at first start without snapshot-specific
-     * setup. Set explicitly to exercise the roster, pending approvals/questions, or
-     * the watermark.
+     * The served main-agent `GET .../transcript` body (ticket 176 — the cold-start read
+     * model: the newest turn plus the session's pending interactions, prompt entities,
+     * agent roster and `seq` watermark). When null (the default), an idle transcript
+     * with no turn, nothing pending, the main agent alone and watermark seq 1. Set it
+     * via [transcriptData] to exercise a running turn, interactions or the roster.
      */
     @Volatile
-    protected var snapshotBody: String? = null
+    protected var transcriptBody: String? = null
 
-    /** Same as [statusResponseGate], for the /snapshot fetch: parks the response so a
-     * test can make a socket event win over the in-flight sync on purpose. */
+    /** Parks the main transcript response so a test can make a socket event win over
+     * the in-flight cold start on purpose. */
     @Volatile
-    protected var snapshotResponseGate: CountDownLatch? = null
+    protected var transcriptResponseGate: CountDownLatch? = null
+
+    /** The served `GET .../prompts` queue (ticket 176): idle by default. */
+    @Volatile
+    protected var promptQueueBody =
+        """{"code":0,"msg":"success","data":{"active":null,"queued":[]},"request_id":"r"}"""
+
+    /** The served `GET .../transcript/ops` catch-up probe (ticket 176): a journal that
+     * covers any watermark by default. */
+    @Volatile
+    protected var catchUpBody =
+        """{"code":0,"msg":"success","data":{"agent_id":"main","batches":[],"latest_seq":1000000,"complete":true},"request_id":"r"}"""
+
+    /** A main transcript envelope: [items] the turn/marker array, the rest the global
+     * state (raw JSON). */
+    protected fun transcriptData(
+        items: String = "[]",
+        interactions: String = "[]",
+        pendingInteractions: String = "[]",
+        prompts: String = "[]",
+        agents: String = """[{"agentId":"main","type":"main"}]""",
+        seq: Long? = 1,
+    ): String = """{"code":0,"msg":"success","data":{"agent_id":"main","items":$items,"has_more":false,""" +
+        """"interactions":$interactions,"pending_interactions":$pendingInteractions,""" +
+        """"prompts":$prompts,"agents":$agents${seq?.let { ""","seq":$it""" }.orEmpty()}},"request_id":"r"}"""
 
     private val testJson = Json { ignoreUnknownKeys = true }
-
-    /** The default snapshot: [messagesBody]'s page + [statusBody]'s busy, empty roster
-     * and pending lists, watermark seq 1 — read at response time, like the other
-     * bodies. The usage carries a zero limit — the "unknown" wire case (0.38.0 made
-     * `context_limit` optional; absent decodes to the same 0), so the ring's fill
-     * converges from the /status re-read. The server serves the SAME page in
-     * opposite orders (live-verified on 0.31.1, 2026-08-02): `/messages` items are
-     * newest-first, the snapshot's OLDEST-first — tests seed [messagesBody] in
-     * `/messages` wire order, so the derivation flips it. */
-    private fun defaultSnapshotBody(): String {
-        val messagesData = testJson.parseToJsonElement(messagesBody).jsonObject.getValue("data").jsonObject
-        val oldestFirst = JsonArray(messagesData["items"]?.jsonArray?.reversed().orEmpty())
-        val snapshotMessages = JsonObject(messagesData + ("items" to oldestFirst))
-        val statusData = testJson.parseToJsonElement(statusBody).jsonObject.getValue("data").jsonObject
-        val busy = statusData["busy"]?.jsonPrimitive?.booleanOrNull == true
-        return """{"code":0,"msg":"success","data":{"as_of_seq":1,"epoch":"ep_1",""" +
-            """"session":{"id":"session_1","busy":$busy,""" +
-            """"usage":{"context_tokens":0,"context_limit":0}},""" +
-            """"messages":$snapshotMessages,"in_flight_turn":null,"subagents":[],""" +
-            """"pending_approvals":[],"pending_questions":[]},"request_id":"r"}"""
-    }
 
     /** Served for /messages requests carrying a `before_id` cursor (ticket 043). */
     @Volatile
@@ -296,10 +292,14 @@ abstract class ChatViewModelTestBase {
                 return when {
                     path == "/api/v1/sessions/session_1" && request.method == "GET" ->
                         MockResponse(body = sessionBody)
-                    path == "/api/v1/sessions/session_1/snapshot" -> {
-                        snapshotResponseGate?.await(5, TimeUnit.SECONDS)
-                        MockResponse(body = snapshotBody ?: defaultSnapshotBody())
+                    path.startsWith("/api/v1/sessions/session_1/transcript/ops") ->
+                        MockResponse(body = catchUpBody)
+                    path.startsWith("/api/v1/sessions/session_1/transcript?agent_id=main") -> {
+                        transcriptResponseGate?.await(5, TimeUnit.SECONDS)
+                        MockResponse(body = transcriptBody ?: transcriptData())
                     }
+                    path == "/api/v1/sessions/session_1/prompts" && request.method == "GET" ->
+                        MockResponse(body = promptQueueBody)
                     path.startsWith("/api/v1/sessions/session_1/messages") ->
                         MockResponse(body = if ("before_id" in path) olderMessagesBody else messagesBody)
                     path == "/api/v1/sessions/session_1/status" -> {
@@ -480,12 +480,12 @@ abstract class ChatViewModelTestBase {
         )
         settingsRepository = SettingsRepository(dataStore, appScope)
         chatRepository = testChatRepository(dataStore)
-        snapshotSync = testSnapshotSync(chatRepository, settingsRepository) { subagentStore }
+        coldStart = testColdStart(chatRepository, settingsRepository) { subagentStore }
         subagentStore = testSubagentStreamStore(
             streamCoalesceWindowMillis = 0,
             chatRepository = chatRepository,
             settingsRepository = settingsRepository,
-            snapshotSync = snapshotSync,
+            coldStart = coldStart,
         )
         viewModel = ChatViewModel(
             chatRepository,
@@ -493,7 +493,7 @@ abstract class ChatViewModelTestBase {
             settingsRepository,
             FakeAttachmentStore(),
             subagentStore,
-            snapshotSync,
+            coldStart,
             Chat("session_1"),
             todoParser = testTodoParser(),
             unreadStore = unreadStore,
@@ -512,7 +512,12 @@ abstract class ChatViewModelTestBase {
         // back — joining after resetMain would crash it on the dispatcher thread
         // ("Module with the Main dispatcher had failed to initialize"). See
         // startedViewModels (ticket 049).
-        runBlocking { startedViewModels.forEach { it.viewModelScope.coroutineContext.job.cancelAndJoin() } }
+        runBlocking {
+            startedViewModels.forEach { it.viewModelScope.coroutineContext.job.cancelAndJoin() }
+            // A resync (a recreated ViewModel joining the cached cold start) fetches on
+            // the cold start's own scope, which no ViewModel cancellation reaches.
+            coldStart.awaitInFlight()
+        }
         Dispatchers.resetMain()
         appScope.cancel()
         server.close()
@@ -533,7 +538,7 @@ abstract class ChatViewModelTestBase {
         settingsRepository,
         FakeAttachmentStore(),
         subagentStore,
-        snapshotSync,
+        coldStart,
         Chat("session_1"),
         todoParser = testTodoParser(),
         unreadStore = unreadStore,
@@ -566,12 +571,16 @@ abstract class ChatViewModelTestBase {
         return texts to job
     }
 
-    /** Drains recorded requests until the approvals POST arrives (history/status/WS came first). */
-    protected fun awaitRequest(pathSubstring: String): RecordedRequest {
+    /** Drains recorded requests until one matching [pathSubstring] (and [method], when
+     * given) arrives — history/status/WS came first. `/prompts` serves both the cold
+     * start's queue GET and the send POST (ticket 176): send assertions pass `POST`. */
+    protected fun awaitRequest(pathSubstring: String, method: String? = null): RecordedRequest {
         val deadline = System.currentTimeMillis() + 5_000
         while (System.currentTimeMillis() < deadline) {
             val request = server.takeRequest(100, TimeUnit.MILLISECONDS) ?: continue
-            if (request.target.orEmpty().contains(pathSubstring)) return request
+            if (request.target.orEmpty().contains(pathSubstring) && (method == null || request.method == method)) {
+                return request
+            }
         }
         error("Timed out waiting for request to $pathSubstring")
     }

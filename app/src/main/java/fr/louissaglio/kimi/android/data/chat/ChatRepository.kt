@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.Flow
 class ChatRepository @Inject constructor(
     private val chatApi: ChatApi,
     private val fileHistory: FileHistoryApi,
+    private val transcriptSync: TranscriptSyncApi,
     private val models: ModelsRepository,
     private val prefs: SessionPrefsStore,
     private val socket: SessionSocket,
@@ -36,7 +37,8 @@ class ChatRepository @Inject constructor(
         chatApi.messages(settings, sessionId, beforeId)
 
     /** One page of an agent's turn-granular transcript — the sub-agent page's history
-     * backing (ticket 046). [beforeTurn] = null fetches the newest page. */
+     * backing (ticket 046) and the main chat's cold-start read model (ticket 176).
+     * [beforeTurn] = null fetches the newest page. */
     suspend fun getTranscript(
         settings: ServerSettings,
         sessionId: String,
@@ -242,10 +244,27 @@ class ChatRepository @Inject constructor(
     suspend fun getSessionStatus(settings: ServerSettings, sessionId: String): Result<SessionStatus> =
         chatApi.sessionStatus(settings, sessionId)
 
-    /** The session snapshot (`GET /api/v1/sessions/{id}/snapshot` — ticket 085): the
-     * cold-start/resync bundle at an event-stream watermark. */
-    suspend fun getSnapshot(settings: ServerSettings, sessionId: String): Result<SessionSnapshot> =
-        chatApi.snapshot(settings, sessionId)
+    /** The main agent's prompt queue (`GET .../prompts` — ticket 176): the running
+     * prompt and the queued ones, in queue order. */
+    suspend fun getPromptQueue(settings: ServerSettings, sessionId: String): Result<PromptQueue> =
+        transcriptSync.promptQueue(settings, sessionId)
+
+    /** Whether [agentId]'s op journal still covers every batch after [sinceSeq]
+     * (`GET .../transcript/ops` — ticket 176): the resume's REST verification. */
+    suspend fun getTranscriptCatchUp(
+        settings: ServerSettings,
+        sessionId: String,
+        agentId: String,
+        sinceSeq: Long,
+    ): Result<TranscriptCatchUp> = transcriptSync.catchUp(settings, sessionId, agentId, sinceSeq)
+
+    /** Seeds the session socket from a REST transcript page (ticket 176): the agent's
+     * fold restarts from the page and its `seq` becomes the resume watermark the next
+     * `subscribe_v2` sends as `transcript_since`. */
+    fun seedTranscript(sessionId: String, page: TranscriptPage) = socket.seedTranscript(sessionId, page)
+
+    /** The agent's resume watermark on the session socket; null when none is known. */
+    fun transcriptWatermark(sessionId: String, agentId: String): Long? = socket.watermark(sessionId, agentId)
 
     /** The session's background tasks (`GET .../tasks` — ticket 092): background
      * sub-agents and bash, terminal ones included. [status] is the optional wire
@@ -298,9 +317,10 @@ class ChatRepository @Inject constructor(
      * Streams [SocketEvent]s for [sessionId]. One collection = one socket owned here
      * (not by the UI); cancelling the collection closes it. On a drop the stream
      * retries with exponential backoff and re-subscribes (`subscribe_v2` — the
-     * subscription does not survive a disconnect); the collector is told via
-     * [SocketEvent.Reconnected] so it can re-sync from REST. A session the server does
-     * not know fails the stream ([SocketEvent.Failed]).
+     * subscription does not survive a disconnect) carrying the resume watermarks, so
+     * the server replays the missed batches (ticket 176); the collector is told via
+     * [SocketEvent.Reconnected] so it can verify the journal covered them. A session
+     * the server does not know fails the stream ([SocketEvent.Failed]).
      */
     fun observeSession(settings: ServerSettings, sessionId: String): Flow<SocketEvent> =
         socket.observe(settings, sessionId)

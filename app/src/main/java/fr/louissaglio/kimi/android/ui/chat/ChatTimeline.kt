@@ -3,7 +3,6 @@ package fr.louissaglio.kimi.android.ui.chat
 import fr.louissaglio.kimi.android.data.chat.AGENT_TOOL_NAME
 import fr.louissaglio.kimi.android.data.chat.AgentCallDisplay
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
-import fr.louissaglio.kimi.android.data.chat.InFlightTurn
 import fr.louissaglio.kimi.android.data.chat.ORIGIN_KIND_COMPACTION_SUMMARY
 import fr.louissaglio.kimi.android.data.chat.PromptStatus
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
@@ -227,35 +226,78 @@ class ChatTimeline(
     }
 
     /**
-     * The snapshot cold start's in-flight turn seed (ticket 144): the resume-cursor
-     * replay covers only frames AFTER the snapshot's watermark, so the running turn's
-     * pre-watermark tail — the aggregated assistant/thinking text and the still-running
-     * tools — must be restored from the bundle, or a cold open of a busy session shows
-     * a gap between the last committed message and the live stream. The aggregated
-     * text predates the still-running tools (they are running AT the watermark), so
-     * the bubble seeds first and the tools tail it — a delta arriving after a tool row
-     * then opens a fresh bubble, the ordinary live rule. Seeded rows are ordinary live
-     * rows: post-watermark frames upsert/heal them in place and the turn-end refetch
-     * replaces them with the canonical committed turn.
+     * The cold start's running-turn seed (ticket 176, 144's role — the removed
+     * snapshot's `in_flight_turn` is now the newest `GET .../transcript` turn while it
+     * runs): the turn's steps/frames become ordinary LIVE rows, so a cold open of a
+     * busy session shows the in-flight text, thinking and tool calls (running or
+     * already settled) instead of a gap between the last committed message and the live
+     * stream. Frames flatten like a transcript page's — consecutive text/thinking frames
+     * share one bubble, a tool frame breaks it — and the socket fold is seeded with the
+     * same frames, so the replayed/live ops after the page's watermark extend these rows
+     * in place (the last bubble absorbs the text deltas, tool events heal their row by
+     * call id): no gap, no duplicate. User-role frames (steered-in prompts) and the
+     * turn's prompt are left to history and the splice echoes. Whatever history
+     * already committed of the turn is pruned from the seed (the ordinary keep-live
+     * merge), and the turn-end refetch replaces the rows with the canonical turn.
      */
-    fun seedInFlight(turn: InFlightTurn) {
-        if (turn.assistantText.isNotBlank() || turn.thinkingText.isNotBlank()) {
-            rows += ChatItem.AssistantMessage(
-                id = "live_${liveBubbleCount++}",
-                text = turn.assistantText,
-                thinking = turn.thinkingText,
-            )
-        }
-        turn.runningTools.forEach { tool ->
-            if (isTodoCall(tool.toolCallId, tool.name)) {
-                // Same rule as a live TodoList call: no row, the widget mirrors it.
-                todoParser.of(tool.name, tool.input)?.let { liveTodos = it }
-            } else {
-                upsertTool(
-                    tool.toolCallId, tool.name, ToolStatus.Running, tool.preview,
-                    input = tool.input, args = tool.args, agentCall = tool.agentCall,
-                )
+    fun seedRunningTurn(turn: TranscriptTurn) {
+        for (step in turn.steps) {
+            var text = ""
+            var thinking = ""
+            fun flushBubble() {
+                if (text.isNotBlank() || thinking.isNotBlank()) {
+                    rows += ChatItem.AssistantMessage(id = "live_${liveBubbleCount++}", text = text, thinking = thinking)
+                }
+                text = ""
+                thinking = ""
             }
+            for (frame in step.frames) {
+                when (frame) {
+                    is TranscriptFrame.Thinking ->
+                        thinking = listOf(thinking, frame.text).filter { it.isNotBlank() }.joinToString("\n")
+                    is TranscriptFrame.Text ->
+                        if (frame.role == TranscriptFrame.Text.Role.Assistant) {
+                            text = listOf(text, frame.text).filter { it.isNotBlank() }.joinToString("\n")
+                        }
+                    is TranscriptFrame.Tool -> {
+                        flushBubble()
+                        if (isTodoCall(frame.toolCallId, frame.name)) {
+                            // Same rule as a live TodoList call: no row, the widget mirrors it.
+                            todoParser.of(frame.name, frame.input)?.let { liveTodos = it }
+                        } else {
+                            upsertTool(
+                                frame.toolCallId, frame.name, frame.toolStatus(), frame.preview,
+                                input = frame.input, output = frame.output, args = frame.args,
+                                agentCall = frame.agentCall,
+                            )
+                            if (!frame.running) linkFromResult(frame.toolCallId, frame.output)
+                        }
+                    }
+                }
+            }
+            flushBubble()
+        }
+        pruneCoveredLiveRows()
+    }
+
+    /**
+     * The cold start's queued prompts (ticket 176, from `GET .../prompts`): each waiting
+     * prompt becomes a "Queued #N" bubble exactly like the optimistic echo of a prompt
+     * this client queued (ticket 154) — its message cannot be in history before its own
+     * turn starts, so the echo registry keeps it across refetches; the turn-start splice
+     * heals it in place (same message id) and the prompt's `prompt.upsert` clears the
+     * mark. [prompts] are in queue order; a message already shown (history, an echo)
+     * keeps its row.
+     */
+    fun seedQueuedPrompts(prompts: List<ChatMessage>) {
+        prompts.forEachIndexed { index, message ->
+            appendLocalEcho(
+                message.id,
+                message.parts.filterIsInstance<ChatMessage.Part.Text>().joinToString("\n") { it.text },
+                message.parts.filterIsInstance<ChatMessage.Part.Attachment>(),
+                message.parts.filterIsInstance<ChatMessage.Part.Image>(),
+            )
+            onPromptQueued(message.id, index + 1)
         }
     }
 
@@ -873,7 +915,7 @@ class ChatTimeline(
                                 ChatItem.ToolActivity(
                                     frame.toolCallId,
                                     frame.name,
-                                    if (frame.running) ToolStatus.Running else ToolStatus.Done,
+                                    frame.toolStatus(),
                                     frame.preview,
                                     frame.input,
                                     frame.output,
@@ -952,6 +994,14 @@ class ChatTimeline(
             return
         }
     }
+}
+
+/** A transcript tool frame's row status: running, else error (2.5.0's `error` state)
+ * or done. */
+private fun TranscriptFrame.Tool.toolStatus(): ToolStatus = when {
+    running -> ToolStatus.Running
+    failed -> ToolStatus.Error
+    else -> ToolStatus.Done
 }
 
 /**

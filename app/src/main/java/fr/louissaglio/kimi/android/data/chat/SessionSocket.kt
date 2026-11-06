@@ -37,7 +37,8 @@ import okhttp3.WebSocketListener
  * The session WebSocket (`/api/v1/ws`, docs/server-api.md → WebSocket): connection
  * management (reconnect loop, backoff, stall watchdog), the `subscribe_v2` frame, and
  * frame dispatch — `transcript.ops` batches folded into [SessionEvent]s by the
- * session's [TranscriptFold] (server 2.5.0, ticket 175).
+ * session's [TranscriptFold] (server 2.5.0, ticket 175) — plus the per-agent resume
+ * watermarks every subscribe sends back as `transcript_since` (ticket 176).
  */
 @Singleton
 class SessionSocket @Inject constructor(
@@ -66,14 +67,56 @@ class SessionSocket @Inject constructor(
     private val folds = ConcurrentHashMap<String, TranscriptFold>()
 
     /**
+     * The resume watermarks, per session then per agent (ticket 176): the op-batch
+     * `seq` the matching [folds] entry has folded up to. Seeded for the main agent by
+     * the cold start's REST transcript page ([seedTranscript]) and advanced by every
+     * `transcript.ops` batch and `transcript.reset` of any agent — so a child seen
+     * live keeps its own. Every `subscribe_v2` sends the whole map as
+     * `transcript_since`: the server replays the batches after each watermark before
+     * the ack instead of a fresh baseline, and the fold continues exactly where it
+     * stopped. Instance-level for the same reason as the fold. An agent without a
+     * watermark (a child never seen on this process) gets the server's baseline
+     * `transcript.reset`; its history pages in over REST after the subscribe, so no
+     * window is missed.
+     */
+    private val watermarks = ConcurrentHashMap<String, ConcurrentHashMap<String, Long>>()
+
+    private fun foldOf(sessionId: String): TranscriptFold =
+        folds.getOrPut(sessionId) { TranscriptFold(json, mapper) }
+
+    private fun watermarksOf(sessionId: String): ConcurrentHashMap<String, Long> =
+        watermarks.getOrPut(sessionId) { ConcurrentHashMap() }
+
+    /**
+     * Seeds [page]'s agent from a REST transcript page (the cold start, ticket 176):
+     * the fold is reset to the page ([TranscriptFold.seed]) and the page's `seq`
+     * becomes the agent's watermark — the next subscribe resumes right after it. A page
+     * without `seq` (a session that is not live) drops the watermark: the subscribe
+     * then takes the server's baseline. Call it while no collection folds the session
+     * (the cold start runs before the subscribe), or accept that ops folded between the
+     * page's capture and this call are forgotten — their frames' final upserts heal.
+     */
+    fun seedTranscript(sessionId: String, page: TranscriptPage) {
+        foldOf(sessionId).seed(page.agentId, page)
+        val seq = page.seq
+        if (seq != null) watermarksOf(sessionId)[page.agentId] = seq else watermarksOf(sessionId).remove(page.agentId)
+    }
+
+    /** The agent's resume watermark, null when none is known (ticket 176). */
+    fun watermark(sessionId: String, agentId: String): Long? = watermarks[sessionId]?.get(agentId)
+
+    /**
      * Streams [SocketEvent]s for [sessionId]. One collection = one socket owned here
      * (not by the UI); cancelling the collection closes it. Each connection sends one
      * `subscribe_v2` (grade `delta` for every agent — the server auto-subscribes the
      * session's sub-agents, whose ops carry their own `agent_id`). On a drop the loop
      * retries with exponential backoff (1 s doubling to 30 s) and re-subscribes — the
-     * subscription does not survive a disconnect — emitting [SocketEvent.Reconnected]
-     * so the collector re-syncs from REST. A subscribe acked `not_found` ends the flow
-     * with [SocketEvent.Failed] ([DataError.SessionNotFound]).
+     * subscription does not survive a disconnect — emitting [SocketEvent.Reconnected].
+     * Every subscribe carries the session's resume watermarks (`transcript_since`,
+     * ticket 176), so a re-subscribe replays the missed batches; an agent whose journal
+     * cannot cover its watermark answers with a fresh `transcript.reset`, surfaced as
+     * [SessionEvent.TranscriptStale] after the agent's fold is reset. A subscribe acked
+     * `not_found` ends the flow with [SocketEvent.Failed] ([DataError.SessionNotFound]).
      */
     fun observe(settings: ServerSettings, sessionId: String): Flow<SocketEvent> = flow {
         val wsUrl = buildWsUrl(settings)
@@ -83,7 +126,8 @@ class SessionSocket @Inject constructor(
             emit(SocketEvent.Failed(DataError.InvalidUrl))
             return@flow
         }
-        val fold = folds.getOrPut(sessionId) { TranscriptFold(json, mapper) }
+        val fold = foldOf(sessionId)
+        val sessionWatermarks = watermarksOf(sessionId)
         val clientId = "android_${UUID.randomUUID()}"
         var attempt = 0
         var connections = 0
@@ -94,6 +138,7 @@ class SessionSocket @Inject constructor(
                     sessionId = sessionId,
                     subscribeId = "c_${connections + 1}",
                     fold = fold,
+                    watermarks = sessionWatermarks,
                     onOpen = {
                         attempt = 0
                         emit(if (connections++ == 0) SocketEvent.Connected else SocketEvent.Reconnected)
@@ -139,15 +184,20 @@ class SessionSocket @Inject constructor(
         sessionId: String,
         subscribeId: String,
         fold: TranscriptFold,
+        watermarks: MutableMap<String, Long>,
         onOpen: suspend () -> Unit,
         onEvent: suspend (SessionEvent) -> Unit,
     ): ConnectionEnd {
+
         // UNLIMITED is not a backpressure risk worth bounding: the collector
         // (ChatViewModel) coalesces streaming deltas before any heavy work (UiState
         // emission → full markdown re-parse), so a frame burst can only ever queue
         // cheap unparsed strings here, never unbounded expensive downstream work.
         val signals = Channel<Signal>(Channel.UNLIMITED)
         val watchdog = SocketStallWatchdog(TAG)
+        // Rebuilt at open: the agents this connection's subscribe asked to resume — a
+        // reset for one of them means its journal could not cover the watermark.
+        var context = FrameContext(sessionId, subscribeId, fold, watermarks, resumed = emptySet(), watchdog)
         val webSocket = socketClient.newWebSocket(
             Request.Builder().url(url).build(),
             object : WebSocketListener() {
@@ -179,10 +229,12 @@ class SessionSocket @Inject constructor(
                     Signal.Opened -> {
                         watchdog.onOpen()
                         onOpen()
-                        webSocket.send(subscribeFrame(subscribeId, sessionId))
+                        val since = watermarks.toMap()
+                        context = FrameContext(sessionId, subscribeId, fold, watermarks, resumed = since.keys, watchdog)
+                        webSocket.send(subscribeFrame(subscribeId, sessionId, since))
                     }
                     is Signal.Text ->
-                        if (!handleFrame(webSocket, signal.text, sessionId, subscribeId, fold, watchdog, onEvent)) {
+                        if (!handleFrame(webSocket, signal.text, context, onEvent)) {
                             return ConnectionEnd.SessionNotFound
                         }
                     Signal.Closed -> return ConnectionEnd.Closed
@@ -195,18 +247,27 @@ class SessionSocket @Inject constructor(
         }
     }
 
+    /** The per-connection state [handleFrame] reads; [resumed] are the agents the
+     * connection's subscribe sent a watermark for. */
+    private class FrameContext(
+        val sessionId: String,
+        val subscribeId: String,
+        val fold: TranscriptFold,
+        val watermarks: MutableMap<String, Long>,
+        val resumed: Set<String>,
+        val watchdog: SocketStallWatchdog,
+    )
+
     /** One bad frame must not kill the connection: parse failures are dropped. Returns
      * false when the subscribe ack reports the session `not_found` — the connection
      * ends and the flow fails. */
     private suspend fun handleFrame(
         webSocket: WebSocket,
         text: String,
-        sessionId: String,
-        subscribeId: String,
-        fold: TranscriptFold,
-        watchdog: SocketStallWatchdog,
+        context: FrameContext,
         onEvent: suspend (SessionEvent) -> Unit,
     ): Boolean {
+        val sessionId = context.sessionId
         val frame = try {
             json.decodeFromString<WsFrame>(text)
         } catch (e: SerializationException) {
@@ -226,18 +287,37 @@ class SessionSocket @Inject constructor(
             // into the domain events, tagged with the batch's agent — "main" feeds the
             // chat, any other id (an auto-subscribed sub-agent) the sub-agent stream
             // store (SessionEvent.isSubagentScoped).
+            // Each batch advances the agent's resume watermark (ticket 176) once its
+            // events are delivered: a collection cancelled mid-batch resumes by
+            // replaying it, and the fold dedups what was already emitted.
             "transcript.ops" -> frame.decodePayload<TranscriptOpsPayload>()
-                ?.let { payload -> fold.fold(payload.agentId, payload.ops).forEach { onEvent(it) } }
-            // The baseline at subscribe — and again after every reconnect. Its items are
-            // always empty (history pages in over REST), so it renders nothing and must
-            // not wipe what the chat shows; the cold start (ticket 176) owns its
-            // prompts/interactions.
+                ?.let { payload ->
+                    context.fold.fold(payload.agentId, payload.ops).forEach { onEvent(it) }
+                    context.watermarks[payload.agentId] = payload.seq
+                }
+            // The baseline of an agent subscribed WITHOUT a watermark (a child never
+            // seen, a session that was not live): its items are always empty (history
+            // pages in over REST), so it renders nothing and must not wipe what the chat
+            // shows; its seq becomes the agent's watermark. For an agent the subscribe
+            // asked to RESUME, a reset instead of the replay means the journal could not
+            // cover the watermark (ticket 176): the fold restarts from the new baseline
+            // and the collector rebuilds the agent's rows from REST — never a partial
+            // replay.
             "transcript.reset" -> frame.decodePayload<TranscriptResetPayload>()
-                ?.let { Log.d(TAG, "Transcript reset for agent '${it.agentId}' at seq ${it.seq}") }
+                ?.let { reset ->
+                    context.watermarks[reset.agentId] = reset.seq
+                    if (reset.agentId in context.resumed) {
+                        Log.w(TAG, "Journal of agent '${reset.agentId}' could not cover the resume; resetting")
+                        context.fold.reset(reset.agentId)
+                        onEvent(SessionEvent.TranscriptStale(reset.agentId))
+                    } else {
+                        Log.d(TAG, "Transcript reset for agent '${reset.agentId}' at seq ${reset.seq}")
+                    }
+                }
             // The subscribe_v2 ack (docs/server-api.md, Control frames): an unknown
             // session answers code 0 with its id in not_found — a load failure, never
             // silence. A malformed subscribe answers code 1; there is nothing to retry.
-            "ack" -> if (frame.id == subscribeId) {
+            "ack" -> if (frame.id == context.subscribeId) {
                 if (frame.code != 0) {
                     Log.w(TAG, "subscribe_v2 refused: ${frame.code} ${frame.msg}")
                 } else if (frame.decodePayload<AckPayload>()?.notFound?.contains(sessionId) == true) {
@@ -255,7 +335,7 @@ class SessionSocket @Inject constructor(
             // server_hello (docs/server-api.md, WebSocket): heartbeat_ms sets the stall
             // watchdog's threshold (3× — ticket 152); the rest of the payload is unused.
             "server_hello" -> frame.decodePayload<ServerHelloPayload>()
-                ?.heartbeatMs?.let { watchdog.onServerHello(it) }
+                ?.heartbeatMs?.let { context.watchdog.onServerHello(it) }
             // The flat state frames (agent, usage, goal, todo, task.list, task,
             // interaction) are tickets 171/172/177–182: ignored, but logged so a server
             // rename shows up during development.
@@ -278,15 +358,20 @@ class SessionSocket @Inject constructor(
             ?.addPathSegments("api/v1/ws")
             ?.build()
 
-    /** `{"type":"subscribe_v2","id":…,"payload":{"session_id":…,"transcript":{"*":"delta"}}}`
-     * — one frame per session (there is no multi-session subscribe); grade `delta`
-     * streams every agent's text/thinking as `append` chunks. */
-    private fun subscribeFrame(id: String, sessionId: String): String = buildJsonObject {
+    /** `{"type":"subscribe_v2","id":…,"payload":{"session_id":…,"transcript":{"*":"delta"},
+     * "transcript_since":{"main":<seq>,…}}}` — one frame per session (there is no
+     * multi-session subscribe); grade `delta` streams every agent's text/thinking as
+     * `append` chunks. [since] are the resume watermarks (ticket 176), omitted when
+     * none is known — the server then sends every agent's baseline reset. */
+    private fun subscribeFrame(id: String, sessionId: String, since: Map<String, Long>): String = buildJsonObject {
         put("type", "subscribe_v2")
         put("id", id)
         putJsonObject("payload") {
             put("session_id", sessionId)
             putJsonObject("transcript") { put("*", "delta") }
+            if (since.isNotEmpty()) {
+                putJsonObject("transcript_since") { since.forEach { (agentId, seq) -> put(agentId, seq) } }
+            }
         }
     }.toString()
 

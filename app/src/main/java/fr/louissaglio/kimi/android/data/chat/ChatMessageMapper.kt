@@ -10,6 +10,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.decodeFromJsonElement
 
 /**
  * Wire DTO → domain mapping for history messages and socket payloads (the single
@@ -17,7 +18,7 @@ import kotlinx.serialization.json.contentOrNull
  * renderings derived from payloads (previews, summaries, pretty-printed details).
  */
 @Singleton
-class ChatMessageMapper @Inject constructor(json: Json) {
+class ChatMessageMapper @Inject constructor(private val json: Json) {
 
     // Pretty-printing for the expanded tool row (ticket 023): strings render as-is,
     // JSON values (tool inputs, structured outputs) render indented. Since ticket 118
@@ -33,13 +34,13 @@ class ChatMessageMapper @Inject constructor(json: Json) {
         else -> prettyJson.encodeToString(JsonElement.serializer(), element)
     }
 
-    /** The compact argument preview for the approval card (the command for shell
-     * calls, else the action). */
-    fun summary(payload: ApprovalRequestedPayload): String =
-        payload.toolInputDisplay?.command?.takeIf { it.isNotBlank() } ?: payload.action
+    /** The compact argument preview for the approval card (the display command for
+     * shell calls, else the action). */
+    fun summary(display: ToolInputDisplayDto?, action: String): String =
+        display?.command?.takeIf { it.isNotBlank() } ?: action
 
-    /** The row preview for a live call (a transcript tool frame, a snapshot running
-     * tool): a Bash call's non-blank `description` argument wins (ticket 095), then the
+    /** The row preview for a transcript tool frame (a live op, or a REST transcript
+     * page — the cold start's running turn, the sub-agent page): a Bash call's non-blank `description` argument wins (ticket 095), then the
      * server's display command when it sent one, else derived from the arguments
      * (ToolPreview). */
     fun preview(name: String, args: JsonObject?, display: ToolInputDisplayDto?): String {
@@ -169,83 +170,74 @@ class ChatMessageMapper @Inject constructor(json: Json) {
 
     /** Transcript page (docs/server-api.md, Transcript): marker items are dropped here,
      * turns keep their ascending wire order. */
-    fun toDomain(dto: TranscriptData): TranscriptPage = TranscriptPage(
-        agentId = dto.agentId,
-        turns = dto.items.filter { it.kind == "turn" }.map(::toDomain),
-        hasMore = dto.hasMore,
-    )
+    fun toDomain(dto: TranscriptData): TranscriptPage {
+        val pending = dto.pendingInteractions.toSet()
+        // The pending set is `pending_interactions` (the ids still waiting); the entity
+        // list also holds ended interactions. An entity whose own state says pending
+        // counts too — the two views are the same server state.
+        val waiting = dto.interactions.filter { it.interactionId in pending || it.state == "pending" }
+        return TranscriptPage(
+            agentId = dto.agentId,
+            turns = dto.items.filter { it.kind == "turn" }.map(::toDomain),
+            hasMore = dto.hasMore,
+            seq = dto.seq,
+            agents = dto.agents.filter { it.agentId.isNotBlank() }.map {
+                TranscriptAgent(it.agentId, isMain = it.type == "main", parentAgentId = it.parentAgentId)
+            },
+            prompts = dto.prompts.filter { it.promptId.isNotBlank() }.map {
+                TranscriptPrompt(it.promptId, promptStatus(it.status))
+            },
+            pendingApprovals = waiting.filter { it.interactionKind == "approval" }.mapNotNull(::toPendingApproval),
+            pendingQuestions = waiting.filter { it.interactionKind == "question" }.mapNotNull(::toPendingQuestion),
+        )
+    }
 
-    /** Session snapshot (docs/server-api.md, Session snapshot — ticket 085): the
-     * cold-start bundle. The messages page is already domain-ordered: unlike
-     * `/messages` (wire newest-first → reversed here), the snapshot's `items`
-     * come OLDEST-first on the wire (live-verified on 0.31.1, 2026-08-02, against
-     * a long session: item ids and `created_at` ascend across the page) — reversing
-     * them inverts the whole cold-start timeline (calls stuck Running behind orphan
-     * result rows, the bottom pin landing mid-session, a newest-id paging cursor). */
-    fun toDomain(dto: SnapshotData): SessionSnapshot = SessionSnapshot(
-        asOfSeq = dto.asOfSeq,
-        epoch = dto.epoch,
-        busy = dto.session?.busy == true,
-        // The bundle's usage is real since 0.38.0 and seeds the ring directly on
-        // cold start (ticket 161); a zero limit still means "unknown", never a real
-        // fill — drop it and let the /status seed and the WS agent.status.updated
-        // stream converge the ring on the live value.
-        contextUsage = dto.session?.usage
-            ?.takeIf { it.contextLimit > 0 }
-            ?.let { ContextUsage(it.contextTokens, it.contextLimit) },
-        messages = MessagePage(
-            items = dto.messages?.items.orEmpty().map { toDomain(it) },
-            hasMore = dto.messages?.hasMore == true,
-        ),
-        pendingApprovals = dto.pendingApprovals.map {
-            // The snapshot items stamp the asking agent snake_case (2.0.2 — ticket
-            // 156); the WS frame's camelCase twin stays the socket's decode.
-            SnapshotApproval(it.approvalId, it.toolName, summary(it), it.agentIdSnakeCase)
-        },
-        pendingQuestions = dto.pendingQuestions.map { toDomain(it) },
-        subagents = dto.subagents.map { entry ->
-            SubagentRosterEntry(
-                id = entry.id,
-                subagentType = entry.subagentType,
-                description = entry.description,
-                phase = when (entry.subagentPhase) {
-                    "queued" -> SubagentRosterPhase.Queued
-                    "working" -> SubagentRosterPhase.Working
-                    "suspended" -> SubagentRosterPhase.Suspended
-                    "completed" -> SubagentRosterPhase.Completed
-                    "failed" -> SubagentRosterPhase.Failed
-                    "cancelled" -> SubagentRosterPhase.Cancelled
-                    else -> SubagentRosterPhase.Unknown
-                },
-                parentToolCallId = entry.parentToolCallId,
-                runInBackground = entry.runInBackground,
-                outputPreview = entry.outputPreview?.takeIf { it.isNotBlank() },
-                swarmIndex = entry.swarmIndex,
-                model = entry.model?.takeIf { it.isNotBlank() },
-                thinkingEffort = entry.thinkingEffort?.takeIf { it.isNotBlank() },
-            )
-        },
-        inFlightTurn = dto.inFlightTurn?.let { turn ->
-            InFlightTurn(
-                turnId = turn.turnId,
-                assistantText = turn.assistantText,
-                thinkingText = turn.thinkingText,
-                runningTools = turn.runningTools.map { tool ->
-                    // The same renderings a live tool frame's row gets (ticket 144):
-                    // the seeded row is indistinguishable from a witnessed one.
-                    RunningTool(
-                        toolCallId = tool.toolCallId,
-                        name = tool.name,
-                        args = tool.args,
-                        preview = preview(tool.name, tool.args, tool.display),
-                        input = formatDetail(tool.args),
-                        agentCall = agentCall(tool.display),
-                    )
-                },
-                currentPromptId = turn.currentPromptId,
-            )
-        },
-    )
+    /** A prompt entity's status (docs/server-api.md, Transcript protocol); null when the
+     * wire value is one this app predates. */
+    fun promptStatus(status: String): PromptStatus? = when (status) {
+        "running" -> PromptStatus.Running
+        "queued" -> PromptStatus.Queued
+        "completed" -> PromptStatus.Completed
+        "aborted" -> PromptStatus.Aborted
+        "blocked" -> PromptStatus.Blocked
+        "failed" -> PromptStatus.Failed
+        else -> null
+    }
+
+    /** A pending approval entity → the card's domain request: the transcript request is
+     * camelCase (docs/server-api.md, Pending state on REST); an undecodable one drops
+     * the entity with a Log.w, never the page. */
+    private fun toPendingApproval(entity: InteractionEntityDto): PendingApprovalRequest? {
+        val request = entity.request?.let {
+            runCatching { json.decodeFromJsonElement<TranscriptApprovalRequestDto>(it) }
+                .onFailure { e -> Log.w(TAG, "Dropping undecodable approval '${entity.interactionId}'", e) }
+                .getOrNull()
+        } ?: return null
+        return PendingApprovalRequest(
+            approvalId = entity.interactionId,
+            toolName = request.toolName,
+            summary = summary(request.display, request.action),
+            agentId = request.agentId?.takeIf { it.isNotBlank() } ?: MAIN_AGENT_ID,
+        )
+    }
+
+    /** A pending question entity → the wizard's domain question: the request keeps the
+     * snake_case question payload shape. The card id is the INTERACTION id (the one the
+     * response route takes); the row's tool call id comes from the entity, else the
+     * request. */
+    private fun toPendingQuestion(entity: InteractionEntityDto): PendingQuestion? {
+        val request = entity.request?.let {
+            runCatching { json.decodeFromJsonElement<QuestionRequestedPayload>(it) }
+                .onFailure { e -> Log.w(TAG, "Dropping undecodable question '${entity.interactionId}'", e) }
+                .getOrNull()
+        } ?: return null
+        return toDomain(
+            request.copy(
+                questionId = entity.interactionId,
+                toolCallId = entity.toolCallId?.takeIf { it.isNotBlank() } ?: request.toolCallId,
+            ),
+        )
+    }
 
     private fun toDomain(dto: TranscriptItemDto): TranscriptTurn = TranscriptTurn(
         id = dto.turnId,
@@ -299,22 +291,38 @@ class ChatMessageMapper @Inject constructor(json: Json) {
             // Same boundary as the message path: a sub-agent's user-role frames (its
             // internal prompts/nudges) can carry harness envelopes — strip them rather
             // than render raw XML on the sub-agent page; a frame left blank is dropped.
+            // A blank ASSISTANT frame is kept: a running turn's just-opened text frame
+            // is "" until its appends land, and the cold start seeds the fold from it
+            // (ticket 176) — the flatten skips blank text anyway.
             val stripped = if (role == TranscriptFrame.Text.Role.User) InternalEnvelopes.strip(text) else text
-            stripped.takeIf { it.isNotBlank() }?.let { TranscriptFrame.Text(dto.frameId, role, it) }
+            stripped.takeIf { it.isNotBlank() || role == TranscriptFrame.Text.Role.Assistant }
+                ?.let { TranscriptFrame.Text(dto.frameId, role, it) }
         }
         "tool" -> dto.toolCallId?.let { toolCallId ->
+            val name = dto.name.orEmpty()
+            // A running call's `input` may still be absent while `inputText` streams:
+            // a complete one parses (the live fold's rule), a partial fragment renders
+            // nothing — the row's first-writer-wins input must not lock onto it.
+            val args = dto.input ?: dto.inputText?.let {
+                runCatching { json.parseToJsonElement(it) as? JsonObject }.getOrNull()
+            }
+            val display = dto.display?.let {
+                runCatching { json.decodeFromJsonElement<ToolInputDisplayDto>(it) }.getOrNull()
+            }
             TranscriptFrame.Tool(
                 id = dto.frameId,
                 toolCallId = toolCallId,
-                name = dto.name.orEmpty(),
+                name = name,
                 running = dto.state == "running",
-                preview = ToolPreview.of(dto.name, dto.input),
-                input = formatDetail(dto.input).ifBlank { dto.inputText.orEmpty() },
+                preview = preview(name, args, display),
+                input = formatDetail(args),
                 // The volatile progress tail stands in while no definitive output exists.
                 output = formatDetail(dto.output).ifBlank { progressText(dto.progress) },
                 // The raw args object (ticket 118) — null when the frame carries no
                 // `input` object, leaving the pretty string as the row's fallback.
-                args = dto.input,
+                args = args,
+                agentCall = agentCall(display),
+                failed = dto.state == "error",
             )
         }
         else -> null

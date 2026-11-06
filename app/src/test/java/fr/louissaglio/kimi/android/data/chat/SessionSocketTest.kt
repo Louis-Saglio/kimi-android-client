@@ -302,6 +302,108 @@ class SessionSocketTest {
         assertEquals(listOf(SessionEvent.AssistantDelta("lo")), second.sessionEvents())
     }
 
+    // --- resume watermarks (ticket 176) ------------------------------------------------
+
+    /** The cold start's main transcript page: a running turn streaming "Hel". */
+    private fun runningPage(seq: Long?) = TranscriptPage(
+        agentId = MAIN_AGENT_ID,
+        turns = listOf(
+            TranscriptTurn(
+                id = "t1", ordinal = 1, state = TranscriptState.Running, prompt = null,
+                steps = listOf(
+                    TranscriptStep(
+                        "t1.1", TranscriptState.Running,
+                        listOf(TranscriptFrame.Text("t1.1.f1", TranscriptFrame.Text.Role.Assistant, "Hel")),
+                    ),
+                ),
+            ),
+        ),
+        hasMore = false,
+        seq = seq,
+    )
+
+    @Test
+    fun `a seeded transcript page makes the subscribe resume from its seq and the fold continue its text`() = runBlocking {
+        socket.seedTranscript("session_1", runningPage(seq = 42))
+        val clientFrames = CopyOnWriteArrayList<String>()
+
+        val emitted = runSocketEvents(
+            // The replay after 42: the turn header unchanged, the next chunk at the
+            // seeded length.
+            opsFrame(turnOp("t1", "running"), seq = 43),
+            opsFrame(appendOp("t1.1.f1", 3, "lo"), seq = 44),
+            eventCount = 1,
+            settleMillis = 100,
+            clientFrames = clientFrames,
+        )
+
+        assertEquals(
+            """{"type":"subscribe_v2","id":"c_1","payload":{"session_id":"session_1","transcript":{"*":"delta"},""" +
+                """"transcript_since":{"main":42}}}""",
+            clientFrames.first(),
+        )
+        // No TurnStarted (the seeded turn is running already), no gap drop.
+        assertEquals(listOf(SessionEvent.AssistantDelta("lo")), emitted.sessionEvents())
+        assertEquals(44L, socket.watermark("session_1", MAIN_AGENT_ID))
+    }
+
+    @Test
+    fun `every agent's batches advance its own watermark`() = runBlocking {
+        runSocketEvents(
+            opsFrame(turnOp("t1", "running"), seq = 9),
+            opsFrame(turnOp("t0", "running"), agentId = "agent-3", seq = 4),
+            eventCount = 2,
+        )
+
+        assertEquals(9L, socket.watermark("session_1", MAIN_AGENT_ID))
+        assertEquals(4L, socket.watermark("session_1", "agent-3"))
+        assertEquals(null, socket.watermark("session_2", MAIN_AGENT_ID))
+    }
+
+    @Test
+    fun `a reset answering a resumed agent is the stale signal and restarts its fold`() = runBlocking {
+        socket.seedTranscript("session_1", runningPage(seq = 42))
+
+        val emitted = runSocketEvents(
+            // The journal could not cover 42: a fresh baseline instead of the replay.
+            resetFrame(agentId = MAIN_AGENT_ID, seq = 77),
+            // The fold restarted: an append to the seeded frame is now unknown.
+            opsFrame(appendOp("t1.1.f1", 3, "lo"), seq = 78),
+            eventCount = 1,
+            settleMillis = 150,
+        )
+
+        assertEquals(listOf(SessionEvent.TranscriptStale(MAIN_AGENT_ID)), emitted.sessionEvents())
+        assertEquals(78L, socket.watermark("session_1", MAIN_AGENT_ID))
+    }
+
+    @Test
+    fun `a baseline reset of an agent subscribed without a watermark is no stale signal`() = runBlocking {
+        socket.seedTranscript("session_1", runningPage(seq = 42))
+
+        val emitted = runSocketEvents(
+            // A child never seen: its baseline (seq 0) — not a resume failure.
+            resetFrame(agentId = "agent-0", seq = 0),
+            opsFrame(appendOp("t1.1.f1", 3, "lo"), seq = 43),
+            eventCount = 1,
+            settleMillis = 100,
+        )
+
+        assertEquals(listOf(SessionEvent.AssistantDelta("lo")), emitted.sessionEvents())
+        assertEquals(0L, socket.watermark("session_1", "agent-0"))
+    }
+
+    @Test
+    fun `a seeded page without seq drops the watermark`() = runBlocking {
+        socket.seedTranscript("session_1", runningPage(seq = 42))
+        socket.seedTranscript("session_1", runningPage(seq = null))
+        val clientFrames = CopyOnWriteArrayList<String>()
+
+        runSocketEvents(opsFrame(appendOp("t1.1.f1", 3, "lo"), seq = 1), eventCount = 1, clientFrames = clientFrames)
+
+        assertFalse(clientFrames.first(), "transcript_since" in clientFrames.first())
+    }
+
     // --- heartbeat ---------------------------------------------------------------------
 
     @Test
@@ -360,8 +462,8 @@ class SessionSocketTest {
     fun `inbound silence past three heartbeats drops the socket and re-subscribes`() = runBlocking {
         // Ticket 152: a subscribed socket stalls silently. Silence past 3x heartbeat_ms
         // must be treated as a drop: close, backoff reconnect, a fresh subscribe_v2 (the
-        // subscription does not survive), and the Reconnected the collector's REST
-        // resync rides on.
+        // subscription does not survive) resuming from the batch already folded
+        // (ticket 176), and the Reconnected the collector's resume check rides on.
         val secondFrames = CopyOnWriteArrayList<String>()
         val emitted = CopyOnWriteArrayList<SocketEvent>()
         server.enqueue(
@@ -404,7 +506,10 @@ class SessionSocketTest {
             emitted,
         )
         assertEquals(
-            listOf("""{"type":"subscribe_v2","id":"c_2","payload":{"session_id":"session_1","transcript":{"*":"delta"}}}"""),
+            listOf(
+                """{"type":"subscribe_v2","id":"c_2","payload":{"session_id":"session_1","transcript":{"*":"delta"},""" +
+                    """"transcript_since":{"main":1}}}""",
+            ),
             secondFrames,
         )
     }

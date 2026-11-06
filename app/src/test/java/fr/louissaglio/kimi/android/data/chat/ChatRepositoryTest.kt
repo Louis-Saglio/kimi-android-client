@@ -176,100 +176,178 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun `snapshot messages page keeps its oldest-first wire order`() = runBlocking {
-        // Regression (Louis, 2026-08-02): unlike /messages (newest-first on the wire),
-        // the snapshot's messages.items come OLDEST-first — live-verified on 0.31.1
-        // (item ids and created_at ascend across the page). Mapping them with the
-        // /messages reversal inverted the cold-start timeline: the bottom pin landed
-        // mid-session, tool results flattened BEFORE their calls (orphan done rows,
-        // calls stuck Running), and the paging cursor became the newest id.
+    fun `transcript maps the 2_5 global state - seq, roster, prompts and the pending interactions`() = runBlocking {
+        // The cold-start read model (ticket 176, docs/server-api.md, Transcript and
+        // Pending state on REST — verified 2.5.1): the approval request is camelCase,
+        // the question request keeps the snake_case question payload; ended entities
+        // stay out of the pending lists.
         server.enqueue(
             MockResponse(body =
                 """
-                {"code":0,"msg":"success","data":{
-                  "as_of_seq":7,"epoch":"ep_1",
-                  "session":{"id":"session_1","busy":false,
-                    "usage":{"context_tokens":0,"context_limit":1048576}},
-                  "messages":{"items":[
-                    {"id":"msg_1","session_id":"session_1","role":"user",
-                     "content":[{"type":"text","text":"run it"}],
-                     "created_at":"2026-08-01T10:00:00.000Z"},
-                    {"id":"msg_2","session_id":"session_1","role":"assistant",
-                     "content":[{"type":"tool_use","tool_call_id":"tool_1","tool_name":"Edit",
-                                 "input":{"path":"docs/server-api.md"}}],
-                     "created_at":"2026-08-01T10:00:01.000Z"},
-                    {"id":"msg_3","session_id":"session_1","role":"tool",
-                     "content":[{"type":"tool_result","tool_call_id":"tool_1","output":"ok","is_error":false}],
-                     "created_at":"2026-08-01T10:00:02.000Z"}
-                  ],"has_more":true},
-                  "in_flight_turn":null,"subagents":[],
-                  "pending_approvals":[],"pending_questions":[]},
+                {"code":0,"msg":"success","data":{"agent_id":"main","items":[],"has_more":false,
+                  "interactions":[
+                    {"interactionId":"approval_1","interactionKind":"approval","toolCallId":"call_1","state":"pending",
+                     "request":{"id":"approval_1","sessionId":"session_1","agentId":"agent-2","turnId":"t1",
+                       "toolCallId":"call_1","toolName":"Bash","action":"Running: rm -rf target",
+                       "display":{"kind":"command","command":"rm -rf target","cwd":"/tmp","language":"bash"}}},
+                    {"interactionId":"approval_0","interactionKind":"approval","state":"approved",
+                     "request":{"toolName":"Write","action":"Writing a.txt"},"response":{"decision":"approved"}},
+                    {"interactionId":"question_1","interactionKind":"question","toolCallId":"call_q","state":"pending",
+                     "request":{"question_id":"question_1","tool_call_id":"call_q","created_at":"2026-11-05T10:00:00.000Z",
+                       "turn_id":"t1","questions":[{"id":"q_0","question":"Cake or pie?","header":"Dessert",
+                       "options":[{"id":"opt_0_0","label":"Cake"}],"allow_other":true}]}},
+                    {"interactionId":"question_0","interactionKind":"question","state":"answered",
+                     "request":{"question_id":"question_0","questions":[]}}],
+                  "pending_interactions":["approval_1","question_1"],
+                  "attachments":[],
+                  "prompts":[
+                    {"promptId":"msg_a","status":"running","userMessageId":"msg_a","content":[],"createdAt":"2026-11-05T10:00:00.000Z"},
+                    {"promptId":"msg_b","status":"queued","userMessageId":"msg_b","content":[],"createdAt":"2026-11-05T10:00:01.000Z"},
+                    {"promptId":"msg_c","status":"brand_new","userMessageId":"msg_c","content":[]}],
+                  "agents":[{"agentId":"main","type":"main"},{"agentId":"agent-2","type":"sub","parentAgentId":"main"}],
+                  "seq":42},
                  "request_id":"01KX"}
                 """.trimIndent(),
             ),
         )
 
-        val snapshot = repository.getSnapshot(settings(), "session_1").getOrThrow()
+        val page = repository.getTranscript(settings(), "session_1", "main", beforeTurn = null, pageSize = 1).getOrThrow()
 
-        assertEquals("/api/v1/sessions/session_1/snapshot", server.takeRequest().target)
-        // Wire order preserved — NOT reversed like a /messages page.
-        assertEquals(listOf("msg_1", "msg_2", "msg_3"), snapshot.messages.items.map { it.id })
-        assertTrue(snapshot.messages.hasMore)
-        assertEquals(7, snapshot.asOfSeq)
-        assertEquals("ep_1", snapshot.epoch)
-        // The bundle's real usage maps through — the cold-start ring's authority
-        // (real since 0.38.0, ticket 161).
-        assertEquals(ContextUsage(0, 1048576), snapshot.contextUsage)
+        assertEquals(42L, page.seq)
+        assertEquals(
+            listOf(TranscriptAgent("main", isMain = true), TranscriptAgent("agent-2", isMain = false, parentAgentId = "main")),
+            page.agents,
+        )
+        assertEquals(
+            listOf(
+                TranscriptPrompt("msg_a", PromptStatus.Running),
+                TranscriptPrompt("msg_b", PromptStatus.Queued),
+                TranscriptPrompt("msg_c", null),
+            ),
+            page.prompts,
+        )
+        assertEquals(
+            listOf(PendingApprovalRequest("approval_1", "Bash", "rm -rf target", agentId = "agent-2")),
+            page.pendingApprovals,
+        )
+        val question = page.pendingQuestions.single()
+        assertEquals("question_1", question.questionId)
+        assertEquals("call_q", question.toolCallId)
+        assertEquals(MAIN_AGENT_ID, question.agentId)
+        assertEquals(listOf("Cake"), question.items.single().options.map { it.label })
+        assertNull(page.runningTurn)
     }
 
     @Test
-    fun `snapshot usage without the optional fields renders unknown`() = runBlocking {
-        // 0.38.0 made `total_cost_usd`/`context_limit`/`turn_count` optional and the
-        // snapshot omits cost and turn count entirely (docs/server-api.md, Session
-        // snapshot): an absent limit decodes to the "unknown" marker, never a real
-        // fill — no ContextUsage may reach the ring (ticket 161).
+    fun `transcript without seq and global state maps to an empty session state`() = runBlocking {
+        // The sub-agent page's pages and a session that is not live: no seq, nothing
+        // pending — the same page mapping, every 2.5 field optional.
         server.enqueue(
-            MockResponse(body =
-                """
-                {"code":0,"msg":"success","data":{
-                  "as_of_seq":7,"epoch":"ep_1",
-                  "session":{"id":"session_1","busy":false,
-                    "usage":{"context_tokens":25050}},
-                  "messages":{"items":[],"has_more":false},
-                  "in_flight_turn":null,"subagents":[],
-                  "pending_approvals":[],"pending_questions":[]},
-                 "request_id":"01KX"}
-                """.trimIndent(),
-            ),
+            MockResponse(body = """{"code":0,"msg":"success","data":{"agent_id":"agent-1","items":[],"has_more":false},"request_id":"r"}"""),
         )
 
-        val snapshot = repository.getSnapshot(settings(), "session_1").getOrThrow()
+        val page = repository.getTranscript(settings(), "session_1", "agent-1", beforeTurn = null, pageSize = 20).getOrThrow()
 
-        assertNull(snapshot.contextUsage)
+        assertNull(page.seq)
+        assertTrue(page.agents.isEmpty())
+        assertTrue(page.pendingApprovals.isEmpty())
+        assertTrue(page.pendingQuestions.isEmpty())
     }
 
     @Test
-    fun `snapshot usage with a zero context limit renders unknown`() = runBlocking {
-        // 100's zero/unknown rule on the snapshot path: 0 is the engine's unknown
-        // marker, never a real limit — no ContextUsage may reach the ring.
+    fun `a running turn's streaming tool frame renders no partial args and keeps its display`() = runBlocking {
+        // Warm running frame: `input` absent while `inputText` streams — a fragment must
+        // not become the row's input (first writer wins); the agent_call display maps.
         server.enqueue(
             MockResponse(body =
                 """
-                {"code":0,"msg":"success","data":{
-                  "as_of_seq":7,"epoch":"ep_1",
-                  "session":{"id":"session_1","busy":false,
-                    "usage":{"context_tokens":25050,"context_limit":0}},
-                  "messages":{"items":[],"has_more":false},
-                  "in_flight_turn":null,"subagents":[],
-                  "pending_approvals":[],"pending_questions":[]},
-                 "request_id":"01KX"}
+                {"code":0,"msg":"success","data":{"agent_id":"main","has_more":false,"seq":3,"items":[
+                  {"kind":"turn","turnId":"t1","ordinal":1,"state":"running","origin":{"kind":"user"},
+                   "steps":[{"kind":"step","stepId":"t1.1","turnId":"t1","ordinal":1,"state":"running","frames":[
+                     {"kind":"text","frameId":"t1.1.f1","role":"assistant","text":""},
+                     {"kind":"tool","frameId":"t1.1.c1","toolCallId":"c1","name":"Bash","state":"running",
+                      "inputText":"{\"command\":\"sl"},
+                     {"kind":"tool","frameId":"t1.1.c2","toolCallId":"c2","name":"Agent","state":"error",
+                      "inputText":"{\"prompt\":\"Reply ok\"}",
+                      "display":{"kind":"agent_call","agent_name":"explore","prompt":"Reply ok","background":true},
+                      "output":"boom"}]}]}]},
+                 "request_id":"r"}
                 """.trimIndent(),
             ),
         )
 
-        val snapshot = repository.getSnapshot(settings(), "session_1").getOrThrow()
+        val page = repository.getTranscript(settings(), "session_1", "main", beforeTurn = null, pageSize = 1).getOrThrow()
 
-        assertNull(snapshot.contextUsage)
+        val frames = page.runningTurn!!.steps.single().frames
+        // A blank assistant text frame survives: the fold seeds its (empty) length.
+        assertEquals(TranscriptFrame.Text("t1.1.f1", TranscriptFrame.Text.Role.Assistant, ""), frames[0])
+        val streaming = frames[1] as TranscriptFrame.Tool
+        assertNull(streaming.args)
+        assertEquals("", streaming.input)
+        assertTrue(streaming.running)
+        val agent = frames[2] as TranscriptFrame.Tool
+        assertEquals("Reply ok", (agent.args!!["prompt"] as kotlinx.serialization.json.JsonPrimitive).content)
+        assertEquals(AgentCallDisplay("explore", "Reply ok", background = true), agent.agentCall)
+        assertTrue(agent.failed)
+        assertFalse(agent.running)
+    }
+
+    @Test
+    fun `prompt queue maps the active and queued prompts`() = runBlocking {
+        // GET .../prompts (2.5.0, docs/server-api.md, Prompts → Queue snapshot — the
+        // verbatim mid-turn shape).
+        server.enqueue(
+            MockResponse(body =
+                """
+                {"code":0,"msg":"success","data":{
+                  "active":{"prompt_id":"msg_a","user_message_id":"msg_a","status":"running",
+                            "content":[{"type":"text","text":"Run this bash command: sleep 25."}],
+                            "created_at":"2026-11-04T10:00:00.000Z"},
+                  "queued":[{"prompt_id":"msg_b","user_message_id":"msg_b","status":"queued",
+                             "content":[{"type":"text","text":"Reply with exactly: steered-ok"}],
+                             "created_at":"2026-11-04T10:00:01.000Z"}]},"request_id":"r"}
+                """.trimIndent(),
+            ),
+        )
+
+        val queue = repository.getPromptQueue(settings(), "session_1").getOrThrow()
+
+        assertEquals("/api/v1/sessions/session_1/prompts", server.takeRequest().target)
+        assertEquals("msg_a", queue.active?.promptId)
+        val queued = queue.queued.single()
+        assertEquals("msg_b", queued.promptId)
+        assertEquals("msg_b", queued.message.id)
+        assertEquals(ChatMessage.Role.User, queued.message.role)
+        assertEquals(listOf(ChatMessage.Part.Text("Reply with exactly: steered-ok")), queued.message.parts)
+    }
+
+    @Test
+    fun `transcript catch-up sends the cursor and reads the journal coverage`() = runBlocking {
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"agent_id":"main","batches":[{"seq":43,"ops":[]}],""" +
+                    """"latest_seq":43,"complete":true},"request_id":"r"}""",
+            ),
+        )
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"agent_id":"main","batches":[],"latest_seq":90,"complete":false},"request_id":"r"}""",
+            ),
+        )
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"agent_id":"main","batches":[],"latest_seq":3,"complete":true},"request_id":"r"}""",
+            ),
+        )
+
+        val covered = repository.getTranscriptCatchUp(settings(), "session_1", "main", sinceSeq = 42).getOrThrow()
+        assertEquals("/api/v1/sessions/session_1/transcript/ops?agent_id=main&since_seq=42", server.takeRequest().target)
+        assertFalse(covered.isStale)
+
+        // complete:false — the journal cannot reach back: a full refresh is required.
+        assertTrue(repository.getTranscriptCatchUp(settings(), "session_1", "main", sinceSeq = 42).getOrThrow().isStale)
+        // A latest seq behind the watermark: a restarted server's fresh journal.
+        assertTrue(repository.getTranscriptCatchUp(settings(), "session_1", "main", sinceSeq = 42).getOrThrow().isStale)
     }
 
     @Test

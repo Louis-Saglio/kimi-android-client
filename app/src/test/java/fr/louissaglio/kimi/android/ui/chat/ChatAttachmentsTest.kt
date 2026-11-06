@@ -34,7 +34,7 @@ class ChatAttachmentsTest : ChatViewModelTestBase() {
 
         val upload = awaitRequest("/api/v1/files")
         assertEquals("POST", upload.method)
-        val prompt = awaitRequest("/prompts")
+        val prompt = awaitRequest("/prompts", method = "POST")
         assertEquals("POST", prompt.method)
         assertEquals("/api/v1/sessions/session_1/prompts", prompt.target)
         assertEquals(
@@ -58,7 +58,7 @@ class ChatAttachmentsTest : ChatViewModelTestBase() {
         viewModel.onInputChange("see attached")
         viewModel.onSend()
         awaitRequest("/api/v1/files")
-        awaitRequest("/prompts")
+        awaitRequest("/prompts", method = "POST")
 
         // The optimistic echo (ticket 154) carries the chip at once, built from the
         // upload's structured metadata (ticket 160): real name, size and media type.
@@ -92,7 +92,7 @@ class ChatAttachmentsTest : ChatViewModelTestBase() {
 
         awaitRequest("/api/v1/files")
         // Attachments alone are sendable: the prompt goes out without a text item.
-        val prompt = awaitRequest("/prompts")
+        val prompt = awaitRequest("/prompts", method = "POST")
         assertEquals(
             """{"content":[{"type":"file","file_id":"f_1","name":"a.txt","media_type":"text/plain","size":5}],""" +
                 """"model":"kimi-code/k3"}""",
@@ -148,7 +148,7 @@ class ChatAttachmentsTest : ChatViewModelTestBase() {
         viewModel.onInputChange("just text")
         viewModel.onSend()
 
-        val prompt = awaitRequest("/prompts")
+        val prompt = awaitRequest("/prompts", method = "POST")
         assertEquals(
             """{"content":[{"type":"text","text":"just text"}],"model":"kimi-code/k3"}""",
             prompt.body!!.utf8(),

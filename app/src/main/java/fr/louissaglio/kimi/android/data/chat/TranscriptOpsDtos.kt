@@ -25,8 +25,9 @@ data class TranscriptResetPayload(
 )
 
 /** The reset's baseline. [prompts] are the prompt entities (all statuses),
- * [interactions] the pending interactions in entity form; [items] and [attachments]
- * are kept raw — the cold start (ticket 176) owns their consumption. */
+ * [interactions] the interactions in entity form; [items] and [attachments] are kept
+ * raw. Nothing here is consumed: the cold start reads the same state from
+ * `GET .../transcript` (ticket 176) — a reset only matters as a resume signal. */
 @Serializable
 data class TranscriptSnapshotDto(
     val items: List<JsonElement> = emptyList(),
@@ -163,9 +164,11 @@ data class UndoMarkerPayload(
     val messages: List<MessageDto> = emptyList(),
 )
 
-/** An interaction entity (`interaction.upsert`, `transcript.reset.snapshot.interactions`)
- * — decoded for completeness only: approvals/questions ride the flat `interaction`
- * frame (tickets 171/172). */
+/** An interaction entity (`interaction.upsert`, `transcript.reset.snapshot.interactions`,
+ * the REST transcript's `interactions`). The cold start (ticket 176) maps the pending
+ * ones of `GET .../transcript` to the approval/question cards; live, approvals and
+ * questions ride the flat `interaction` frame (tickets 171/172). [request] stays raw:
+ * its shape differs per [interactionKind] (camelCase approval, snake_case question). */
 @Serializable
 data class InteractionEntityDto(
     val interactionId: String = "",

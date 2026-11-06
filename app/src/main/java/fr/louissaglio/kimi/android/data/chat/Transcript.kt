@@ -15,6 +15,50 @@ data class TranscriptPage(
     val turns: List<TranscriptTurn>,
     /** True while older turns exist beyond [TranscriptTurn.id] of the first turn. */
     val hasMore: Boolean,
+    // --- The session's unpaginated global state, shipped with every page (2.5.0 —
+    // the cold-start read model replacing the removed snapshot, ticket 176). Only the
+    // main chat's cold start consumes it; the sub-agent page reads the turns.
+    /** The agent's op-batch watermark — the `transcript_since` resume point. Null on
+     * a session that is not live (the server ships `seq` for live sessions only). */
+    val seq: Long? = null,
+    /** Every agent of the session (main + children). */
+    val agents: List<TranscriptAgent> = emptyList(),
+    /** The prompt entities (all statuses): the fold's queue bookkeeping seed. */
+    val prompts: List<TranscriptPrompt> = emptyList(),
+    /** The still-pending approvals ([PendingApprovalRequest.approvalId] = the
+     * interaction id), in entity order. */
+    val pendingApprovals: List<PendingApprovalRequest> = emptyList(),
+    /** The still-pending questions ([PendingQuestion.questionId] = the interaction
+     * id), in entity order. */
+    val pendingQuestions: List<PendingQuestion> = emptyList(),
+) {
+    /** The agent's in-flight turn: the newest turn while it is `running`. */
+    val runningTurn: TranscriptTurn?
+        get() = turns.lastOrNull()?.takeIf { it.state == TranscriptState.Running }
+}
+
+/** One `agents` roster entry (2.5.0): [isMain] for the main agent, otherwise a child
+ * spawned by [parentAgentId]. */
+data class TranscriptAgent(
+    val id: String,
+    val isMain: Boolean,
+    val parentAgentId: String? = null,
+)
+
+/** One prompt entity of the transcript: [status] null when the wire value is unknown. */
+data class TranscriptPrompt(
+    val id: String,
+    val status: PromptStatus?,
+)
+
+/** One pending approval of the transcript's interactions (2.5.0, the camelCase
+ * request): [summary] is the card's compact argument preview (the display command,
+ * else the action — ChatMessageMapper.summary); [agentId] is the asking agent. */
+data class PendingApprovalRequest(
+    val approvalId: String,
+    val toolName: String,
+    val summary: String,
+    val agentId: String = MAIN_AGENT_ID,
 )
 
 /** Turn/step states observed on the wire: "running", "completed", and (real since
@@ -70,7 +114,7 @@ sealed interface TranscriptFrame {
         override val id: String,
         val toolCallId: String,
         val name: String,
-        /** Wire state "running"; false for "done" (the only other state observed). */
+        /** Wire state "running"; false for "done"/"error". */
         val running: Boolean,
         /** One-line input summary (ToolPreview), the collapsed row's label. */
         val preview: String,
@@ -83,5 +127,11 @@ sealed interface TranscriptFrame {
          * key/value table (ToolDetailFields). Null when the wire frame carried no
          * `input` object — the pretty string is the row's fallback there. */
         val args: JsonObject? = null,
+        /** The parsed `agent_call` display (ticket 157) — warm frames only; a running
+         * `Agent` call seeded from the transcript on a cold open (ticket 176) gets the
+         * same spawn row a witnessed one does. */
+        val agentCall: AgentCallDisplay? = null,
+        /** Wire state "error" (2.5.0). */
+        val failed: Boolean = false,
     ) : TranscriptFrame
 }
