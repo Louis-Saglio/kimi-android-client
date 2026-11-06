@@ -18,8 +18,12 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
@@ -27,6 +31,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
@@ -50,9 +55,10 @@ import okhttp3.WebSocketListener
  * the flat `interaction` frame mapped to the approval card's and question wizard's
  * events and the ack-time pending-interaction resets (tickets 171/172), the flat
  * `task.list`/`task` frames mapped to [SessionEvent.TaskListed]/[SessionEvent.TaskUpdated]
- * and the flat task controls with their `response` replies (ticket 179) — plus the
- * per-agent resume watermarks every subscribe sends back as `transcript_since`
- * (ticket 176).
+ * and the flat task controls with their `response` replies (ticket 179), the
+ * `task.watch`/`task.unwatch` output stream and its `task.output` chunks (ticket 180)
+ * — plus the per-agent resume watermarks every subscribe sends back as
+ * `transcript_since` (ticket 176).
  */
 @Singleton
 class SessionSocket @Inject constructor(
@@ -117,10 +123,28 @@ class SessionSocket @Inject constructor(
 
     private val requestIds = AtomicLong()
 
+    private val connectionIds = AtomicLong()
+
+    /** The id of the session's open connection, null while none is open (ticket 180):
+     * a task watch does not survive a disconnect, so a watcher re-sends `task.watch`
+     * whenever a new id appears. */
+    private val openConnections = ConcurrentHashMap<String, MutableStateFlow<Long?>>()
+
+    private fun openConnectionOf(sessionId: String): MutableStateFlow<Long?> =
+        openConnections.getOrPut(sessionId) { MutableStateFlow(null) }
+
+    /** The `task.output` chunks per session (ticket 180). Hot and replay-less: a
+     * watcher subscribes BEFORE it sends `task.watch`, so the tail chunk that follows
+     * the reply is never missed; chunks nobody collects are dropped. */
+    private val taskOutputs = ConcurrentHashMap<String, MutableSharedFlow<TaskOutputChunk>>()
+
+    private fun taskOutputsOf(sessionId: String): MutableSharedFlow<TaskOutputChunk> =
+        taskOutputs.getOrPut(sessionId) { MutableSharedFlow(extraBufferCapacity = OUTPUT_BUFFER) }
+
     /** One open socket and its in-flight task controls by `request_id`. A control's
      * owning agent rides along: the reply carries no `agent_id`, but its task state
      * is emitted as that agent's [SessionEvent.TaskUpdated]. */
-    private class LiveConnection(val webSocket: WebSocket) {
+    private class LiveConnection(val webSocket: WebSocket, val id: Long) {
         val pending = ConcurrentHashMap<String, PendingControl>()
     }
 
@@ -171,6 +195,53 @@ class SessionSocket @Inject constructor(
         control: TaskControl,
         agentId: String,
         taskId: String,
+    ): Result<TaskState?> = sendControl(sessionId, control.wire, agentId, taskId)
+
+    /**
+     * Starts streaming [agentId]'s task [taskId]'s output on the session's open
+     * connection (ticket 180; docs/server-api.md → Task frames and controls): the flat
+     * `{type:"task.watch",request_id,session_id,agent_id,task_id,since_offset?,tail_bytes?}`.
+     * The code-0 reply's task state is applied like [sendTaskControl]'s; the server then
+     * sends one [TaskOutputChunk] holding the last [tailBytes] after [sinceOffset] and
+     * every live chunk after it, all on [observeTaskOutput] — subscribe there FIRST. The
+     * watch dies with the connection ([observeConnection]); re-send it with
+     * [sinceOffset] = the end of what is already held. Errors as [sendTaskControl]
+     * (`40406` unknown task, `50003` output unreadable).
+     */
+    suspend fun watchTask(
+        sessionId: String,
+        agentId: String,
+        taskId: String,
+        sinceOffset: Long?,
+        tailBytes: Int?,
+    ): Result<TaskState?> = sendControl(sessionId, WATCH, agentId, taskId) {
+        if (sinceOffset != null) put("since_offset", sinceOffset)
+        if (tailBytes != null) put("tail_bytes", tailBytes)
+    }
+
+    /** Stops [agentId]'s task [taskId]'s output stream (`task.unwatch`, ticket 180).
+     * Fire-and-forget — the screen leaving cannot wait for the reply, which is dropped
+     * as an unknown request; false when no connection is open (a watch died with it). */
+    fun unwatchTask(sessionId: String, agentId: String, taskId: String): Boolean {
+        val connection = connections[sessionId] ?: return false
+        val requestId = "t_${requestIds.incrementAndGet()}"
+        return connection.webSocket.send(taskControlFrame(UNWATCH, requestId, sessionId, agentId, taskId))
+    }
+
+    /** [agentId]'s task [taskId]'s `task.output` chunks while it is watched (ticket 180). */
+    fun observeTaskOutput(sessionId: String, agentId: String, taskId: String): Flow<TaskOutputChunk> =
+        taskOutputsOf(sessionId).filter { it.agentId == agentId && it.taskId == taskId }
+
+    /** The id of the session's open connection, null while none is open (ticket 180):
+     * every new id is a connection without the previous one's task watches. */
+    fun observeConnection(sessionId: String): StateFlow<Long?> = openConnectionOf(sessionId).asStateFlow()
+
+    private suspend fun sendControl(
+        sessionId: String,
+        wire: String,
+        agentId: String,
+        taskId: String,
+        extra: JsonObjectBuilder.() -> Unit = {},
     ): Result<TaskState?> {
         val connection = connections[sessionId]
             ?: return Result.failure(DataError.Network(IOException("The session socket is not connected")))
@@ -178,13 +249,13 @@ class SessionSocket @Inject constructor(
         val pending = PendingControl(agentId, CompletableDeferred())
         connection.pending[requestId] = pending
         return try {
-            if (!connection.webSocket.send(taskControlFrame(control, requestId, sessionId, agentId, taskId))) {
+            if (!connection.webSocket.send(taskControlFrame(wire, requestId, sessionId, agentId, taskId, extra))) {
                 return Result.failure(DataError.Network(IOException("The session socket is closing")))
             }
             val response = withTimeoutOrNull(CONTROL_TIMEOUT_MILLIS) { pending.reply.await() }
-                ?: return Result.failure(DataError.Network(TimeoutException("No reply to ${control.wire}")))
+                ?: return Result.failure(DataError.Network(TimeoutException("No reply to $wire")))
             if (response.code != 0) {
-                Result.failure(DataError.Api(response.code, response.msg?.takeIf { it.isNotBlank() } ?: "${control.wire} failed"))
+                Result.failure(DataError.Api(response.code, response.msg?.takeIf { it.isNotBlank() } ?: "$wire failed"))
             } else {
                 Result.success(response.task?.toTaskState())
             }
@@ -320,7 +391,7 @@ class SessionSocket @Inject constructor(
                 }
             },
         )
-        val connection = LiveConnection(webSocket)
+        val connection = LiveConnection(webSocket, connectionIds.incrementAndGet())
         // Rebuilt at open: the agents this connection's subscribe asked to resume — a
         // reset for one of them means its journal could not cover the watermark.
         var context = FrameContext(sessionId, subscribeId, fold, watermarks, resumed = emptySet(), watchdog, connection)
@@ -333,6 +404,7 @@ class SessionSocket @Inject constructor(
                         val since = watermarks.toMap()
                         context = FrameContext(sessionId, subscribeId, fold, watermarks, resumed = since.keys, watchdog, connection)
                         connections[sessionId] = connection
+                        openConnectionOf(sessionId).value = connection.id
                         webSocket.send(subscribeFrame(subscribeId, sessionId, since))
                     }
                     is Signal.Text ->
@@ -345,6 +417,7 @@ class SessionSocket @Inject constructor(
             }
         } finally {
             connections.remove(sessionId, connection)
+            openConnectionOf(sessionId).compareAndSet(connection.id, null)
             // A control in flight on this socket gets no reply any more: fail it now
             // instead of waiting out the timeout.
             connection.pending.values.forEach {
@@ -533,9 +606,12 @@ class SessionSocket @Inject constructor(
                     }
                     pending.reply.complete(response)
                 }
-            // The other flat state frames (goal, task.output) are out of scope or
-            // ticket 180: ignored, but logged so a server rename shows up during
-            // development.
+            // A watched task's output chunk (ticket 180): only ever sent to a
+            // connection that sent task.watch; the watcher assembles them by offset.
+            "task.output" -> decodeFlat<TaskOutputFrame>(frame.type, text)
+                ?.let { taskOutputsOf(sessionId).emit(TaskOutputChunk(it.agentId, it.taskId, it.offset, it.text)) }
+            // The other flat state frames (goal) are out of scope: ignored, but logged
+            // so a server rename shows up during development.
             else -> Log.d(TAG, "Ignoring '${frame.type}' frame")
         }
         return true
@@ -578,19 +654,22 @@ class SessionSocket @Inject constructor(
     }.toString()
 
     /** A flat task control (ticket 179): its fields sit beside `type` and `request_id`
-     * replaces `id` — a frame without a readable `request_id` closes the socket (1008). */
+     * replaces `id` — a frame without a readable `request_id` closes the socket (1008).
+     * [extra] adds a control's own fields (`task.watch`'s offsets — ticket 180). */
     private fun taskControlFrame(
-        control: TaskControl,
+        wire: String,
         requestId: String,
         sessionId: String,
         agentId: String,
         taskId: String,
+        extra: JsonObjectBuilder.() -> Unit = {},
     ): String = buildJsonObject {
-        put("type", control.wire)
+        put("type", wire)
         put("request_id", requestId)
         put("session_id", sessionId)
         put("agent_id", agentId)
         put("task_id", taskId)
+        extra()
     }.toString()
 
     private fun pongFrame(nonce: String): String = buildJsonObject {
@@ -604,6 +683,13 @@ class SessionSocket @Inject constructor(
 
         /** How long a task control waits for its `response` before failing. */
         const val CONTROL_TIMEOUT_MILLIS = 15_000L
+
+        const val WATCH = "task.watch"
+        const val UNWATCH = "task.unwatch"
+
+        /** Output chunks buffered per session before the frame loop waits on a slow
+         * watcher. */
+        const val OUTPUT_BUFFER = 64
 
         fun backoffMillis(attempt: Int): Long = (1_000L shl attempt).coerceAtMost(30_000L)
     }

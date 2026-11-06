@@ -16,6 +16,7 @@ import fr.louissaglio.kimi.android.navigation.JobDetail
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.ackFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.taskFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.taskListFrame
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames.taskOutputFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.taskResponseFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.taskState
 import fr.louissaglio.kimi.android.testutil.awaitCondition
@@ -38,8 +39,11 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import mockwebserver3.Dispatcher
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
@@ -186,7 +190,7 @@ class JobDetailViewModelTest {
         awaitState(viewModel.uiState) { it.status == Job.Status.Completed }
         state = viewModel.uiState.value
         assertEquals(Instant.parse("2026-11-04T19:32:00.000Z"), state.completedAt)
-        assertEquals("tick 119", state.outputPreview)
+        assertEquals("tick 119", state.output)
         assertTrue(requests.none { "/tasks" in it })
     }
 
@@ -279,6 +283,204 @@ class JobDetailViewModelTest {
         awaitCondition { effects.isNotEmpty() }
         assertEquals(JobDetailViewModel.Effect.StopFailed("task not found"), effects.single())
         assertEquals(Job.Status.Running, viewModel.uiState.value.status)
+    }
+
+    // --- Output watch (ticket 180) -----------------------------------------------------
+
+    private fun sent(type: String) = clientFrames
+        .map { Json.parseToJsonElement(it).jsonObject }
+        .filter { it["type"]?.jsonPrimitive?.content == type }
+
+    private fun sentWatches() = sent("task.watch")
+
+    private fun sentUnwatches() = sent("task.unwatch")
+
+    private fun JsonObject.requestId() = this["request_id"]!!.jsonPrimitive.content
+
+    /** Starts the screen on a running task and answers its watch; returns the server end. */
+    private suspend fun watchingRunningTask(viewModel: JobDetailViewModel): WebSocket {
+        val (_, socket) = connect()
+        socket.send(taskListFrame(taskState("bash-1")))
+        awaitState(viewModel.uiState) { it.status == Job.Status.Running }
+        viewModel.onScreenStarted()
+        awaitCondition { sentWatches().size == 1 }
+        socket.send(taskResponseFrame(sentWatches().single().requestId(), task = taskState("bash-1")))
+        return socket
+    }
+
+    @Test
+    fun `opening a running job streams its output with one watch and no poll`() = runBlocking {
+        val (_, socket) = connect()
+        val viewModel = newViewModel()
+        socket.send(taskListFrame(taskState("bash-1")))
+        awaitState(viewModel.uiState) { it.status == Job.Status.Running }
+
+        viewModel.onScreenStarted()
+
+        awaitCondition { sentWatches().size == 1 }
+        val watch = sentWatches().single()
+        assertEquals("main", watch["agent_id"]?.jsonPrimitive?.content)
+        assertEquals("bash-1", watch["task_id"]?.jsonPrimitive?.content)
+        assertEquals(32768, watch["tail_bytes"]?.jsonPrimitive?.int)
+        assertNull(watch["since_offset"])
+        // Waiting for the first chunk.
+        assertTrue(viewModel.uiState.value.isLoading)
+
+        socket.send(taskResponseFrame(watch.requestId(), task = taskState("bash-1")))
+        socket.send(taskOutputFrame("bash-1", offset = 0, text = ""))
+        socket.send(taskOutputFrame("bash-1", offset = 0, text = "tick 1\n"))
+        socket.send(taskOutputFrame("bash-1", offset = 7, text = "tick 2\n"))
+
+        awaitState(viewModel.uiState) { it.output == "tick 1\ntick 2\n" }
+        assertFalse(viewModel.uiState.value.isLoading)
+        // Longer than the old 2 s poll: still one watch, nothing else, no REST at all.
+        delay(2_500)
+        assertEquals(1, sentWatches().size)
+        assertTrue(sentUnwatches().isEmpty())
+        assertTrue(requests.all { it.startsWith("/api/v1/ws") })
+    }
+
+    @Test
+    fun `chunks append at their byte offsets, a duplicate is ignored and a gap stays visible`() = runBlocking {
+        val viewModel = newViewModel()
+        val socket = watchingRunningTask(viewModel)
+
+        socket.send(taskOutputFrame("bash-1", offset = 0, text = "a\n"))
+        socket.send(taskOutputFrame("bash-1", offset = 0, text = "a\n"))
+        socket.send(taskOutputFrame("bash-1", offset = 10, text = "z\n"))
+
+        awaitState(viewModel.uiState) { it.output?.endsWith("z\n") == true }
+        assertEquals("a\n[… 8 bytes missing …]\nz\n", viewModel.uiState.value.output)
+    }
+
+    @Test
+    fun `leaving sends task unwatch and re-entering resumes at the held byte offset`() = runBlocking {
+        val viewModel = newViewModel()
+        val socket = watchingRunningTask(viewModel)
+        // 3 characters, 6 UTF-8 bytes.
+        socket.send(taskOutputFrame("bash-1", offset = 0, text = "é✓\n"))
+        awaitState(viewModel.uiState) { it.output == "é✓\n" }
+
+        viewModel.onScreenStopped()
+
+        awaitCondition { sentUnwatches().isNotEmpty() }
+        val unwatch = sentUnwatches().single()
+        assertEquals("bash-1", unwatch["task_id"]?.jsonPrimitive?.content)
+        assertEquals("main", unwatch["agent_id"]?.jsonPrimitive?.content)
+
+        viewModel.onScreenStarted()
+
+        awaitCondition { sentWatches().size == 2 }
+        assertEquals(6L, sentWatches().last()["since_offset"]?.jsonPrimitive?.long)
+        // The held output stays on screen: no loading placeholder for a re-watch.
+        assertFalse(viewModel.uiState.value.isLoading)
+        socket.send(taskResponseFrame(sentWatches().last().requestId(), task = taskState("bash-1")))
+        socket.send(taskOutputFrame("bash-1", offset = 6, text = "more\n"))
+        awaitState(viewModel.uiState) { it.output == "é✓\nmore\n" }
+    }
+
+    @Test
+    fun `a reconnect re-sends the watch from the held byte offset`() = runBlocking {
+        val viewModel = newViewModel()
+        val socket = watchingRunningTask(viewModel)
+        socket.send(taskOutputFrame("bash-1", offset = 0, text = "before drop\n"))
+        awaitState(viewModel.uiState) { it.output == "before drop\n" }
+
+        serverSocket = null
+        socket.close(1000, "bye")
+
+        awaitCondition { sentWatches().size == 2 }
+        assertEquals(12L, sentWatches().last()["since_offset"]?.jsonPrimitive?.long)
+        val reconnected = serverSocket!!
+        reconnected.send(taskResponseFrame(sentWatches().last().requestId(), task = taskState("bash-1")))
+        // A chunk overlapping what is held keeps only its new bytes.
+        reconnected.send(taskOutputFrame("bash-1", offset = 7, text = "drop\nafter\n"))
+        awaitState(viewModel.uiState) { it.output == "before drop\nafter\n" }
+    }
+
+    @Test
+    fun `a task that ends while watched keeps its final state and output and unwatches`() = runBlocking {
+        val viewModel = newViewModel()
+        val socket = watchingRunningTask(viewModel)
+        socket.send(taskOutputFrame("bash-1", offset = 0, text = "watched-ok\n"))
+        awaitState(viewModel.uiState) { it.output == "watched-ok\n" }
+
+        socket.send(
+            taskFrame(
+                taskState(
+                    "bash-1", status = "ended", outcome = "completed", endedAt = "2026-11-04T19:30:30.000Z",
+                    extra = ""","result_summary":"summary"""",
+                ),
+            ),
+        )
+
+        awaitCondition { sentUnwatches().size == 1 }
+        val state = viewModel.uiState.value
+        assertEquals(Job.Status.Completed, state.status)
+        // The streamed tail wins over the summary.
+        assertEquals("watched-ok\n", state.output)
+
+        // An ended task is never re-watched.
+        viewModel.onScreenStopped()
+        viewModel.onScreenStarted()
+        delay(150)
+        assertEquals(1, sentWatches().size)
+        assertEquals(1, sentUnwatches().size)
+    }
+
+    @Test
+    fun `an already-ended task is watched once for its final tail, then unwatched`() = runBlocking {
+        val (_, socket) = connect()
+        val viewModel = newViewModel()
+        val ended = taskState("bash-1", status = "ended", outcome = "failed", endedAt = "2026-11-04T19:30:30.000Z")
+        socket.send(taskFrame(ended))
+        awaitState(viewModel.uiState) { it.status == Job.Status.Failed }
+
+        viewModel.onScreenStarted()
+        awaitCondition { sentWatches().size == 1 }
+        socket.send(taskResponseFrame(sentWatches().single().requestId(), task = ended))
+        delay(100)
+        // The reply alone does not unwatch: the tail chunk follows it.
+        assertTrue(sentUnwatches().isEmpty())
+        socket.send(taskOutputFrame("bash-1", offset = 0, text = "exit 1\n"))
+
+        awaitCondition { sentUnwatches().size == 1 }
+        assertEquals("exit 1\n", viewModel.uiState.value.output)
+        assertEquals(Job.Status.Failed, viewModel.uiState.value.status)
+    }
+
+    @Test
+    fun `40406 and 50003 watch replies surface the error and fall back to the summary`() = runBlocking {
+        val (_, socket) = connect()
+        listOf(40406 to "task not found", 50003 to "task output unreadable").forEachIndexed { index, (code, msg) ->
+            val taskId = "bash-${index + 10}"
+            val viewModel = newViewModel(JobDetail("session_1", taskId))
+            socket.send(
+                taskFrame(
+                    taskState(
+                        taskId, status = "ended", outcome = "completed", endedAt = "2026-11-04T19:30:30.000Z",
+                        extra = ""","result_summary":"done"""",
+                    ),
+                ),
+            )
+            awaitState(viewModel.uiState) { it.status == Job.Status.Completed }
+            viewModel.onScreenStarted()
+            awaitCondition { sentWatches().size == index + 1 }
+            socket.send(taskResponseFrame(sentWatches().last().requestId(), code = code, msg = msg))
+
+            awaitState(viewModel.uiState) { it.outputError != null }
+            val state = viewModel.uiState.value
+            assertEquals(msg, state.outputError)
+            assertEquals("done", state.output)
+            assertFalse(state.isLoading)
+            assertEquals(Job.Status.Completed, state.status)
+
+            // A refused watch is not retried on re-entry.
+            viewModel.onScreenStopped()
+            viewModel.onScreenStarted()
+            delay(100)
+            assertEquals(index + 1, sentWatches().size)
+        }
     }
 
     // --- Store-backed mode (ticket 098) ------------------------------------------------

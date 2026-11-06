@@ -1,5 +1,8 @@
 package fr.louissaglio.kimi.android.testutil
 
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+
 /**
  * Server frames of the 2.5.0 session socket (docs/server-api.md, WebSocket → Session
  * frames / Transcript protocol — ticket 175), shaped after the verbatim captures. Op
@@ -99,6 +102,23 @@ object TranscriptFrames {
     fun taskListFrame(vararg states: String, agentId: String = "main", sessionId: String = "session_1"): String =
         """{"type":"task.list","session_id":"$sessionId","agent_id":"$agentId","tasks":[""" +
             states.joinToString(",") + "]}"
+
+    /** A watched task's `task.output` chunk (ticket 180), shaped after the verbatim
+     * capture: [offset] is the UTF-8 byte offset of [text]. */
+    fun taskOutputFrame(
+        taskId: String,
+        offset: Long,
+        text: String,
+        agentId: String = "main",
+        sessionId: String = "session_1",
+    ): String = buildJsonObject {
+        put("type", "task.output")
+        put("session_id", sessionId)
+        put("agent_id", agentId)
+        put("task_id", taskId)
+        put("offset", offset)
+        put("text", text)
+    }.toString()
 
     /** A task control's reply: `{type:"response",request_id,code,msg?,task?}`. */
     fun taskResponseFrame(requestId: String, code: Int = 0, msg: String? = null, task: String? = null): String =

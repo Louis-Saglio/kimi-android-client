@@ -55,8 +55,8 @@ import kotlinx.coroutines.delay
 /**
  * Background-bash job screen (ticket 096): the job's description in the title, a
  * status line (glyph + label + elapsed — ticking every second while running), the
- * command, and the Output section (the ended task's summary until ticket 180 streams
- * the live tail, pinned to the newest output). Stop lives in the app bar while
+ * command, and the Output section (the `task.watch` stream's live tail — ticket 180 —
+ * pinned to the newest output; the ended task's summary when nothing streamed). Stop lives in the app bar while
  * running: killing a runaway job is the natural reaction while watching it. Entry
  * points: a linked chat row or the jobs sheet's bash rows — the chat row itself
  * stays free of the log. No full-screen loading gate: the title and the Command
@@ -256,10 +256,11 @@ private fun JobSection(title: String, modifier: Modifier = Modifier, content: @C
 
 /** The output text (the ToolDetailBlock recipe): one monospace block scrolling
  * internally, re-pinned to the tail each time it grows while the job runs. While
- * [JobDetailViewModel.UiState.isLoading] a small spinner stands in for the block —
- * the rest of the shell already renders from the route-seeded state. In store-backed
- * mode (ticket 098) an explicit placeholder replaces the block: no output channel is
- * wired for a sub-agent-owned task.
+ * [JobDetailViewModel.UiState.isLoading] (a watch awaiting its first chunk) a small
+ * spinner stands in for the block — the rest of the shell already renders from the
+ * route-seeded state. A watch error (ticket 180) reads "Output unavailable: …" above
+ * the fallback block. In store-backed mode (ticket 098) an explicit placeholder
+ * replaces the block: no output channel is wired for a sub-agent-owned task.
  * Internal for the semantics tests. */
 @Composable
 internal fun JobOutputBlock(uiState: JobDetailViewModel.UiState, modifier: Modifier = Modifier) {
@@ -278,7 +279,14 @@ internal fun JobOutputBlock(uiState: JobDetailViewModel.UiState, modifier: Modif
         }
         return
     }
-    if (uiState.isLoading && uiState.outputPreview == null) {
+    uiState.outputError?.let { error ->
+        Text(
+            text = "Output unavailable: $error",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+        )
+    }
+    if (uiState.isLoading && uiState.output == null) {
         Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
             CircularProgressIndicator(
                 modifier = Modifier.padding(24.dp).semantics { contentDescription = "Loading output" },
@@ -286,7 +294,7 @@ internal fun JobOutputBlock(uiState: JobDetailViewModel.UiState, modifier: Modif
         }
         return
     }
-    val output = uiState.outputPreview.orEmpty()
+    val output = uiState.output.orEmpty()
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
         shape = MaterialTheme.shapes.small,

@@ -15,6 +15,7 @@ import fr.louissaglio.kimi.android.testutil.TranscriptFrames.resetFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.stepOp
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.taskFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.taskListFrame
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames.taskOutputFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.taskResponseFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.taskState
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.textOp
@@ -510,6 +511,103 @@ class SessionSocketTest {
         )
 
         assertEquals(listOf(SessionEvent.TaskUpdated(shellTask("bash-2"))), emitted.sessionEvents())
+    }
+
+    // --- task output watch (ticket 180) -----------------------------------------------
+
+    @Test
+    fun `task watch is a flat frame with its offsets and the chunks that follow reach its watcher`() = runBlocking {
+        val clientFrames = CopyOnWriteArrayList<String>()
+        coroutineScope {
+            val (emitted, job) = openInteractive(clientFrames) { webSocket, requestId ->
+                // The verbatim order: the reply with the state, then the tail chunk,
+                // then a live chunk; another task's chunk is not this watcher's.
+                webSocket.send(taskResponseFrame(requestId, task = taskState("bash-1")))
+                webSocket.send(taskOutputFrame("bash-1", offset = 0, text = ""))
+                webSocket.send(taskOutputFrame("bash-2", offset = 0, text = "other"))
+                webSocket.send(taskOutputFrame("bash-1", offset = 0, text = "tick ✓\n"))
+            }
+            try {
+                val chunks = CopyOnWriteArrayList<TaskOutputChunk>()
+                val watcher = launch { socket.observeTaskOutput("session_1", "main", "bash-1").collect { chunks += it } }
+                awaitCondition { socket.observeConnection("session_1").value != null }
+                delay(50) // let the watcher subscribe
+
+                val result = socket.watchTask("session_1", "main", "bash-1", sinceOffset = 42, tailBytes = 32768)
+
+                assertEquals(shellTask("bash-1"), result.getOrThrow())
+                assertEquals(
+                    """{"type":"task.watch","request_id":"t_1","session_id":"session_1","agent_id":"main",""" +
+                        """"task_id":"bash-1","since_offset":42,"tail_bytes":32768}""",
+                    clientFrames.last(),
+                )
+                // The reply's state applies like any task frame.
+                assertEquals(listOf(SessionEvent.TaskUpdated(shellTask("bash-1"))), emitted.sessionEvents())
+                awaitCondition { chunks.size == 2 }
+                assertEquals(
+                    listOf(TaskOutputChunk("main", "bash-1", 0, ""), TaskOutputChunk("main", "bash-1", 0, "tick ✓\n")),
+                    chunks,
+                )
+                watcher.cancel()
+            } finally {
+                job.cancel()
+            }
+        }
+    }
+
+    @Test
+    fun `a first watch omits since_offset and unwatch is a flat fire-and-forget frame`() = runBlocking {
+        assertFalse(socket.unwatchTask("session_1", "main", "bash-1"))
+
+        val clientFrames = CopyOnWriteArrayList<String>()
+        coroutineScope {
+            val (_, job) = openInteractive(clientFrames) { webSocket, requestId ->
+                webSocket.send(taskResponseFrame(requestId, task = taskState("bash-1")))
+            }
+            try {
+                socket.watchTask("session_1", "main", "bash-1", sinceOffset = null, tailBytes = 32768).getOrThrow()
+                assertTrue(clientFrames.last().endsWith(""""task_id":"bash-1","tail_bytes":32768}"""))
+
+                assertTrue(socket.unwatchTask("session_1", "main", "bash-1"))
+                awaitCondition { clientFrames.last().contains("task.unwatch") }
+                assertEquals(
+                    """{"type":"task.unwatch","request_id":"t_2","session_id":"session_1","agent_id":"main","task_id":"bash-1"}""",
+                    clientFrames.last(),
+                )
+            } finally {
+                job.cancel()
+            }
+        }
+    }
+
+    @Test
+    fun `a watch error reply fails with its code`() = runBlocking {
+        val clientFrames = CopyOnWriteArrayList<String>()
+        coroutineScope {
+            val (_, job) = openInteractive(clientFrames) { webSocket, requestId ->
+                webSocket.send(taskResponseFrame(requestId, code = 50003, msg = "task output unreadable"))
+            }
+            try {
+                val error = socket.watchTask("session_1", "main", "bash-1", null, 32768).exceptionOrNull()
+                assertEquals(DataError.Api(50003, "task output unreadable"), error)
+            } finally {
+                job.cancel()
+            }
+        }
+    }
+
+    @Test
+    fun `the open connection id is set while a connection is open and cleared when it drops`() = runBlocking {
+        assertEquals(null, socket.observeConnection("session_1").value)
+        val clientFrames = CopyOnWriteArrayList<String>()
+        coroutineScope {
+            val (_, job) = openInteractive(clientFrames) { _, _ -> }
+            val id = socket.observeConnection("session_1").value
+            assertTrue(id != null)
+            job.cancel()
+            job.join()
+            assertEquals(null, socket.observeConnection("session_1").value)
+        }
     }
 
     // --- todo state frames (ticket 178) ----------------------------------------------

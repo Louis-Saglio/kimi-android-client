@@ -288,7 +288,18 @@ data class TaskListFrame(
     val tasks: List<TaskStateDto> = emptyList(),
 )
 
-/** The reply to a flat task control (`task.stop`/`task.background`, ticket 179):
+/** The flat `task.output` frame (ticket 180): sent only to a connection that sent
+ * `task.watch` — [text] starts at UTF-8 byte [offset] of the task's output. */
+@Serializable
+data class TaskOutputFrame(
+    @SerialName("agent_id") val agentId: String = MAIN_AGENT_ID,
+    @SerialName("task_id") val taskId: String,
+    val offset: Long,
+    val text: String = "",
+)
+
+/** The reply to a flat task control (`task.stop`/`task.background`, ticket 179;
+ * `task.watch`/`task.unwatch`, ticket 180):
  * `{type:"response",request_id,code,msg?,task?}` — matched to its request by
  * [requestId]; [task] is the task's state after the control (also sent on some
  * errors, e.g. `40933`). */

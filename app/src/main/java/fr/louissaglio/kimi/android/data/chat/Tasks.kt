@@ -73,7 +73,9 @@ enum class TaskOutcome(val wire: String) {
 
 /** The two task controls the app sends (docs/server-api.md → WebSocket → Control
  * frames): flat `task.stop` (replaces REST `:cancel`) and `task.background` (replaces
- * REST `:detach`). Both reply `{type:"response",request_id,code,msg?,task?}`. */
+ * REST `:detach`). Both reply `{type:"response",request_id,code,msg?,task?}`. The
+ * output stream's `task.watch`/`task.unwatch` (ticket 180) carry their own parameters
+ * — [SessionSocket.watchTask]/[SessionSocket.unwatchTask]. */
 enum class TaskControl(val wire: String) {
     Stop("task.stop"),
     Background("task.background"),

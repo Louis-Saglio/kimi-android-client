@@ -89,7 +89,17 @@
   task?}` reply is matched by `request_id`, a code-0 reply's task is emitted as
   that agent's `TaskUpdated` (and recorded) BEFORE the call returns it, a
   non-zero code fails with `DataError.Api` and applies nothing, and no
-  connection / a dropped one / no reply in 15 s fails with `DataError.Network`. Ticket 171 decodes the flat `interaction`
+  connection / a dropped one / no reply in 15 s fails with `DataError.Network`.
+  Ticket 180 adds the output stream on the same control path: `watchTask`
+  sends the flat `task.watch` (`since_offset?`, `tail_bytes?` beside the
+  control fields; reply handled like `sendTaskControl`'s), `unwatchTask` the
+  flat `task.unwatch` fire-and-forget (its reply is dropped as an unknown
+  request — the leaving screen cannot wait), and every `task.output` frame
+  (`TaskOutputFrame`) is emitted as a `TaskOutputChunk(agentId, taskId,
+  offset, text)` on a hot, replay-less per-session flow (`observeTaskOutput` —
+  a watcher subscribes BEFORE sending the watch; never a `SessionEvent`).
+  `observeConnection` is the open connection's id (null while none is open):
+  a watch dies with its connection, so a new id tells a watcher to re-watch. Ticket 171 decodes the flat `interaction`
   frame (no `payload`, no `seq`; `InteractionFrame`, mapped by the pure
   `ChatMessageMapper.toInteractionEvent`, which dispatches on `kind` to
   `toApprovalEvent`/`toQuestionEvent`): an approval `pending` →
@@ -214,8 +224,11 @@
   endpoints belong in a collaborator, not the facade. Background tasks (tickets
   092/179): there is no REST task API since server 2.5.0 — the session socket's
   task frames and controls (above) are the only channel, exposed through
-  `ChatRepository.sendTaskControl` and `observeTask`. Domain: `TaskState`/
-  `TaskOutcome`/`TaskControl` in `data/chat/Tasks.kt`.
+  `ChatRepository.sendTaskControl` and `observeTask`; ticket 180's output
+  stream through `watchTaskOutput`/`unwatchTaskOutput`/`observeTaskOutput`/
+  `observeSocketConnection`. Domain: `TaskState`/`TaskOutcome`/`TaskControl` in
+  `data/chat/Tasks.kt`; `TaskOutputChunk` and the pure `TaskOutputTail` (the
+  bounded byte-offset assembly, below) in `data/chat/TaskOutput.kt`.
 - `data/sessions/` — `SessionsRepository` (list/get/create/fork/archive/restore/delete REST
   facade; ticket 132 adds `listArchivedSessions` — the v1 list with
   `archived_only=true&exclude_empty=true` and the same `before_id` cursor, rows
@@ -400,10 +413,23 @@
   callback only (the sub-agent's own task controls are ticket 182's): bash rows open the
   job screen's store-backed mode (ticket 098), wired exactly like the chat's.
   The job screen's main-agent mode (`JobDetailViewModel`) reads the socket's
-  task record (`observeTask` — status, timestamps, description, command, the
-  ended task's `result_summary`/`error` as its output until ticket 180's
-  `task.watch`) and stops with `task.stop`; a task this process never saw keeps
-  the route seeds with an empty status line.
+  task record (`observeTask` — status, timestamps, description, command) and
+  stops with `task.stop`; a task this process never saw keeps the route seeds
+  with an empty status line. Its Output streams with `task.watch` (ticket 180,
+  no poll): while the screen is started and the socket has an open connection,
+  one watch per connection (`tail_bytes` 32 KiB; once output is held,
+  `since_offset` = its UTF-8 byte end, so a reconnect or ON_STOP→ON_START
+  re-entry neither loses nor duplicates). Chunks append into a
+  `TaskOutputTail` by BYTE offset (never `String.length`): a chunk ending at or
+  before the held end is a duplicate, a straddling one keeps its new bytes, a
+  later one opens a segment rendered behind a `[… N bytes missing …]` marker,
+  and at most 64 KiB is retained (oldest bytes cut on a character boundary,
+  `[… N earlier bytes not shown …]`). ON_STOP sends `task.unwatch` before the
+  page count drops; an ended task unwatches once the watch's first chunk (its
+  final tail) is in and is never re-watched. A watch error (`40406`, `50003`)
+  stops watching for good: `outputError` above the output, which falls back
+  to the ended frame's `result_summary`/`error` like a task with no streamed
+  text. The store-backed mode sends no watch.
   The live activity status line (ticket 148) is smaller than a collaborator and
   follows the 058 `StepRetry` precedent. Since 2.5.0 (ticket 177) the server
   reports no phase — only the `agent` frame's busy `status` — so

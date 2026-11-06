@@ -11,8 +11,9 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /** Semantics tests for the job screen's output block: the loading placeholder that
- * stands in while the entry fetch runs (the shell renders from the route seeds
- * first), then the output tail / the "No output yet" placeholder. */
+ * stands in while the `task.watch` awaits its first chunk (the shell renders from the
+ * route seeds first), then the output tail / the "No output yet" placeholder, and a
+ * watch error above the fallback (ticket 180). */
 @RunWith(AndroidJUnit4::class)
 class JobOutputBlockTest {
 
@@ -37,7 +38,7 @@ class JobOutputBlockTest {
             JobDetailViewModel.UiState(
                 taskId = "bash-1",
                 status = Job.Status.Running,
-                outputPreview = "tick 41\n",
+                output = "tick 41\n",
                 isLoading = false,
             ),
         )
@@ -58,6 +59,21 @@ class JobOutputBlockTest {
 
         composeTestRule.onNodeWithText("No output yet").assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription("Loading output").assertDoesNotExist()
+    }
+
+    @Test
+    fun aWatchErrorShowsAboveTheFallbackSummary() {
+        outputBlock(
+            JobDetailViewModel.UiState(
+                taskId = "bash-1",
+                status = Job.Status.Completed,
+                output = "done",
+                outputError = "task not found",
+            ),
+        )
+
+        composeTestRule.onNodeWithText("Output unavailable: task not found").assertIsDisplayed()
+        composeTestRule.onNodeWithText("done").assertIsDisplayed()
     }
 
     @Test

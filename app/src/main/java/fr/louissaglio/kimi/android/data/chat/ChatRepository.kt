@@ -278,6 +278,31 @@ class ChatRepository @Inject constructor(
     fun observeTask(sessionId: String, agentId: String, taskId: String): Flow<TaskState?> =
         socket.observeTask(sessionId, agentId, taskId)
 
+    /** Starts streaming [agentId]'s task output over the session's live socket
+     * (`task.watch` — ticket 180) and awaits the reply; the chunks then arrive on
+     * [observeTaskOutput] (collect it first). [sinceOffset] is the UTF-8 byte offset
+     * already held (null on the first watch), [tailBytes] the size of the first chunk.
+     * Errors as [sendTaskControl] (`40406` unknown task, `50003` output unreadable). */
+    suspend fun watchTaskOutput(
+        sessionId: String,
+        taskId: String,
+        sinceOffset: Long?,
+        tailBytes: Int?,
+        agentId: String = MAIN_AGENT_ID,
+    ): Result<TaskState?> = socket.watchTask(sessionId, agentId, taskId, sinceOffset, tailBytes)
+
+    /** Stops a task's output stream (`task.unwatch`), fire-and-forget. */
+    fun unwatchTaskOutput(sessionId: String, taskId: String, agentId: String = MAIN_AGENT_ID): Boolean =
+        socket.unwatchTask(sessionId, agentId, taskId)
+
+    /** A watched task's `task.output` chunks (ticket 180). */
+    fun observeTaskOutput(sessionId: String, taskId: String, agentId: String = MAIN_AGENT_ID): Flow<TaskOutputChunk> =
+        socket.observeTaskOutput(sessionId, agentId, taskId)
+
+    /** The id of the session socket's open connection, null while none is open: a new
+     * id is a connection without the previous one's task watches (ticket 180). */
+    fun observeSocketConnection(sessionId: String): Flow<Long?> = socket.observeConnection(sessionId)
+
     /** One turn's changed files (`GET .../file-history/changes?turn_id=N` — ticket
      * 149, live since server 0.41.0): [turnId] is the main agent's 0-based turn
      * index (the transcript ordinal). A turn with nothing recorded comes back as
