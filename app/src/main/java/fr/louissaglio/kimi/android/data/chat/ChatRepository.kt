@@ -233,7 +233,7 @@ class ChatRepository @Inject constructor(
 
     /** Starts a compaction (`POST /api/v1/sessions/{id}:compact`, docs/server-api.md,
      * Compact — ticket 056). Fire-and-forget: the progress arrives over the WebSocket
-     * (compaction.started/completed), so success carries no payload. */
+     * (the `compaction` transcript markers — ticket 181), so success carries no payload. */
     suspend fun compact(settings: ServerSettings, sessionId: String): Result<Unit> =
         chatApi.compact(settings, sessionId)
 

@@ -1,5 +1,6 @@
 package fr.louissaglio.kimi.android.data.chat
 
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -363,10 +364,66 @@ class TranscriptFoldTest {
 
         val events = fold(
             marker,
-            """{"op":"marker.upsert","item":{"kind":"marker","markerId":"live-m5","marker":"compaction",""" +
-                """"payload":{"phase":"started","agentId":"main","trigger":"manual"}}}""",
+            """{"op":"marker.upsert","item":{"kind":"marker","markerId":"live-m5","marker":"swarm.started",""" +
+                """"payload":{"agentId":"main"}}}""",
         )
 
+        assertEquals(emptyList<SessionEvent>(), events)
+    }
+
+    @Test
+    fun `the three compaction markers fold to started, the splice and completed`() {
+        // Ticket 181, the verbatim 2.5.0 sequence: started → undo (kept messages +
+        // summary + continuation injection) → completed with the result block.
+        val events = fold(
+            TranscriptFrames.compactionStartedOp(),
+            TranscriptFrames.compactionUndoOp(kept = arrayOf(TranscriptFrames.userMessage("msg_1", "kept"))),
+            TranscriptFrames.compactionCompletedOp(summary = "Working summary."),
+        )
+
+        assertEquals(3, events.size)
+        assertEquals(SessionEvent.CompactionStarted("manual"), events[0])
+        // The continuation injection is harness-only; the summary stays in the splice
+        // for the timeline to drop (it owns that rule for every splice source).
+        val splice = events[1] as SessionEvent.ContextSpliced
+        assertEquals(listOf("msg_1", ""), splice.messages.map { it.id })
+        assertEquals(ORIGIN_KIND_COMPACTION_SUMMARY, splice.messages[1].originKind)
+        assertEquals(
+            SessionEvent.CompactionCompleted(
+                summary = "Working summary.",
+                compactedCount = 6,
+                tokensBefore = 22_745,
+                tokensAfter = 23_493,
+                keptUserMessageCount = 2,
+            ),
+            events[2],
+        )
+    }
+
+    @Test
+    fun `replayed compaction markers are not re-emitted`() {
+        fold(TranscriptFrames.compactionStartedOp(), TranscriptFrames.compactionCompletedOp())
+
+        // A resume replay re-sends the journaled markers: the started one must not put
+        // a finished compaction back into progress.
+        val events = fold(TranscriptFrames.compactionStartedOp(), TranscriptFrames.compactionCompletedOp())
+
+        assertEquals(emptyList<SessionEvent>(), events)
+    }
+
+    @Test
+    fun `compaction markers carry the batch agent, and unreadable phases emit nothing`() {
+        val child = fold(TranscriptFrames.compactionStartedOp(agentId = "agent-1"), agentId = "agent-1")
+        assertEquals(listOf(SessionEvent.CompactionStarted("manual", agentId = "agent-1")), child)
+        assertTrue(child.single().isSubagentScoped())
+
+        val events = fold(
+            // A completed marker without a result, an unknown phase.
+            """{"op":"marker.upsert","item":{"kind":"marker","markerId":"m1","marker":"compaction",""" +
+                """"payload":{"phase":"completed","agentId":"main"}}}""",
+            """{"op":"marker.upsert","item":{"kind":"marker","markerId":"m2","marker":"compaction",""" +
+                """"payload":{"phase":"paused","agentId":"main"}}}""",
+        )
         assertEquals(emptyList<SessionEvent>(), events)
     }
 

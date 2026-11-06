@@ -56,7 +56,8 @@
   frame branches (approval/question/agent-status/task/subagent/compaction
   families) are deleted, and the domain events documented below for those
   features have no live feed until tickets 178–182 re-feed them from
-  the 2.5.0 frames (171/172 re-fed approvals and questions, 179 tasks, below). Ticket 177 adds the main agent's flat `agent`/`usage`
+  the 2.5.0 frames (171/172 re-fed approvals and questions, 179 tasks, 181
+  compaction, below). Ticket 177 adds the main agent's flat `agent`/`usage`
   state frames (decoded from the frame text — their fields sit beside `type`;
   a child agent's are ignored until 182): `agent` → `SessionModelUpdated`
   (only when it names a model or effort — a model-less session omits both, a
@@ -133,7 +134,23 @@
   `{"kind":"approval","decision":…}`; `answerQuestion`:
   `{"kind":"question","answers":{…}}`; `dismissQuestion`:
   `{"kind":"question","dismissed":true}`, an ordinary code-0 success); `40404`/
-  `40902` surface as `DataError.Api` with the server message),
+  `40902` surface as `DataError.Api` with the server message). Ticket 181 folds
+  the `marker:"compaction"` items (`CompactionMarkerPayload`): `phase:"started"`
+  → `CompactionStarted(trigger, agentId)`, `phase:"completed"` →
+  `CompactionCompleted` with the `result` block (summary, counts, token delta);
+  both dedup by marker id like `undo`, so a resume replay never re-opens a
+  finished compaction. The context rewrite between them is a plain `undo`
+  splice (kept user messages dedup by id, the continuation injection is
+  dropped by the fold, the id-less `compaction_summary` by `ChatTimeline`).
+  There is no failure marker: the socket also emits the global
+  `event.session.work_changed` for its own session as
+  `SessionWorkChanged(busy)` (a payload without `busy` emits nothing), and the
+  ViewModel's `settleDroppedCompaction` ends a compacting state still open
+  when the session goes idle (`work_changed busy:false` or the `agent` frame's
+  idle `AgentBusyUpdated`) — `ChatTimeline.compactionAbandoned` removes only a
+  PENDING live divider. A done live divider is dropped by a keep-live refetch
+  whose history carries a divider with the same summary
+  (`pruneCoveredLiveRows`), so it never renders twice),
   `ModelsRepository` (models/config caches; catalog items map their optional
   `upgrade` retirement guidance — ticket 166 — and its `clientConfigs` fetches
   the two named cloud policies, `model_switch_confirm`/`effort_switch_confirm`,

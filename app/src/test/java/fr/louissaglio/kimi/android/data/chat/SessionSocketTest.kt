@@ -7,6 +7,9 @@ import fr.louissaglio.kimi.android.testutil.TranscriptFrames.agentFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.appendOp
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.approvalEntity
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.approvalFrame
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames.compactionCompletedOp
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames.compactionStartedOp
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames.compactionUndoOp
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.opsFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.promptOp
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.questionEntity
@@ -25,6 +28,7 @@ import fr.louissaglio.kimi.android.testutil.TranscriptFrames.turnOp
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.undoOp
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.usageFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.userMessage
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames.workChangedFrame
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.webSocketUpgradeResponse
 import java.time.Instant
@@ -920,6 +924,32 @@ class SessionSocketTest {
         )
 
         assertEquals(listOf(SessionEvent.TurnStarted()), emitted.sessionEvents())
+    }
+
+    @Test
+    fun `a compaction streams as its markers and this session's work_changed frames`() = runBlocking {
+        // Ticket 181, the 2.5.0 capture order: started marker, busy, the undo splice,
+        // completed marker, idle. Another session's work_changed and a payload without
+        // `busy` emit nothing.
+        val emitted = runSocketEvents(
+            opsFrame(compactionStartedOp(), seq = 32),
+            workChangedFrame(busy = true),
+            opsFrame(compactionUndoOp(kept = arrayOf(userMessage("msg_1", "kept"))), seq = 33),
+            opsFrame(compactionCompletedOp(summary = "Working summary."), seq = 34),
+            workChangedFrame(busy = false, sessionId = "session_2"),
+            """{"type":"event.session.work_changed","session_id":"session_1","payload":{"type":"event.session.work_changed"}}""",
+            workChangedFrame(busy = false),
+            eventCount = 5,
+            settleMillis = 200,
+        )
+
+        val events = emitted.sessionEvents()
+        assertEquals(5, events.size)
+        assertEquals(SessionEvent.CompactionStarted("manual"), events[0])
+        assertEquals(SessionEvent.SessionWorkChanged(busy = true), events[1])
+        assertEquals(listOf("msg_1", ""), (events[2] as SessionEvent.ContextSpliced).messages.map { it.id })
+        assertEquals("Working summary.", (events[3] as SessionEvent.CompactionCompleted).summary)
+        assertEquals(SessionEvent.SessionWorkChanged(busy = false), events[4])
     }
 
     @Test

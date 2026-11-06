@@ -270,6 +270,44 @@ object TranscriptFrames {
             """"payload":{"agentId":"main","start":0,"deleteCount":0,"messages":[${messages.joinToString(",")}]},""" +
             """"at":"2026-11-04T19:25:51.000Z"}}"""
 
+    /** The `started` compaction marker (ticket 181), after the verbatim 2.5.0 capture
+     * (docs/server-api.md, Compact → WebSocket sequence). */
+    fun compactionStartedOp(markerId: String = "live-m5", agentId: String = "main"): String =
+        """{"op":"marker.upsert","item":{"kind":"marker","markerId":"$markerId","marker":"compaction",""" +
+            """"payload":{"phase":"started","agentId":"$agentId","trigger":"manual"},"at":"2026-11-04T19:30:00.000Z"}}"""
+
+    /** The compaction's wholesale `undo` splice: [kept] user messages (JSON objects),
+     * then the summary (id-less, model-facing prefix) and the continuation injection. */
+    fun compactionUndoOp(markerId: String = "live-m6", vararg kept: String): String =
+        """{"op":"marker.upsert","item":{"kind":"marker","markerId":"$markerId","marker":"undo",""" +
+            """"payload":{"agentId":"main","start":0,"deleteCount":6,"messages":[""" +
+            (kept.toList() + listOf(
+                """{"role":"user","content":[{"type":"text","text":"The conversation so far has been compacted."}],""" +
+                    """"origin":{"kind":"compaction_summary"}}""",
+                """{"role":"user","content":[{"type":"text","text":"<system-reminder>Context compaction is complete.</system-reminder>"}],""" +
+                    """"origin":{"kind":"injection","variant":"compaction_continuation"}}""",
+            )).joinToString(",") +
+            """],"tokens":23493},"at":"2026-11-04T19:30:20.000Z"}}"""
+
+    /** The `completed` compaction marker with its `result` block. */
+    fun compactionCompletedOp(
+        summary: String = "the summary",
+        tokensBefore: Long = 22_745,
+        tokensAfter: Long = 23_493,
+        markerId: String = "live-m7",
+        agentId: String = "main",
+    ): String =
+        """{"op":"marker.upsert","item":{"kind":"marker","markerId":"$markerId","marker":"compaction",""" +
+            """"payload":{"phase":"completed","agentId":"$agentId","result":{"summary":"$summary","compactedCount":6,""" +
+            """"tokensBefore":$tokensBefore,"tokensAfter":$tokensAfter,"keptUserMessageCount":2}},""" +
+            """"at":"2026-11-04T19:30:21.000Z"}}"""
+
+    /** The global `event.session.work_changed` push (ticket 181). */
+    fun workChangedFrame(busy: Boolean, sessionId: String = "session_1"): String =
+        """{"type":"event.session.work_changed","session_id":"$sessionId","timestamp":"2026-11-04T19:30:22.000Z",""" +
+            """"payload":{"type":"event.session.work_changed","busy":$busy,"main_turn_active":false,""" +
+            """"pending_interaction":"none","last_turn_reason":"completed","agentId":"main","sessionId":"$sessionId"}}"""
+
     fun userMessage(id: String?, text: String): String =
         """{"role":"user","content":[{"type":"text","text":"$text"}],""" +
             (if (id != null) """"id":"$id",""" else "") + """"origin":{"kind":"user"}}"""

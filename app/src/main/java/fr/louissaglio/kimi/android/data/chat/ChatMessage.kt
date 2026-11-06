@@ -76,6 +76,6 @@ data class MessagePage(
 )
 
 /** `origin.kind` of the user message a compaction appends to history (bare summary,
- * docs/server-api.md, Compact) — and of the id-less summary in the `context.spliced`
- * rewrite (prefixed text there; both are kept out of the user-bubble path). */
+ * docs/server-api.md, Compact) — and of the id-less summary in the compaction's `undo`
+ * marker rewrite (prefixed text there; both are kept out of the user-bubble path). */
 const val ORIGIN_KIND_COMPACTION_SUMMARY = "compaction_summary"

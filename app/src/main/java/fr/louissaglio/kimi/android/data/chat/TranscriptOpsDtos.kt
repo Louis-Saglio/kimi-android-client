@@ -146,7 +146,8 @@ data class AppendTargetDto(
 
 /** A transcript marker (`marker.upsert`). [marker] `undo` carries a context splice in
  * [payload] (`{agentId,start,deleteCount,messages,tokens?}` — [UndoMarkerPayload]);
- * `compaction` and `swarm.*` markers are other tickets' business. */
+ * `compaction` a compaction phase ([CompactionMarkerPayload], ticket 181); `swarm.*`
+ * markers are other tickets' business. */
 @Serializable
 data class MarkerItemDto(
     val markerId: String = "",
@@ -163,6 +164,28 @@ data class UndoMarkerPayload(
     val start: Int = 0,
     val deleteCount: Int = 0,
     val messages: List<MessageDto> = emptyList(),
+)
+
+/** The `compaction` marker's payload (docs/server-api.md, Compact → WebSocket sequence —
+ * ticket 181): [phase] `started` carries [trigger] (`manual`; the request's
+ * `instruction` is not echoed), `completed` the [result] block. No other phase was
+ * observed on 2.5.0. */
+@Serializable
+data class CompactionMarkerPayload(
+    val phase: String = "",
+    val trigger: String? = null,
+    val result: CompactionResultDto? = null,
+)
+
+/** The completed compaction marker's `result` — the same five fields the removed
+ * `compaction.completed` frame carried. */
+@Serializable
+data class CompactionResultDto(
+    val summary: String = "",
+    val compactedCount: Int = 0,
+    val tokensBefore: Long = 0,
+    val tokensAfter: Long = 0,
+    val keptUserMessageCount: Int = 0,
 )
 
 /** An interaction entity (`interaction.upsert`, `transcript.reset.snapshot.interactions`,

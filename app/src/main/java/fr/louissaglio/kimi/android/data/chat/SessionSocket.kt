@@ -610,6 +610,11 @@ class SessionSocket @Inject constructor(
             // connection that sent task.watch; the watcher assembles them by offset.
             "task.output" -> decodeFlat<TaskOutputFrame>(frame.type, text)
                 ?.let { taskOutputsOf(sessionId).emit(TaskOutputChunk(it.agentId, it.taskId, it.offset, it.text)) }
+            // The global busy push (docs/server-api.md, Global events — ticket 181),
+            // already filtered to this session above. Only `busy` is read: its idle
+            // edge ends a compaction whose completed marker never came.
+            "event.session.work_changed" -> frame.decodePayload<ChatWorkChangedPayload>()
+                ?.busy?.let { onEvent(SessionEvent.SessionWorkChanged(it)) }
             // The other flat state frames (goal) are out of scope: ignored, but logged
             // so a server rename shows up during development.
             else -> Log.d(TAG, "Ignoring '${frame.type}' frame")

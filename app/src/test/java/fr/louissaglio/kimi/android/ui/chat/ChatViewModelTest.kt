@@ -1830,6 +1830,8 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             awaitState(viewModel.uiState) { it.items != null }
             while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
+            val compacting = CopyOnWriteArrayList<Boolean>()
+            val stateJob = launch { viewModel.uiState.collect { compacting += it.isCompacting } }
             viewModel.onCompact()
 
             awaitCondition { effects.isNotEmpty() }
@@ -1837,9 +1839,159 @@ class ChatViewModelTest : ChatViewModelTestBase() {
                 ChatViewModel.Effect.CompactionFailed("No messages to compact in current history."),
                 effects.single(),
             )
-            assertFalse(viewModel.uiState.value.isCompacting)
+            // Never entered the compacting state (ticket 181), and no divider shows.
+            Thread.sleep(100)
+            stateJob.cancel()
+            assertFalse(compacting.any { it })
+            assertTrue(viewModel.uiState.value.items!!.none { it is ChatItem.CompactionDivider })
         } finally {
             effectJob.cancel()
+        }
+    }
+
+    /** One user message in history, the shape the compaction tests start from. */
+    private fun historyBody(vararg extra: String): String =
+        """{"code":0,"msg":"success","data":{"items":[""" +
+            (extra.toList() + listOf(
+                """{"id":"msg_1","session_id":"session_1","role":"user",""" +
+                    """"content":[{"type":"text","text":"kept"}],""" +
+                    """"created_at":"2026-11-04T19:00:00.000Z","metadata":{"origin":{"kind":"user"}}}""",
+            )).joinToString(",") +
+            """],"has_more":false},"request_id":"r"}"""
+
+    @Test
+    fun `a compaction runs from the started marker to the completed one, the undo splice in between`() = runBlocking {
+        // Ticket 181: the verbatim 2.5.0 sequence — started marker, busy, the undo
+        // splice (kept message + summary + continuation injection), completed marker,
+        // idle. The undo renders no bubble and no second divider; the completed marker
+        // carries the summary and the token delta.
+        messagesBody = historyBody()
+        val effects = CopyOnWriteArrayList<ChatViewModel.Effect>()
+        val effectJob = launch { viewModel.effects.collect { effects += it } }
+        try {
+            viewModel.onScreenStarted()
+            val socket = awaitServerSocket()
+            awaitState(viewModel.uiState) { it.items != null }
+            while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+            viewModel.onCompact()
+            awaitRequest(":compact")
+            awaitState(viewModel.uiState) { it.isCompacting }
+
+            val kept = ChatItem.UserMessage("msg_1", "kept", createdAt = Instant.parse("2026-11-04T19:00:00.000Z"))
+            socket.send(TranscriptFrames.opsFrame(TranscriptFrames.compactionStartedOp(), seq = 32))
+            socket.send(TranscriptFrames.workChangedFrame(busy = true))
+            socket.send(
+                TranscriptFrames.opsFrame(
+                    TranscriptFrames.compactionUndoOp(kept = arrayOf(TranscriptFrames.userMessage("msg_1", "kept"))),
+                    seq = 33,
+                ),
+            )
+            awaitState(viewModel.uiState) {
+                it.isCompacting && it.items == listOf(kept, ChatItem.CompactionDivider(LIVE_COMPACTION_DIVIDER_ID, pending = true))
+            }
+
+            socket.send(TranscriptFrames.opsFrame(TranscriptFrames.compactionCompletedOp(summary = "Working summary."), seq = 34))
+            socket.send(TranscriptFrames.workChangedFrame(busy = false))
+            val done = ChatItem.CompactionDivider(
+                LIVE_COMPACTION_DIVIDER_ID,
+                pending = false,
+                tokensBefore = 22_745,
+                tokensAfter = 23_493,
+                summary = "Working summary.",
+            )
+            awaitState(viewModel.uiState) { !it.isCompacting && it.items == listOf(kept, done) }
+            awaitCondition { effects.isNotEmpty() }
+            val finished = effects.single() as ChatViewModel.Effect.CompactionFinished
+            assertTrue(finished.message, finished.message.startsWith("Context compacted: "))
+
+            // The late idle edge leaves the finished trace alone.
+            Thread.sleep(200)
+            assertEquals(listOf(kept, done), viewModel.uiState.value.items)
+        } finally {
+            effectJob.cancel()
+        }
+    }
+
+    @Test
+    fun `after a compaction the next history fetch renders exactly one summary divider`() = runBlocking {
+        // Ticket 181: the persisted summary pages in with the next turn's refetch; the
+        // live divider must not survive next to the history-sourced one.
+        messagesBody = historyBody()
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.compactionStartedOp(), seq = 32))
+        socket.send(
+            TranscriptFrames.opsFrame(
+                TranscriptFrames.compactionUndoOp(kept = arrayOf(TranscriptFrames.userMessage("msg_1", "kept"))),
+                seq = 33,
+            ),
+        )
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.compactionCompletedOp(summary = "Working summary."), seq = 34))
+        awaitState(viewModel.uiState) { state ->
+            state.items?.any { it is ChatItem.CompactionDivider && !it.pending } == true
+        }
+
+        messagesBody = historyBody(
+            """{"id":"msg_2","session_id":"session_1","role":"user",""" +
+                """"content":[{"type":"text","text":"Working summary."}],""" +
+                """"created_at":"2026-11-04T19:30:21.000Z","metadata":{"origin":{"kind":"compaction_summary"}}}""",
+        )
+        socket.send(turnStartedFrame())
+        socket.send(turnEndedFrame(reason = "completed"))
+        awaitRequest("/messages")
+
+        awaitState(viewModel.uiState) { state ->
+            state.items?.filterIsInstance<ChatItem.CompactionDivider>() ==
+                listOf(ChatItem.CompactionDivider("msg_2", pending = false, summary = "Working summary."))
+        }
+        assertEquals(1, viewModel.uiState.value.items!!.count { it is ChatItem.UserMessage })
+    }
+
+    @Test
+    fun `a compaction that never completes clears when the session goes idle`() = runBlocking {
+        // Ticket 181: there is no failure marker — a dropped compaction is the session
+        // going idle without the completed marker. The progress row must not stick.
+        messagesBody = historyBody()
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        viewModel.onCompact()
+        awaitRequest(":compact")
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.compactionStartedOp(), seq = 32))
+        socket.send(TranscriptFrames.workChangedFrame(busy = true))
+        awaitState(viewModel.uiState) { state ->
+            state.isCompacting && state.items?.any { it is ChatItem.CompactionDivider && it.pending } == true
+        }
+
+        socket.send(TranscriptFrames.workChangedFrame(busy = false))
+
+        awaitState(viewModel.uiState) { state ->
+            !state.isCompacting && state.items?.none { it is ChatItem.CompactionDivider } == true
+        }
+    }
+
+    @Test
+    fun `an idle agent frame also ends a compaction that never completed`() = runBlocking {
+        messagesBody = historyBody()
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.compactionStartedOp(), seq = 32))
+        socket.send(TranscriptFrames.agentFrame(status = "running"))
+        awaitState(viewModel.uiState) { it.isCompacting }
+
+        socket.send(TranscriptFrames.agentFrame(status = "idle"))
+
+        awaitState(viewModel.uiState) { state ->
+            !state.isCompacting && state.items?.none { it is ChatItem.CompactionDivider } == true
         }
     }
 

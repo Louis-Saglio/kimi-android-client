@@ -128,8 +128,8 @@ class ChatTimelineFuzzTest {
                     timeline.compactionCompleted("summary", 10, 5)
                 }
                 14 -> {
-                    log += "compactionFailed"
-                    timeline.compactionFailed()
+                    log += "compactionAbandoned"
+                    timeline.compactionAbandoned()
                 }
                 15 -> {
                     val id = toolIds.random(rnd)

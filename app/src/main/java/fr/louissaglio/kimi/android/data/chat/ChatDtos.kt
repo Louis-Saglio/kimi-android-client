@@ -213,6 +213,16 @@ data class AgentStateFrame(
 )
 
 /**
+ * `payload` of the global `event.session.work_changed` frame as the chat reads it
+ * (docs/server-api.md, Global events — ticket 181): only [busy]. Absent = unreadable,
+ * never "idle" — a drifted frame must not end a running compaction.
+ */
+@Serializable
+data class ChatWorkChangedPayload(
+    val busy: Boolean? = null,
+)
+
+/**
  * The flat `usage` state frame (docs/server-api.md, WebSocket → Session frames —
  * ticket 177): the agent's context fill, coalesced server-side to a few frames per
  * second. [maxContextTokens] is optional — absent or `0` is the engine's "unknown"

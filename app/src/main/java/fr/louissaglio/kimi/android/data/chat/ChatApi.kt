@@ -313,8 +313,8 @@ class ChatApi @Inject constructor(
     /**
      * Starts a compaction (`POST /api/v1/sessions/{id}:compact`, docs/server-api.md,
      * Compact — ticket 056). Fire-and-forget: the ack only confirms the request; the
-     * progress (`compaction.started` → `compaction.completed`) arrives over the
-     * WebSocket, so success carries no payload. The non-zero envelope `msg` (40910
+     * progress (the `compaction` transcript markers, started → completed — ticket
+     * 181) arrives over the WebSocket, so success carries no payload. The non-zero envelope `msg` (40910
      * empty session / turn active, 40401 unknown session) rides DataError.Api's
      * serverMessage to the snackbar unchanged.
      */

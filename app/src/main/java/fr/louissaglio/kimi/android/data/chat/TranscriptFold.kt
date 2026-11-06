@@ -26,7 +26,9 @@ import kotlinx.serialization.json.decodeFromJsonElement
  *   [SessionEvent.ToolCallResult] exactly once, on `done`/`error`;
  * - turns, steps and prompts: their last state, so a re-sent upsert never re-fires a
  *   transition (turn started/ended, step started/completed, prompt status);
- * - `undo` markers: the ids seen, so a replayed splice is not re-emitted.
+ * - `undo` and `compaction` markers: the ids seen, so a replayed splice or compaction
+ *   phase is not re-emitted (ticket 181: `started` → [SessionEvent.CompactionStarted],
+ *   `completed` → [SessionEvent.CompactionCompleted]).
  *
  * Events carry the batch's `agent_id`; the collectors route non-main agents to the
  * sub-agent stream store. A turn's frame state is pruned when the turn ends. Not
@@ -363,12 +365,19 @@ internal class TranscriptFold(
     }
 
     private fun onMarker(agentId: String, item: MarkerItemDto, events: MutableList<SessionEvent>) {
-        if (item.marker != MARKER_UNDO) {
-            // `compaction` (ticket 181), `swarm.*`: not this fold's business.
-            Log.d(TAG, "Ignoring '${item.marker}' marker")
-            return
+        when (item.marker) {
+            MARKER_UNDO, MARKER_COMPACTION -> Unit
+            else -> {
+                // `swarm.*`: not this fold's business.
+                Log.d(TAG, "Ignoring '${item.marker}' marker")
+                return
+            }
         }
         if (!seenMarkers.add(Key(agentId, item.markerId))) return
+        if (item.marker == MARKER_COMPACTION) {
+            onCompactionMarker(agentId, item, events)
+            return
+        }
         val payload = item.payload?.let {
             runCatching { json.decodeFromJsonElement<UndoMarkerPayload>(it) }
                 .onFailure { e -> Log.w(TAG, "Dropping undecodable undo marker '${item.markerId}'", e) }
@@ -382,9 +391,36 @@ internal class TranscriptFold(
         if (messages.isNotEmpty()) events += SessionEvent.ContextSpliced(messages, agentId)
     }
 
+    /** A `compaction` marker (ticket 181): `started` → [SessionEvent.CompactionStarted],
+     * `completed` → [SessionEvent.CompactionCompleted] with its `result`. The context
+     * rewrite between them is the `undo` marker, folded like any splice. A completed
+     * marker without a result, or an unknown phase, emits nothing. */
+    private fun onCompactionMarker(agentId: String, item: MarkerItemDto, events: MutableList<SessionEvent>) {
+        val payload = item.payload?.let {
+            runCatching { json.decodeFromJsonElement<CompactionMarkerPayload>(it) }
+                .onFailure { e -> Log.w(TAG, "Dropping undecodable compaction marker '${item.markerId}'", e) }
+                .getOrNull()
+        } ?: return
+        when (payload.phase) {
+            "started" -> events += SessionEvent.CompactionStarted(payload.trigger.orEmpty(), agentId)
+            "completed" -> payload.result?.let { result ->
+                events += SessionEvent.CompactionCompleted(
+                    summary = result.summary,
+                    compactedCount = result.compactedCount,
+                    tokensBefore = result.tokensBefore,
+                    tokensAfter = result.tokensAfter,
+                    keptUserMessageCount = result.keptUserMessageCount,
+                    agentId = agentId,
+                )
+            } ?: Log.w(TAG, "Dropping completed compaction marker '${item.markerId}' without a result")
+            else -> Log.w(TAG, "Dropping compaction marker '${item.markerId}' with unknown phase '${payload.phase}'")
+        }
+    }
+
     private companion object {
         const val TAG = "TranscriptFold"
         const val MARKER_UNDO = "undo"
+        const val MARKER_COMPACTION = "compaction"
         const val ORIGIN_KIND_INJECTION = "injection"
 
         // Ticket 155's footer vocabulary (ChatTimeline.turnEndCopy).

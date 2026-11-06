@@ -257,8 +257,10 @@ class ChatViewModel internal constructor(
         /** True while an older history page loads; the list shows a header spinner. */
         val isLoadingMoreHistory: Boolean = false,
         /** True while a compaction runs (ticket 056): set optimistically on the POST
-         * ack, cleared by compaction.completed/failed. Gates the menu item — a second
-         * compact is a silent no-op server-side, so the client must prevent it. */
+         * ack and by the `started` compaction marker, cleared by the `completed` one —
+         * or, when that never comes, by the session going idle (ticket 181). Gates the
+         * menu item — a second compact is a silent no-op server-side, so the client
+         * must prevent it. */
         val isCompacting: Boolean = false,
     ) {
         /** Top-bar label: the loaded title (or cwd basename), falling back to the raw
@@ -397,7 +399,8 @@ class ChatViewModel internal constructor(
         data class CompactionFinished(override val message: String) : Effect
 
         /** The compact POST failed (e.g. the empty-session 40910 — the server's own
-         * message) or a compaction ended with failed/cancelled/blocked. */
+         * message). A compaction that starts and then never completes has no failure
+         * signal on the wire (ticket 181): its progress row just goes away. */
         data class CompactionFailed(override val message: String) : Effect
 
         /** The `task.stop` control failed (ticket 179 — an error reply such as
@@ -1077,13 +1080,24 @@ class ChatViewModel internal constructor(
         }
     }
 
+    /** The stream went idle (`agent` idle / `work_changed` busy:false — ticket 181)
+     * while still compacting: the completed marker never came (the server has no
+     * failure marker), so the progress row goes and the menu item re-enables. After a
+     * completed marker this is a no-op — isCompacting is already false. */
+    private fun settleDroppedCompaction() {
+        if (!uiState.value.isCompacting) return
+        timeline.compactionAbandoned()
+        uiState.update { it.copy(isCompacting = false, items = timeline.items()) }
+    }
+
     /**
      * POSTs `:compact` (ticket 056). No-ops while a turn runs or a compaction is in
      * progress — the server rejects the former (40910) and silently no-ops the latter,
      * so the guard is the only feedback; the menu item is disabled in both states too.
      * On the ack the compacting state is set optimistically; the socket's
-     * compaction.started/completed frames drive the divider and clear it. A failure
-     * (empty session, web-started turn) surfaces the server's own message.
+     * `compaction` transcript markers (started/completed, ticket 181) drive the
+     * divider and clear it. A failure (empty session, web-started turn) surfaces the
+     * server's own message and never enters the compacting state.
      */
     fun onCompact() {
         val state = uiState.value
@@ -1406,7 +1420,12 @@ class ChatViewModel internal constructor(
                 } else {
                     runningTools.clear()
                     uiState.update { it.copy(agentActiveSince = null, runningTool = null) }
+                    settleDroppedCompaction()
                 }
+            // The global busy push for this session (ticket 181): only its idle edge
+            // matters here — it ends a compaction whose completed marker never came.
+            is SessionEvent.SessionWorkChanged ->
+                if (!event.busy) settleDroppedCompaction()
             // The `agent` frame's binding (ticket 177, after 107): the first frame is the
             // seed, later ones follow bindings made from any client.
             is SessionEvent.SessionModelUpdated ->
@@ -1417,10 +1436,12 @@ class ChatViewModel internal constructor(
             // (ticket 141); the store read is the recreation-proof half of that guard.
             is SessionEvent.SessionPermissionUpdated ->
                 syncServerSessionPermission(event.permission, chatRepository.getSessionPermission(sessionId))
-            // Compaction (ticket 056): no turn events fire for it — these frames alone
-            // drive the divider and the compacting state. Started also arrives for
-            // compactions triggered from another client (the TUI's /compact), so it —
-            // not only our POST ack — sets isCompacting.
+            // Compaction (ticket 056; transcript markers since ticket 181): no turn ops
+            // fire for it — the `compaction` markers alone drive the divider and the
+            // compacting state, the `undo` marker between them is a plain splice (kept
+            // messages dedup, the summary is dropped: this divider owns the trace).
+            // Started also arrives for compactions triggered from another client (the
+            // TUI's /compact), so it — not only our POST ack — sets isCompacting.
             is SessionEvent.CompactionStarted -> {
                 timeline.compactionStarted()
                 uiState.update { it.copy(isCompacting = true, items = timeline.items()) }
@@ -1434,11 +1455,6 @@ class ChatViewModel internal constructor(
                             "${formatTokenCount(event.tokensAfter)} tokens",
                     ),
                 )
-            }
-            is SessionEvent.CompactionFailed -> {
-                timeline.compactionFailed()
-                uiState.update { it.copy(isCompacting = false, items = timeline.items()) }
-                _effects.send(Effect.CompactionFailed(event.cause ?: "Compaction failed"))
             }
             is SessionEvent.ToolCallStarted -> {
                 // First sight only: a re-emit (args/display now known) keeps the start.

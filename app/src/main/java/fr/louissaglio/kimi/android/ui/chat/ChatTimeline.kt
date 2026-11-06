@@ -377,14 +377,19 @@ class ChatTimeline(
 
     /** Drops the live rows a refetch has since committed, so [keepLive]-style replaces
      * never show a row twice: tool rows dedup by call id (a half-committed group keeps
-     * its survivors under the first one's id), assistant bubbles by exact content. */
+     * its survivors under the first one's id), assistant bubbles by exact content, and
+     * a done live compaction divider by its summary (ticket 181: the completed marker's
+     * `result.summary` is the bare text history persists — a refetch landing after the
+     * compaction, mid-turn, carries the canonical divider). */
     private fun pruneCoveredLiveRows() {
         val committedToolIds = mutableSetOf<String>()
         val committedBubbles = mutableListOf<ChatItem.AssistantMessage>()
+        val committedSummaries = mutableSetOf<String?>()
         for (index in 0 until liveStart) {
             when (val item = rows[index]) {
                 is ChatItem.ToolGroup -> item.tools.forEach { committedToolIds += it.id }
                 is ChatItem.AssistantMessage -> committedBubbles += item
+                is ChatItem.CompactionDivider -> committedSummaries += item.summary
                 else -> Unit
             }
         }
@@ -401,6 +406,10 @@ class ChatTimeline(
                 }
                 is ChatItem.AssistantMessage ->
                     if (committedBubbles.any { it.text == item.text && it.thinking == item.thinking }) {
+                        rows.removeAt(index)
+                    }
+                is ChatItem.CompactionDivider ->
+                    if (!item.pending && item.summary != null && item.summary in committedSummaries) {
                         rows.removeAt(index)
                     }
                 else -> Unit
@@ -422,7 +431,7 @@ class ChatTimeline(
                     liveStart = rows.size
                 }
                 // The footer closed the PREVIOUS turn (ticket 155) — a new one starts
-                // clean. Removal keeps the committed/live boundary like compactionFailed.
+                // clean. Removal keeps the committed/live boundary like compactionAbandoned.
                 turnEndLabel = null
                 val turnEndIndex = rows.indexOfFirst { it.id == TURN_END_ROW_ID }
                 if (turnEndIndex >= 0) {
@@ -507,7 +516,8 @@ class ChatTimeline(
     }
 
     /**
-     * `compaction.started` (ticket 056): a pending divider at the tail — or the previous
+     * The `started` compaction marker (ticket 056, marker-driven since 181): a pending
+     * divider at the tail — or the previous
      * run's done divider reset to pending (one constant id: the server runs one
      * compaction per session at a time, so successive runs reuse the row rather than
      * stacking keys). The row lives in the LIVE tail on purpose: a mid-compaction
@@ -521,7 +531,7 @@ class ChatTimeline(
         if (index >= 0) rows[index] = pending else rows += pending
     }
 
-    /** `compaction.completed`: the pending divider flips to done with the token delta
+    /** The `completed` compaction marker: the pending divider flips to done with the token delta
      * and the summary. With no pending row (the app subscribed mid-run), the done row
      * is appended directly — the compaction still gets its timeline trace. */
     fun compactionCompleted(summary: String, tokensBefore: Long, tokensAfter: Long) {
@@ -536,14 +546,15 @@ class ChatTimeline(
         if (index >= 0) rows[index] = done else rows += done
     }
 
-    /** `compaction.failed`/`cancelled`/`blocked`: the pending divider is removed — the
-     * error snackbar (ViewModel) carries the feedback instead. The removal keeps the
+    /** A compaction that never completed (ticket 181 — the session went idle without a
+     * `completed` marker; the server sends no failure marker): the PENDING divider is
+     * removed, a done one (a previous run's trace) stays. The removal keeps the
      * committed/live boundary: a divider sealed into the committed zone (a
      * non-history-backed timeline's turn.started moved it there) shifts [liveStart]
      * with it, or later boundary walks read past the row list. */
-    fun compactionFailed() {
+    fun compactionAbandoned() {
         val index = rows.indexOfFirst { it.id == LIVE_COMPACTION_DIVIDER_ID }
-        if (index < 0) return
+        if (index < 0 || (rows[index] as? ChatItem.CompactionDivider)?.pending != true) return
         rows.removeAt(index)
         if (index < liveStart) liveStart--
     }

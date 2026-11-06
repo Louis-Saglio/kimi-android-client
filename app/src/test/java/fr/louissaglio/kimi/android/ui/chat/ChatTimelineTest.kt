@@ -1753,12 +1753,12 @@ class ChatTimelineTest {
     }
 
     @Test
-    fun `compaction started, completed and failed drive the live divider`() {
+    fun `compaction started, completed and abandoned drive the live divider`() {
         val timeline = testChatTimeline()
         timeline.replaceHistory(listOf(userMessage("msg_1", "hi")), keepLive = false)
 
         timeline.compactionStarted()
-        // Idempotent: a cursor replay of the started frame stacks no second row.
+        // Idempotent: a replayed started marker stacks no second row.
         timeline.compactionStarted()
         assertEquals(
             listOf(
@@ -1783,16 +1783,45 @@ class ChatTimelineTest {
             timeline.items(),
         )
 
-        // A second run resets the done row to pending; when it FAILS the divider is
-        // removed (the error snackbar carries the feedback) — the next resync restores
-        // the first run's trace from the persisted summary in history.
+        // Abandoning after completion (a late idle edge) keeps the done trace.
+        timeline.compactionAbandoned()
+        assertEquals(2, timeline.items().size)
+
+        // A second run resets the done row to pending; when it never completes (ticket
+        // 181 — the session goes idle without a completed marker) the divider is
+        // removed — the next resync restores the first run's trace from the persisted
+        // summary in history.
         timeline.compactionStarted()
         assertEquals(
             ChatItem.CompactionDivider(LIVE_COMPACTION_DIVIDER_ID, pending = true),
             timeline.items().last(),
         )
-        timeline.compactionFailed()
+        timeline.compactionAbandoned()
         assertEquals(listOf(ChatItem.UserMessage("msg_1", "hi")), timeline.items())
+    }
+
+    @Test
+    fun `a keep-live refetch after a completed compaction keeps one divider, the history one`() {
+        // Ticket 181: the compaction finished, then a resync lands while a turn runs
+        // (keepLive). History now carries the persisted summary — the live done divider
+        // with the same summary must not render a second time.
+        val timeline = testChatTimeline()
+        timeline.replaceHistory(listOf(userMessage("msg_1", "hi")), keepLive = false)
+        timeline.compactionStarted()
+        timeline.compactionCompleted("the summary", tokensBefore = 22_745, tokensAfter = 23_493)
+
+        timeline.replaceHistory(
+            listOf(userMessage("msg_1", "hi"), compactionSummaryMessage("msg_2", "the summary")),
+            keepLive = true,
+        )
+
+        assertEquals(
+            listOf(
+                ChatItem.UserMessage("msg_1", "hi"),
+                ChatItem.CompactionDivider("msg_2", pending = false, summary = "the summary"),
+            ),
+            timeline.items(),
+        )
     }
 
     @Test
@@ -1868,7 +1897,7 @@ class ChatTimelineTest {
         )
 
         // No bubble for the summary, no duplicate of the kept message, no divider either
-        // (the live pending divider from compaction.started owns the trace).
+        // (the live pending divider from the started marker owns the trace).
         assertEquals(listOf(ChatItem.UserMessage("msg_1", "kept")), timeline.items())
     }
 

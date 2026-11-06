@@ -292,24 +292,35 @@ sealed interface SessionEvent {
         override val agentId: String = MAIN_AGENT_ID,
     ) : SessionEvent, AgentScopedEvent
 
-    /** `compaction.started` (docs/server-api.md, Compact — ticket 056): the server
-     * began summarizing the session — no turn events, compaction is not a turn. */
-    data class CompactionStarted(val trigger: String, val instruction: String?) : SessionEvent
+    /** A `marker:"compaction"` transcript item with `phase:"started"` (docs/server-api.md,
+     * Compact → WebSocket sequence — server 2.5.0, ticket 181; before: ticket 056's
+     * `compaction.started`): the server began summarizing [agentId]'s context — no turn
+     * ops, compaction is not a turn. [trigger] is `manual` for a `:compact`. */
+    data class CompactionStarted(
+        val trigger: String,
+        override val agentId: String = MAIN_AGENT_ID,
+    ) : SessionEvent, AgentScopedEvent
 
-    /** `compaction.completed`: carries the result — the summary (also persisted to
-     * history) and the token delta of the compacted span. */
+    /** The `phase:"completed"` compaction marker: its `result` block — the summary (also
+     * persisted to history) and the token delta of the compacted span. The context
+     * rewrite itself rides the `undo` marker between the two (a [ContextSpliced]). There
+     * is no failure marker: a compaction that never completes shows only as the stream
+     * going idle ([AgentBusyUpdated] / [SessionWorkChanged]) without this event. */
     data class CompactionCompleted(
         val summary: String,
         val compactedCount: Int,
         val tokensBefore: Long,
         val tokensAfter: Long,
         val keptUserMessageCount: Int,
-    ) : SessionEvent
+        override val agentId: String = MAIN_AGENT_ID,
+    ) : SessionEvent, AgentScopedEvent
 
-    /** `compaction.failed`/`cancelled`/`blocked` ([kind] is the wire event type): any
-     * of them ends the compacting state. [cause] is the payload's best-effort message;
-     * null when the (unverified) shape carried none. */
-    data class CompactionFailed(val kind: String, val cause: String?) : SessionEvent
+    /** The global `event.session.work_changed` frame for THIS session (docs/server-api.md,
+     * Global events — ticket 181): [busy] covers turns AND compactions (a compaction
+     * reads `busy:true`, `main_turn_active:false` for its whole run), so `busy:false` is
+     * the session going idle — the signal that ends a compaction whose completed marker
+     * never came. Not journaled, never replayed. */
+    data class SessionWorkChanged(val busy: Boolean) : SessionEvent
 
     /** `task.list` (docs/server-api.md, Sub-agents → Task frames and controls — server
      * 2.5.0, ticket 179): every RUNNING task of [agentId] (the OWNING agent — "main",
