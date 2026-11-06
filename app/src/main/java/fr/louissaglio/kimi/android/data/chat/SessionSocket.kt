@@ -37,8 +37,10 @@ import okhttp3.WebSocketListener
  * The session WebSocket (`/api/v1/ws`, docs/server-api.md → WebSocket): connection
  * management (reconnect loop, backoff, stall watchdog), the `subscribe_v2` frame, and
  * frame dispatch — `transcript.ops` batches folded into [SessionEvent]s by the
- * session's [TranscriptFold] (server 2.5.0, ticket 175) — plus the per-agent resume
- * watermarks every subscribe sends back as `transcript_since` (ticket 176).
+ * session's [TranscriptFold] (server 2.5.0, ticket 175), the main agent's flat `agent`/
+ * `usage` state frames mapped to its model/permission/busy/context events (ticket 177)
+ * — plus the per-agent resume watermarks every subscribe sends back as
+ * `transcript_since` (ticket 176).
  */
 @Singleton
 class SessionSocket @Inject constructor(
@@ -336,9 +338,21 @@ class SessionSocket @Inject constructor(
             // watchdog's threshold (3× — ticket 152); the rest of the payload is unused.
             "server_hello" -> frame.decodePayload<ServerHelloPayload>()
                 ?.heartbeatMs?.let { context.watchdog.onServerHello(it) }
-            // The flat state frames (agent, usage, goal, todo, task.list, task,
-            // interaction) are tickets 171/172/177–182: ignored, but logged so a server
-            // rename shows up during development.
+            // The flat agent/usage state frames (docs/server-api.md, Session frames —
+            // ticket 177): sent before the subscribe ack (the chat's seed) and again on
+            // every change. Their fields sit beside `type`, so the frame text itself is
+            // decoded. Only the main agent's feed the chat; a child's are ticket 182's.
+            "agent" -> decodeFlat<AgentStateFrame>(frame.type, text)
+                ?.takeIf { it.agentId == MAIN_AGENT_ID }
+                ?.toSessionEvents()
+                ?.forEach { onEvent(it) }
+            "usage" -> decodeFlat<UsageFrame>(frame.type, text)
+                ?.takeIf { it.agentId == MAIN_AGENT_ID }
+                ?.toSessionEvent()
+                ?.let { onEvent(it) }
+            // The other flat state frames (goal, todo, task.list, task, interaction)
+            // are tickets 171/172/178–182: ignored, but logged so a server rename shows
+            // up during development.
             else -> Log.d(TAG, "Ignoring '${frame.type}' frame")
         }
         return true
@@ -350,6 +364,11 @@ class SessionSocket @Inject constructor(
                 .onFailure { e -> Log.w(TAG, "Dropping undecodable '$type' payload", e) }
                 .getOrNull()
         }
+
+    private inline fun <reified T> decodeFlat(type: String, text: String): T? =
+        runCatching { json.decodeFromString<T>(text) }
+            .onFailure { e -> Log.w(TAG, "Dropping undecodable '$type' frame", e) }
+            .getOrNull()
 
     private fun buildWsUrl(settings: ServerSettings): HttpUrl? =
         // OkHttp's HttpUrl holds only http/https; newWebSocket derives ws/wss itself.
@@ -386,4 +405,33 @@ class SessionSocket @Inject constructor(
 
         fun backoffMillis(attempt: Int): Long = (1_000L shl attempt).coerceAtMost(30_000L)
     }
+}
+
+/**
+ * The `agent` state frame → the chat's events (ticket 177): the model/effort binding
+ * when the frame names either (blank or absent = "nothing said" — a model-less session
+ * omits both), the effective permission mode, and the busy state (`running`/`idle`; an
+ * unknown status emits nothing). The mode booleans are not mapped (ticket 174 owns
+ * swarm mode).
+ */
+internal fun AgentStateFrame.toSessionEvents(): List<SessionEvent> = buildList {
+    val boundModel = model?.takeIf { it.isNotBlank() }
+    val boundEffort = thinking?.takeIf { it.isNotBlank() }
+    if (boundModel != null || boundEffort != null) {
+        add(SessionEvent.SessionModelUpdated(boundModel, boundEffort, agentId))
+    }
+    permissionMode?.takeIf { it.isNotBlank() }?.let { add(SessionEvent.SessionPermissionUpdated(it, agentId)) }
+    when (status) {
+        "running" -> add(SessionEvent.AgentBusyUpdated(running = true, agentId = agentId))
+        "idle" -> add(SessionEvent.AgentBusyUpdated(running = false, agentId = agentId))
+    }
+}
+
+/** The `usage` state frame → [SessionEvent.ContextUsageUpdated] (ticket 177), only
+ * with the used tokens AND a positive limit: an absent/zero `max_context_tokens` is
+ * "unknown" and must never render a 0/0 ring. */
+internal fun UsageFrame.toSessionEvent(): SessionEvent? {
+    val used = contextTokens ?: return null
+    val max = maxContextTokens?.takeIf { it > 0 } ?: return null
+    return SessionEvent.ContextUsageUpdated(ContextUsage(used, max), agentId)
 }

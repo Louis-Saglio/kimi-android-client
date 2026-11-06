@@ -68,7 +68,7 @@ internal val PermissionMode.tint: Color
 /** Permission-mode picker bottom sheet (ticket 141), the ModelPickerSheet pattern
  * reduced to the server's three static modes: one row per mode — icon, label,
  * description — with a check on the current value (the local pick, else the
- * /status-seeded server mode). In the chat a tap selects and dismisses; there is no
+ * server-reported mode). In the chat a tap selects and dismisses; there is no
  * confirmation even for Never Ask (web parity — the error tint carries the risk
  * signal). Settings reuses the sheet (ticket 142) to edit the SERVER default: a tap
  * persists through the ViewModel and the caller keeps the sheet open, the check

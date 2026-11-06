@@ -20,6 +20,36 @@ object TranscriptFrames {
         """{"type":"ack","id":"$id","code":0,"msg":"success","payload":{"accepted":${jsonList(accepted)},""" +
             """"not_found":${jsonList(notFound)}}}"""
 
+    /** The flat `agent` state frame (ticket 177), shaped after the verbatim capture;
+     * a null [model]/[thinking]/[permissionMode] omits the key (a model-less session
+     * omits both binding fields). */
+    fun agentFrame(
+        status: String = "idle",
+        model: String? = null,
+        thinking: String? = null,
+        permissionMode: String? = "auto",
+        agentId: String = "main",
+        sessionId: String = "session_1",
+    ): String =
+        """{"type":"agent","session_id":"$sessionId","agent_id":"$agentId",""" +
+            """"event_created_at":"2026-11-04T19:25:52.678Z","status":"$status",""" +
+            (model?.let { """"model":"$it",""" } ?: "") +
+            (thinking?.let { """"thinking":"$it",""" } ?: "") +
+            (permissionMode?.let { """"permission_mode":"$it",""" } ?: "") +
+            """"plan_mode":false,"swarm_mode":false,"tower_mode":false}"""
+
+    /** The flat `usage` state frame (ticket 177); a null [maxContextTokens] omits the
+     * optional limit. */
+    fun usageFrame(
+        contextTokens: Long,
+        maxContextTokens: Long? = 1_000_000,
+        agentId: String = "main",
+        sessionId: String = "session_1",
+    ): String =
+        """{"type":"usage","session_id":"$sessionId","agent_id":"$agentId",""" +
+            """"event_created_at":"2026-11-04T19:25:52.679Z","context_tokens":$contextTokens""" +
+            (maxContextTokens?.let { ""","max_context_tokens":$it""" } ?: "") + "}"
+
     fun promptOp(promptId: String, status: String, extra: String = ""): String =
         """{"op":"prompt.upsert","prompt":{"promptId":"$promptId","status":"$status","userMessageId":"$promptId",""" +
             """"content":[{"type":"text","text":"hi"}],"createdAt":"2026-11-04T19:25:50.000Z"$extra}}"""

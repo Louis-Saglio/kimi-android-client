@@ -61,7 +61,7 @@ internal fun ChatInputBar(
     /** The chip's effective effort (ticket 108); null on effort-less models. */
     modelEffort: String?,
     /** The session's effective permission mode (ticket 141); null hides the chip
-     * until the /status seed or a stored pick lands. */
+     * until the `agent` frame or a stored pick lands. */
     permissionMode: PermissionMode?,
     contextUsage: ContextUsage?,
     compactEnabled: Boolean,

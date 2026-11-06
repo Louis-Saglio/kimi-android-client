@@ -52,27 +52,36 @@
   `PromptUpdated` (status + derived queue length, replacing 154's
   submitted/queued/started); an `undo` marker is the `ContextSpliced` echo
   (injections dropped). Every event carries the batch's `agent_id`, so
-  sub-agent ops route to the store exactly as before. Since 175 the socket
-  feeds ONLY these transcript events: the legacy frame branches (approval/
-  question/agent-status/task/subagent/compaction families) are deleted, and
-  the domain events documented below for those features have no live feed
-  until tickets 171/172/177–182 re-feed them from the 2.5.0 frames),
+  sub-agent ops route to the store exactly as before. Since 175 the legacy
+  frame branches (approval/question/agent-status/task/subagent/compaction
+  families) are deleted, and the domain events documented below for those
+  features have no live feed until tickets 171/172/178–182 re-feed them from
+  the 2.5.0 frames. Ticket 177 adds the main agent's flat `agent`/`usage`
+  state frames (decoded from the frame text — their fields sit beside `type`;
+  a child agent's are ignored until 182): `agent` → `SessionModelUpdated`
+  (only when it names a model or effort — a model-less session omits both, a
+  blank is "nothing said"), `SessionPermissionUpdated` and `AgentBusyUpdated`
+  (`running`/`idle`); `usage` → `ContextUsageUpdated` only with a positive
+  `max_context_tokens` (absent/zero = unknown, never a 0/0 ring). They precede
+  the subscribe ack, so the first pair is the chat's seed — there is no REST
+  status read (`/status` is gone)),
   `ModelsRepository` (models/config caches; catalog items map their optional
   `upgrade` retirement guidance — ticket 166 — and its `clientConfigs` fetches
   the two named cloud policies, `model_switch_confirm`/`effort_switch_confirm`,
   fresh per chat model-data load — tickets 167/170; `config(settings)` also maps
   the config `models` alias → upstream id map the switch rules match),
   `SessionPrefsStore` (per-session model/effort prefs — server-synced since
-  ticket 107: `/status` seeds and `agent.status.updated` frames write the
-  session's bound model/effort through to it, so the chip and the prompt send
+  ticket 107: the `agent` frame — `/status` and `agent.status.updated` before
+  ticket 177 — writes the session's bound model/effort through to it, so the chip and the prompt send
   path — both store-fed — follow bindings made from any client; a pick made
   locally but not yet sent wins over server reports — plus the ticket-141
-  permission-mode pick, which is deliberately NOT server-synced: `/status`
+  permission-mode pick, which is deliberately NOT server-synced: the server
   always reports a mode, so write-through would turn follow-the-server
   sessions into stamped ones; the stored pick wins over the report and
-  self-heals via the per-prompt `permission_mode` stamp. Since ticket 165 the
-  live `agent.status.updated` `permission` variant follows the same guard for
-  the chip — read-only, never written through), `ChatMessageMapper`
+  self-heals via the per-prompt `permission_mode` stamp. The `agent` frame's
+  `permission_mode` (ticket 177, after 165's live variant) follows the same
+  guard for the chip — read-only, never written through; the ViewModel shows
+  the stored pick on every start, ahead of the frame), `ChatMessageMapper`
   (DTO→domain; a tool call's raw `args` JsonObject rides the domain/end-to-end
   models — `tool_use` parts, `ToolCallStarted` events, transcript tool frames,
   `ChatItem.ToolActivity` — and payload-derived display renderings live in
@@ -331,13 +340,19 @@
   callback only (REST `/tasks:cancel` is main-agent-only): bash rows open the
   job screen's store-backed mode (ticket 098), wired exactly like the chat's.
   The live activity status line (ticket 148) is smaller than a collaborator and
-  follows the 058 `StepRetry` precedent: the socket maps `agent.status.updated`'s
-  phase variant to `SessionEvent.AgentStatusUpdated` (domain `AgentPhase` — the
-  seven 2.0.2 kinds; unknown kinds drop at the mapper), the ViewModel reduces it
-  to `UiState.activityStatus` (label + the phase's `since`; `interrupted`/
-  `idle`/`ended` → null, a turn end clears), and `ActivityStatusLine`
+  follows the 058 `StepRetry` precedent. Since 2.5.0 (ticket 177) the server
+  reports no phase — only the `agent` frame's busy `status` — so
+  `UiState.activityStatus` is a computed property over the transcript state:
+  null unless `agentActiveSince` is set (`running`; `idle` and a turn end
+  clear it), then a pending approval → "Waiting for approval", a pending
+  question → "Waiting for your answer", a step retry → "Retrying…", the
+  newest still-running main tool (`UiState.runningTool`, fed by the
+  ViewModel's `runningTools` map from the live tool events and re-seeded from
+  the cold start's running turn) → "Running X…", a running turn →
+  "Thinking…", else (busy with no turn — background work) "Working in
+  background…"; `ActivityStatusLine`
   (ui/chat/components) renders it directly above the composer — spinner leading
-  icon, elapsed `mm:ss` ticking from a 1 s ticker that lives only while a phase
+  icon, elapsed `mm:ss` ticking from a 1 s ticker that lives only while a status
   is shown.
 - Send-path recovery and cloud switch gates (tickets 167–170): the composer's
   model/effort taps go through `ChatViewModel.onModelPicked`/`onEffortPicked`,
@@ -389,9 +404,9 @@
   the cards' queues (approval request camelCase, question request the snake_case
   question payload; card id = the interaction id), each guarded against a live
   event overtaking the fetch. A turn event landing mid-fetch (a resync with the
-  socket open) keeps the live tail as-is. Every cold start still re-reads /status
-  for the bound model/effort and the ring (107/161 — ticket 177 moves them to the
-  `agent`/`usage` frames).
+  socket open) keeps the live tail as-is. The bound model/effort, permission
+  mode, busy state and ring are not part of the cold start: the subscribe's
+  `agent`/`usage` frames seed them (ticket 177).
   The fetch is cached per session only until the session is LEFT:
   `SubagentStreamStore.release` calls `TranscriptColdStart.forget`, so the next entry
   re-fetches (one cheap round per entry — no process-lifetime cache of mutable

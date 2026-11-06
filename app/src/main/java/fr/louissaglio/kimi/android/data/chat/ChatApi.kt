@@ -324,29 +324,6 @@ class ChatApi @Inject constructor(
             api.json.decodeFromString<Envelope<JsonObject>>(body).toAckResult()
         }
 
-    /** Lightweight live status (`GET /api/v1/sessions/{id}/status`): the mid-turn flag
-     * and the context window fill (ticket 041). A data-less success envelope degrades
-     * to "not busy, fill unknown" (see SessionStatus). */
-    suspend fun sessionStatus(settings: ServerSettings, sessionId: String): Result<SessionStatus> =
-        api.get(settings, "/api/v1/sessions/$sessionId/status") { body ->
-            api.json.decodeFromString<Envelope<SessionStatusData>>(body).toNullableResult().map { data ->
-                SessionStatus(
-                    busy = data?.busy == true,
-                    // 0.34.0: max_context_tokens is omittable, 0 decodes as the unknown
-                    // marker — drop the usage instead of leaking a phantom 0/0 fill.
-                    contextUsage = data?.takeIf { it.maxContextTokens > 0 }
-                        ?.let { ContextUsage(it.contextTokens, it.maxContextTokens) },
-                    // The session's binding (ticket 107): a blank thinking_level is a
-                    // fresh session's "none", never a value to store.
-                    model = data?.model?.takeIf { it.isNotBlank() },
-                    thinkingLevel = data?.thinkingLevel?.takeIf { it.isNotBlank() },
-                    // Permission mode (ticket 141): always reported (a fresh session
-                    // reads the server default) — same blank guard regardless.
-                    permission = data?.permission?.takeIf { it.isNotBlank() },
-                )
-            }
-        }
-
     /**
      * Lists the session's background tasks (`GET /api/v1/sessions/{id}/tasks`,
      * docs/server-api.md, REST /tasks — ticket 092): background sub-agents and bash;

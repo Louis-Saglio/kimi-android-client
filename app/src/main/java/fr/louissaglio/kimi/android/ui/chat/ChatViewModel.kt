@@ -11,7 +11,6 @@ import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.toUserMessage
 import fr.louissaglio.kimi.android.data.chat.AGENT_SWARM_TOOL_NAME
 import fr.louissaglio.kimi.android.data.chat.AGENT_TOOL_NAME
-import fr.louissaglio.kimi.android.data.chat.AgentPhase
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
@@ -28,6 +27,7 @@ import fr.louissaglio.kimi.android.data.chat.SocketEvent
 import fr.louissaglio.kimi.android.data.chat.SwitchConfirm
 import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.TodoParser
+import fr.louissaglio.kimi.android.data.chat.TranscriptFrame
 import fr.louissaglio.kimi.android.data.chat.isSubagentScoped
 import fr.louissaglio.kimi.android.data.sessions.Session
 import fr.louissaglio.kimi.android.data.sessions.SessionsRepository
@@ -133,8 +133,9 @@ class ChatViewModel internal constructor(
     )
 
     /** The agent's live activity reduced for the status line above the composer
-     * (ticket 148): [text] is the phase's label, [since] its start for the elapsed
-     * readout — null when the phase carried none (the terminal kinds carry `at`). */
+     * (ticket 148; derived since 177 — see [UiState.activityStatus]): [text] is the
+     * label, [since] the activity's start for the elapsed readout — null when the
+     * activity has no meaningful start (waiting on the user, a retry). */
     data class ActivityStatus(
         val text: String,
         val since: Instant? = null,
@@ -165,9 +166,15 @@ class ChatViewModel internal constructor(
         val isReconnecting: Boolean = false,
         /** The in-flight step's LLM retry, if any (ticket 058); transient status line. */
         val stepRetry: StepRetry? = null,
-        /** The agent's live activity phase (ticket 148), shown as the status line
-         * directly above the composer; null while idle/ended/interrupted or unknown. */
-        val activityStatus: ActivityStatus? = null,
+        /** When the main agent's current busy stretch (or, after a tool settled,
+         * its current thinking phase) started — set by the `agent` frame's
+         * `status:"running"`, null while `idle` (ticket 177). Gates the status line,
+         * see [activityStatus]. */
+        val agentActiveSince: Instant? = null,
+        /** The most recently started main-agent tool still running (ticket 177): the
+         * status line's "Running X…" sub-phase, derived from the transcript's tool
+         * frames — the `agent` frame carries no phase. */
+        val runningTool: RunningTool? = null,
         val inputText: String = "",
         val isSending: Boolean = false,
         /** Attachments staged above the input, in pick order (ticket 033). */
@@ -218,13 +225,14 @@ class ChatViewModel internal constructor(
         /** An effort switch awaiting confirmation (ticket 170), same contract. */
         val pendingEffortSwitch: PendingSwitch? = null,
         /** The session's permission mode wire value (manual/yolo/auto — ticket 141):
-         * the local pick (persisted), else the /status-seeded server report; null until
-         * either lands — the composer's permission chip stays hidden meanwhile. */
+         * the local pick (persisted), else the server's report (the `agent` frame's
+         * `permission_mode`, ticket 177); null until either lands — the composer's
+         * permission chip stays hidden meanwhile. */
         val sessionPermission: String? = null,
         /** Context window fill for the composer's ring (041, moved into the composer
-         * in 053); null until the first read carrying a real fill arrives (the
-         * /status seed, or a live context-usage event — ticket 177 moves both to the
-         * 2.5.0 `usage` frame). */
+         * in 053); null until the first `usage` frame carrying a real limit arrives
+         * (the subscribe's seed, then every live change — ticket 177); a frame without
+         * a limit leaves it as it is. */
         val contextUsage: ContextUsage? = null,
         /** The agent's latest todo list, mirrored from its TodoList tool calls
          * (ticket 042); null or empty hides the widget above the composer. */
@@ -303,7 +311,32 @@ class ChatViewModel internal constructor(
          * value (or none yet) hides the chip. */
         val currentPermissionMode: PermissionMode?
             get() = PermissionMode.fromWire(sessionPermission)
+
+        /**
+         * The status line above the composer (ticket 148). Since 2.5.0 (ticket 177) the
+         * server reports only busy/idle (the `agent` frame), so the sub-phase is derived
+         * from the transcript state: shown only while the agent is busy; a pending
+         * approval or question = waiting on the user, a step retry = retrying, a
+         * running tool frame = "Running X…", a running turn otherwise = thinking — and
+         * a busy agent with no turn is background work.
+         */
+        val activityStatus: ActivityStatus?
+            get() {
+                val since = agentActiveSince ?: return null
+                return when {
+                    pendingApprovals.isNotEmpty() -> ActivityStatus("Waiting for approval")
+                    pendingQuestions.isNotEmpty() -> ActivityStatus("Waiting for your answer")
+                    stepRetry != null -> ActivityStatus("Retrying…")
+                    runningTool != null -> ActivityStatus("Running ${runningTool.name}…", runningTool.since)
+                    isWorking -> ActivityStatus("Thinking…", since)
+                    else -> ActivityStatus("Working in background…", since)
+                }
+            }
     }
+
+    /** A main-agent tool frame still running (ticket 177): [since] is when this client
+     * first saw it — the status line's elapsed readout. */
+    data class RunningTool(val name: String, val since: Instant)
 
     sealed interface Effect {
         /** Snackbar text — the collector's catch-all branch shows it; the two special
@@ -533,8 +566,9 @@ class ChatViewModel internal constructor(
     /**
      * The one cold start of this chat open: awaits the session's transcript cold start
      * and applies its bundle — history, the running turn's live rows, the working
-     * state, the pending approvals/questions and the queued prompts (a /status re-read
-     * follows for the session's bound model/effort, ticket 107). An
+     * state, the pending approvals/questions and the queued prompts (the bound
+     * model/effort, permission, busy state and ring ride the subscribe's `agent`/`usage`
+     * frames instead — ticket 177). An
      * [TranscriptColdStart.Outcome.AlreadyFresh] join means another collection (the
      * store's keep-alive restoring a sub-agent page on top) fetched first: its bundle is
      * gone and the socket may have folded past it, while this timeline is still empty
@@ -612,6 +646,7 @@ class ChatViewModel internal constructor(
             bundle.runningTurn?.let(timeline::seedRunningTurn)
         }
         timeline.seedQueuedPrompts(bundle.queue.queued.map { it.message })
+        if (!turnStale) seedRunningTools(bundle)
         oldestHistoryId = bundle.messages.items.firstOrNull()?.id
         mineAgentRowsIntoStore()
         uiState.update {
@@ -621,6 +656,7 @@ class ChatViewModel internal constructor(
                 error = null,
                 hasMoreHistory = bundle.messages.hasMore,
                 isWorking = if (!turnStale) bundle.busy else it.isWorking,
+                runningTool = runningTools.values.lastOrNull(),
                 // The transcript's pending interactions are the only REST read of the
                 // approvals: they REPLACE the queue (a decision missed with the stream
                 // heals here), unless a live approval event overtook the fetch.
@@ -635,10 +671,25 @@ class ChatViewModel internal constructor(
             )
         }
         questions.applyColdStart(bundle.transcript.pendingQuestions.distinctBy { it.questionId }, guards.questions)
-        // /status re-read on EVERY cold start: the session's bound model/effort
-        // (ticket 107) and the context ring are served only there (ticket 177 moves
-        // both to the subscribe's `agent`/`usage` frames).
-        seedSessionStatus()
+        // The bound model/effort, the permission mode, the busy state and the context
+        // ring are NOT part of the cold start: the subscribe's `agent`/`usage` frames
+        // seed them (they precede the ack) and every change re-sends them (ticket 177).
+    }
+
+    /** The main agent's running tool frames, by tool call id in start order (ticket
+     * 177): the status line's "Running X…" source. Fed by the live tool events, cleared
+     * by a turn end or the agent going idle, re-seeded by every cold start from the
+     * running turn's still-running tool frames. */
+    private val runningTools = LinkedHashMap<String, RunningTool>()
+
+    private fun seedRunningTools(bundle: TranscriptColdStart.Bundle) {
+        runningTools.clear()
+        val now = Instant.now()
+        bundle.runningTurn?.steps.orEmpty()
+            .flatMap { it.frames }
+            .filterIsInstance<TranscriptFrame.Tool>()
+            .filter { it.running }
+            .forEach { runningTools[it.toolCallId] = RunningTool(it.name, now) }
     }
 
     /**
@@ -696,14 +747,9 @@ class ChatViewModel internal constructor(
         }
     }
 
-    /** Bumped on every turn.started/turn.ended event, so [seedSessionStatus] and a
-     * cold-start rebuild ([applyColdStart]) can drop a response a newer turn event has
-     * overtaken. */
+    /** Bumped on every turn.started/turn.ended event, so a cold-start rebuild
+     * ([applyColdStart]) can drop a response a newer turn event has overtaken. */
     private val turnSeedGuard = SeedGuard()
-
-    /** Bumped on every live context-usage event, so [seedSessionStatus] can drop a
-     * /status snapshot a newer agent.status.updated frame has already overtaken. */
-    private val contextUsageSeedGuard = SeedGuard()
 
     /** Bumped on every approval event, so a cold-start apply racing the live stream
      * drops its stale queue replace. */
@@ -787,9 +833,10 @@ class ChatViewModel internal constructor(
      * cold start do the initial load (ticket 176). Later starts are the within-process
      * resume (ticket 048): the socket gate re-subscribes with the resume watermark (the
      * server replays the missed window — a turn that ended while the app was away
-     * takes its ghost live rows with it), [verifyResume] checks the journal covered it,
-     * plus the questions seed and the status seed. Also fires when the app returns to
-     * the foreground. */
+     * takes its ghost live rows with it, and its `agent`/`usage` frames re-seed the
+     * model, permission, busy and context state — ticket 177), [verifyResume] checks
+     * the journal covered it, plus the questions seed. Every start re-applies the stored
+     * permission pick. Also fires when the app returns to the foreground. */
     fun onScreenStarted() {
         screenVisible.value = true
         // The web clears a session's unread marker when it becomes the visible session
@@ -798,8 +845,8 @@ class ChatViewModel internal constructor(
         if (coldStartDone) {
             verifyResume()
             questions.seed()
-            seedSessionStatus()
         }
+        seedStoredPermissionPick()
         refreshSessionInfo()
         loadModels()
     }
@@ -1269,11 +1316,15 @@ class ChatViewModel internal constructor(
                 // The early-stop footer (ticket 155) lands now; the refetch below
                 // re-appends it over the canonical rows.
                 timeline.onTurnEnded(event.interruptReason, event.errorMessage)
+                runningTools.clear()
                 uiState.update {
                     it.copy(
                         isWorking = false,
                         stepRetry = null,
-                        activityStatus = null,
+                        // The idle `agent` frame follows the turn's ops; one still
+                        // running (background work) re-opens the line.
+                        agentActiveSince = null,
+                        runningTool = null,
                         pendingApprovals = emptyList(),
                         items = timeline.items(),
                         todos = timeline.todos(),
@@ -1336,23 +1387,27 @@ class ChatViewModel internal constructor(
                 // carrier. The funnel no-ops on everything else.
                 subagentStore.apply(sessionId, event)
             }
-            is SessionEvent.ContextUsageUpdated -> {
-                contextUsageSeedGuard.bump()
+            // The `usage` frame (ticket 177): the subscribe's first one seeds the ring,
+            // later ones grow it live. A frame without a usable limit never gets here.
+            is SessionEvent.ContextUsageUpdated ->
                 uiState.update { it.copy(contextUsage = event.contextUsage) }
-            }
-            // Same frame family, phase variant (ticket 148): the agent's live activity,
-            // reduced to the status line's model. Sub-agent frames route to the store
-            // before ever reaching here.
-            is SessionEvent.AgentStatusUpdated ->
-                uiState.update { it.copy(activityStatus = event.phase.toActivityStatus()) }
-            // Same frame family, session-scope fields: the live model/effort binding.
+            // The `agent` frame's status (ticket 177): gates the derived status line.
+            // A re-sent `running` (every re-subscribe) keeps the stretch's start.
+            is SessionEvent.AgentBusyUpdated ->
+                if (event.running) {
+                    uiState.update { it.copy(agentActiveSince = it.agentActiveSince ?: Instant.now()) }
+                } else {
+                    runningTools.clear()
+                    uiState.update { it.copy(agentActiveSince = null, runningTool = null) }
+                }
+            // The `agent` frame's binding (ticket 177, after 107): the first frame is the
+            // seed, later ones follow bindings made from any client.
             is SessionEvent.SessionModelUpdated ->
                 syncServerSessionModel(event.model, event.thinkingEffort)
-            // 2.2.0's permission variant (ticket 165): the server pushes the mode the
-            // moment it changes, including a profile write from another client. The
-            // seed's guard applies verbatim — a stored pick stays displayed and the
-            // per-prompt stamp re-asserts it (ticket 141); the store read is the
-            // recreation-proof half of that guard.
+            // The `agent` frame's `permission_mode` (ticket 177, after 165): re-sent the
+            // moment the mode changes, including a profile write from another client.
+            // A stored pick stays displayed and the per-prompt stamp re-asserts it
+            // (ticket 141); the store read is the recreation-proof half of that guard.
             is SessionEvent.SessionPermissionUpdated ->
                 syncServerSessionPermission(event.permission, chatRepository.getSessionPermission(sessionId))
             // Compaction (ticket 056): no turn events fire for it — these frames alone
@@ -1378,7 +1433,18 @@ class ChatViewModel internal constructor(
                 uiState.update { it.copy(isCompacting = false, items = timeline.items()) }
                 _effects.send(Effect.CompactionFailed(event.cause ?: "Compaction failed"))
             }
+            is SessionEvent.ToolCallStarted -> {
+                // First sight only: a re-emit (args/display now known) keeps the start.
+                runningTools.getOrPut(event.toolCallId) { RunningTool(event.name, Instant.now()) }
+                applyTimelineEvent(event)
+                uiState.update { it.copy(runningTool = runningTools.values.lastOrNull()) }
+            }
             is SessionEvent.ToolCallResult -> {
+                if (runningTools.remove(event.toolCallId) != null && runningTools.isEmpty()) {
+                    // The agent is back to thinking: the line's elapsed restarts.
+                    uiState.update { it.copy(agentActiveSince = it.agentActiveSince?.let { Instant.now() }) }
+                }
+                uiState.update { it.copy(runningTool = runningTools.values.lastOrNull()) }
                 applyTimelineEvent(event)
                 // A background Agent result carries the agent_id marker mid-run: mine
                 // right away so the page can open and later frames stop dropping.
@@ -1582,8 +1648,8 @@ class ChatViewModel internal constructor(
     }
 
     /**
-     * The server owns the session's model/effort binding (ticket 107): what /status and
-     * agent.status.updated report is written through to the per-session store, so the
+     * The server owns the session's model/effort binding (ticket 107): what the `agent`
+     * frame reports (ticket 177) is written through to the per-session store, so the
      * chip and the send path (both store-fed) follow bindings made from any client.
      * Null reports mean the server said nothing (fresh session) and never clobber; a
      * local pick awaiting its first prompt wins over a report (see [pendingModelPick]).
@@ -1600,14 +1666,15 @@ class ChatViewModel internal constructor(
     }
 
     /**
-     * The /status permission-mode seed (ticket 141): the report feeds the chip but is
-     * NEVER written through to the per-session store — unlike the model binding the
+     * The server's permission mode (ticket 141; the `agent` frame's `permission_mode`
+     * since 177): the report feeds the chip but is NEVER written through to the
+     * per-session store — unlike the model binding the
      * server always reports a mode (a fresh session reads the server default), and a
      * stored value stamps `permission_mode` on every prompt, so write-through would
      * turn "follow the server" sessions into stamped ones and pin the first value ever
      * seen. A local pick wins over the report: [pendingPermissionPick] covers the
-     * in-flight window, [storedPick] (read by the seed ahead of the GET) the
-     * recreation case, where the in-memory flag was lost. The pick is sticky by design
+     * in-flight window, [storedPick] (read from the store per frame) the recreation
+     * case, where the in-memory flag was lost. The pick is sticky by design
      * — per-prompt stamping re-asserts it on every send (the session-profile endpoint
      * stays unused, see ticket 141).
      */
@@ -1630,53 +1697,16 @@ class ChatViewModel internal constructor(
         }
     }
 
-    /** Seeds the working indicator when opening a session that is already mid-turn
-     * (turn events only fire on transitions), the session's bound model/effort
-     * (ticket 107 — served only by /status), and the composer's context-usage ring
-     * (ticket 041), all from the same /status snapshot. Failure just leaves all
-     * three untouched. A turn event or a live context-usage event landing while the
-     * GET is in flight is newer than the seed's snapshot, so the late response is
-     * dropped for that field instead of overriding it. */
-    private fun seedSessionStatus() {
-        val turnEventsAtSeed = turnSeedGuard.capture()
-        val contextEventsAtSeed = contextUsageSeedGuard.capture()
+    /** Shows the stored permission pick (ticket 141) on every start: it displays even
+     * before the subscribe's `agent` frame lands, and that frame's report then leaves
+     * it in place (see [syncServerSessionPermission]) — pendingPermissionPick is
+     * per-instance, the store is the record that survives recreation. */
+    private fun seedStoredPermissionPick() {
         viewModelScope.launch {
-            // The stored permission pick seeds the chip ahead of the GET (it shows
-            // even when the /status read fails) and shields the server report from
-            // clobbering an unsent pick — pendingPermissionPick is per-instance, the
-            // store is the record that survives recreation (ticket 141).
             val storedPermissionPick = chatRepository.getSessionPermission(sessionId)
             if (storedPermissionPick != null) {
                 uiState.update { it.copy(sessionPermission = storedPermissionPick) }
             }
-            chatRepository.getSessionStatus(settingsRepository.current(), sessionId)
-                .onSuccess { status ->
-                    syncServerSessionModel(status.model, status.thinkingLevel)
-                    syncServerSessionPermission(status.permission, storedPermissionPick)
-                    uiState.update {
-                        it.copy(
-                            isWorking = if (!turnSeedGuard.isStale(turnEventsAtSeed)) status.busy else it.isWorking,
-                            contextUsage =
-                                if (!contextUsageSeedGuard.isStale(contextEventsAtSeed) && status.contextUsage != null) {
-                                    status.contextUsage
-                                } else {
-                                    it.contextUsage
-                                },
-                        )
-                    }
-                }
         }
     }
-}
-
-/** Phase → status-line reduction (ticket 148): the active kinds label themselves (a
- * tool call names its tool), `interrupted` maps to null — the abort UI owns that
- * moment — and `idle`/`ended` clear the line. */
-internal fun AgentPhase.toActivityStatus(): ChatViewModel.ActivityStatus? = when (kind) {
-    AgentPhase.Kind.Running -> ChatViewModel.ActivityStatus("Thinking…", since)
-    AgentPhase.Kind.ToolCall ->
-        ChatViewModel.ActivityStatus(toolName?.let { "Running $it…" } ?: "Running tool…", since)
-    AgentPhase.Kind.Retrying -> ChatViewModel.ActivityStatus("Retrying…", since)
-    AgentPhase.Kind.AwaitingApproval -> ChatViewModel.ActivityStatus("Waiting for approval", since)
-    AgentPhase.Kind.Interrupted, AgentPhase.Kind.Idle, AgentPhase.Kind.Ended -> null
 }

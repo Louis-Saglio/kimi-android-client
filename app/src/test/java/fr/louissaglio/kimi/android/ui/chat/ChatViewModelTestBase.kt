@@ -204,10 +204,10 @@ abstract class ChatViewModelTestBase {
     protected var effortSwitchConfigBody =
         """{"code":0,"msg":"success","data":{"name":"effort_switch_confirm","config":null},"request_id":"r"}"""
 
-    @Volatile
-    protected var statusBody =
-        """{"code":0,"msg":"success","data":{"busy":false,"context_tokens":0,""" +
-            """"max_context_tokens":1048576,"context_usage":0.0},"request_id":"r"}"""
+    /** Every request target the server dispatched, in arrival order — unlike
+     * [awaitRequest] it is never drained, so a test can assert a route was NEVER hit
+     * (ticket 177: no `/status`). */
+    protected val requestedTargets = CopyOnWriteArrayList<String>()
 
     @Volatile
     protected var serverSocket: WebSocket? = null
@@ -253,16 +253,13 @@ abstract class ChatViewModelTestBase {
         }
     }
 
-    /** When set, the /status response is held back server-side until the test releases
-     * it, so a test can make a socket event win over the in-flight seed on purpose. */
-    @Volatile
-    protected var statusResponseGate: CountDownLatch? = null
-
-    /** Same as [statusResponseGate], for the /questions poll. */
+    /** When set, the /questions response is held back server-side until the test
+     * releases it, so a test can make a socket event win over the in-flight seed on
+     * purpose. */
     @Volatile
     protected var questionsResponseGate: CountDownLatch? = null
 
-    /** Same as [statusResponseGate], for the /api/v1/files upload (ticket 033): parks
+    /** Same as [questionsResponseGate], for the /api/v1/files upload (ticket 033): parks
      * the response so a test can observe the send while the upload is in flight. */
     @Volatile
     protected var filesResponseGate: CountDownLatch? = null
@@ -282,7 +279,8 @@ abstract class ChatViewModelTestBase {
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 val path = request.target.orEmpty()
-                // Stamped at arrival, not at response time: the /status and /questions
+                requestedTargets += path
+                // Stamped at arrival, not at response time: the /questions and transcript
                 // responses may be parked behind a test gate below, and the WS upgrade's
                 // quiet window must not wait for those. The WS path is itself a GET but
                 // is excluded — the window measures the poll burst only.
@@ -302,10 +300,6 @@ abstract class ChatViewModelTestBase {
                         MockResponse(body = promptQueueBody)
                     path.startsWith("/api/v1/sessions/session_1/messages") ->
                         MockResponse(body = if ("before_id" in path) olderMessagesBody else messagesBody)
-                    path == "/api/v1/sessions/session_1/status" -> {
-                        statusResponseGate?.await(5, TimeUnit.SECONDS)
-                        MockResponse(body = statusBody)
-                    }
                     path == "/api/v1/sessions/session_1/prompts" ->
                         promptFailureBody?.let { MockResponse(body = it) } ?: MockResponse(body = 
                             """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +

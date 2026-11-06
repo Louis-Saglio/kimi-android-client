@@ -1,7 +1,6 @@
 package fr.louissaglio.kimi.android.data.chat
 
 import fr.louissaglio.kimi.android.data.DataError
-import java.time.Instant
 import kotlinx.serialization.json.JsonObject
 
 /** Payload tag of the main agent (docs/server-api.md, Sub-agents): every transcript
@@ -220,39 +219,43 @@ sealed interface SessionEvent {
      * (event.question.answered / event.question.dismissed share the consumed shape). */
     data class QuestionResolved(val questionId: String) : SessionEvent
 
-    /** Live context window fill (agent.status.updated, model/usage variant — ticket 041).
-     * Only emitted when the frame carries both token counts; phase-variant frames of the
-     * same event type emit nothing and leave the stored value untouched. */
+    /** Live context window fill (the `usage` state frame — server 2.5.0, ticket 177).
+     * Only emitted when the frame carries the used tokens AND a positive limit: an
+     * absent or zero `max_context_tokens` is the engine's "unknown" marker and emits
+     * nothing, leaving the displayed ring untouched (never a 0/0 fill). */
     data class ContextUsageUpdated(
         val contextUsage: ContextUsage,
         override val agentId: String = MAIN_AGENT_ID,
     ) : SessionEvent, AgentScopedEvent
 
-    /** The session's bound model/effort as the server reports it (agent.status.updated,
-     * model/usage variant — ticket 107). Emitted when the frame carries either value;
-     * a null field means the frame said nothing about it, never "unset". */
+    /** The session's bound model/effort as the server reports it (the `agent` state
+     * frame — ticket 177, after 107's `/status` seed). Emitted when the frame carries
+     * either value; a null field means the frame said nothing about it (a model-less
+     * session omits both), never "unset". */
     data class SessionModelUpdated(
         val model: String?,
         val thinkingEffort: String?,
         override val agentId: String = MAIN_AGENT_ID,
     ) : SessionEvent, AgentScopedEvent
 
-    /** The session's permission mode as the server reports it (agent.status.updated,
-     * permission variant — 2.2.0, ticket 165). The server pushes this the moment the
-     * mode changes, including when another client writes it through the profile route;
-     * the chat's chip follows it unless a local pick is in force (ticket 141). */
+    /** The session's effective permission mode as the server reports it (the `agent`
+     * frame's `permission_mode` — ticket 177, after 165). The server re-sends the
+     * frame the moment the mode changes, including when another client writes it
+     * through the profile route; the chat's chip follows it unless a local pick is in
+     * force (ticket 141). */
     data class SessionPermissionUpdated(
         val permission: String,
         override val agentId: String = MAIN_AGENT_ID,
     ) : SessionEvent, AgentScopedEvent
 
-    /** The agent's live activity phase (agent.status.updated, phase variant — ticket
-     * 148): thinking, running a tool, backing off, waiting on the user. Emitted only
-     * when the frame carries a phase of a KNOWN kind — the model/usage variant emits
-     * nothing here, and an unknown kind drops the frame at the mapper (the
-     * ignore-unknown rule), leaving the displayed status untouched. */
-    data class AgentStatusUpdated(
-        val phase: AgentPhase,
+    /** The agent's busy state (the `agent` frame's `status` — ticket 177, replacing
+     * 148's phase variant of the removed `agent.status.updated`): [running] while a turn
+     * or background work keeps the agent busy, false on `idle`. An unknown status
+     * value emits nothing. The status line's sub-phase (tool call, retry, waiting on
+     * the user) is derived from the transcript state by the ViewModel — the frame
+     * carries none. */
+    data class AgentBusyUpdated(
+        val running: Boolean,
         override val agentId: String = MAIN_AGENT_ID,
     ) : SessionEvent, AgentScopedEvent
 
@@ -298,35 +301,6 @@ enum class PromptStatus { Running, Queued, Completed, Aborted, Blocked, Failed }
 data class ContextUsage(
     val usedTokens: Long,
     val maxTokens: Long,
-)
-
-/** The agent's live activity phase (`agent.status.updated`, phase variant —
- * docs/server-api.md, ticket 148). [since] is the phase's start (epoch ms on the wire),
- * present on the ACTIVE kinds only — `ended`/`interrupted` carry `at` instead, not
- * decoded: no elapsed readout exists for them. [toolName] rides [Kind.ToolCall] only. */
-data class AgentPhase(
-    val kind: Kind,
-    val since: Instant? = null,
-    val toolName: String? = null,
-) {
-    /** The 2.0.2 kind vocabulary (docs/server-api.md); `streaming` was removed in
-     * 0.43.0 — the phase stays [Running] while tokens stream. */
-    enum class Kind { Idle, Running, ToolCall, Retrying, AwaitingApproval, Interrupted, Ended }
-}
-
-/** Snapshot of `GET /api/v1/sessions/{id}/status` (ticket 041): [busy] is the mid-turn
- * flag; [contextUsage] is null only when the success envelope carried no data object.
- * [model]/[thinkingLevel] are the session's server-side binding (ticket 107) — null
- * when the server reported none (unbound session, or a blank `thinking_level`).
- * [permission] is the session's permission mode (ticket 141, manual/yolo/auto) —
- * always reported (a fresh session reads the server default), null only on a
- * data-less envelope or a blank value. */
-data class SessionStatus(
-    val busy: Boolean,
-    val contextUsage: ContextUsage?,
-    val model: String? = null,
-    val thinkingLevel: String? = null,
-    val permission: String? = null,
 )
 
 /** What the socket reports to the collector: connection lifecycle + session events. */

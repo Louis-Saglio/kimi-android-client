@@ -56,12 +56,6 @@ class TranscriptColdStartTest : ChatViewModelTestBase() {
         """"display":{"kind":"command","command":"sleep 60","cwd":"/tmp","language":"bash"}}""" +
         """]}]}]"""
 
-    /** /status is gone on 2.5.0: an error envelope keeps the harness's legacy seed from
-     * writing the working state, so the assertions read the transcript's alone. */
-    private fun statusRemoved() {
-        statusBody = """{"code":40401,"msg":"not found","data":null,"request_id":"r"}"""
-    }
-
     private fun drainRequests(windowMs: Long = 500): List<String> {
         val paths = mutableListOf<String>()
         val deadline = System.currentTimeMillis() + windowMs
@@ -95,7 +89,6 @@ class TranscriptColdStartTest : ChatViewModelTestBase() {
 
     @Test
     fun `a mid-turn cold open shows the running turn's rows and the working state`() = runBlocking {
-        statusRemoved()
         messagesBody = runningHistory
         transcriptBody = transcriptData(items = runningTurn, seq = 42)
 
@@ -117,8 +110,24 @@ class TranscriptColdStartTest : ChatViewModelTestBase() {
     }
 
     @Test
+    fun `a mid-turn cold open's running tool names the status line once the agent frame says running`() = runBlocking {
+        // Ticket 177: the status line's sub-phase is derived from the transcript — the
+        // seeded running tool frame — and gated by the subscribe's `agent` frame.
+        messagesBody = runningHistory
+        transcriptBody = transcriptData(items = runningTurn, seq = 42)
+
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { state -> state.items?.map(ChatItem::id) == listOf("msg_1", "live_0", "tool_bash") }
+        assertNull(viewModel.uiState.value.activityStatus)
+
+        socket.send(TranscriptFrames.agentFrame(status = "running"))
+
+        awaitState(viewModel.uiState) { it.activityStatus?.text == "Running Bash…" }
+    }
+
+    @Test
     fun `live ops after the watermark extend the seeded rows without a gap or a duplicate`() = runBlocking {
-        statusRemoved()
         messagesBody = runningHistory
         transcriptBody = transcriptData(items = runningTurn, seq = 42)
 
@@ -162,7 +171,6 @@ class TranscriptColdStartTest : ChatViewModelTestBase() {
         // The running turn's last frame is the streaming text: the replay's next chunk
         // lands at the seeded length — the fold knows it, so it extends the bubble
         // instead of reading as a gap.
-        statusRemoved()
         messagesBody = runningHistory
         transcriptBody = transcriptData(
             items = """[{"kind":"turn","turnId":"t1","ordinal":1,"state":"running",""" +
@@ -188,7 +196,6 @@ class TranscriptColdStartTest : ChatViewModelTestBase() {
         // A finished step of the running turn may already be in /messages: its text
         // bubble and its tool row must render once, the seed only adding what history
         // lacks (here the running step's text).
-        statusRemoved()
         messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
             """{"id":"msg_3","session_id":"session_1","role":"tool",""" +
             """"content":[{"type":"tool_result","tool_call_id":"tool_ls","output":"a.txt"}],"created_at":"2026-11-04T10:00:02.000Z"},""" +
@@ -341,7 +348,6 @@ class TranscriptColdStartTest : ChatViewModelTestBase() {
 
     @Test
     fun `a journal that cannot cover the watermark triggers a full transcript refetch`() = runBlocking {
-        statusRemoved()
         transcriptBody = transcriptData(seq = 42)
         viewModel.onScreenStarted()
         awaitServerSocket()
@@ -421,7 +427,6 @@ class TranscriptColdStartTest : ChatViewModelTestBase() {
 
     @Test
     fun `a reset answering the watermark rebuilds the chat from the transcript`() = runBlocking {
-        statusRemoved()
         transcriptBody = transcriptData(seq = 42)
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
@@ -444,7 +449,6 @@ class TranscriptColdStartTest : ChatViewModelTestBase() {
         // Mining preserved (ticket 091 on the 176 carriers): a settled spawn whose
         // result carries the agent_id: marker — here still inside the running turn,
         // not yet committed to history — links its row and seeds the store record.
-        statusRemoved()
         transcriptBody = transcriptData(
             items = """[{"kind":"turn","turnId":"t1","ordinal":1,"state":"running",""" +
                 """"origin":{"kind":"user"},"steps":[{"kind":"step","stepId":"t1.1","turnId":"t1","ordinal":1,""" +

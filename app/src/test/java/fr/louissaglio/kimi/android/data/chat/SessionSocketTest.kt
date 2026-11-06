@@ -3,6 +3,7 @@ package fr.louissaglio.kimi.android.data.chat
 import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.ackFrame
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames.agentFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.appendOp
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.opsFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.promptOp
@@ -12,6 +13,7 @@ import fr.louissaglio.kimi.android.testutil.TranscriptFrames.textOp
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.toolOp
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.turnOp
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.undoOp
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames.usageFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.userMessage
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.webSocketUpgradeResponse
@@ -40,7 +42,8 @@ import org.junit.Test
 
 /**
  * The 2.5.0 session socket (ticket 175): the `subscribe_v2` frame, its ack, the
- * transcript frames folded into domain events, and the connection machinery
+ * transcript frames folded into domain events, the `agent`/`usage` state frames
+ * (ticket 177), and the connection machinery
  * (heartbeat, stall watchdog, reconnect re-subscribe) — against a real WebSocket.
  */
 class SessionSocketTest {
@@ -147,27 +150,101 @@ class SessionSocketTest {
     }
 
     @Test
-    fun `the subscribe-time state frames and the reset emit no events`() = runBlocking {
+    fun `the subscribe-time agent and usage frames seed the state, the rest and the reset emit nothing`() = runBlocking {
         // The verbatim subscribe order: per-agent state frames, transcript.reset, ack.
-        // The reset's items are always empty — it must neither render nor clear.
+        // The agent/usage pair is the chat's seed (ticket 177); the reset's items are
+        // always empty — it must neither render nor clear.
         val emitted = runSocketEvents(
             """{"type":"task.list","session_id":"session_1","agent_id":"main","tasks":[]}""",
-            """{"type":"agent","session_id":"session_1","agent_id":"main","event_created_at":"2026-11-04T19:25:52.678Z",""" +
-                """"status":"idle","permission_mode":"auto","plan_mode":false,"swarm_mode":false,"tower_mode":false}""",
-            """{"type":"usage","session_id":"session_1","agent_id":"main","context_tokens":22433,"max_context_tokens":1000000}""",
+            agentFrame(model = "deepseek/deepseek-v4-flash", thinking = "max", permissionMode = "auto"),
+            usageFrame(22433, 1_000_000),
             """{"type":"goal","session_id":"session_1","agent_id":"main","event_created_at":"2026-11-04T19:25:52.679Z"}""",
             """{"type":"todo","session_id":"session_1","agent_id":"main","items":[]}""",
             resetFrame(seq = 18),
             ackFrame(),
             opsFrame(promptOp("msg_1", "running"), seq = 19),
+            eventCount = 5,
+            settleMillis = 100,
+        )
+
+        assertEquals(
+            listOf(
+                SocketEvent.Connected,
+                SocketEvent.Event(SessionEvent.SessionModelUpdated("deepseek/deepseek-v4-flash", "max")),
+                SocketEvent.Event(SessionEvent.SessionPermissionUpdated("auto")),
+                SocketEvent.Event(SessionEvent.AgentBusyUpdated(running = false)),
+                SocketEvent.Event(SessionEvent.ContextUsageUpdated(ContextUsage(22433, 1_000_000))),
+                SocketEvent.Event(SessionEvent.PromptUpdated("msg_1", PromptStatus.Running)),
+            ),
+            emitted,
+        )
+    }
+
+    // --- agent / usage state frames (ticket 177) ---------------------------------------
+
+    @Test
+    fun `a model-less agent frame names no binding and a running one reports busy`() = runBlocking {
+        val emitted = runSocketEvents(
+            agentFrame(status = "running", model = null, thinking = null, permissionMode = "manual"),
+            eventCount = 2,
+            settleMillis = 100,
+        )
+
+        assertEquals(
+            listOf(
+                SessionEvent.SessionPermissionUpdated("manual"),
+                SessionEvent.AgentBusyUpdated(running = true),
+            ),
+            emitted.sessionEvents(),
+        )
+    }
+
+    @Test
+    fun `usage frames without a positive limit emit nothing`() = runBlocking {
+        val emitted = runSocketEvents(
+            usageFrame(500, maxContextTokens = null),
+            usageFrame(500, maxContextTokens = 0),
+            usageFrame(600, 262_144),
             eventCount = 1,
             settleMillis = 100,
         )
 
         assertEquals(
-            listOf(SocketEvent.Connected, SocketEvent.Event(SessionEvent.PromptUpdated("msg_1", PromptStatus.Running))),
-            emitted,
+            listOf(SessionEvent.ContextUsageUpdated(ContextUsage(600, 262_144))),
+            emitted.sessionEvents(),
         )
+    }
+
+    @Test
+    fun `child agents' state frames and foreign sessions' never reach the chat`() = runBlocking {
+        // A child's agent/usage frames are ticket 182's; the main chat must not take its
+        // model, permission or ring from them.
+        val emitted = runSocketEvents(
+            agentFrame(status = "running", model = "kimi-code/k3", thinking = "high", agentId = "agent-0"),
+            usageFrame(10, 1_000, agentId = "agent-0"),
+            agentFrame(status = "running", model = "kimi-code/k3", sessionId = "session_2"),
+            usageFrame(700, 262_144),
+            eventCount = 1,
+            settleMillis = 150,
+        )
+
+        assertEquals(
+            listOf(SessionEvent.ContextUsageUpdated(ContextUsage(700, 262_144))),
+            emitted.sessionEvents(),
+        )
+    }
+
+    @Test
+    fun `the agent frame mapping treats blank values and unknown statuses as nothing said`() {
+        assertEquals(
+            emptyList<SessionEvent>(),
+            AgentStateFrame(status = "paused", model = "", thinking = " ", permissionMode = "").toSessionEvents(),
+        )
+        assertEquals(
+            listOf(SessionEvent.SessionModelUpdated(model = null, thinkingEffort = "low")),
+            AgentStateFrame(thinking = "low").toSessionEvents(),
+        )
+        assertEquals(null, UsageFrame(contextTokens = null, maxContextTokens = 100).toSessionEvent())
     }
 
     // --- transcript.ops → domain events ------------------------------------------------

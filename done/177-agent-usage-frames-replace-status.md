@@ -93,3 +93,39 @@ Relevant code: `data/chat/SessionSocket.kt` (`agent.status.updated` branch),
 `ui/chat/ChatViewModel.kt` (the two `getSessionStatus` calls, the permission
 chip, the context ring). Wire reference: `docs/server-api.md` → WebSocket →
 Session frames (`agent`, `usage`).
+
+## Implementation notes
+
+**2026-11-06 —** `SessionSocket` decodes the main agent's flat `agent`/`usage` state
+frames (`AgentStateFrame`/`UsageFrame` in `ChatDtos.kt`, read from the frame text since
+their fields sit beside `type`) and maps them with the pure `AgentStateFrame.toSessionEvents`
+/ `UsageFrame.toSessionEvent`: model/thinking → `SessionModelUpdated` (only when either is
+non-blank — a model-less session emits none), `permission_mode` →
+`SessionPermissionUpdated`, `status` → the new `SessionEvent.AgentBusyUpdated(running)`
+(unknown statuses emit nothing), `usage` → `ContextUsageUpdated` only with a positive
+`max_context_tokens`. Child-agent frames are ignored (ticket 182). The frames precede the
+subscribe ack, so the first pair is the chat's seed: `ChatApi.sessionStatus`,
+`ChatRepository.getSessionStatus`, `SessionStatus`/`SessionStatusData`,
+`ChatViewModel.seedSessionStatus` and its context-usage seed guard are deleted, as are
+`SessionEvent.AgentStatusUpdated`, `AgentPhase` and `toActivityStatus`.
+
+- `ChatViewModel`: the stored permission pick is shown on every start
+  (`seedStoredPermissionPick`) and still wins over every frame (the ticket-141/165 guard
+  in `syncServerSessionPermission`); the model/effort write-through and the pending-pick
+  guard are unchanged. The status line's sub-phase is derived (option 1 of the ticket):
+  `UiState.activityStatus` is now a computed property over `agentActiveSince` (set by a
+  `running` frame, cleared by `idle`/a turn end), the pending approvals/questions, the
+  step retry, and `UiState.runningTool` (the newest still-running main tool, from the
+  ViewModel's `runningTools` map fed by `ToolCallStarted`/`ToolCallResult` and re-seeded
+  from the cold start's running turn). A busy agent with no turn reads "Working in
+  background…". `isWorking` stays turn-driven (transcript ops + cold start): `running`
+  also covers background work, which must not turn the composer into "steer" mode.
+- Tests: `SessionSocketTest` (subscribe-time seed order, model-less frame, usage without
+  limit, child/foreign frames ignored, blank/unknown mapping), `ChatViewModelTest` (seed
+  from the first frames with no `/status` request — `requestedTargets` in the harness —,
+  live ring growth and limit-less frames, profile write flipping the chip, stored pick
+  wins, pending model/permission picks, model-less session stays unbound, the derived
+  status line through a turn and background work), `TranscriptColdStartTest` (seeded
+  running tool names the line), `ActivityStatusTest` (precedence). The `/status` route,
+  `statusBody` and `statusResponseGate` left the VM harness; the repository and live
+  `/status` tests were deleted with the route.

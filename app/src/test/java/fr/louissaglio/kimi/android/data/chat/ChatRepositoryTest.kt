@@ -60,7 +60,7 @@ class ChatRepositoryTest {
     /**
      * Collects what one socket receives after the server sends [frames] on upgrade:
      * collects until [eventCount] substantive events arrived (server_hello and
-     * phase-only agent.status frames emit none), then waits [settleMillis] longer as
+     * the state frames without news emit none), then waits [settleMillis] longer as
      * proof that nothing more comes, and cancels. Returns every emitted [SocketEvent],
      * Connected first; callers assert on the [SocketEvent.Event] subset.
      */
@@ -1190,110 +1190,6 @@ class ChatRepositoryTest {
         val result = repository.abortPrompt(settings(), "session_1")
 
         assertTrue(result.exceptionOrNull() is DataError.Api)
-    }
-
-    @Test
-    fun `getSessionStatus maps the busy flag and the context usage`() = runBlocking {
-        server.enqueue(
-            MockResponse(body = 
-                """{"code":0,"msg":"success","data":{"busy":true,"context_tokens":25050,""" +
-                    """"max_context_tokens":1048576,"context_usage":0.0239},"request_id":"01KX"}""",
-            ),
-        )
-
-        assertEquals(
-            SessionStatus(busy = true, contextUsage = ContextUsage(25050, 1048576)),
-            repository.getSessionStatus(settings(), "session_1").getOrThrow(),
-        )
-        assertEquals("/api/v1/sessions/session_1/status", server.takeRequest().target)
-    }
-
-    @Test
-    fun `getSessionStatus drops the context usage when max_context_tokens is omitted`() = runBlocking {
-        // 0.34.0 (ticket 100): max_context_tokens is omittable; 0 is the engine's
-        // unknown marker, never a real limit — no ContextUsage must reach the UI.
-        server.enqueue(
-            MockResponse(body =
-                """{"code":0,"msg":"success","data":{"busy":true,"context_tokens":25050,""" +
-                    """"context_usage":0.0239},"request_id":"01KX"}""",
-            ),
-        )
-
-        assertEquals(
-            SessionStatus(busy = true, contextUsage = null),
-            repository.getSessionStatus(settings(), "session_1").getOrThrow(),
-        )
-    }
-
-    @Test
-    fun `getSessionStatus drops the context usage when max_context_tokens is zero`() = runBlocking {
-        server.enqueue(
-            MockResponse(body =
-                """{"code":0,"msg":"success","data":{"busy":false,"context_tokens":25050,""" +
-                    """"max_context_tokens":0,"context_usage":0.0},"request_id":"01KX"}""",
-            ),
-        )
-
-        assertEquals(
-            SessionStatus(busy = false, contextUsage = null),
-            repository.getSessionStatus(settings(), "session_1").getOrThrow(),
-        )
-    }
-
-    @Test
-    fun `getSessionStatus maps the bound model and the thinking level`() = runBlocking {
-        // 0.39.1 (ticket 107, live-verified 2026-09-01): /status serves the session's
-        // persisted binding — also for sessions cold since server start.
-        server.enqueue(
-            MockResponse(body =
-                """{"code":0,"msg":"success","data":{"busy":false,"model":"kimi-code/k3-256k",""" +
-                    """"thinking_level":"low","context_tokens":100,""" +
-                    """"max_context_tokens":262144,"context_usage":0.0},"request_id":"01KX"}""",
-            ),
-        )
-
-        assertEquals(
-            SessionStatus(
-                busy = false,
-                contextUsage = ContextUsage(100, 262144),
-                model = "kimi-code/k3-256k",
-                thinkingLevel = "low",
-            ),
-            repository.getSessionStatus(settings(), "session_1").getOrThrow(),
-        )
-    }
-
-    @Test
-    fun `getSessionStatus maps an omitted model and a blank thinking level to null`() = runBlocking {
-        // Fresh never-prompted session (live-verified 2026-09-01): no model key at all,
-        // thinking_level "" — both must read as "no value", never as a choice to store.
-        server.enqueue(
-            MockResponse(body =
-                """{"code":0,"msg":"success","data":{"busy":false,"thinking_level":"",""" +
-                    """"context_tokens":0,"max_context_tokens":1048576,"context_usage":0},"request_id":"01KX"}""",
-            ),
-        )
-
-        val status = repository.getSessionStatus(settings(), "session_1").getOrThrow()
-        assertNull(status.model)
-        assertNull(status.thinkingLevel)
-    }
-
-    @Test
-    fun `getSessionStatus maps the permission mode`() = runBlocking {
-        // Ticket 141: /status always reports the session's mode (a fresh session reads
-        // the server default — "yolo" on Louis's server).
-        server.enqueue(
-            MockResponse(body =
-                """{"code":0,"msg":"success","data":{"busy":false,"permission":"manual",""" +
-                    """"context_tokens":100,"max_context_tokens":1048576,"context_usage":0.0},"request_id":"01KX"}""",
-            ),
-        )
-
-        assertEquals(
-            SessionStatus(busy = false, contextUsage = ContextUsage(100, 1048576), permission = "manual"),
-            repository.getSessionStatus(settings(), "session_1").getOrThrow(),
-        )
     }
 
     @Test

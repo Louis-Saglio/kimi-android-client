@@ -239,11 +239,6 @@ class ChatRepository @Inject constructor(
     suspend fun compact(settings: ServerSettings, sessionId: String): Result<Unit> =
         chatApi.compact(settings, sessionId)
 
-    /** Lightweight live status (`GET /api/v1/sessions/{id}/status`): the mid-turn flag
-     * and the context window fill (ticket 041). */
-    suspend fun getSessionStatus(settings: ServerSettings, sessionId: String): Result<SessionStatus> =
-        chatApi.sessionStatus(settings, sessionId)
-
     /** The main agent's prompt queue (`GET .../prompts` — ticket 176): the running
      * prompt and the queued ones, in queue order. */
     suspend fun getPromptQueue(settings: ServerSettings, sessionId: String): Result<PromptQueue> =

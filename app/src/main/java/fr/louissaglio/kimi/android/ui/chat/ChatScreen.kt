@@ -592,11 +592,11 @@ private fun ChatContent(
                     onOpenJob = onOpenJob,
                     onCancelJob = onCancelJob,
                 )
-                // Live activity phase (ticket 148): the status line — spinner, label,
-                // elapsed — shows what the generic working state cannot ("thinking" vs
-                // "running a tool" vs "waiting for my approval"). The 1 s ticker runs
-                // only while a phase is on screen (the null-status frame removes the
-                // whole block, ticker included).
+                // Live activity (ticket 148, derived since 177): the status line — spinner,
+                // label, elapsed — shows what the generic working state cannot
+                // ("thinking" vs "running a tool" vs "waiting for my approval"). The 1 s
+                // ticker runs only while a status is on screen (an idle agent removes
+                // the whole block, ticker included).
                 uiState.activityStatus?.let { status ->
                     var now by remember { mutableStateOf(Instant.now()) }
                     LaunchedEffect(Unit) {
@@ -618,7 +618,7 @@ private fun ChatContent(
                     modelLabel = uiState.currentModelLabel,
                     modelEffort = uiState.effectiveEffort,
                     // The permission chip (ticket 141): the session's effective mode,
-                    // hidden until the /status seed or a stored pick lands.
+                    // hidden until the `agent` frame or a stored pick lands.
                     permissionMode = uiState.currentPermissionMode,
                     contextUsage = uiState.contextUsage,
                     compactEnabled = canCompact,

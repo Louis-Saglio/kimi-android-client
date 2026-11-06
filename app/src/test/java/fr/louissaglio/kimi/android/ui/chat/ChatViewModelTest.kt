@@ -173,9 +173,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     fun `a turn still running on return keeps its live rows and the replay extends them`() = runBlocking {
         // The 2.5.0 resume (ticket 176, replacing 048's status-aware REST resync): the
         // re-subscribe carries the watermark, so no history refetch runs on return —
-        // the live bubble survives and the replayed text keeps feeding it. (/status is
-        // gone on 2.5.0: its error keeps the legacy seed from writing the working state.)
-        statusBody = """{"code":40401,"msg":"not found","data":null,"request_id":"r"}"""
+        // the live bubble survives and the replayed text keeps feeding it.
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         awaitState(viewModel.uiState) { it.items != null }
@@ -665,21 +663,76 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     }
 
     @Test
-    fun `the status seed fills the ring and syncs the model on every cold start`() = runBlocking {
-        // Ticket 107: the session's bound model/effort is served only by /status,
-        // so the seed runs on EVERY cold start — and the ring's fill rides the same
-        // read (the transcript cold start carries no usage; ticket 177 moves both to
-        // the `agent`/`usage` frames).
-        statusBody = """{"code":0,"msg":"success","data":{"busy":false,""" +
-            """"model":"kimi-code/kimi-for-coding","thinking_level":"low",""" +
-            """"context_tokens":25050,"max_context_tokens":1048576,"context_usage":0.0239},"request_id":"r"}"""
-
+    fun `the first agent and usage frames seed the chat state with no status request`() = runBlocking {
+        // Ticket 177: /status is gone on 2.5.0. The subscribe's state frames (sent before
+        // the ack) carry the bound model/effort, the permission mode and the ring.
         viewModel.onScreenStarted()
-        awaitRequest("/status")
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+
+        socket.send(TranscriptFrames.agentFrame(model = "kimi-code/kimi-for-coding", thinking = "low", permissionMode = "manual"))
+        socket.send(TranscriptFrames.usageFrame(25050, 1048576))
 
         awaitState(viewModel.uiState) { it.contextUsage == ContextUsage(25050, 1048576) }
         awaitState(viewModel.uiState) { it.sessionModel == "kimi-code/kimi-for-coding" }
         assertEquals("low", viewModel.uiState.value.sessionEffort)
+        awaitState(viewModel.uiState) { it.sessionPermission == "manual" }
+        assertEquals(PermissionMode.AlwaysAsk, viewModel.uiState.value.currentPermissionMode)
+        assertTrue(requestedTargets.none { it.endsWith("/status") })
+    }
+
+    @Test
+    fun `usage frames grow the ring live and a frame without a limit leaves it unchanged`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        // No usage frame yet: the ring is unknown, never a 0/0 fill.
+        assertNull(viewModel.uiState.value.contextUsage)
+
+        socket.send(turnStartedFrame())
+        socket.send(TranscriptFrames.usageFrame(1000, 262144))
+        awaitState(viewModel.uiState) { it.contextUsage == ContextUsage(1000, 262144) }
+
+        socket.send(TranscriptFrames.usageFrame(5000, maxContextTokens = null))
+        socket.send(TranscriptFrames.usageFrame(6000, maxContextTokens = 0))
+        delay(200)
+        assertEquals(ContextUsage(1000, 262144), viewModel.uiState.value.contextUsage)
+
+        socket.send(TranscriptFrames.usageFrame(9000, 262144))
+        awaitState(viewModel.uiState) { it.contextUsage == ContextUsage(9000, 262144) }
+    }
+
+    @Test
+    fun `the agent busy state and the transcript drive the activity status line`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        assertNull(viewModel.uiState.value.activityStatus)
+
+        // The verbatim order: the turn's ops first, then the running agent frame.
+        socket.send(turnStartedFrame())
+        socket.send(TranscriptFrames.agentFrame(status = "running"))
+        awaitState(viewModel.uiState) { it.activityStatus?.text == "Thinking…" }
+        assertTrue(viewModel.uiState.value.activityStatus?.since != null)
+
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.toolOp("call_1", "Bash", "running", turnId = "t1")))
+        awaitState(viewModel.uiState) { it.activityStatus?.text == "Running Bash…" }
+
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.toolOp("call_1", "Bash", "done", ""","output":"ok"""", turnId = "t1")))
+        awaitState(viewModel.uiState) { it.activityStatus?.text == "Thinking…" }
+
+        socket.send(stepRetryingFrame(nextAttempt = 2))
+        awaitState(viewModel.uiState) { it.activityStatus?.text == "Retrying…" }
+
+        socket.send(turnEndedFrame(reason = "completed"))
+        awaitState(viewModel.uiState) { it.activityStatus == null }
+
+        // Background work keeps the agent running after the turn (docs/server-api.md).
+        socket.send(TranscriptFrames.agentFrame(status = "running"))
+        awaitState(viewModel.uiState) { it.activityStatus?.text == "Working in background…" }
+
+        socket.send(TranscriptFrames.agentFrame(status = "idle"))
+        awaitState(viewModel.uiState) { it.activityStatus == null }
     }
 
     @Test
@@ -740,32 +793,6 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         } finally {
             effectJob.cancel()
         }
-    }
-
-    @Test
-    fun `status seed in flight does not clear a turn that just started`() = runBlocking {
-        // The cold start owns the first start's seeds (ticket 085), so the /status
-        // seed this guards runs on the within-process resume (second ON_START).
-        viewModel.onScreenStarted()
-        awaitServerSocket()
-        awaitState(viewModel.uiState) { it.items != null }
-        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
-        serverSocket = null
-        viewModel.onScreenStopped()
-
-        val gate = CountDownLatch(1)
-        statusResponseGate = gate
-        viewModel.onScreenStarted()
-        val socket = awaitServerSocket()
-
-        // The /status response is parked server-side: turn.started lands first.
-        socket.send(turnStartedFrame())
-        awaitState(viewModel.uiState) { it.isWorking }
-
-        // The stale busy:false snapshot arrives after the event and must be dropped.
-        gate.countDown()
-        delay(200)
-        assertTrue(viewModel.uiState.value.isWorking)
     }
 
     @Test
@@ -1125,33 +1152,31 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     // --- Server-owned session model (ticket 107) ----------------------------------------
 
     @Test
-    fun `status seed syncs the server-reported model and effort into the session prefs`() = runBlocking {
-        // The server owns the session's binding: /status serves it even for sessions
-        // cold since server start (live-verified 2026-09-01). The bound model is not
-        // the server default — the pre-107 chip would have shown the default instead.
+    fun `the agent frame syncs the server-reported model and effort into the session prefs`() = runBlocking {
+        // The server owns the session's binding (ticket 107; the `agent` frame since
+        // 177). The bound model is not the server default — the pre-107 chip would have
+        // shown the default instead.
         modelsBody = """{"code":0,"msg":"success","data":{"items":[""" +
             """{"provider":"managed:kimi-code","model":"kimi-code/k3","display_name":"K3",""" +
             """"max_context_size":1048576,"support_efforts":["low","high","max"],"default_effort":"high"},""" +
             """{"provider":"deepseek","model":"deepseek/deepseek-v4-pro","display_name":"DeepSeek V4 Pro",""" +
             """"max_context_size":1000000,"support_efforts":["low","high"],"default_effort":"high"}""" +
             """]},"request_id":"r"}"""
-        statusBody = """{"code":0,"msg":"success","data":{"busy":false,"model":"deepseek/deepseek-v4-pro",""" +
-            """"thinking_level":"low","context_tokens":0,"max_context_tokens":1000000,""" +
-            """"context_usage":0.0},"request_id":"r"}"""
         viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(TranscriptFrames.agentFrame(model = "deepseek/deepseek-v4-pro", thinking = "low"))
 
         awaitState(viewModel.uiState) { it.sessionModel == "deepseek/deepseek-v4-pro" }
         assertEquals("low", viewModel.uiState.value.sessionEffort)
 
         // Persisted: the next prompt carries the server-reported values. The
-        // write-through lands off the seed's call stack (syncServerSessionModel
-        // launches it) — poll until it commits, like the agent-status test below.
+        // write-through lands off the frame's call stack (syncServerSessionModel
+        // launches it) — poll until it commits.
         withTimeout(5_000) {
             while (dataStore.data.first()[stringPreferencesKey("effort_for_session_session_1")] != "low") delay(10)
         }
-        // The /status seed and the /models fetch race: promptThinking drops the effort
-        // stamp while the models cache is cold (ticket 163), so wait for it before the
-        // send assertion below.
+        // promptThinking drops the effort stamp while the models cache is cold (ticket
+        // 163), so wait for it before the send assertion below.
         awaitState(viewModel.uiState) { it.modelsAvailable }
 
         viewModel.onInputChange("hi")
@@ -1162,19 +1187,75 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     }
 
     @Test
-    fun `blank status values leave the stored model choice untouched`() = runBlocking {
-        dataStore.edit { it[stringPreferencesKey("model_for_session_session_1")] = "kimi-code/kimi-for-coding" }
-        // Default statusBody: no model key, no thinking_level — a fresh session's answer
-        // must not erase the stored choice.
+    fun `a model-less agent frame leaves the binding unbound and the stored choice untouched`() = runBlocking {
         viewModel.onScreenStarted()
-        // The seed has applied once its context usage lands in the state.
-        awaitState(viewModel.uiState) { it.contextUsage != null && it.modelsAvailable }
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.modelsAvailable }
+        // A fresh model-less session omits model/thinking: nothing is bound, no blank.
+        socket.send(TranscriptFrames.agentFrame(model = null, thinking = null))
+        socket.send(TranscriptFrames.usageFrame(10, 262144))
+        awaitState(viewModel.uiState) { it.contextUsage != null }
+        assertNull(viewModel.uiState.value.sessionModel)
+        assertNull(viewModel.uiState.value.sessionEffort)
+        assertNull(dataStore.data.first()[stringPreferencesKey("model_for_session_session_1")])
+    }
+
+    @Test
+    fun `a model-less agent frame never erases a stored model choice`() = runBlocking {
+        dataStore.edit { it[stringPreferencesKey("model_for_session_session_1")] = "kimi-code/kimi-for-coding" }
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.modelsAvailable }
+        socket.send(TranscriptFrames.agentFrame(model = "", thinking = ""))
+        socket.send(TranscriptFrames.usageFrame(10, 262144))
+        // The frames were processed once the usage lands.
+        awaitState(viewModel.uiState) { it.contextUsage != null }
 
         assertEquals("kimi-code/kimi-for-coding", viewModel.uiState.value.sessionModel)
         assertEquals(
             "kimi-code/kimi-for-coding",
             dataStore.data.first()[stringPreferencesKey("model_for_session_session_1")],
         )
+    }
+
+    @Test
+    fun `a pending pick is not clobbered by an agent frame of the running turn`() = runBlocking {
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.modelsAvailable }
+        val socket = awaitServerSocket()
+
+        viewModel.onModelSelected("kimi-code/kimi-for-coding")
+        awaitState(viewModel.uiState) { it.sessionModel == "kimi-code/kimi-for-coding" }
+
+        // A frame of the still-running turn reports the OLD binding (k3): the unsent
+        // model pick must survive. The effort was not picked, so it does sync.
+        socket.send(TranscriptFrames.agentFrame(status = "running", model = "kimi-code/k3", thinking = "max"))
+
+        awaitState(viewModel.uiState) { it.sessionEffort == "max" }
+        assertEquals("kimi-code/kimi-for-coding", viewModel.uiState.value.sessionModel)
+    }
+
+    @Test
+    fun `the next agent frame syncs again once the prompt carrying the pick was sent`() = runBlocking {
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.modelsAvailable }
+        val socket = awaitServerSocket()
+
+        viewModel.onModelSelected("kimi-code/kimi-for-coding")
+        awaitState(viewModel.uiState) { it.sessionModel == "kimi-code/kimi-for-coding" }
+        viewModel.onInputChange("hi")
+        viewModel.onSend()
+
+        val body = awaitRequest("/prompts", method = "POST").body!!.utf8()
+        assertTrue(""""model":"kimi-code/kimi-for-coding"""" in body)
+        awaitState(viewModel.uiState) { !it.isSending }
+
+        // The prompt bound the session; later frames reflect the server's state again
+        // (here: another client rebound the session to K3 with max effort).
+        socket.send(TranscriptFrames.agentFrame(model = "kimi-code/k3", thinking = "max"))
+
+        awaitState(viewModel.uiState) { it.sessionModel == "kimi-code/k3" }
+        assertEquals("max", viewModel.uiState.value.sessionEffort)
     }
 
     // --- Cloud switch policies (tickets 167/170) ---------------------------------
@@ -1383,20 +1464,20 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     // --- Permission mode (ticket 141) ---------------------------------------------------
 
     @Test
-    fun `status seed syncs the server-reported permission mode without storing it`() = runBlocking {
-        // Unlike the model binding, /status ALWAYS reports a mode (a fresh session reads
-        // the server default): it feeds the chip but never the per-session store — the
-        // store holds only explicit picks, so an unpicked prompt carries no
+    fun `the agent frame syncs the server-reported permission mode without storing it`() = runBlocking {
+        // Unlike the model binding, the frame ALWAYS reports a mode (a fresh session
+        // reads the server default): it feeds the chip but never the per-session store —
+        // the store holds only explicit picks, so an unpicked prompt carries no
         // permission_mode field (absent = follow the server).
-        statusBody = """{"code":0,"msg":"success","data":{"busy":false,"permission":"manual",""" +
-            """"context_tokens":0,"max_context_tokens":1048576,"context_usage":0.0},"request_id":"r"}"""
         viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(TranscriptFrames.agentFrame(permissionMode = "manual"))
 
         awaitState(viewModel.uiState) { it.sessionPermission == "manual" }
         assertEquals(PermissionMode.AlwaysAsk, viewModel.uiState.value.currentPermissionMode)
         assertNull(dataStore.data.first()[stringPreferencesKey("permission_for_session_session_1")])
 
-        // The seed left the store empty: the next prompt omits permission_mode.
+        // The frame left the store empty: the next prompt omits permission_mode.
         viewModel.onInputChange("hi")
         viewModel.onSend()
         val body = awaitRequest("/prompts", method = "POST").body!!.utf8()
@@ -1404,10 +1485,45 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     }
 
     @Test
-    fun `selected permission mode persists, stamps prompts and survives recreation`() = runBlocking {
-        statusBody = """{"code":0,"msg":"success","data":{"busy":false,"permission":"yolo",""" +
-            """"context_tokens":0,"max_context_tokens":1048576,"context_usage":0.0},"request_id":"r"}"""
+    fun `a profile write from another client flips the chip live via the agent frame`() = runBlocking {
+        // `POST .../profile {"agent_config":{"permission_mode":"manual"}}` from another
+        // client: the server re-sends the agent frame with the new effective mode.
         viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(TranscriptFrames.agentFrame(permissionMode = "auto"))
+        awaitState(viewModel.uiState) { it.sessionPermission == "auto" }
+
+        socket.send(TranscriptFrames.agentFrame(permissionMode = "manual"))
+
+        awaitState(viewModel.uiState) { it.sessionPermission == "manual" }
+        assertEquals(PermissionMode.AlwaysAsk, viewModel.uiState.value.currentPermissionMode)
+        // Read-only sync: the frame never writes the per-session store (ticket 141).
+        assertNull(dataStore.data.first()[stringPreferencesKey("permission_for_session_session_1")])
+    }
+
+    @Test
+    fun `an agent frame leaves a stored permission pick untouched`() = runBlocking {
+        dataStore.edit { it[stringPreferencesKey("permission_for_session_session_1")] = "yolo" }
+        viewModel.onScreenStarted()
+        awaitState(viewModel.uiState) { it.sessionPermission == "yolo" }
+        val socket = awaitServerSocket()
+
+        socket.send(TranscriptFrames.agentFrame(permissionMode = "auto"))
+        socket.send(TranscriptFrames.usageFrame(10, 262144))
+
+        // The sticky pick is re-asserted per prompt; showing the server's value would
+        // mislead (ticket 165's carry-over of the 141 design).
+        awaitState(viewModel.uiState) { it.contextUsage != null }
+        delay(200)
+        assertEquals("yolo", viewModel.uiState.value.sessionPermission)
+        assertEquals("yolo", dataStore.data.first()[stringPreferencesKey("permission_for_session_session_1")])
+    }
+
+    @Test
+    fun `selected permission mode persists, stamps prompts and survives recreation`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(TranscriptFrames.agentFrame(permissionMode = "yolo"))
         awaitState(viewModel.uiState) { it.sessionPermission == "yolo" }
         // The non-positional mapping: the yolo wire value is the middle "Ask When
         // Needed" label, never sorted into place.
@@ -1423,8 +1539,8 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         assertTrue(body, body.contains(""""permission_mode":"manual""""))
         awaitState(viewModel.uiState) { !it.isSending }
 
-        // Recreation over the same DataStore (kill + reopen): the /status seed still
-        // reports the server's yolo, but the stored pick wins and re-stamps.
+        // Recreation over the same DataStore (kill + reopen): the stored pick seeds the
+        // chip on start and re-stamps.
         val recreated = ChatViewModel(
             chatRepository,
             testSessionsRepository(),
@@ -1447,23 +1563,20 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     }
 
     @Test
-    fun `a pending permission pick is not clobbered by a later status seed`() = runBlocking {
-        statusBody = """{"code":0,"msg":"success","data":{"busy":false,"permission":"yolo",""" +
-            """"context_tokens":0,"max_context_tokens":1048576,"context_usage":0.0},"request_id":"r"}"""
+    fun `a pending permission pick is not clobbered by a later agent frame`() = runBlocking {
         viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        socket.send(TranscriptFrames.agentFrame(permissionMode = "yolo"))
         awaitState(viewModel.uiState) { it.sessionPermission == "yolo" }
-        // Drain the startup burst so the next /status request is the re-seed's.
-        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
         viewModel.onPermissionModeSelected(PermissionMode.AlwaysAsk)
         awaitState(viewModel.uiState) { it.sessionPermission == "manual" }
 
-        // A later ON_START re-seeds from /status; the server still reports the
-        // previous mode (the pick was never sent) — the unsent pick must win.
-        statusBody = """{"code":0,"msg":"success","data":{"busy":false,"permission":"auto",""" +
-            """"context_tokens":0,"max_context_tokens":1048576,"context_usage":0.0},"request_id":"r"}"""
-        viewModel.onScreenStarted()
-        awaitRequest("/status")
+        // The server still reports a mode the pick has not reached (it rides the next
+        // prompt): the unsent pick must win.
+        socket.send(TranscriptFrames.agentFrame(permissionMode = "auto"))
+        socket.send(TranscriptFrames.usageFrame(10, 262144))
+        awaitState(viewModel.uiState) { it.contextUsage != null }
         delay(200)
 
         assertEquals("manual", viewModel.uiState.value.sessionPermission)

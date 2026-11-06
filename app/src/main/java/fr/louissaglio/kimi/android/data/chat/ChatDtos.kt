@@ -97,22 +97,6 @@ data class MediaSourceDto(
     @SerialName("file_id") val fileId: String? = null,
 )
 
-@Serializable
-data class SessionStatusData(
-    val busy: Boolean = false,
-    // Context window fill (ticket 041); defaulted like every DTO field so a server
-    // omission degrades to a partial read instead of failing the whole status poll.
-    @SerialName("context_tokens") val contextTokens: Long = 0,
-    @SerialName("max_context_tokens") val maxContextTokens: Long = 0,
-    // The session's bound model/effort (ticket 107): `model` is omitted entirely when
-    // unbound, `thinking_level` reads "" on a fresh never-prompted session.
-    val model: String? = null,
-    @SerialName("thinking_level") val thinkingLevel: String? = null,
-    // The session's permission mode (ticket 141): manual/yolo/auto. Unlike `model` it
-    // is ALWAYS reported — a fresh session reads the server default.
-    val permission: String? = null,
-)
-
 /** `data` of `GET /api/v1/config` (and the POST's echo): the app consumes the
  * server-wide default model, the default thinking effort, the default permission
  * mode (ticket 142) and the providers map (credentials redacted to `has_api_key`)
@@ -207,6 +191,37 @@ data class WsFrame(
     val code: Int = 0,
     val msg: String? = null,
     val payload: JsonObject? = null,
+)
+
+/**
+ * The flat `agent` state frame (docs/server-api.md, WebSocket → Session frames —
+ * server 2.5.0, ticket 177): the agent's live state, sent before the subscribe ack and
+ * again on every change, replacing the client copy wholesale. [status] is
+ * `idle`/`running` (running while a turn or background work keeps the agent busy);
+ * [model]/[thinking] are omitted on a model-less session; [permissionMode] is the
+ * effective `manual`/`yolo`/`auto`. The mode booleans (`plan_mode`/`swarm_mode`/
+ * `tower_mode`) are not consumed here.
+ */
+@Serializable
+data class AgentStateFrame(
+    @SerialName("agent_id") val agentId: String = MAIN_AGENT_ID,
+    val status: String? = null,
+    val model: String? = null,
+    val thinking: String? = null,
+    @SerialName("permission_mode") val permissionMode: String? = null,
+)
+
+/**
+ * The flat `usage` state frame (docs/server-api.md, WebSocket → Session frames —
+ * ticket 177): the agent's context fill, coalesced server-side to a few frames per
+ * second. [maxContextTokens] is optional — absent or `0` is the engine's "unknown"
+ * limit, never a real one.
+ */
+@Serializable
+data class UsageFrame(
+    @SerialName("agent_id") val agentId: String = MAIN_AGENT_ID,
+    @SerialName("context_tokens") val contextTokens: Long? = null,
+    @SerialName("max_context_tokens") val maxContextTokens: Long? = null,
 )
 
 /**
