@@ -11,8 +11,8 @@ import kotlinx.coroutines.flow.onStart
 /**
  * Fake [SessionListSocket] for ViewModel tests (ticket 087): the test pushes events
  * via [events]; [collections]/[completions] expose the screen gate (collection starts
- * on ON_START, is cancelled on ON_STOP). The session-ids flow is ignored — subscribe
- * frames are asserted on the real socket in OkHttpSessionListSocketTest.
+ * on ON_START, is cancelled on ON_STOP). The session-ids flow is ignored — its
+ * foreign-session filtering is asserted on the real socket in OkHttpSessionListSocketTest.
  */
 class FakeSessionListSocket : SessionListSocket {
     val events = MutableSharedFlow<SessionListEvent>(extraBufferCapacity = 16)

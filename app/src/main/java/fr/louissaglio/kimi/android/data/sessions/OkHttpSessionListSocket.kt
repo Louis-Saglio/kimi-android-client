@@ -9,6 +9,7 @@ import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
@@ -21,13 +22,11 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
-import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -44,8 +43,10 @@ import okhttp3.WebSocketListener
  * the list's own: exactly `event.session.work_changed`, `session.meta.updated`, the
  * global `event.session.archived` (0.38.0 — ticket 105) and `event.session.deleted`
  * (0.42.0 — ticket 126), the broadcast `event.session.created` (ticket 129) and the
- * global `event.config.changed`/`event.model_catalog.changed` (0.39.1 — ticket 110),
- * and the subscribe ack.
+ * global `event.config.changed`/`event.model_catalog.changed` (0.39.1 — ticket 110).
+ * The list sends nothing but heartbeat pongs: since 2.5.0 every frame it consumes is
+ * an app-level push that reaches every connection without a subscription
+ * (docs/server-api.md, Global events).
  * SessionSocket stays single-session/chat-specific — patching it for multi-session
  * use was rejected in the ticket.
  */
@@ -82,8 +83,8 @@ class OkHttpSessionListSocket @Inject constructor(
                     sessionIds = sessionIds,
                     onOpen = {
                         // attempt > 0 means this open follows a drop (or a failed first
-                        // attempt), so the connection's event window has a gap: no
-                        // cursors are ever sent, the collector heals via REST instead.
+                        // attempt), so the connection's event window has a gap: global
+                        // events are never replayed, the collector heals via REST instead.
                         if (attempt > 0) emit(SessionListEvent.Reconnected)
                         attempt = 0
                     },
@@ -149,42 +150,33 @@ class OkHttpSessionListSocket @Inject constructor(
         )
         try {
             coroutineScope {
-                // Ids subscribed on THIS connection; doubles as the foreign-frame
-                // filter (0.31.0 unsolicited-broadcast caveat, docs/server-api.md).
-                // Grown BEFORE the send so an event racing its subscribe is accepted.
-                val subscribed = mutableSetOf<String>()
-                var subscribeCount = 0
+                // Ids observed on THIS connection: every loaded id seen since it
+                // opened (grown, never shrunk). Nothing is sent for them — the
+                // per-session pushes reach every connection — so the set is purely the
+                // foreign-frame filter: work_changed/meta.updated for a session the
+                // list never loaded are dropped (docs/server-api.md, Global events).
+                val observed = mutableSetOf<String>()
                 // Collects the loaded ids for the life of the connection; cancelled
                 // when the signal loop exits — coroutineScope waits for children, so
                 // a lingering collector would wedge the reconnect loop on a drop.
-                var idJob: Job? = null
+                // UNDISPATCHED so the current set lands before the first frame is read.
+                val idJob: Job = launch(start = CoroutineStart.UNDISPATCHED) {
+                    sessionIds.collect { ids -> observed += ids }
+                }
                 try {
                     while (true) {
                         when (val signal = watchdog.receive(signals)) {
                             Signal.Opened -> {
                                 watchdog.onOpen()
                                 onOpen()
-                                // Follow the loaded ids for the life of this connection:
-                                // the first emission subscribes the current set in ONE
-                                // frame; later ones (new pages) subscribe only the delta.
-                                // Started on open so sends always hit an open socket.
-                                idJob = launch {
-                                    sessionIds.collect { ids ->
-                                        val newIds = ids - subscribed
-                                        if (newIds.isNotEmpty()) {
-                                            subscribed += newIds
-                                            webSocket.send(subscribeFrame(newIds, "c_${++subscribeCount}"))
-                                        }
-                                    }
-                                }
                             }
-                            is Signal.Text -> handleFrame(webSocket, signal.text, subscribed, watchdog, onEvent)
+                            is Signal.Text -> handleFrame(webSocket, signal.text, observed, watchdog, onEvent)
                             Signal.Closed -> return@coroutineScope
                             is Signal.Failed -> throw IOException("WebSocket failed", signal.cause)
                         }
                     }
                 } finally {
-                    idJob?.cancel()
+                    idJob.cancel()
                 }
             }
         } finally {
@@ -197,7 +189,7 @@ class OkHttpSessionListSocket @Inject constructor(
     private suspend fun handleFrame(
         webSocket: WebSocket,
         text: String,
-        subscribed: Set<String>,
+        observed: Set<String>,
         watchdog: SocketStallWatchdog,
         onEvent: suspend (SessionListEvent) -> Unit,
     ) {
@@ -208,8 +200,8 @@ class OkHttpSessionListSocket @Inject constructor(
             return
         }
         // 0.38.0 global event (docs/server-api.md — ticket 105): parsed ahead of the
-        // unsubscribed filter below because the envelope session_id is the __global__
-        // watermark, never a subscribed id; the archived id rides in the payload as
+        // foreign-frame filter below because the envelope session_id is the __global__
+        // watermark, never an observed id; the archived id rides in the payload as
         // camelCase sessionId.
         if (frame.type == "event.session.archived") {
             frame.decodePayload<SessionArchivedPayload>()?.let { payload ->
@@ -230,7 +222,7 @@ class OkHttpSessionListSocket @Inject constructor(
         // client. Same ahead-of-the-filter placement as the archived frame, for a
         // different reason: the frame is broadcast on the NEW session's own stream,
         // so the envelope session_id is the created session — never __global__ and
-        // never a subscribed id. The payload session is the snake_case REST shape.
+        // never an observed id. The payload session is the snake_case REST shape.
         if (frame.type == "event.session.created") {
             frame.decodePayload<SessionCreatedPayload>()?.let { payload ->
                 onEvent(SessionListEvent.SessionCreated(payload.session.toDomain()))
@@ -250,12 +242,12 @@ class OkHttpSessionListSocket @Inject constructor(
             onEvent(SessionListEvent.ModelCatalogChanged)
             return
         }
-        // 0.31.0 caveat (docs/server-api.md): the server also sends events for sessions
-        // this connection never subscribed to — drop them on the envelope session_id.
-        // Untagged frames fail open (control frames carry no session_id); an event
-        // without one cannot patch a row and is ignored below.
-        if (frame.sessionId != null && frame.sessionId !in subscribed) {
-            Log.w(TAG, "Dropping '${frame.type}' frame for unsubscribed session ${frame.sessionId}")
+        // The per-session pushes reach every connection (docs/server-api.md, Global
+        // events), so frames for sessions the list never loaded are dropped on the
+        // envelope session_id. Untagged frames fail open (control frames carry no
+        // session_id); an event without one cannot patch a row and is ignored below.
+        if (frame.sessionId != null && frame.sessionId !in observed) {
+            Log.w(TAG, "Dropping '${frame.type}' frame for unobserved session ${frame.sessionId}")
             return
         }
         when (frame.type) {
@@ -276,10 +268,6 @@ class OkHttpSessionListSocket @Inject constructor(
                     onEvent(SessionListEvent.MetaUpdated(sessionId, payload.title))
                 }
             }
-            // The subscribe ack (accepted / not_found): no cursors are ever sent, so
-            // there is nothing to reconcile; live removal of not_found rows is
-            // deferred (ticket 087, out of scope).
-            "ack" -> Unit
             // App-level heartbeat (0.35.0 — docs/server-api.md, Heartbeat): the server
             // pings every 10 s and closes the socket after ~20 s of client silence, so
             // the nonce is echoed back in a pong. A ping without a decodable nonce is
@@ -310,14 +298,6 @@ class OkHttpSessionListSocket @Inject constructor(
             ?.newBuilder()
             ?.addPathSegments("api/v1/ws")
             ?.build()
-
-    private fun subscribeFrame(sessionIds: Set<String>, id: String): String = buildJsonObject {
-        put("type", "subscribe")
-        put("id", id)
-        putJsonObject("payload") {
-            putJsonArray("session_ids") { sessionIds.forEach(::add) }
-        }
-    }.toString()
 
     private fun pongFrame(nonce: String): String = buildJsonObject {
         put("type", "pong")

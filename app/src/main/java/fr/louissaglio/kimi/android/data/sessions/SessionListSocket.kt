@@ -18,13 +18,14 @@ interface SessionListSocket {
      * Streams [SessionListEvent]s for the sessions in [sessionIds]. One collection =
      * one socket owned here (not by the UI); cancelling the collection closes it.
      *
-     * [sessionIds] is the live set of loaded session ids: on connect, one subscribe
-     * frame carries the current set — NO cursors (the REST load is the baseline;
-     * events only patch) — and changes while connected send follow-up subscribes for
-     * the new ids only. On a drop the connection retries with exponential backoff
-     * (1 s doubling to 30 s); a successful reconnect resubscribes the full set and
-     * emits [SessionListEvent.Reconnected] once so the collector heals the missed
-     * window via REST.
+     * [sessionIds] is the live set of loaded session ids. Nothing is sent for them:
+     * the per-session pushes (`event.session.work_changed`, `session.meta.updated`)
+     * reach every connection unsubscribed (docs/server-api.md, Global events), so the
+     * set only filters out frames for sessions the list never loaded — every id seen
+     * since the connection opened passes. The REST load is the baseline; events only
+     * patch. On a drop the connection retries with exponential backoff (1 s doubling
+     * to 30 s); a successful reconnect emits [SessionListEvent.Reconnected] once so
+     * the collector heals the missed window via REST.
      */
     fun observe(settings: ServerSettings, sessionIds: Flow<Set<String>>): Flow<SessionListEvent>
 }
@@ -35,9 +36,9 @@ interface SessionListSocket {
 sealed interface SessionListEvent {
 
     /**
-     * A dropped (or initially failed) connection was re-established and every loaded
-     * id resubscribed. Events in the gap are lost (no cursors — see
-     * [SessionListSocket.observe]), so the collector re-syncs the list from REST once.
+     * A dropped (or initially failed) connection was re-established. Events in the
+     * gap are lost (the server never replays them — see [SessionListSocket.observe]),
+     * so the collector re-syncs the list from REST once.
      */
     data object Reconnected : SessionListEvent
 
@@ -80,8 +81,8 @@ sealed interface SessionListEvent {
      * `event.session.created` (verified on 0.42.0, docs/server-api.md — ticket 129):
      * a session was created from any client, and [session] is the full REST-shaped
      * object. Not a `__global__` frame: it is broadcast on the new session's own
-     * stream, so the envelope `session_id` is the created session — an id this
-     * connection is by definition not subscribed to. Fires on plain creates only:
+     * stream, so the envelope `session_id` is the created session — an id the list
+     * has by definition not loaded yet. Fires on plain creates only:
      * a `:fork`'s frame is dropped server-side (the fork is never loaded), so a fork
      * made elsewhere appears on the next refresh — the app's own fork inserts the
      * row itself (ticket 128).

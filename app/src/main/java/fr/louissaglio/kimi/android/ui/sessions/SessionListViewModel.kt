@@ -233,13 +233,14 @@ class SessionListViewModel @Inject constructor(
      * client is upserted on event.session.created (ticket 129), the global
      * config/model-catalog changed events drop the ModelsRepository caches (0.39.1 —
      * ticket 110), a reconnect heals via one silent refresh. The loaded ids ride a
-     * derived flow, so page loads while connected re-subscribe on their own.
+     * derived flow, so rows from page loads while connected pass the socket's
+     * foreign-session filter on their own.
      * Restart-safe: ON_START/ON_STOP pair up, but a repeat start never opens a second
      * collection.
      */
     private fun startSocket() {
         if (socketJob?.isActive == true) return
-        // The subscribed ids follow the active mode: the flat page's rows, or every
+        // The observed ids follow the active mode: the flat page's rows, or every
         // group's rows in grouped mode.
         val sessionIds = uiState
             .map { state ->
