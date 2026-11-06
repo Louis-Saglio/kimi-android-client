@@ -34,7 +34,7 @@ no `TodoList` input parsing on every update.
    `[]` clears it. Keep the existing `Todo` domain model and status mapping;
    an unknown status string degrades to Pending as today.
 3. Add the frame to the cold-start path by construction: the server sends the
-   current list before the subscribe ack, so no `SnapshotSync`/transcript
+   current list before the subscribe ack, so no `TranscriptColdStart`/transcript
    mining is needed. Remove the `TodoParser` scan from the live event path;
    keep the parser only if the transcript REST page still needs it for
    historical rows (it does not — `TodoList` tool frames remain visible
@@ -44,16 +44,16 @@ no `TodoList` input parsing on every update.
 
 ## Acceptance criteria
 
-- [ ] A live `TodoList` update moves the widget from the `todo` frame, with
+- [x] A live `TodoList` update moves the widget from the `todo` frame, with
       no scan of tool-call history (unit test feeds three frames and asserts
       the widget replaces, not appends).
-- [ ] Undo after a todo update restores the previous list when the server
+- [x] Undo after a todo update restores the previous list when the server
       sends the new `todo` frame (test with two frames).
-- [ ] A cold open shows the current list from the frame that precedes the
+- [x] A cold open shows the current list from the frame that precedes the
       subscribe ack; no `TodoList` row is rendered.
-- [ ] A child agent's `todo` frame does not touch the main chat widget.
-- [ ] Empty `items` clears the widget.
-- [ ] `:app:testDebugUnitTest` passes.
+- [x] A child agent's `todo` frame does not touch the main chat widget.
+- [x] Empty `items` clears the widget.
+- [x] `:app:testDebugUnitTest` passes.
 
 ## Out of scope
 
@@ -68,3 +68,36 @@ Relevant code: `data/chat/Todo.kt` (`TodoParser`), `data/chat/ChatEvents.kt`,
 `data/chat/SessionSocket.kt`, `ui/chat/ChatViewModel.kt` (todo state),
 `ui/chat/ChatTimeline.kt` / `ui/chat/components` (widget). Wire reference:
 `docs/server-api.md` → Todos and WebSocket → Session frames.
+
+## Implementation notes
+
+**2026-11-06 —** `SessionSocket` decodes the flat `todo` frame (`TodoFrame`/`TodoItemDto`
+in `ChatDtos.kt`, read from the frame text like `agent`/`usage`) and maps it with the pure
+`TodoFrame.toTodos()` (`data/chat/Todo.kt`: blank titles skipped, an unknown status
+degrades to Pending) into the new `SessionEvent.TodoUpdated(items, agentId)` — emitted for
+every agent. `ChatViewModel` applies main's wholesale to `UiState.todos` (`[]` clears the
+widget); the frame precedes the subscribe ack, so it is the cold-start seed with no
+transcript mining, and the server's re-send after an undo/cold restore heals the widget.
+A child's frame is sub-agent-scoped (`isSubagentScoped`) and never reaches the chat.
+
+- Deleted: `TodoParser` (and its DI wiring in `ChatViewModel`, `SubagentStreamStore`,
+  `ChatTimeline`) and the timeline's `committedTodos`/`liveTodos`/`todos()` derivation;
+  `ChatTimeline` keeps only the ticket-042 row/result suppression, keyed by the new
+  top-level `TODO_LIST_TOOL_NAME`. History refetches and cold-start applies no longer
+  write `UiState.todos`.
+- Sub-agent pages: deleting the parser would have left the dock without a feed, so the
+  child's agent-tagged frame now replaces `SubagentRecord.todos` (a field outside the
+  timeline — no transcript replace touches it). The rest of the sub-agent page rebuild
+  stays ticket 182's.
+- Tests: `ChatTodosTest` (VM harness: three live frames replace, never append; undo +
+  re-sent frame restores; cold open shows the pre-ack frame's list over a stale history
+  `TodoList` call, survives the turn-end refetch, no `TodoList` row; a child's frame
+  leaves the main widget alone; `[]` clears), `SessionSocketTest` (subscribe-time seed
+  order now includes the todo event, per-agent tagging, foreign session dropped, the
+  mapping's status/title rules — replacing `TodoParserTest`), `ChatTimelineTest` (row
+  suppression for history, live and transcript paths; the derivation tests are gone with
+  the behaviour), `SubagentStreamStoreTest`/`SubagentViewModelTest` (the dock list from the
+  child's frame, untouched by a transcript page). Shared builder:
+  `TranscriptFrames.todoFrame`.
+- Docs: `docs/conventions.md` (state frames, cold start, sub-agent dock) and the app note
+  at the end of `docs/server-api.md` → Todos, which still described the removed derivation.

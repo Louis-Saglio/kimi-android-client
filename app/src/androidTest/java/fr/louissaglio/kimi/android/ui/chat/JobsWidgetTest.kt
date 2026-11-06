@@ -6,7 +6,6 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import fr.louissaglio.kimi.android.data.chat.BackgroundTask
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 import java.time.Instant
 import org.junit.Assert.assertEquals
@@ -50,9 +49,9 @@ class JobsWidgetTest {
             jobs = listOf(
                 Job(
                     taskId = "bash-1",
-                    kind = BackgroundTask.Kind.Bash,
+                    kind = Job.Kind.Bash,
                     description = "tick counter loop",
-                    status = BackgroundTask.Status.Running,
+                    status = Job.Status.Running,
                     startedAt = Instant.now().minusSeconds(5),
                 ),
             ),
@@ -72,9 +71,9 @@ class JobsWidgetTest {
         var openedJob: String? = null
         val job = Job(
             taskId = "agent-9",
-            kind = BackgroundTask.Kind.Subagent,
+            kind = Job.Kind.Subagent,
             description = "doc-verify",
-            status = BackgroundTask.Status.Running,
+            status = Job.Status.Running,
             startedAt = Instant.now().minusSeconds(5),
             agentId = "agent-9",
         )
@@ -92,16 +91,16 @@ class JobsWidgetTest {
     }
 
     @Test
-    fun tappingRestSeededSubagentRowReportsTheJob() {
-        // A REST-seeded sub-agent job carries no agentId (REST /tasks omits it): the
+    fun tappingLinklessSubagentRowReportsTheJob() {
+        // A transcript-healed sub-agent job carries no agentId (no child_agent_id): the
         // row stays tappable and reports the whole Job — the caller resolves the page
         // id from the timeline.
         var openedAgent: Job? = null
         val job = Job(
             taskId = "agent-9",
-            kind = BackgroundTask.Kind.Subagent,
+            kind = Job.Kind.Subagent,
             description = "doc-verify",
-            status = BackgroundTask.Status.Completed,
+            status = Job.Status.Completed,
             startedAt = Instant.now().minusSeconds(5),
             endedAt = Instant.now(),
         )
@@ -119,14 +118,14 @@ class JobsWidgetTest {
     @Test
     fun timedOutBashRowReadsTimedOutAfterTheElapsed() {
         // Ticket 097: a live-recorded timeout reads "timed out after <elapsed>" instead
-        // of the plain "failed" a REST-seeded job shows.
+        // of the plain "failed" a failed outcome shows.
         sheet(
             jobs = listOf(
                 Job(
                     taskId = "bash-1",
-                    kind = BackgroundTask.Kind.Bash,
+                    kind = Job.Kind.Bash,
                     description = "tick counter loop",
-                    status = BackgroundTask.Status.Failed,
+                    status = Job.Status.Failed,
                     startedAt = Instant.now().minusSeconds(5),
                     endedAt = Instant.now(),
                     timedOut = true,
@@ -141,15 +140,15 @@ class JobsWidgetTest {
 
     @Test
     fun nullOnCancelHidesTheStopButton() {
-        // The sub-agent page's sheet is read-only (REST task cancel serves only the
-        // main agent's store): no Stop affordance on running rows.
+        // The sub-agent page's sheet is read-only (its own task controls are not
+        // wired — no ticket owns them yet): no Stop affordance on running rows.
         sheet(
             jobs = listOf(
                 Job(
                     taskId = "bash-1",
-                    kind = BackgroundTask.Kind.Bash,
+                    kind = Job.Kind.Bash,
                     description = "tick counter loop",
-                    status = BackgroundTask.Status.Running,
+                    status = Job.Status.Running,
                     startedAt = Instant.now().minusSeconds(5),
                 ),
             ),
@@ -169,9 +168,9 @@ class JobsWidgetTest {
             jobs = listOf(
                 Job(
                     taskId = "bash-1",
-                    kind = BackgroundTask.Kind.Bash,
+                    kind = Job.Kind.Bash,
                     description = "tick counter loop",
-                    status = BackgroundTask.Status.Running,
+                    status = Job.Status.Running,
                     startedAt = Instant.now().minusSeconds(5),
                 ),
             ),

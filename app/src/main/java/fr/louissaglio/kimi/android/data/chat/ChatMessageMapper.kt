@@ -5,11 +5,13 @@ import java.time.Instant
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.decodeFromJsonElement
 
 /**
  * Wire DTO → domain mapping for history messages and socket payloads (the single
@@ -17,7 +19,7 @@ import kotlinx.serialization.json.contentOrNull
  * renderings derived from payloads (previews, summaries, pretty-printed details).
  */
 @Singleton
-class ChatMessageMapper @Inject constructor(json: Json) {
+class ChatMessageMapper @Inject constructor(private val json: Json) {
 
     // Pretty-printing for the expanded tool row (ticket 023): strings render as-is,
     // JSON values (tool inputs, structured outputs) render indented. Since ticket 118
@@ -33,22 +35,72 @@ class ChatMessageMapper @Inject constructor(json: Json) {
         else -> prettyJson.encodeToString(JsonElement.serializer(), element)
     }
 
-    /** The compact argument preview for the approval card (the command for shell
-     * calls, else the action). */
-    fun summary(payload: ApprovalRequestedPayload): String =
-        payload.toolInputDisplay?.command?.takeIf { it.isNotBlank() } ?: payload.action
-
-    /** The row preview for a started call: the server-rendered `description` wins
-     * (ticket 153 — every tool gets a readable label), then a Bash call's non-blank
-     * `description` argument (ticket 095), then the server's display command when it
-     * sent one, else derived from the arguments (ToolPreview). */
-    fun preview(payload: ToolCallPayload): String {
-        payload.description?.takeIf { it.isNotBlank() }?.let { return it }
-        if (payload.name == "Bash") {
-            val description = (payload.args?.get("description") as? JsonPrimitive)?.contentOrNull
-            if (!description.isNullOrBlank()) return ToolPreview.of(payload.name, payload.args)
+    /**
+     * A tool result's `output` → the row's text plus its media (ticket 184 — server
+     * 2.5.1, docs/server-api.md, Messages → History and Transcript): the ONE parse every
+     * tool-result carrier shares (the history `tool_result` part, the REST transcript
+     * tool frame, the live `transcript.ops` fold). A content-part array — non-empty,
+     * every element an object with a string `type`, at least one of them
+     * `text`/`image`/`video` — yields its `text` parts joined by "\n" and one
+     * [ToolMedia] per `image`/`video` part whose source is `session_media`; any other
+     * part type is ignored. When the array carried media, a text part that is only an
+     * `<image …>`/`</image>` (or video) wrapper tag is dropped: it just frames the
+     * image. Anything else — a string, an object, any other array — keeps
+     * [formatDetail]'s rendering, with no media.
+     */
+    fun toolOutput(element: JsonElement?): ToolOutput {
+        val parts = (element as? JsonArray)
+            ?.takeIf { array -> array.isNotEmpty() && array.all { it.partType() != null } }
+            ?.map { it as JsonObject }
+            ?.takeIf { array -> array.any { it.partType() in TOOL_OUTPUT_PART_TYPES } }
+            ?: return ToolOutput(formatDetail(element))
+        val media = parts.mapNotNull { part ->
+            val kind = when (part.partType()) {
+                "image" -> ToolMedia.Kind.Image
+                "video" -> ToolMedia.Kind.Video
+                else -> return@mapNotNull null
+            }
+            val source = part["source"] as? JsonObject ?: return@mapNotNull null
+            if (source.string("kind") != "session_media") return@mapNotNull null
+            val fileId = source.string("file_id")?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            ToolMedia(fileId, kind, name = part.string("name")?.takeIf { it.isNotBlank() })
         }
-        return payload.display?.command?.takeIf { it.isNotBlank() } ?: ToolPreview.of(payload.name, payload.args)
+        val text = parts
+            .filter { it.partType() == "text" }
+            .mapNotNull { it.string("text") }
+            .filterNot { media.isNotEmpty() && MEDIA_WRAPPER_TAG_RE.matches(it.trim()) }
+            .joinToString("\n")
+        return ToolOutput(text, media)
+    }
+
+    private fun JsonElement.partType(): String? =
+        ((this as? JsonObject)?.get("type") as? JsonPrimitive)?.takeIf { it.isString }?.content
+
+    private fun JsonObject.string(key: String): String? =
+        (get(key) as? JsonPrimitive)?.takeIf { it.isString }?.content
+
+    /** The compact argument preview for the approval card (the display command for
+     * shell calls, else the action). */
+    fun summary(display: ToolInputDisplayDto?, action: String): String =
+        display?.command?.takeIf { it.isNotBlank() } ?: action
+
+    /** The plan Markdown of a `plan_review` display (ticket 173 — `ExitPlanMode`,
+     * docs/server-api.md, Plan review approvals): the approval card renders it above
+     * Allow/Deny. Null for every other kind, a missing display, or a blank plan — those
+     * cards keep the [summary]-only treatment. */
+    fun planReview(display: ToolInputDisplayDto?): String? =
+        display?.takeIf { it.kind == PLAN_REVIEW_KIND }?.plan?.takeIf { it.isNotBlank() }
+
+    /** The row preview for a transcript tool frame (a live op, or a REST transcript
+     * page — the cold start's running turn, the sub-agent page): a Bash call's non-blank `description` argument wins (ticket 095), then the
+     * server's display command when it sent one, else derived from the arguments
+     * (ToolPreview). */
+    fun preview(name: String, args: JsonObject?, display: ToolInputDisplayDto?): String {
+        if (name == "Bash") {
+            val description = (args?.get("description") as? JsonPrimitive)?.contentOrNull
+            if (!description.isNullOrBlank()) return ToolPreview.of(name, args)
+        }
+        return display?.command?.takeIf { it.isNotBlank() } ?: ToolPreview.of(name, args)
     }
 
     /** The `agent_call` display's typed model (ticket 157 — 0.31.0, docs/server-api.md,
@@ -61,10 +113,18 @@ class ChatMessageMapper @Inject constructor(json: Json) {
         return AgentCallDisplay(name, display.prompt.orEmpty(), display.background)
     }
 
-    fun toDomain(payload: QuestionRequestedPayload): PendingQuestion = PendingQuestion(
-        questionId = payload.questionId,
-        toolCallId = payload.toolCallId,
-        items = payload.questions.map { item ->
+    /** A question interaction's request → the wizard's domain question. [questionId] is
+     * the interaction id (the one the response route takes); [toolCallId] links the
+     * card to its `AskUserQuestion` row; [agentId] is the asking agent (ticket 156). */
+    private fun toPendingQuestion(
+        request: QuestionRequestDto,
+        questionId: String,
+        toolCallId: String?,
+        agentId: String?,
+    ): PendingQuestion = PendingQuestion(
+        questionId = questionId,
+        toolCallId = toolCallId?.takeIf { it.isNotBlank() } ?: request.toolCallId,
+        items = request.questions.map { item ->
             PendingQuestion.Item(
                 id = item.id,
                 header = item.header,
@@ -74,8 +134,7 @@ class ChatMessageMapper @Inject constructor(json: Json) {
                 multiSelect = item.multiSelect,
             )
         },
-        // The stamp is optional on the wire; absent = the main agent (ticket 156).
-        agentId = payload.agentId ?: MAIN_AGENT_ID,
+        agentId = agentId?.takeIf { it.isNotBlank() } ?: MAIN_AGENT_ID,
     )
 
     fun toDomain(dto: MessageDto): ChatMessage {
@@ -124,7 +183,9 @@ class ChatMessageMapper @Inject constructor(json: Json) {
             )
         }
         "tool_result" -> dto.toolCallId?.let {
-            ChatMessage.Part.ToolResult(it, dto.isError ?: false, formatDetail(dto.output))
+            // 2.5.1 (ticket 184): a media result's `output` is a content-part array.
+            val output = toolOutput(dto.output)
+            ChatMessage.Part.ToolResult(it, dto.isError ?: false, output.text, output.media)
         }
         else -> null
     }
@@ -170,83 +231,162 @@ class ChatMessageMapper @Inject constructor(json: Json) {
 
     /** Transcript page (docs/server-api.md, Transcript): marker items are dropped here,
      * turns keep their ascending wire order. */
-    fun toDomain(dto: TranscriptData): TranscriptPage = TranscriptPage(
-        agentId = dto.agentId,
-        turns = dto.items.filter { it.kind == "turn" }.map(::toDomain),
-        hasMore = dto.hasMore,
-    )
+    fun toDomain(dto: TranscriptData): TranscriptPage {
+        val pending = dto.pendingInteractions.toSet()
+        // The pending set is `pending_interactions` (the ids still waiting); the entity
+        // list also holds ended interactions. An entity whose own state says pending
+        // counts too — the two views are the same server state.
+        return TranscriptPage(
+            agentId = dto.agentId,
+            turns = dto.items.filter { it.kind == "turn" }.map(::toDomain),
+            hasMore = dto.hasMore,
+            seq = dto.seq,
+            agents = dto.agents.filter { it.agentId.isNotBlank() }.map {
+                TranscriptAgent(it.agentId, isMain = it.type == "main", parentAgentId = it.parentAgentId)
+            },
+            prompts = dto.prompts.filter { it.promptId.isNotBlank() }.map {
+                TranscriptPrompt(it.promptId, promptStatus(it.status))
+            },
+            pendingApprovals = pendingApprovals(dto.interactions, pending),
+            pendingQuestions = pendingQuestions(dto.interactions, pending),
+        )
+    }
 
-    /** Session snapshot (docs/server-api.md, Session snapshot — ticket 085): the
-     * cold-start bundle. The messages page is already domain-ordered: unlike
-     * `/messages` (wire newest-first → reversed here), the snapshot's `items`
-     * come OLDEST-first on the wire (live-verified on 0.31.1, 2026-08-02, against
-     * a long session: item ids and `created_at` ascend across the page) — reversing
-     * them inverts the whole cold-start timeline (calls stuck Running behind orphan
-     * result rows, the bottom pin landing mid-session, a newest-id paging cursor). */
-    fun toDomain(dto: SnapshotData): SessionSnapshot = SessionSnapshot(
-        asOfSeq = dto.asOfSeq,
-        epoch = dto.epoch,
-        busy = dto.session?.busy == true,
-        // The bundle's usage is real since 0.38.0 and seeds the ring directly on
-        // cold start (ticket 161); a zero limit still means "unknown", never a real
-        // fill — drop it and let the /status seed and the WS agent.status.updated
-        // stream converge the ring on the live value.
-        contextUsage = dto.session?.usage
-            ?.takeIf { it.contextLimit > 0 }
-            ?.let { ContextUsage(it.contextTokens, it.contextLimit) },
-        messages = MessagePage(
-            items = dto.messages?.items.orEmpty().map { toDomain(it) },
-            hasMore = dto.messages?.hasMore == true,
-        ),
-        pendingApprovals = dto.pendingApprovals.map {
-            // The snapshot items stamp the asking agent snake_case (2.0.2 — ticket
-            // 156); the WS frame's camelCase twin stays the socket's decode.
-            SnapshotApproval(it.approvalId, it.toolName, summary(it), it.agentIdSnakeCase)
-        },
-        pendingQuestions = dto.pendingQuestions.map { toDomain(it) },
-        subagents = dto.subagents.map { entry ->
-            SubagentRosterEntry(
-                id = entry.id,
-                subagentType = entry.subagentType,
-                description = entry.description,
-                phase = when (entry.subagentPhase) {
-                    "queued" -> SubagentRosterPhase.Queued
-                    "working" -> SubagentRosterPhase.Working
-                    "suspended" -> SubagentRosterPhase.Suspended
-                    "completed" -> SubagentRosterPhase.Completed
-                    "failed" -> SubagentRosterPhase.Failed
-                    "cancelled" -> SubagentRosterPhase.Cancelled
-                    else -> SubagentRosterPhase.Unknown
-                },
-                parentToolCallId = entry.parentToolCallId,
-                runInBackground = entry.runInBackground,
-                outputPreview = entry.outputPreview?.takeIf { it.isNotBlank() },
-                swarmIndex = entry.swarmIndex,
-                model = entry.model?.takeIf { it.isNotBlank() },
-                thinkingEffort = entry.thinkingEffort?.takeIf { it.isNotBlank() },
-            )
-        },
-        inFlightTurn = dto.inFlightTurn?.let { turn ->
-            InFlightTurn(
-                turnId = turn.turnId,
-                assistantText = turn.assistantText,
-                thinkingText = turn.thinkingText,
-                runningTools = turn.runningTools.map { tool ->
-                    // The same renderings a live tool.call.started row gets (ticket
-                    // 144): the seeded row is indistinguishable from a witnessed one.
-                    RunningTool(
-                        toolCallId = tool.toolCallId,
-                        name = tool.name,
-                        args = tool.args,
-                        preview = preview(ToolCallPayload(tool.toolCallId, tool.name, tool.args, tool.display)),
-                        input = formatDetail(tool.args),
-                        agentCall = agentCall(tool.display),
-                    )
-                },
-                currentPromptId = turn.currentPromptId,
-            )
-        },
-    )
+    /** A prompt entity's status (docs/server-api.md, Transcript protocol); null when the
+     * wire value is one this app predates. */
+    fun promptStatus(status: String): PromptStatus? = when (status) {
+        "running" -> PromptStatus.Running
+        "queued" -> PromptStatus.Queued
+        "completed" -> PromptStatus.Completed
+        "aborted" -> PromptStatus.Aborted
+        "blocked" -> PromptStatus.Blocked
+        "failed" -> PromptStatus.Failed
+        else -> null
+    }
+
+    /** The pending approvals of an interaction entity list — the REST transcript's
+     * (pre-filtered against `pending_interactions`) and `transcript.reset.snapshot.
+     * interactions`, which also holds ended entities (docs/server-api.md, Interactions):
+     * approval-kind entities whose state is `pending` or whose id is in [pendingIds],
+     * deduped by interaction id, in entity order. */
+    fun pendingApprovals(
+        entities: List<InteractionEntityDto>,
+        pendingIds: Set<String> = emptySet(),
+    ): List<PendingApprovalRequest> =
+        entities
+            .filter { it.interactionKind == "approval" && (it.state == "pending" || it.interactionId in pendingIds) }
+            .filter { it.interactionId.isNotBlank() }
+            .distinctBy { it.interactionId }
+            .mapNotNull(::toPendingApproval)
+
+    /** The pending questions of an interaction entity list — [pendingApprovals]' filter
+     * for question-kind entities (ticket 172): the REST transcript's cold seed and the
+     * `transcript.reset` snapshots the subscribe ack's question reset carries. */
+    fun pendingQuestions(
+        entities: List<InteractionEntityDto>,
+        pendingIds: Set<String> = emptySet(),
+    ): List<PendingQuestion> =
+        entities
+            .filter { it.interactionKind == "question" && (it.state == "pending" || it.interactionId in pendingIds) }
+            .filter { it.interactionId.isNotBlank() }
+            .distinctBy { it.interactionId }
+            .mapNotNull(::toPendingQuestion)
+
+    /** The flat `interaction` frame → the card events of its [InteractionFrame.kind]:
+     * [toApprovalEvent] or [toQuestionEvent]; any other kind maps to nothing. */
+    fun toInteractionEvent(frame: InteractionFrame): SessionEvent? = when (frame.kind) {
+        "approval" -> toApprovalEvent(frame)
+        "question" -> toQuestionEvent(frame)
+        else -> null
+    }
+
+    /**
+     * The flat `interaction` frame → the approval card's events (ticket 171): `pending`
+     * → [SessionEvent.ApprovalRequested] (card id = the interaction id, the one the
+     * response route takes; [summary] over the display command, else the action; the
+     * `plan_review` display's plan — ticket 173; the asking agent from the frame), `ended` → [SessionEvent.ApprovalResolved] whatever
+     * the outcome (`approved`/`rejected`/`cancelled`). A question frame maps to nothing
+     * here ([toQuestionEvent]'s), like an unknown status or an undecodable request.
+     */
+    fun toApprovalEvent(frame: InteractionFrame): SessionEvent? {
+        if (frame.kind != "approval" || frame.interactionId.isBlank()) return null
+        return when (frame.status) {
+            "pending" -> {
+                val request = frame.request?.let {
+                    runCatching { json.decodeFromJsonElement<ApprovalInteractionRequestDto>(it) }
+                        .onFailure { e -> Log.w(TAG, "Dropping undecodable approval '${frame.interactionId}'", e) }
+                        .getOrNull()
+                } ?: return null
+                SessionEvent.ApprovalRequested(
+                    approvalId = frame.interactionId,
+                    toolName = request.toolName,
+                    summary = summary(request.toolInputDisplay, request.action),
+                    agentId = frame.agentId.takeIf { it.isNotBlank() } ?: MAIN_AGENT_ID,
+                    plan = planReview(request.toolInputDisplay),
+                )
+            }
+            "ended" -> SessionEvent.ApprovalResolved(frame.interactionId)
+            else -> null
+        }
+    }
+
+    /**
+     * The flat `interaction` frame → the question wizard's events (ticket 172):
+     * `pending` → [SessionEvent.QuestionRequested] (card id = the interaction id,
+     * `tool_call_id` links the `AskUserQuestion` row, `agent_id` is the asker, the
+     * `request.questions[]` items decode through [QuestionItemDto]), `ended` →
+     * [SessionEvent.QuestionResolved] whatever the outcome (`answered`/`dismissed`/
+     * `cancelled` — an abort ends a pending question `dismissed`). An approval frame, an
+     * unknown status or an undecodable request maps to nothing.
+     */
+    fun toQuestionEvent(frame: InteractionFrame): SessionEvent? {
+        if (frame.kind != "question" || frame.interactionId.isBlank()) return null
+        return when (frame.status) {
+            "pending" -> {
+                val request = frame.request?.let {
+                    runCatching { json.decodeFromJsonElement<QuestionRequestDto>(it) }
+                        .onFailure { e -> Log.w(TAG, "Dropping undecodable question '${frame.interactionId}'", e) }
+                        .getOrNull()
+                } ?: return null
+                SessionEvent.QuestionRequested(
+                    toPendingQuestion(request, frame.interactionId, frame.toolCallId, frame.agentId),
+                )
+            }
+            "ended" -> SessionEvent.QuestionResolved(frame.interactionId)
+            else -> null
+        }
+    }
+
+    /** A pending approval entity → the card's domain request: the transcript request is
+     * camelCase (docs/server-api.md, Pending state on REST); an undecodable one drops
+     * the entity with a Log.w, never the page. */
+    private fun toPendingApproval(entity: InteractionEntityDto): PendingApprovalRequest? {
+        val request = entity.request?.let {
+            runCatching { json.decodeFromJsonElement<TranscriptApprovalRequestDto>(it) }
+                .onFailure { e -> Log.w(TAG, "Dropping undecodable approval '${entity.interactionId}'", e) }
+                .getOrNull()
+        } ?: return null
+        return PendingApprovalRequest(
+            approvalId = entity.interactionId,
+            toolName = request.toolName,
+            summary = summary(request.display, request.action),
+            agentId = request.agentId?.takeIf { it.isNotBlank() } ?: MAIN_AGENT_ID,
+            plan = planReview(request.display),
+        )
+    }
+
+    /** A pending question entity → the wizard's domain question: the request keeps the
+     * snake_case question shape. The card id is the INTERACTION id (the one the
+     * response route takes); the row's tool call id comes from the entity, else the
+     * request; the entity names no asker (main until a frame says otherwise). */
+    private fun toPendingQuestion(entity: InteractionEntityDto): PendingQuestion? {
+        val request = entity.request?.let {
+            runCatching { json.decodeFromJsonElement<QuestionRequestDto>(it) }
+                .onFailure { e -> Log.w(TAG, "Dropping undecodable question '${entity.interactionId}'", e) }
+                .getOrNull()
+        } ?: return null
+        return toPendingQuestion(request, entity.interactionId, entity.toolCallId, agentId = null)
+    }
 
     private fun toDomain(dto: TranscriptItemDto): TranscriptTurn = TranscriptTurn(
         id = dto.turnId,
@@ -276,18 +416,11 @@ class ChatMessageMapper @Inject constructor(json: Json) {
         }
     }
 
-    /** The origin's status — only "completed" is verified on the wire (0.34.0); the
-     * rest of the core vocabulary is assumed, an unknown value maps to null and the
-     * store's heal skips the turn instead of guessing. */
-    private fun taskOriginStatus(status: String?): TaskInfo.Status? = when (status) {
-        "running" -> TaskInfo.Status.Running
-        "completed" -> TaskInfo.Status.Completed
-        "failed" -> TaskInfo.Status.Failed
-        "timed_out" -> TaskInfo.Status.TimedOut
-        "killed" -> TaskInfo.Status.Killed
-        "lost" -> TaskInfo.Status.Lost
-        else -> null
-    }
+    /** The origin's terminal outcome — only "completed" is verified on the wire
+     * (0.34.0); the rest of the task outcome vocabulary is assumed. "running" and an
+     * unknown value map to null and the store's heal skips the turn instead of
+     * guessing. */
+    private fun taskOriginStatus(status: String?): TaskOutcome? = TaskOutcome.fromWire(status)
 
     private fun toDomain(dto: TranscriptFrameDto): TranscriptFrame? = when (dto.kind) {
         "thinking" -> dto.text?.let { TranscriptFrame.Thinking(dto.frameId, it) }
@@ -300,22 +433,42 @@ class ChatMessageMapper @Inject constructor(json: Json) {
             // Same boundary as the message path: a sub-agent's user-role frames (its
             // internal prompts/nudges) can carry harness envelopes — strip them rather
             // than render raw XML on the sub-agent page; a frame left blank is dropped.
+            // A blank ASSISTANT frame is kept: a running turn's just-opened text frame
+            // is "" until its appends land, and the cold start seeds the fold from it
+            // (ticket 176) — the flatten skips blank text anyway.
             val stripped = if (role == TranscriptFrame.Text.Role.User) InternalEnvelopes.strip(text) else text
-            stripped.takeIf { it.isNotBlank() }?.let { TranscriptFrame.Text(dto.frameId, role, it) }
+            stripped.takeIf { it.isNotBlank() || role == TranscriptFrame.Text.Role.Assistant }
+                ?.let { TranscriptFrame.Text(dto.frameId, role, it) }
         }
         "tool" -> dto.toolCallId?.let { toolCallId ->
+            val name = dto.name.orEmpty()
+            // A running call's `input` may still be absent while `inputText` streams:
+            // a complete one parses (the live fold's rule), a partial fragment renders
+            // nothing — the row's first-writer-wins input must not lock onto it.
+            val args = dto.input ?: dto.inputText?.let {
+                runCatching { json.parseToJsonElement(it) as? JsonObject }.getOrNull()
+            }
+            val display = dto.display?.let {
+                runCatching { json.decodeFromJsonElement<ToolInputDisplayDto>(it) }.getOrNull()
+            }
+            // 2.5.1 (ticket 184): a media result's `output` is a content-part array.
+            val output = toolOutput(dto.output)
             TranscriptFrame.Tool(
                 id = dto.frameId,
                 toolCallId = toolCallId,
-                name = dto.name.orEmpty(),
+                name = name,
                 running = dto.state == "running",
-                preview = ToolPreview.of(dto.name, dto.input),
-                input = formatDetail(dto.input).ifBlank { dto.inputText.orEmpty() },
-                // The volatile progress tail stands in while no definitive output exists.
-                output = formatDetail(dto.output).ifBlank { progressText(dto.progress) },
+                preview = preview(name, args, display),
+                input = formatDetail(args),
+                // The volatile progress tail stands in while no definitive output exists
+                // (a media-only result is definitive: its text stays blank).
+                output = if (output.text.isBlank() && output.media.isEmpty()) progressText(dto.progress) else output.text,
+                media = output.media,
                 // The raw args object (ticket 118) — null when the frame carries no
                 // `input` object, leaving the pretty string as the row's fallback.
-                args = dto.input,
+                args = args,
+                agentCall = agentCall(display),
+                failed = dto.state == "error",
             )
         }
         else -> null
@@ -334,120 +487,17 @@ class ChatMessageMapper @Inject constructor(json: Json) {
     private fun progressText(progress: JsonObject?): String =
         progress?.get("text")?.let { (it as? JsonPrimitive)?.contentOrNull }.orEmpty()
 
-    /** REST task → domain (ticket 092): kind `tool` (question flows) is excluded by
-     * design — those surface as question cards in chat; unknown kind/status values and
-     * unusable timestamps drop the entry with a Log.w, never crash. */
-    fun toDomain(dto: TaskDto): BackgroundTask? {
-        val kind = when (dto.kind) {
-            "subagent" -> BackgroundTask.Kind.Subagent
-            "bash" -> BackgroundTask.Kind.Bash
-            "tool" -> return null
-            else -> {
-                Log.w(TAG, "Dropping task '${dto.id}' with unknown kind '${dto.kind}'")
-                return null
-            }
-        }
-        val status = when (dto.status) {
-            "running" -> BackgroundTask.Status.Running
-            "completed" -> BackgroundTask.Status.Completed
-            "failed" -> BackgroundTask.Status.Failed
-            "cancelled" -> BackgroundTask.Status.Cancelled
-            else -> {
-                Log.w(TAG, "Dropping task '${dto.id}' with unknown status '${dto.status}'")
-                return null
-            }
-        }
-        // started_at == created_at on the wire (docs/server-api.md); a malformed one
-        // falls back to the other, and both missing drops the entry — the elapsed
-        // column has nothing to show for it.
-        val startedAt = parseInstant(dto.startedAt) ?: parseInstant(dto.createdAt)
-        val createdAt = parseInstant(dto.createdAt) ?: startedAt
-        if (startedAt == null || createdAt == null) {
-            Log.w(TAG, "Dropping task '${dto.id}' with unusable timestamps")
-            return null
-        }
-        return BackgroundTask(
-            id = dto.id,
-            kind = kind,
-            description = dto.description,
-            status = status,
-            runInBackground = dto.runInBackground,
-            createdAt = createdAt,
-            startedAt = startedAt,
-            completedAt = parseInstant(dto.completedAt),
-            agentId = dto.agentId,
-            command = dto.command,
-            outputPreview = dto.outputPreview,
-            outputBytes = dto.outputBytes,
-            model = dto.model?.takeIf { it.isNotBlank() },
-            thinkingEffort = dto.thinkingEffort?.takeIf { it.isNotBlank() },
-        )
-    }
-
-    /** WS task `info` → domain (ticket 092): the CORE status/kind vocabulary (the
-     * collector maps it to the REST wire one); times are epoch millis, unlike REST's
-     * ISO strings. Unknown values drop the event with a Log.w, never crash. */
-    fun toDomain(dto: TaskInfoDto): TaskInfo? {
-        val status = when (dto.status) {
-            "running" -> TaskInfo.Status.Running
-            "completed" -> TaskInfo.Status.Completed
-            "failed" -> TaskInfo.Status.Failed
-            "timed_out" -> TaskInfo.Status.TimedOut
-            "killed" -> TaskInfo.Status.Killed
-            "lost" -> TaskInfo.Status.Lost
-            else -> {
-                Log.w(TAG, "Dropping task event '${dto.taskId}' with unknown status '${dto.status}'")
-                return null
-            }
-        }
-        val kind = when (dto.kind) {
-            "agent" -> TaskInfo.Kind.Agent
-            "process" -> TaskInfo.Kind.Process
-            else -> {
-                Log.w(TAG, "Dropping task event '${dto.taskId}' with unknown kind '${dto.kind}'")
-                return null
-            }
-        }
-        return TaskInfo(
-            taskId = dto.taskId,
-            description = dto.description,
-            status = status,
-            startedAt = Instant.ofEpochMilli(dto.startedAt),
-            endedAt = dto.endedAt?.let(Instant::ofEpochMilli),
-            stopReason = dto.stopReason,
-            kind = kind,
-            agentId = dto.agentId,
-            subagentType = dto.subagentType,
-        )
-    }
-
-    /** `agent.status.updated` phase object → domain (ticket 148): the 2.0.2 kind
-     * vocabulary; an unknown kind drops the frame with a Log.w (the ignore-unknown
-     * rule), never crash. `since` is epoch ms on the wire, absent on the terminal
-     * kinds (they carry `at`). */
-    fun toDomain(dto: AgentPhaseDto): AgentPhase? {
-        val kind = when (dto.kind) {
-            "idle" -> AgentPhase.Kind.Idle
-            "running" -> AgentPhase.Kind.Running
-            "tool_call" -> AgentPhase.Kind.ToolCall
-            "retrying" -> AgentPhase.Kind.Retrying
-            "awaiting_approval" -> AgentPhase.Kind.AwaitingApproval
-            "interrupted" -> AgentPhase.Kind.Interrupted
-            "ended" -> AgentPhase.Kind.Ended
-            else -> {
-                Log.w(TAG, "Dropping agent phase with unknown kind '${dto.kind}'")
-                return null
-            }
-        }
-        return AgentPhase(kind, dto.since?.let(Instant::ofEpochMilli), dto.name)
-    }
-
-    private fun parseInstant(value: String?): Instant? =
-        value?.let { runCatching { Instant.parse(it) }.getOrNull() }
-
     private companion object {
         const val TAG = "ChatMessageMapper"
+        const val PLAN_REVIEW_KIND = "plan_review"
         val DATA_URL_RE = Regex("""^data:([^;,]+);base64,(.*)$""", RegexOption.DOT_MATCHES_ALL)
+
+        /** The content-part types a tool-output array is recognized by (ticket 184). */
+        val TOOL_OUTPUT_PART_TYPES = setOf("text", "image", "video")
+
+        /** One bare `<image …>`/`</image>` (or video) tag — the wrapper text the media
+         * tools frame their media part with (docs/server-api.md, Messages → History). */
+        val MEDIA_WRAPPER_TAG_RE = Regex("""^(?:<(?:image|video)(?:\s[^<>]*)?>|</(?:image|video)>)$""")
 
         // File-store ids come in two shapes: v1 `f_`<26-char ULID> and v2 `f_`<randomUUID>.
         // Anchored at the start of the `<fileId>-<name>` basename — splitting on the first

@@ -43,9 +43,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.navigation.toRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
-import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
-import fr.louissaglio.kimi.android.data.settings.SettingsRepository
+import fr.louissaglio.kimi.android.data.chat.TaskControl
 import fr.louissaglio.kimi.android.data.toUserMessage
 import fr.louissaglio.kimi.android.navigation.Swarm
 import fr.louissaglio.kimi.android.ui.common.EmptyState
@@ -70,7 +69,6 @@ import kotlinx.coroutines.launch
 class SwarmViewModel internal constructor(
     private val subagentStore: SubagentStreamStore,
     private val chatRepository: ChatRepository,
-    private val settingsRepository: SettingsRepository,
     private val routeArgs: Swarm,
 ) : ViewModel() {
 
@@ -81,9 +79,8 @@ class SwarmViewModel internal constructor(
     constructor(
         subagentStore: SubagentStreamStore,
         chatRepository: ChatRepository,
-        settingsRepository: SettingsRepository,
         savedStateHandle: SavedStateHandle,
-    ) : this(subagentStore, chatRepository, settingsRepository, savedStateHandle.toRoute<Swarm>())
+    ) : this(subagentStore, chatRepository, savedStateHandle.toRoute<Swarm>())
 
     private val sessionId: String = routeArgs.sessionId
     private val toolCallId: String = routeArgs.toolCallId
@@ -93,7 +90,7 @@ class SwarmViewModel internal constructor(
      * title then. [members] are sorted by swarmIndex, nulls in arrival order.
      * [stoppingMemberIds] latches the ids whose stop call succeeded or is in
      * flight (ticket 137): the row's Stop disables on tap and stays down — the
-     * wire (`task.terminated` killed, else the settled call's result) flips the
+     * wire (the ended task state, outcome killed, else the settled call's result) flips the
      * member terminal, which hides the button. A failure removes the latch. */
     data class UiState(
         val sessionId: String,
@@ -141,34 +138,26 @@ class SwarmViewModel internal constructor(
         subagentStore.pageClosed(sessionId)
     }
 
-    /** Stops one running member (`POST .../tasks/{taskId}:cancel` — ticket 092's
-     * endpoint, working on foreground members since server 0.34.0, docs/server-api.md)
-     * through the same repository wrapper the jobs sheet uses, so error surfacing
-     * stays consistent. No confirmation (web parity). The button disables on tap and
-     * stays down on success — NO optimistic status flip: the row settles when the
-     * kill's `task.terminated` (status killed) or, for a foreground member, the
-     * settled call's result lands. A 40904 (the member went terminal first) is
-     * already-terminal success, the jobs idiom: the latch stands. Any other failure
-     * re-enables the button and snackbars. */
+    /** Stops one running member with the flat `task.stop` control (ticket 179 —
+     * server 2.5.0 dropped REST `:cancel`), the same repository call the jobs sheet
+     * uses, so error surfacing stays consistent. No confirmation (web parity). The
+     * button disables on tap and stays down on success — NO optimistic status flip:
+     * the row settles when the member's ended task state (outcome `killed`, ticket
+     * 135's pin) or the settled call's result lands. An already-ended member just
+     * replies with its state (code 0). An error reply or a dropped socket re-enables
+     * the button and snackbars. */
     fun onStopMember(memberId: String) {
         val member = uiState.value.members.firstOrNull { it.id == memberId } ?: return
         if (!member.stoppable || member.id in uiState.value.stoppingMemberIds) return
         val taskId = member.taskId ?: return
         uiState.update { it.copy(stoppingMemberIds = it.stoppingMemberIds + memberId) }
         viewModelScope.launch {
-            chatRepository.cancelTask(settingsRepository.current(), sessionId, taskId)
+            chatRepository.sendTaskControl(sessionId, TaskControl.Stop, taskId)
                 .onFailure { error ->
-                    if ((error as? DataError.Api)?.code == TASK_ALREADY_TERMINAL_CODE) return@onFailure
                     uiState.update { it.copy(stoppingMemberIds = it.stoppingMemberIds - memberId) }
                     _effects.send(Effect.MemberStopFailed(error.toUserMessage()))
                 }
         }
-    }
-
-    private companion object {
-        /** Envelope code of a cancel aimed at an already-terminal task
-         * (docs/server-api.md, REST /tasks) — tolerated as success. */
-        const val TASK_ALREADY_TERMINAL_CODE = 40904
     }
 }
 

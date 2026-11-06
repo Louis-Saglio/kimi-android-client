@@ -68,12 +68,12 @@ data class Swarm(val sessionId: String, val toolCallId: String)
  * resolves them from its own state at navigation time; absent (deep link, unknown
  * row), the screen falls back to plain elapsed and "failed". The description and
  * command ride along the same way (the tapped row already carries the call input),
- * so the title and the Command section render before the entry fetch answers; the
- * fetch stays authoritative and overwrites both. [ownerAgentId] (ticket 098) selects
- * the data mode: null/"main" is the REST-backed mode; a sub-agent id is the
- * store-backed mode — REST `/tasks` serves only the main agent's task store, so a
- * sub-agent-owned task gets its status from the SubagentStreamStore's live frames
- * (no output tail, no Stop). */
+ * so the title and the Command section render before the task's frame lands; a frame
+ * carrying them overwrites both. [ownerAgentId] (ticket 098) selects the data mode:
+ * null/"main" is the frame-backed mode (the session socket's task record, Stop via
+ * `task.stop` — ticket 179); a sub-agent id is the store-backed mode — a
+ * sub-agent-owned task gets its status from the SubagentStreamStore's records (no
+ * output, no Stop). */
 @Serializable
 data class JobDetail(
     val sessionId: String,

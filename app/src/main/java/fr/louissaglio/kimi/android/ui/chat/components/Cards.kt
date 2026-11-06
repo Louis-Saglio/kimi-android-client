@@ -28,11 +28,22 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import fr.louissaglio.kimi.android.data.chat.MAIN_AGENT_ID
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 
+/** Test tag of the approval card's scrollable plan body (ticket 173). */
+internal const val APPROVAL_PLAN_TAG = "approval_plan"
+
+/** The plan body's cap: about a dozen lines of Markdown, leaving the card's header and
+ * Allow/Deny row on screen above the composer even on a small phone. */
+private val PLAN_MAX_HEIGHT = 240.dp
+
+/** The head of the approval queue, docked above the composer. A `plan_review` request
+ * (ticket 173) adds the plan Markdown in a scrollable, height-capped body; every other
+ * request shows the tool name and its compact summary only. */
 @Composable
 internal fun ApprovalCard(
     approval: ChatViewModel.PendingApproval,
@@ -61,7 +72,7 @@ internal fun ApprovalCard(
             )
             // Ticket 139 (web parity): a sub-agent's request names the asking member —
             // the record's name/description from the store, or the plain fallback while
-            // the record has not landed (the request can race ahead of subagent.spawned).
+            // the record has not landed (the request can race ahead of the spawn task frame).
             if (approval.agentId != MAIN_AGENT_ID) {
                 Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.small) {
                     Text(
@@ -79,6 +90,26 @@ internal fun ApprovalCard(
                     maxLines = 4,
                     overflow = TextOverflow.Ellipsis,
                 )
+            }
+            // Ticket 173: an `ExitPlanMode` review shows the plan it asks to approve. The
+            // body scrolls inside a height-capped inset, so a long plan never pushes
+            // Allow/Deny out of the bottom dock.
+            approval.plan?.let { plan ->
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .heightIn(max = PLAN_MAX_HEIGHT)
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 10.dp, vertical = 8.dp)
+                            .testTag(APPROVAL_PLAN_TAG),
+                    ) {
+                        MarkdownBody(plan)
+                    }
+                }
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -177,7 +208,7 @@ internal fun QuestionCard(
             // Ticket 156 (the approval badge's idiom, 139 — byte-identical): a
             // sub-agent's question names the asking member — the record's
             // name/description from the store, or the plain fallback while the record
-            // has not landed (the request can race ahead of subagent.spawned).
+            // has not landed (the request can race ahead of the spawn task frame).
             if (question.agentId != MAIN_AGENT_ID) {
                 Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.small) {
                     Text(

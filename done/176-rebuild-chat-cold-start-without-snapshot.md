@@ -100,3 +100,54 @@ Relevant code: `ui/chat/SnapshotSync.kt`, `data/chat/Snapshot.kt`,
 (roster apply), `data/chat/SessionSocket.kt` (`seedCursor`). Wire reference:
 `docs/server-api.md` → Transcript, Prompts → Queue snapshot, WebSocket →
 Transcript protocol.
+
+## Implementation notes
+
+**2026-11-06 —** `SnapshotSync` is replaced by `TranscriptColdStart` (ui/chat, same
+session-scoped singleton, per-session in-flight cache and `forget` release hook): one
+cold start is three parallel reads — `GET .../messages`, `GET .../transcript?agent_id=main
+&page_size=1` and `GET .../prompts` — and any failed read is the ordinary load error. On
+success it seeds the socket (`ChatRepository.seedTranscript` → `SessionSocket.seedTranscript`:
+main's `TranscriptFold.seed` + the page's `seq` as watermark), applies the transcript
+`agents` roster to the store (identity-only `SubagentRosterEntry`, phase `Unknown`) and
+mines `Agent` calls from the messages page and the running turn's tool frames.
+`ChatViewModel.applyColdStart` replaces history, seeds the running turn as live rows
+(`ChatTimeline.seedRunningTurn`), renders queued prompts as "Queued #N" echoes
+(`seedQueuedPrompts`), sets the working state from the running turn / active prompt and
+replaces the approval/question queues from the transcript's pending interactions. A chat
+that joins someone else's fetch (`AlreadyFresh`) takes its own `resync`; the gate now
+claims the feeder role before awaiting the cold start.
+
+- Resume: `SessionSocket` keeps per-agent watermarks (seeded by the cold start, advanced
+  by every ops batch and reset) and sends them as `transcript_since` on every subscribe.
+  A reset answering a resumed agent resets its fold and emits the new
+  `SessionEvent.TranscriptStale`; `ChatViewModel.verifyResume` (ON_START after the first,
+  every `Reconnected`) probes `GET .../transcript/ops` via the new `TranscriptSyncApi`
+  (`TranscriptCatchUp.isStale`: `complete:false` or `latest_seq` behind the watermark).
+  Either stale signal runs `rebuildFromTranscript` (a fresh cold start). This replaces
+  048's status-aware REST resync (`resyncHistoryAfterDrop` is deleted).
+- Data: `TranscriptPage` gained `seq`/`agents`/`prompts`/`pendingApprovals`/
+  `pendingQuestions` (mapped in `ChatMessageMapper` from the 2.5 global state — camelCase
+  approval request `TranscriptApprovalRequestDto`, snake_case question request; card id =
+  interaction id); transcript tool frames now carry `agentCall`/`failed`, parse a complete
+  `inputText` and keep blank assistant text frames. Deleted: `SessionSnapshot`,
+  `SnapshotApproval`, `InFlightTurn`/`RunningTool`, `SnapshotData` and its DTOs,
+  `ApprovalRequestedPayload`, `ChatApi.snapshot`, `ChatRepository.getSnapshot`,
+  `ChatTimeline.seedInFlight`.
+- Tests: `TranscriptColdStartTest` (VM harness: no `/snapshot`, mid-turn rows + working
+  state, live ops extending the seed, history/seed dedup, one card per pending
+  interaction, queued prompt, `transcript_since` for main and a live-seen child,
+  `complete:false` and stale-reset rebuilds, covered resume, Agent-row link, roster,
+  failure/retry), `TranscriptColdStartSyncTest` (cache/forget/failure, watermark seed,
+  mining, roster), `SessionSocketTest` (resume subscribe, per-agent watermarks, stale vs
+  baseline reset), `TranscriptFoldTest` (seed/reset), `ChatRepositoryTest` (global-state
+  mapping, prompt queue, catch-up), `ChatTimelineTest` (both seeds); the harness serves
+  the transcript/prompts/catch-up routes, `awaitRequest` takes a method filter, and
+  tearDowns join `TranscriptColdStart.awaitInFlight()` (a resync fetches on the cold
+  start's own scope, which no ViewModel cancellation reaches).
+- Behaviour that died with the snapshot roster and is not rebuilt here: a running
+  foreground sub-agent's row no longer links before its result exists (the transcript
+  roster carries no parent tool call) and roster phases/descriptions no longer seed —
+  ticket 182 re-feeds both from `task` frames; the snapshot usage ring seed is ticket 177's
+  `usage` frame. A child agent first seen on this process subscribes without a watermark
+  (it takes the server's baseline reset; its page fetches history after the subscribe).

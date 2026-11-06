@@ -48,7 +48,7 @@ class SessionPrefsStore @Inject constructor(
     }
 
     /** The session's stored permission-mode pick (ticket 141), null when the session
-     * follows the server. Only explicit local picks land here — the /status-reported
+     * follows the server. Only explicit local picks land here — the server-reported
      * mode is never written through (unlike the model binding, the server always
      * reports one, and a stored value stamps every prompt). */
     suspend fun permission(sessionId: String): String? =

@@ -115,3 +115,51 @@ REST mapper already models turn/step/frame shapes — reuse it for frame
 upserts), `ui/chat/ChatViewModel.kt` (event handling). Wire reference:
 `docs/server-api.md` → WebSocket → Transcript protocol; the upstream
 contract is `packages/transcript/src/contract/schema.ts` at tag 2.5.0.
+
+## Implementation notes
+
+**2026-11-06 —** `SessionSocket` now sends one `subscribe_v2` per connection
+(`{"session_id":…,"transcript":{"*":"delta"}}`, id `c_N`), re-subscribes on every
+reconnect (`SocketEvent.Reconnected` is now a plain object → the ViewModel's REST
+resync), and treats an ack listing the session in `not_found` as terminal:
+`SocketEvent.Failed(DataError.SessionNotFound)`, surfaced by `ChatViewModel` as the
+load error (snackbar once rows exist). The resume cursor (`cursors`, `seedCursor`,
+`ChatRepository.seedSessionCursor`, the snapshot cursor seed, `appliedSnapshotCursor`),
+`ResyncRequired` and every legacy frame branch/DTO are deleted (`WsFrame` lost
+`seq`/`epoch`/`volatile`; `AckPayload` is `accepted`/`not_found`; the agent-status,
+task-info, subagent, compaction, approval-resolved/question-resolved, delta/tool/turn/
+step/prompt payloads and the matching mapper paths are gone). `transcript.reset` is
+decoded and renders nothing.
+
+- Wire DTOs: `data/chat/TranscriptOpsDtos.kt` (reset/ops payloads, the flat
+  `TranscriptOpDto` union, prompt/turn/step/append/marker/interaction entities; the
+  frame body reuses `TranscriptFrameDto`).
+- Fold: `data/chat/TranscriptFold.kt`, one per session held by the socket at instance
+  level (survives the ON_STOP/ON_START collection restarts). Text/thinking frames →
+  suffix-only `AssistantDelta`/`ThinkingDelta` (append dedup, gaps dropped for 176);
+  tool frames → `ToolCallStarted` (first sight + when args/display become known; a
+  partial `inputText` renders no args, a complete one parses) and one
+  `ToolCallResult`; `turn.upsert` → `TurnStarted`/`TurnEnded` (`cancelled` →
+  `user_cancelled`, `failed` → `error` + `errorMessage`); `step.upsert` →
+  `StepStarted`/`StepCompleted` (+ `StepRetrying` from the schema-level `retry`);
+  `prompt.upsert` → the new `PromptUpdated(status, queueLength)` (replaces
+  `PromptSubmitted`/`PromptQueued`/`PromptStarted`); `undo` marker → `ContextSpliced`
+  minus injections. Ops of an ended turn are ignored; events carry the batch
+  `agent_id`, so sub-agent ops route to `SubagentStreamStore` unchanged.
+- Domain/UI: `ToolCallDelta`, `ToolCallProgress` and `ToolCallStarted.description`
+  deleted; `ChatTimeline.onTurnEnded` settles still-running live tools to Error on an
+  interrupted end (also via `apply(TurnEnded)` for the store's timelines) and the
+  footer carries a failed turn's error (`turnEndCopy("error", message)`).
+- Tests: `TranscriptFoldTest` (every op type, dedup/gap/abort/agent tagging),
+  `SessionSocketTest` (rewritten: subscribe_v2 frame, not_found, reset, a full live
+  round, sub-agent tagging, legacy families ignored, fold across collections,
+  heartbeat/watchdog/re-subscribe), `ChatViewModelTest` (live streaming without REST,
+  reset keeps history, unknown sub-agent isolation, abort, failed-turn footer,
+  not_found), `ChatTimelineTest`, shared frame builders in `testutil/TranscriptFrames`.
+  The harness helpers (`turnStartedFrame`, `assistantDeltaFrame`, …) now emit
+  `transcript.ops`.
+- Removed tests whose only feed was a deleted legacy family (port them from git
+  history with the new frames): approvals → 171; the `event.question.*`-driven
+  `QuestionWizardTest` cases → 172; agent-status/usage/permission → 177; `task.*` →
+  179; compaction → 181; `subagent.*` spawn-link → 182; cursor/`resync_required` →
+  removed behaviour.

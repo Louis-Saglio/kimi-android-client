@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.Flow
 class ChatRepository @Inject constructor(
     private val chatApi: ChatApi,
     private val fileHistory: FileHistoryApi,
+    private val transcriptSync: TranscriptSyncApi,
     private val models: ModelsRepository,
     private val prefs: SessionPrefsStore,
     private val socket: SessionSocket,
@@ -36,7 +37,8 @@ class ChatRepository @Inject constructor(
         chatApi.messages(settings, sessionId, beforeId)
 
     /** One page of an agent's turn-granular transcript — the sub-agent page's history
-     * backing (ticket 046). [beforeTurn] = null fetches the newest page. */
+     * backing (ticket 046) and the main chat's cold-start read model (ticket 176).
+     * [beforeTurn] = null fetches the newest page. */
     suspend fun getTranscript(
         settings: ServerSettings,
         sessionId: String,
@@ -70,14 +72,17 @@ class ChatRepository @Inject constructor(
      * WebSocket (docs/server-api.md). Success carries the ACK's prompt id — equal to
      * the user message id, so it keys the chat's optimistic local echo (ticket 154).
      * [attachments] (already uploaded, ticket 033) go into the content array before the
-     * text item; [text] may be blank when attachments are present. Success records
-     * [sessionId] in the [SessionActivityStore] so the session list bumps its row.
+     * text item; [text] may be blank when attachments are present. [swarmMode] is the
+     * composer's swarm chip (ticket 174), sent as `swarm_mode` whatever its value.
+     * Success records [sessionId] in the [SessionActivityStore] so the session list
+     * bumps its row.
      */
     suspend fun sendPrompt(
         settings: ServerSettings,
         sessionId: String,
         text: String,
         attachments: List<FileMeta> = emptyList(),
+        swarmMode: Boolean = false,
     ): Result<String> {
         val model = promptModel(settings, sessionId)
         return chatApi.postPrompt(
@@ -88,6 +93,7 @@ class ChatRepository @Inject constructor(
             model,
             promptThinking(settings, sessionId, model),
             promptPermissionMode(sessionId),
+            swarmMode,
         )
             .onSuccess { activity.record(sessionId) }
     }
@@ -97,7 +103,8 @@ class ChatRepository @Inject constructor(
      * posted as usual — while busy the server queues it — then `prompts:steer` injects the
      * queued prompt into the active turn. Success carries the posted prompt's id like
      * [sendPrompt] (the echo's key); the steered user message echoes over the
-     * WebSocket (context.spliced) like a regular one. Success records [sessionId] in the
+     * WebSocket (context.spliced) like a regular one. The posted prompt carries
+     * [swarmMode] like [sendPrompt]'s. Success records [sessionId] in the
      * [SessionActivityStore] like [sendPrompt].
      */
     suspend fun steer(
@@ -105,6 +112,7 @@ class ChatRepository @Inject constructor(
         sessionId: String,
         text: String,
         attachments: List<FileMeta> = emptyList(),
+        swarmMode: Boolean = false,
     ): Result<String> {
         val model = promptModel(settings, sessionId)
         val promptId = chatApi.postPrompt(
@@ -115,6 +123,7 @@ class ChatRepository @Inject constructor(
             model,
             promptThinking(settings, sessionId, model),
             promptPermissionMode(sessionId),
+            swarmMode,
         )
             .getOrElse { return Result.failure(it) }
         return chatApi.postSteer(settings, sessionId, promptId)
@@ -200,8 +209,9 @@ class ChatRepository @Inject constructor(
     suspend fun abortPrompt(settings: ServerSettings, sessionId: String): Result<Unit> =
         chatApi.abortPrompt(settings, sessionId)
 
-    /** Posts the user's decision for one approval request; the pending UI clears when
-     * the `event.approval.resolved` frame arrives over the WebSocket. */
+    /** Posts the user's decision for one approval interaction ([approvalId] = the
+     * interaction id); the pending UI clears when the `ended` `interaction` frame
+     * arrives over the WebSocket (ticket 171). */
     suspend fun postApprovalDecision(
         settings: ServerSettings,
         sessionId: String,
@@ -209,13 +219,9 @@ class ChatRepository @Inject constructor(
         approved: Boolean,
     ): Result<Unit> = chatApi.postApprovalDecision(settings, sessionId, approvalId, approved)
 
-    /** Polls the pending questions of the session — the source of truth used to
-     * re-derive the pending question after a reconnect or a history refetch. */
-    suspend fun getPendingQuestions(settings: ServerSettings, sessionId: String): Result<List<PendingQuestion>> =
-        chatApi.pendingQuestions(settings, sessionId)
-
-    /** Posts the user's answers for one question; the pending UI clears when the
-     * `event.question.answered` frame arrives over the WebSocket. */
+    /** Posts the user's answers for one question interaction ([questionId] = the
+     * interaction id); the pending UI clears when the `ended` `interaction` frame
+     * arrives over the WebSocket (ticket 172). */
     suspend fun answerQuestion(
         settings: ServerSettings,
         sessionId: String,
@@ -223,8 +229,9 @@ class ChatRepository @Inject constructor(
         answers: List<QuestionAnswer>,
     ): Result<Unit> = chatApi.answerQuestion(settings, sessionId, questionId, answers)
 
-    /** Dismisses one pending question; the pending UI clears when the
-     * `event.question.dismissed` frame arrives over the WebSocket. */
+    /** Dismisses one pending question interaction; the pending UI clears when the
+     * `ended` (`outcome:"dismissed"`) `interaction` frame arrives over the WebSocket
+     * (ticket 172). */
     suspend fun dismissQuestion(
         settings: ServerSettings,
         sessionId: String,
@@ -233,45 +240,75 @@ class ChatRepository @Inject constructor(
 
     /** Starts a compaction (`POST /api/v1/sessions/{id}:compact`, docs/server-api.md,
      * Compact — ticket 056). Fire-and-forget: the progress arrives over the WebSocket
-     * (compaction.started/completed), so success carries no payload. */
+     * (the `compaction` transcript markers — ticket 181), so success carries no payload. */
     suspend fun compact(settings: ServerSettings, sessionId: String): Result<Unit> =
         chatApi.compact(settings, sessionId)
 
-    /** Lightweight live status (`GET /api/v1/sessions/{id}/status`): the mid-turn flag
-     * and the context window fill (ticket 041). */
-    suspend fun getSessionStatus(settings: ServerSettings, sessionId: String): Result<SessionStatus> =
-        chatApi.sessionStatus(settings, sessionId)
+    /** The main agent's prompt queue (`GET .../prompts` — ticket 176): the running
+     * prompt and the queued ones, in queue order. */
+    suspend fun getPromptQueue(settings: ServerSettings, sessionId: String): Result<PromptQueue> =
+        transcriptSync.promptQueue(settings, sessionId)
 
-    /** The session snapshot (`GET /api/v1/sessions/{id}/snapshot` — ticket 085): the
-     * cold-start/resync bundle at an event-stream watermark. */
-    suspend fun getSnapshot(settings: ServerSettings, sessionId: String): Result<SessionSnapshot> =
-        chatApi.snapshot(settings, sessionId)
+    /** Whether [agentId]'s op journal still covers every batch after [sinceSeq]
+     * (`GET .../transcript/ops` — ticket 176): the resume's REST verification. */
+    suspend fun getTranscriptCatchUp(
+        settings: ServerSettings,
+        sessionId: String,
+        agentId: String,
+        sinceSeq: Long,
+    ): Result<TranscriptCatchUp> = transcriptSync.catchUp(settings, sessionId, agentId, sinceSeq)
 
-    /** The session's background tasks (`GET .../tasks` — ticket 092): background
-     * sub-agents and bash, terminal ones included. [status] is the optional wire
-     * filter; null fetches unfiltered. */
-    suspend fun getTasks(settings: ServerSettings, sessionId: String, status: String? = null): Result<List<BackgroundTask>> =
-        chatApi.listTasks(settings, sessionId, status)
+    /** Seeds the session socket from a REST transcript page (ticket 176): the agent's
+     * fold restarts from the page and its `seq` becomes the resume watermark the next
+     * `subscribe_v2` sends as `transcript_since`. */
+    fun seedTranscript(sessionId: String, page: TranscriptPage) = socket.seedTranscript(sessionId, page)
 
-    /** One background task with its stored output tail (`GET .../tasks/{taskId}` —
-     * ticket 096's job screen): the bash preview grows between polls while running.
-     * An unknown task surfaces as the typed DataError.Api(40406). */
-    suspend fun getTask(settings: ServerSettings, sessionId: String, taskId: String): Result<BackgroundTask> =
-        chatApi.getTask(settings, sessionId, taskId)
+    /** The agent's resume watermark on the session socket; null when none is known. */
+    fun transcriptWatermark(sessionId: String, agentId: String): Long? = socket.watermark(sessionId, agentId)
 
-    /** Cancels one background task (`POST .../tasks/{taskId}:cancel` — ticket 092);
-     * the `task.terminated` teardown arrives over the WebSocket. A terminal task
-     * surfaces as the typed DataError.Api(40904). */
-    suspend fun cancelTask(settings: ServerSettings, sessionId: String, taskId: String): Result<Unit> =
-        chatApi.cancelTask(settings, sessionId, taskId)
+    /** Sends one flat task control (`task.stop`/`task.background` — ticket 179) for
+     * [agentId]'s task over the session's live socket and awaits its reply. Success
+     * carries the replied task state, which the socket has already emitted as a
+     * [SessionEvent.TaskUpdated] to the collector; a non-zero code (`40933` not
+     * movable, `40406` unknown task, …) surfaces as [DataError.Api], a missing or
+     * dropped connection as [DataError.Network]. */
+    suspend fun sendTaskControl(
+        sessionId: String,
+        control: TaskControl,
+        taskId: String,
+        agentId: String = MAIN_AGENT_ID,
+    ): Result<TaskState?> = socket.sendTaskControl(sessionId, control, agentId, taskId)
 
-    /** Detaches one running foreground task to the background
-     * (`POST .../tasks/{taskId}:detach` — ticket 138, server 0.39.0); the
-     * `task.started` conversion frame arrives over the WebSocket. An unknown task
-     * surfaces as the typed DataError.Api(40406), an already-background or terminal
-     * one as a refusal. */
-    suspend fun detachTask(settings: ServerSettings, sessionId: String, taskId: String): Result<Unit> =
-        chatApi.detachTask(settings, sessionId, taskId)
+    /** The latest known state of [agentId]'s task [taskId] in the session, from the
+     * task frames the socket has seen in this process (ticket 179 — the job screen's
+     * status source); null until one arrives. */
+    fun observeTask(sessionId: String, agentId: String, taskId: String): Flow<TaskState?> =
+        socket.observeTask(sessionId, agentId, taskId)
+
+    /** Starts streaming [agentId]'s task output over the session's live socket
+     * (`task.watch` — ticket 180) and awaits the reply; the chunks then arrive on
+     * [observeTaskOutput] (collect it first). [sinceOffset] is the UTF-8 byte offset
+     * already held (null on the first watch), [tailBytes] the size of the first chunk.
+     * Errors as [sendTaskControl] (`40406` unknown task, `50003` output unreadable). */
+    suspend fun watchTaskOutput(
+        sessionId: String,
+        taskId: String,
+        sinceOffset: Long?,
+        tailBytes: Int?,
+        agentId: String = MAIN_AGENT_ID,
+    ): Result<TaskState?> = socket.watchTask(sessionId, agentId, taskId, sinceOffset, tailBytes)
+
+    /** Stops a task's output stream (`task.unwatch`), fire-and-forget. */
+    fun unwatchTaskOutput(sessionId: String, taskId: String, agentId: String = MAIN_AGENT_ID): Boolean =
+        socket.unwatchTask(sessionId, agentId, taskId)
+
+    /** A watched task's `task.output` chunks (ticket 180). */
+    fun observeTaskOutput(sessionId: String, taskId: String, agentId: String = MAIN_AGENT_ID): Flow<TaskOutputChunk> =
+        socket.observeTaskOutput(sessionId, agentId, taskId)
+
+    /** The id of the session socket's open connection, null while none is open: a new
+     * id is a connection without the previous one's task watches (ticket 180). */
+    fun observeSocketConnection(sessionId: String): Flow<Long?> = socket.observeConnection(sessionId)
 
     /** One turn's changed files (`GET .../file-history/changes?turn_id=N` — ticket
      * 149, live since server 0.41.0): [turnId] is the main agent's 0-based turn
@@ -294,20 +331,14 @@ class ChatRepository @Inject constructor(
     ): Result<FileContent?> =
         fileHistory.getContent(settings, sessionId, turnId, path, phase)
 
-    /** Seeds the socket's resume cursor from a snapshot watermark (ticket 085), so the
-     * session's next subscribe resumes exactly where the bundle was taken. */
-    fun seedSessionCursor(sessionId: String, seq: Long, epoch: String) =
-        socket.seedCursor(sessionId, seq, epoch)
-
     /**
      * Streams [SocketEvent]s for [sessionId]. One collection = one socket owned here
      * (not by the UI); cancelling the collection closes it. On a drop the stream
-     * retries with exponential backoff and re-subscribes with the last seen cursor —
-     * which survives the collection itself (ticket 048), so a later collection
-     * resumes too — and the server replays missed events. The collector is told via
-     * [SocketEvent.Reconnected] (any subscribe carrying a cursor) so it can also
-     * refetch history, and via [SocketEvent.ResyncRequired] when the server refuses
-     * the cursor and no replay will come.
+     * retries with exponential backoff and re-subscribes (`subscribe_v2` — the
+     * subscription does not survive a disconnect) carrying the resume watermarks, so
+     * the server replays the missed batches (ticket 176); the collector is told via
+     * [SocketEvent.Reconnected] so it can verify the journal covered them. A session
+     * the server does not know fails the stream ([SocketEvent.Failed]).
      */
     fun observeSession(settings: ServerSettings, sessionId: String): Flow<SocketEvent> =
         socket.observe(settings, sessionId)

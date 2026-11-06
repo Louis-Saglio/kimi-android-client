@@ -196,6 +196,9 @@ internal fun MessageList(
                         ToolGroupCard(
                             item, onOpenSubagent, onOpenJob, onQuestionRowTapped, onOpenEditDiff, onOpenFileContent,
                             swarmMembers, onOpenSwarm, onContinueSubagent,
+                            // Ticket 184: tool-result images share the bubbles' viewer
+                            // and session-media fetch.
+                            onImageClick = onImageClick, loadImageBytes = loadImageBytes,
                         )
                     is ChatItem.CompactionDivider ->
                         CompactionDividerRow(item, onOpenSummary = { onOpenCompactionSummary(item) })
@@ -206,6 +209,9 @@ internal fun MessageList(
                         ToolRow(
                             item, onOpenSubagent, onOpenJob, onQuestionRowTapped, onOpenEditDiff, onOpenFileContent,
                             swarmMembers, onOpenSwarm, onContinueSubagent,
+                            // Ticket 184: tool-result images share the bubbles' viewer
+                            // and session-media fetch.
+                            onImageClick = onImageClick, loadImageBytes = loadImageBytes,
                         )
                 }
             }

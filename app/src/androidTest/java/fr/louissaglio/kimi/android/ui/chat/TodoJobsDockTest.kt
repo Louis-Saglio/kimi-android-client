@@ -6,7 +6,6 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import fr.louissaglio.kimi.android.data.chat.BackgroundTask
 import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 import java.time.Instant
@@ -19,7 +18,7 @@ import org.junit.runner.RunWith
 /**
  * Semantics tests for the shared todos/jobs dock: the pill row's visibility, the
  * sheets it opens, and the sheet's sub-agent tap resolution against the caller's
- * timeline items (a REST-seeded job carries no agentId — the spawning `Agent` row's
+ * timeline items (a transcript-healed job carries no agentId — the spawning `Agent` row's
  * `task_id:` stub fills the gap). Rows merge their descendants, so they are matched
  * by content description (substring — the elapsed time ticks every second).
  */
@@ -36,9 +35,9 @@ class TodoJobsDockTest {
 
     private val bashJob = Job(
         taskId = "bash-1",
-        kind = BackgroundTask.Kind.Bash,
+        kind = Job.Kind.Bash,
         description = "tick counter loop",
-        status = BackgroundTask.Status.Running,
+        status = Job.Status.Running,
         startedAt = Instant.now().minusSeconds(5),
     )
 
@@ -97,9 +96,9 @@ class TodoJobsDockTest {
         var opened: String? = null
         val job = Job(
             taskId = "agent-9",
-            kind = BackgroundTask.Kind.Subagent,
+            kind = Job.Kind.Subagent,
             description = "doc-verify",
-            status = BackgroundTask.Status.Running,
+            status = Job.Status.Running,
             startedAt = Instant.now().minusSeconds(5),
         )
         // The spawning `Agent` row of the caller's timeline: linked to its sub-agent,
@@ -133,9 +132,9 @@ class TodoJobsDockTest {
         var opened: String? = null
         val job = Job(
             taskId = "agent-9",
-            kind = BackgroundTask.Kind.Subagent,
+            kind = Job.Kind.Subagent,
             description = "doc-verify",
-            status = BackgroundTask.Status.Running,
+            status = Job.Status.Running,
             startedAt = Instant.now().minusSeconds(5),
         )
         dock(todos = null, jobs = listOf(job), onOpenSubagent = { opened = it })

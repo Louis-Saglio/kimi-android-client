@@ -116,3 +116,50 @@ Relevant code: `data/chat/SessionSocket.kt`, `data/chat/ChatDtos.kt`
 `data/chat/ChatRepository.kt`, `ui/chat/QuestionWizard.kt` (`onSubmit`,
 `onDismiss`, `onRequested`, `onResolved`, `refresh`, `seed`,
 `applySnapshot`). Wire reference: `docs/server-api.md` → Interactions.
+
+## Implementation notes
+
+**2026-11-06 —** `SessionSocket` now routes every flat `interaction` frame through
+`ChatMessageMapper.toInteractionEvent`, which dispatches on `kind` to ticket 171's
+`toApprovalEvent` or the new `toQuestionEvent`: a question `pending` →
+`SessionEvent.QuestionRequested` (question id = `interaction_id`, `tool_call_id` links the
+`AskUserQuestion` row, `agent_id` is the asker, `request.questions[]` through
+`QuestionItemDto`), `ended` → `QuestionResolved` for every outcome. The removed
+`event.question.requested` payload DTO became `QuestionRequestDto` (the request of both
+the frame and the transcript entity; the asker comes from the frame only), and
+`QuestionListData` is deleted. Each connection's `FrameContext` also collects the pending
+questions of its `transcript.reset` snapshots (`ChatMessageMapper.pendingQuestions`, shared
+with the REST transcript's cold seed), and an accepted ack emits the new
+`SessionEvent.QuestionsReset(pending)` after `ApprovalsReset` (empty on a resumed
+subscribe). `ChatApi.answerQuestion`/`dismissQuestion` POST
+`{"kind":"question","answers":{…}}` / `{"kind":"question","dismissed":true}` to
+`/api/v1/sessions/{id}/interactions/{questionId}` through one `postInteraction` helper
+(shared with approvals); the `40909` special case is gone, and `40404`/`40902` surface as
+`DataError.Api` with the server message.
+
+- `QuestionWizard`: `refresh()` (reconnect + `turn.ended`) and `seed()` (screen start) are
+  deleted with `ChatApi.pendingQuestions`/`ChatRepository.getPendingQuestions`; the cold
+  seed stays ticket 176's `GET .../transcript` interactions (`applyColdStart`). New
+  `onReset` replaces the queue; `onRequested` dedups by question id in place. A resumed
+  subscribe's reset is empty, so the head question disappears until its re-send a moment
+  later — `onReset` stashes the dropped head's drafts (selections, other texts, step,
+  minimized) and `onRequested` restores them when the re-sent frame makes it the head
+  again, so a network blip never wipes a half-filled wizard (the old poll-based refresh
+  kept drafts the same way).
+- Tests: `SessionSocketTest` (pending/ended per outcome with the verbatim shape, sub-agent
+  asker + `multi_select` forms, undecodable/foreign/unknown-kind frames ignored, the ack
+  question reset from reset snapshots with an answered entity and a child's duplicate
+  list, resumed/refused/foreign acks), `ChatMessageMapperTest` (`pendingQuestions`
+  filtering, `toQuestionEvent`, `toInteractionEvent` dispatch), `ChatRepositoryTest` (answer
+  URL + body for single/other and multi/multi_with_other, 40902/40404, dismiss body + code-0
+  success, the socket test expects both resets), `QuestionWizardTest` (live card with no
+  REST poll, single-select POST and clear only on the `answered` frame, the multi/other/
+  multi_with_other mapping, dismiss without error, 40902 and 40404 messages keep the card,
+  abort clears via the `dismissed` frame with the turn end polling nothing, re-subscribe
+  rebuilds exactly one card and drops one answered while away, a resumed empty reset keeps
+  the head's drafts, cold open + reset + re-send shows one card). The VM harness's
+  `/questions` route, `questionsBody`, `questionsResponseGate` and `answersSucceed` are
+  gone: `/interactions/` answers questions by body `kind` (`questionFailureBody` overrides
+  the success). `TranscriptFrames` gained `questionFrame`/`questionEntity`/`CAKE_OR_PIE`.
+- Not verified live (no server access from this run): the acceptance criteria about a real
+  `AskUserQuestion` call are covered by the captured frame shapes only.

@@ -231,7 +231,7 @@ class SwarmScreenTest {
 
     /** Ticket 137: tapping Stop reports the member and disables the button
      * immediately; the row settles (button gone, terminal chip) when the kill's
-     * `task.terminated` lands — the store's killed → Cancelled mapping (ticket 135)
+     * ended task state (outcome killed) lands — the store's killed → Cancelled mapping (ticket 135)
      * drives the state flip, the row just renders it. */
     @Test
     fun tappingStopDisablesTheButtonAndTheSettledRowHidesIt() {
@@ -264,7 +264,7 @@ class SwarmScreenTest {
         assertEquals("agent-1", stopped)
         composeTestRule.onNodeWithTag("stopMember:agent-1").assertIsNotEnabled()
 
-        // The kill's task.terminated arrives: the member goes terminal, the button
+        // The kill's ended task state arrives: the member goes terminal, the button
         // is gone, the chip reads the cancelled truth.
         composeTestRule.runOnIdle {
             state.value = state.value.copy(

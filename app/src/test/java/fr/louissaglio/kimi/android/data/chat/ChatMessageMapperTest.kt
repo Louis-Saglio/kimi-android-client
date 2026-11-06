@@ -18,69 +18,130 @@ class ChatMessageMapperTest {
 
     private val mapper = ChatMessageMapper(Json { ignoreUnknownKeys = true })
 
+    private val json = Json { ignoreUnknownKeys = true }
+
+    @Test
+    fun `pendingApprovals keeps pending approval entities once, by state or pending id, in entity order`() {
+        // transcript.reset.snapshot.interactions holds ended entities too (ticket 171).
+        val entities = json.decodeFromString<List<InteractionEntityDto>>(
+            "[" + listOf(
+                fr.louissaglio.kimi.android.testutil.TranscriptFrames.approvalEntity("approval_0", state = "approved"),
+                fr.louissaglio.kimi.android.testutil.TranscriptFrames.approvalEntity("approval_1", command = "ls", agentId = "agent-0"),
+                fr.louissaglio.kimi.android.testutil.TranscriptFrames.approvalEntity("approval_1", command = "ls", agentId = "agent-0"),
+                """{"interactionId":"question_1","interactionKind":"question","state":"pending","request":{}}""",
+                """{"interactionId":"approval_2","interactionKind":"approval","state":"","request":{"toolName":"Write","action":"Writing a.txt"}}""",
+            ).joinToString(",") + "]",
+        )
+
+        assertEquals(
+            listOf(PendingApprovalRequest("approval_1", "Bash", "ls", agentId = "agent-0")),
+            mapper.pendingApprovals(entities),
+        )
+        assertEquals(
+            listOf(
+                PendingApprovalRequest("approval_1", "Bash", "ls", agentId = "agent-0"),
+                PendingApprovalRequest("approval_2", "Write", "Writing a.txt"),
+            ),
+            mapper.pendingApprovals(entities, pendingIds = setOf("approval_2")),
+        )
+    }
+
+    @Test
+    fun `an approval interaction frame maps by status and ignores questions and unknown statuses`() {
+        fun frame(text: String) = json.decodeFromString<InteractionFrame>(text)
+        val pending = frame(fr.louissaglio.kimi.android.testutil.TranscriptFrames.approvalFrame("approval_1", command = "echo hi"))
+        assertEquals(SessionEvent.ApprovalRequested("approval_1", "Bash", "echo hi"), mapper.toApprovalEvent(pending))
+        listOf("approved", "rejected", "cancelled").forEach { outcome ->
+            val ended = frame(
+                fr.louissaglio.kimi.android.testutil.TranscriptFrames.approvalFrame("approval_1", status = "ended", outcome = outcome),
+            )
+            assertEquals(SessionEvent.ApprovalResolved("approval_1"), mapper.toApprovalEvent(ended))
+        }
+        assertNull(mapper.toApprovalEvent(pending.copy(kind = "question")))
+        assertNull(mapper.toApprovalEvent(pending.copy(status = "expired")))
+        assertNull(mapper.toApprovalEvent(pending.copy(request = null)))
+    }
+
+    @Test
+    fun `pendingQuestions keeps pending question entities once, keyed on the interaction id`() {
+        // Ticket 172: the reset snapshot's full entity list (ended included) and the REST
+        // transcript's pending ids select the same questions; approvals stay out.
+        val frames = fr.louissaglio.kimi.android.testutil.TranscriptFrames
+        val entities = json.decodeFromString<List<InteractionEntityDto>>(
+            "[" + listOf(
+                frames.questionEntity("question_0", state = "answered"),
+                frames.questionEntity("question_1", toolCallId = "call_q1"),
+                frames.questionEntity("question_1", toolCallId = "call_q1"),
+                frames.approvalEntity("approval_1"),
+                frames.questionEntity("question_2", state = ""),
+                """{"interactionId":"question_3","interactionKind":"question","state":"pending","request":{"questions":7}}""",
+            ).joinToString(",") + "]",
+        )
+
+        val pending = mapper.pendingQuestions(entities)
+        assertEquals(listOf("question_1"), pending.map { it.questionId })
+        assertEquals("call_q1", pending.single().toolCallId)
+        assertEquals(MAIN_AGENT_ID, pending.single().agentId)
+        assertEquals(listOf("Cake", "Pie"), pending.single().items.single().options.map { it.label })
+        assertEquals(
+            listOf("question_1", "question_2"),
+            mapper.pendingQuestions(entities, pendingIds = setOf("question_2")).map { it.questionId },
+        )
+    }
+
+    @Test
+    fun `a question interaction frame maps by status and ignores approvals and unknown statuses`() {
+        fun frame(text: String) = json.decodeFromString<InteractionFrame>(text)
+        val frames = fr.louissaglio.kimi.android.testutil.TranscriptFrames
+        val pending = frame(frames.questionFrame("question_1", toolCallId = "call_00_q", agentId = "agent-3"))
+
+        val question = (mapper.toQuestionEvent(pending) as SessionEvent.QuestionRequested).question
+        assertEquals("question_1", question.questionId)
+        assertEquals("call_00_q", question.toolCallId)
+        assertEquals("agent-3", question.agentId)
+        assertEquals(listOf("q_0"), question.items.map { it.id })
+        listOf("answered", "dismissed", "cancelled").forEach { outcome ->
+            val ended = frame(frames.questionFrame("question_1", status = "ended", outcome = outcome))
+            assertEquals(SessionEvent.QuestionResolved("question_1"), mapper.toQuestionEvent(ended))
+            assertEquals(SessionEvent.QuestionResolved("question_1"), mapper.toInteractionEvent(ended))
+        }
+        assertNull(mapper.toQuestionEvent(pending.copy(kind = "approval")))
+        assertNull(mapper.toQuestionEvent(pending.copy(status = "expired")))
+        assertNull(mapper.toQuestionEvent(pending.copy(request = null)))
+        assertNull(mapper.toQuestionEvent(pending.copy(interactionId = "")))
+        // The dispatcher routes each kind to its own mapping, and nothing else.
+        assertEquals(mapper.toQuestionEvent(pending), mapper.toInteractionEvent(pending))
+        val approval = frame(frames.approvalFrame("approval_1"))
+        assertEquals(mapper.toApprovalEvent(approval), mapper.toInteractionEvent(approval))
+        assertNull(mapper.toInteractionEvent(pending.copy(kind = "survey")))
+    }
+
     @Test
     fun `a started bash call's description beats the server display command`() {
-        // ticket 095: the live tool.call.started path prefers display.command — for Bash
-        // a non-blank args.description (the human-written label) must win over it.
-        val payload = ToolCallPayload(
-            toolCallId = "tool_1",
-            name = "Bash",
-            args = buildJsonObject {
-                put("command", "./gradlew test")
-                put("description", "Run the unit tests")
-            },
-            display = ToolInputDisplayDto(kind = "command", command = "./gradlew test"),
-        )
+        // ticket 095: the live tool-frame path prefers display.command — for Bash a
+        // non-blank args.description (the human-written label) must win over it.
+        val args = buildJsonObject {
+            put("command", "./gradlew test")
+            put("description", "Run the unit tests")
+        }
+        val display = ToolInputDisplayDto(kind = "command", command = "./gradlew test")
 
-        assertEquals("Run the unit tests", mapper.preview(payload))
-    }
-
-    // --- Server description precedence (ticket 153) -------------------------------------
-
-    @Test
-    fun `the server description beats the bash description argument and the display command`() {
-        // ticket 153: tool.call.started carries the server-rendered action — it wins
-        // over both of 095's sources.
-        val payload = ToolCallPayload(
-            toolCallId = "tool_1",
-            name = "Bash",
-            args = buildJsonObject {
-                put("command", "./gradlew test")
-                put("description", "Run the unit tests")
-            },
-            display = ToolInputDisplayDto(kind = "command", command = "./gradlew test"),
-            description = "Running: ./gradlew test",
-        )
-
-        assertEquals("Running: ./gradlew test", mapper.preview(payload))
+        assertEquals("Run the unit tests", mapper.preview("Bash", args, display))
     }
 
     @Test
-    fun `a non-bash call previews the server description over its args`() {
-        val payload = ToolCallPayload(
-            toolCallId = "tool_1",
-            name = "Read",
-            args = buildJsonObject { put("path", "/tmp/spike/a.txt") },
-            description = "Reading /tmp/spike/a.txt",
-        )
+    fun `the display command beats the args derivation when no description exists`() {
+        val args = buildJsonObject { put("command", "ls  -la") }
+        val display = ToolInputDisplayDto(kind = "command", command = "ls -la /srv")
 
-        assertEquals("Reading /tmp/spike/a.txt", mapper.preview(payload))
+        assertEquals("ls -la /srv", mapper.preview("Bash", args, display))
     }
 
     @Test
-    fun `a blank server description falls through to the 095 path`() {
-        val payload = ToolCallPayload(
-            toolCallId = "tool_1",
-            name = "Bash",
-            args = buildJsonObject {
-                put("command", "./gradlew test")
-                put("description", "Run the unit tests")
-            },
-            display = ToolInputDisplayDto(kind = "command", command = "./gradlew test"),
-            description = " ",
-        )
+    fun `a call without a display previews its args`() {
+        val args = buildJsonObject { put("path", "/tmp/spike/a.txt") }
 
-        assertEquals("Run the unit tests", mapper.preview(payload))
+        assertEquals(ToolPreview.of("Read", args), mapper.preview("Read", args, null))
     }
 
     // --- Raw args plumbing (ticket 118) ------------------------------------------------
@@ -243,7 +304,7 @@ class ChatMessageMapperTest {
         )
 
         assertEquals(
-            TranscriptTaskOrigin("bash-xhlawxzk", TaskInfo.Status.Completed),
+            TranscriptTaskOrigin("bash-xhlawxzk", TaskOutcome.Completed),
             page.turns.single().taskOrigin,
         )
     }
@@ -261,7 +322,7 @@ class ChatMessageMapperTest {
         )
 
         assertEquals(
-            TranscriptTaskOrigin("agent-a7fxomh0", TaskInfo.Status.Killed),
+            TranscriptTaskOrigin("agent-a7fxomh0", TaskOutcome.Killed),
             page.turns.single().taskOrigin,
         )
     }
@@ -434,6 +495,99 @@ class ChatMessageMapperTest {
     fun `an agent call display without a usable name parses to nothing`() {
         assertNull(mapper.agentCall(ToolInputDisplayDto(kind = "agent_call", prompt = "Reply ok")))
         assertNull(mapper.agentCall(ToolInputDisplayDto(kind = "agent_call", agentName = " ", prompt = "Reply ok")))
+    }
+
+    // --- plan_review display (ticket 173) --------------------------------------------
+
+    @Test
+    fun `a plan review display decodes its plan and path and maps to the card's plan`() {
+        // Shaped after the verbatim 2.4.0 capture (docs/server-api.md, Plan review approvals).
+        val display = wireJson.decodeFromString(
+            ToolInputDisplayDto.serializer(),
+            fr.louissaglio.kimi.android.testutil.TranscriptFrames.PLAN_REVIEW_DISPLAY,
+        )
+
+        assertEquals("plan_review", display.kind)
+        assertEquals(fr.louissaglio.kimi.android.testutil.TranscriptFrames.PLAN_REVIEW_PLAN, display.plan)
+        assertEquals("/path/to/session/agents/main/plans/plan.md", display.path)
+        assertEquals(fr.louissaglio.kimi.android.testutil.TranscriptFrames.PLAN_REVIEW_PLAN, mapper.planReview(display))
+        // The compact summary stays the action string: a plan display has no command.
+        assertEquals("Presenting plan and exiting plan mode", mapper.summary(display, "Presenting plan and exiting plan mode"))
+        assertNull(mapper.agentCall(display))
+    }
+
+    @Test
+    fun `only a plan review display with a non-blank plan yields a plan`() {
+        assertNull(mapper.planReview(ToolInputDisplayDto(kind = "command", command = "ls")))
+        assertNull(mapper.planReview(ToolInputDisplayDto(kind = "agent_call", agentName = "explore", prompt = "ok")))
+        // Unknown kinds keep the summary-only fallback, even when they carry a plan field.
+        assertNull(mapper.planReview(ToolInputDisplayDto(kind = "future_kind", plan = "# Plan")))
+        assertNull(mapper.planReview(ToolInputDisplayDto(kind = "plan_review", plan = " ")))
+        assertNull(mapper.planReview(ToolInputDisplayDto(kind = "plan_review")))
+        assertNull(mapper.planReview(null))
+    }
+
+    @Test
+    fun `a plan review approval frame and transcript entity carry the plan, other approvals none`() {
+        val frames = fr.louissaglio.kimi.android.testutil.TranscriptFrames
+        val planFrame = wireJson.decodeFromString<InteractionFrame>(
+            frames.approvalFrame(
+                "approval_plan",
+                toolName = "ExitPlanMode",
+                action = frames.PLAN_REVIEW_ACTION,
+                displayJson = frames.PLAN_REVIEW_DISPLAY,
+            ),
+        )
+        assertEquals(
+            SessionEvent.ApprovalRequested(
+                "approval_plan", "ExitPlanMode", frames.PLAN_REVIEW_ACTION, plan = frames.PLAN_REVIEW_PLAN,
+            ),
+            mapper.toApprovalEvent(planFrame),
+        )
+        // A command approval and a display-less one look exactly as before.
+        assertEquals(
+            SessionEvent.ApprovalRequested("approval_1", "Bash", "echo hi"),
+            mapper.toApprovalEvent(wireJson.decodeFromString<InteractionFrame>(frames.approvalFrame("approval_1"))),
+        )
+        assertEquals(
+            SessionEvent.ApprovalRequested("approval_2", "Write", "Writing a.txt"),
+            mapper.toApprovalEvent(
+                wireJson.decodeFromString<InteractionFrame>(
+                    frames.approvalFrame("approval_2", toolName = "Write", action = "Writing a.txt", command = null),
+                ),
+            ),
+        )
+        // An unknown display kind falls back to the action, with no plan.
+        assertEquals(
+            SessionEvent.ApprovalRequested("approval_3", "Edit", "Editing a.txt"),
+            mapper.toApprovalEvent(
+                wireJson.decodeFromString<InteractionFrame>(
+                    frames.approvalFrame(
+                        "approval_3", toolName = "Edit", action = "Editing a.txt",
+                        displayJson = """{"kind":"future_kind","plan":"# not a plan"}""",
+                    ),
+                ),
+            ),
+        )
+
+        // The cold read (REST transcript / reset snapshot entity, camelCase request).
+        val entities = wireJson.decodeFromString<List<InteractionEntityDto>>(
+            "[" + frames.approvalEntity(
+                "approval_plan",
+                toolName = "ExitPlanMode",
+                action = frames.PLAN_REVIEW_ACTION,
+                displayJson = frames.PLAN_REVIEW_DISPLAY,
+            ) + "," + frames.approvalEntity("approval_1", command = "ls") + "]",
+        )
+        assertEquals(
+            listOf(
+                PendingApprovalRequest(
+                    "approval_plan", "ExitPlanMode", frames.PLAN_REVIEW_ACTION, plan = frames.PLAN_REVIEW_PLAN,
+                ),
+                PendingApprovalRequest("approval_1", "Bash", "ls"),
+            ),
+            mapper.pendingApprovals(entities),
+        )
     }
 
     private fun transcript(vararg frames: TranscriptFrameDto): TranscriptData = TranscriptData(

@@ -5,6 +5,7 @@ import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.sessions.SessionActivityStore
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.testChatRepository
 import fr.louissaglio.kimi.android.testutil.testChatTimeline
@@ -59,7 +60,7 @@ class ChatRepositoryTest {
     /**
      * Collects what one socket receives after the server sends [frames] on upgrade:
      * collects until [eventCount] substantive events arrived (server_hello and
-     * phase-only agent.status frames emit none), then waits [settleMillis] longer as
+     * the state frames without news emit none), then waits [settleMillis] longer as
      * proof that nothing more comes, and cancels. Returns every emitted [SocketEvent],
      * Connected first; callers assert on the [SocketEvent.Event] subset.
      */
@@ -175,100 +176,178 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun `snapshot messages page keeps its oldest-first wire order`() = runBlocking {
-        // Regression (Louis, 2026-08-02): unlike /messages (newest-first on the wire),
-        // the snapshot's messages.items come OLDEST-first — live-verified on 0.31.1
-        // (item ids and created_at ascend across the page). Mapping them with the
-        // /messages reversal inverted the cold-start timeline: the bottom pin landed
-        // mid-session, tool results flattened BEFORE their calls (orphan done rows,
-        // calls stuck Running), and the paging cursor became the newest id.
+    fun `transcript maps the 2_5 global state - seq, roster, prompts and the pending interactions`() = runBlocking {
+        // The cold-start read model (ticket 176, docs/server-api.md, Transcript and
+        // Pending state on REST — verified 2.5.1): the approval request is camelCase,
+        // the question request keeps the snake_case question payload; ended entities
+        // stay out of the pending lists.
         server.enqueue(
             MockResponse(body =
                 """
-                {"code":0,"msg":"success","data":{
-                  "as_of_seq":7,"epoch":"ep_1",
-                  "session":{"id":"session_1","busy":false,
-                    "usage":{"context_tokens":0,"context_limit":1048576}},
-                  "messages":{"items":[
-                    {"id":"msg_1","session_id":"session_1","role":"user",
-                     "content":[{"type":"text","text":"run it"}],
-                     "created_at":"2026-08-01T10:00:00.000Z"},
-                    {"id":"msg_2","session_id":"session_1","role":"assistant",
-                     "content":[{"type":"tool_use","tool_call_id":"tool_1","tool_name":"Edit",
-                                 "input":{"path":"docs/server-api.md"}}],
-                     "created_at":"2026-08-01T10:00:01.000Z"},
-                    {"id":"msg_3","session_id":"session_1","role":"tool",
-                     "content":[{"type":"tool_result","tool_call_id":"tool_1","output":"ok","is_error":false}],
-                     "created_at":"2026-08-01T10:00:02.000Z"}
-                  ],"has_more":true},
-                  "in_flight_turn":null,"subagents":[],
-                  "pending_approvals":[],"pending_questions":[]},
+                {"code":0,"msg":"success","data":{"agent_id":"main","items":[],"has_more":false,
+                  "interactions":[
+                    {"interactionId":"approval_1","interactionKind":"approval","toolCallId":"call_1","state":"pending",
+                     "request":{"id":"approval_1","sessionId":"session_1","agentId":"agent-2","turnId":"t1",
+                       "toolCallId":"call_1","toolName":"Bash","action":"Running: rm -rf target",
+                       "display":{"kind":"command","command":"rm -rf target","cwd":"/tmp","language":"bash"}}},
+                    {"interactionId":"approval_0","interactionKind":"approval","state":"approved",
+                     "request":{"toolName":"Write","action":"Writing a.txt"},"response":{"decision":"approved"}},
+                    {"interactionId":"question_1","interactionKind":"question","toolCallId":"call_q","state":"pending",
+                     "request":{"question_id":"question_1","tool_call_id":"call_q","created_at":"2026-11-05T10:00:00.000Z",
+                       "turn_id":"t1","questions":[{"id":"q_0","question":"Cake or pie?","header":"Dessert",
+                       "options":[{"id":"opt_0_0","label":"Cake"}],"allow_other":true}]}},
+                    {"interactionId":"question_0","interactionKind":"question","state":"answered",
+                     "request":{"question_id":"question_0","questions":[]}}],
+                  "pending_interactions":["approval_1","question_1"],
+                  "attachments":[],
+                  "prompts":[
+                    {"promptId":"msg_a","status":"running","userMessageId":"msg_a","content":[],"createdAt":"2026-11-05T10:00:00.000Z"},
+                    {"promptId":"msg_b","status":"queued","userMessageId":"msg_b","content":[],"createdAt":"2026-11-05T10:00:01.000Z"},
+                    {"promptId":"msg_c","status":"brand_new","userMessageId":"msg_c","content":[]}],
+                  "agents":[{"agentId":"main","type":"main"},{"agentId":"agent-2","type":"sub","parentAgentId":"main"}],
+                  "seq":42},
                  "request_id":"01KX"}
                 """.trimIndent(),
             ),
         )
 
-        val snapshot = repository.getSnapshot(settings(), "session_1").getOrThrow()
+        val page = repository.getTranscript(settings(), "session_1", "main", beforeTurn = null, pageSize = 1).getOrThrow()
 
-        assertEquals("/api/v1/sessions/session_1/snapshot", server.takeRequest().target)
-        // Wire order preserved — NOT reversed like a /messages page.
-        assertEquals(listOf("msg_1", "msg_2", "msg_3"), snapshot.messages.items.map { it.id })
-        assertTrue(snapshot.messages.hasMore)
-        assertEquals(7, snapshot.asOfSeq)
-        assertEquals("ep_1", snapshot.epoch)
-        // The bundle's real usage maps through — the cold-start ring's authority
-        // (real since 0.38.0, ticket 161).
-        assertEquals(ContextUsage(0, 1048576), snapshot.contextUsage)
+        assertEquals(42L, page.seq)
+        assertEquals(
+            listOf(TranscriptAgent("main", isMain = true), TranscriptAgent("agent-2", isMain = false, parentAgentId = "main")),
+            page.agents,
+        )
+        assertEquals(
+            listOf(
+                TranscriptPrompt("msg_a", PromptStatus.Running),
+                TranscriptPrompt("msg_b", PromptStatus.Queued),
+                TranscriptPrompt("msg_c", null),
+            ),
+            page.prompts,
+        )
+        assertEquals(
+            listOf(PendingApprovalRequest("approval_1", "Bash", "rm -rf target", agentId = "agent-2")),
+            page.pendingApprovals,
+        )
+        val question = page.pendingQuestions.single()
+        assertEquals("question_1", question.questionId)
+        assertEquals("call_q", question.toolCallId)
+        assertEquals(MAIN_AGENT_ID, question.agentId)
+        assertEquals(listOf("Cake"), question.items.single().options.map { it.label })
+        assertNull(page.runningTurn)
     }
 
     @Test
-    fun `snapshot usage without the optional fields renders unknown`() = runBlocking {
-        // 0.38.0 made `total_cost_usd`/`context_limit`/`turn_count` optional and the
-        // snapshot omits cost and turn count entirely (docs/server-api.md, Session
-        // snapshot): an absent limit decodes to the "unknown" marker, never a real
-        // fill — no ContextUsage may reach the ring (ticket 161).
+    fun `transcript without seq and global state maps to an empty session state`() = runBlocking {
+        // The sub-agent page's pages and a session that is not live: no seq, nothing
+        // pending — the same page mapping, every 2.5 field optional.
         server.enqueue(
-            MockResponse(body =
-                """
-                {"code":0,"msg":"success","data":{
-                  "as_of_seq":7,"epoch":"ep_1",
-                  "session":{"id":"session_1","busy":false,
-                    "usage":{"context_tokens":25050}},
-                  "messages":{"items":[],"has_more":false},
-                  "in_flight_turn":null,"subagents":[],
-                  "pending_approvals":[],"pending_questions":[]},
-                 "request_id":"01KX"}
-                """.trimIndent(),
-            ),
+            MockResponse(body = """{"code":0,"msg":"success","data":{"agent_id":"agent-1","items":[],"has_more":false},"request_id":"r"}"""),
         )
 
-        val snapshot = repository.getSnapshot(settings(), "session_1").getOrThrow()
+        val page = repository.getTranscript(settings(), "session_1", "agent-1", beforeTurn = null, pageSize = 20).getOrThrow()
 
-        assertNull(snapshot.contextUsage)
+        assertNull(page.seq)
+        assertTrue(page.agents.isEmpty())
+        assertTrue(page.pendingApprovals.isEmpty())
+        assertTrue(page.pendingQuestions.isEmpty())
     }
 
     @Test
-    fun `snapshot usage with a zero context limit renders unknown`() = runBlocking {
-        // 100's zero/unknown rule on the snapshot path: 0 is the engine's unknown
-        // marker, never a real limit — no ContextUsage may reach the ring.
+    fun `a running turn's streaming tool frame renders no partial args and keeps its display`() = runBlocking {
+        // Warm running frame: `input` absent while `inputText` streams — a fragment must
+        // not become the row's input (first writer wins); the agent_call display maps.
         server.enqueue(
             MockResponse(body =
                 """
-                {"code":0,"msg":"success","data":{
-                  "as_of_seq":7,"epoch":"ep_1",
-                  "session":{"id":"session_1","busy":false,
-                    "usage":{"context_tokens":25050,"context_limit":0}},
-                  "messages":{"items":[],"has_more":false},
-                  "in_flight_turn":null,"subagents":[],
-                  "pending_approvals":[],"pending_questions":[]},
-                 "request_id":"01KX"}
+                {"code":0,"msg":"success","data":{"agent_id":"main","has_more":false,"seq":3,"items":[
+                  {"kind":"turn","turnId":"t1","ordinal":1,"state":"running","origin":{"kind":"user"},
+                   "steps":[{"kind":"step","stepId":"t1.1","turnId":"t1","ordinal":1,"state":"running","frames":[
+                     {"kind":"text","frameId":"t1.1.f1","role":"assistant","text":""},
+                     {"kind":"tool","frameId":"t1.1.c1","toolCallId":"c1","name":"Bash","state":"running",
+                      "inputText":"{\"command\":\"sl"},
+                     {"kind":"tool","frameId":"t1.1.c2","toolCallId":"c2","name":"Agent","state":"error",
+                      "inputText":"{\"prompt\":\"Reply ok\"}",
+                      "display":{"kind":"agent_call","agent_name":"explore","prompt":"Reply ok","background":true},
+                      "output":"boom"}]}]}]},
+                 "request_id":"r"}
                 """.trimIndent(),
             ),
         )
 
-        val snapshot = repository.getSnapshot(settings(), "session_1").getOrThrow()
+        val page = repository.getTranscript(settings(), "session_1", "main", beforeTurn = null, pageSize = 1).getOrThrow()
 
-        assertNull(snapshot.contextUsage)
+        val frames = page.runningTurn!!.steps.single().frames
+        // A blank assistant text frame survives: the fold seeds its (empty) length.
+        assertEquals(TranscriptFrame.Text("t1.1.f1", TranscriptFrame.Text.Role.Assistant, ""), frames[0])
+        val streaming = frames[1] as TranscriptFrame.Tool
+        assertNull(streaming.args)
+        assertEquals("", streaming.input)
+        assertTrue(streaming.running)
+        val agent = frames[2] as TranscriptFrame.Tool
+        assertEquals("Reply ok", (agent.args!!["prompt"] as kotlinx.serialization.json.JsonPrimitive).content)
+        assertEquals(AgentCallDisplay("explore", "Reply ok", background = true), agent.agentCall)
+        assertTrue(agent.failed)
+        assertFalse(agent.running)
+    }
+
+    @Test
+    fun `prompt queue maps the active and queued prompts`() = runBlocking {
+        // GET .../prompts (2.5.0, docs/server-api.md, Prompts → Queue snapshot — the
+        // verbatim mid-turn shape).
+        server.enqueue(
+            MockResponse(body =
+                """
+                {"code":0,"msg":"success","data":{
+                  "active":{"prompt_id":"msg_a","user_message_id":"msg_a","status":"running",
+                            "content":[{"type":"text","text":"Run this bash command: sleep 25."}],
+                            "created_at":"2026-11-04T10:00:00.000Z"},
+                  "queued":[{"prompt_id":"msg_b","user_message_id":"msg_b","status":"queued",
+                             "content":[{"type":"text","text":"Reply with exactly: steered-ok"}],
+                             "created_at":"2026-11-04T10:00:01.000Z"}]},"request_id":"r"}
+                """.trimIndent(),
+            ),
+        )
+
+        val queue = repository.getPromptQueue(settings(), "session_1").getOrThrow()
+
+        assertEquals("/api/v1/sessions/session_1/prompts", server.takeRequest().target)
+        assertEquals("msg_a", queue.active?.promptId)
+        val queued = queue.queued.single()
+        assertEquals("msg_b", queued.promptId)
+        assertEquals("msg_b", queued.message.id)
+        assertEquals(ChatMessage.Role.User, queued.message.role)
+        assertEquals(listOf(ChatMessage.Part.Text("Reply with exactly: steered-ok")), queued.message.parts)
+    }
+
+    @Test
+    fun `transcript catch-up sends the cursor and reads the journal coverage`() = runBlocking {
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"agent_id":"main","batches":[{"seq":43,"ops":[]}],""" +
+                    """"latest_seq":43,"complete":true},"request_id":"r"}""",
+            ),
+        )
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"agent_id":"main","batches":[],"latest_seq":90,"complete":false},"request_id":"r"}""",
+            ),
+        )
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"agent_id":"main","batches":[],"latest_seq":3,"complete":true},"request_id":"r"}""",
+            ),
+        )
+
+        val covered = repository.getTranscriptCatchUp(settings(), "session_1", "main", sinceSeq = 42).getOrThrow()
+        assertEquals("/api/v1/sessions/session_1/transcript/ops?agent_id=main&since_seq=42", server.takeRequest().target)
+        assertFalse(covered.isStale)
+
+        // complete:false — the journal cannot reach back: a full refresh is required.
+        assertTrue(repository.getTranscriptCatchUp(settings(), "session_1", "main", sinceSeq = 42).getOrThrow().isStale)
+        // A latest seq behind the watermark: a restarted server's fresh journal.
+        assertTrue(repository.getTranscriptCatchUp(settings(), "session_1", "main", sinceSeq = 42).getOrThrow().isStale)
     }
 
     @Test
@@ -574,7 +653,7 @@ class ChatRepositoryTest {
         assertEquals("POST", request.method)
         assertEquals("/api/v1/sessions/session_1/prompts", request.target)
         assertEquals(
-            """{"content":[{"type":"text","text":"Reply with exactly: ok"}]}""",
+            """{"content":[{"type":"text","text":"Reply with exactly: ok"}],"swarm_mode":false}""",
             request.body!!.utf8(),
         )
     }
@@ -619,7 +698,7 @@ class ChatRepositoryTest {
         val prompt = server.takeRequest()
         assertEquals("POST", prompt.method)
         assertEquals("/api/v1/sessions/session_1/prompts", prompt.target)
-        assertEquals("""{"content":[{"type":"text","text":"Stop counting"}]}""", prompt.body!!.utf8())
+        assertEquals("""{"content":[{"type":"text","text":"Stop counting"}],"swarm_mode":false}""", prompt.body!!.utf8())
         val steer = server.takeRequest()
         assertEquals("POST", steer.method)
         assertEquals("/api/v1/sessions/session_1/prompts:steer", steer.target)
@@ -719,7 +798,7 @@ class ChatRepositoryTest {
         assertEquals("/api/v1/config", server.takeRequest().target)
         val prompt = server.takeRequest()
         assertEquals(
-            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/k3"}""",
+            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/k3","swarm_mode":false}""",
             prompt.body!!.utf8(),
         )
     }
@@ -744,7 +823,7 @@ class ChatRepositoryTest {
         assertEquals("/api/v1/config", server.takeRequest().target)
         val prompt = server.takeRequest()
         assertEquals(
-            """{"content":[{"type":"text","text":"Stop counting"}],"model":"kimi-code/k3"}""",
+            """{"content":[{"type":"text","text":"Stop counting"}],"model":"kimi-code/k3","swarm_mode":false}""",
             prompt.body!!.utf8(),
         )
     }
@@ -805,7 +884,7 @@ class ChatRepositoryTest {
         assertTrue(second.isSuccess)
         assertEquals("/api/v1/config", server.takeRequest().target)
         assertEquals(
-            """{"content":[{"type":"text","text":"one"}]}""",
+            """{"content":[{"type":"text","text":"one"}],"swarm_mode":false}""",
             server.takeRequest().body!!.utf8(),
         )
         // Failures are not cached: the next send retries the config fetch.
@@ -904,7 +983,7 @@ class ChatRepositoryTest {
         val prompt = server.takeRequest()
         assertEquals("/api/v1/sessions/session_1/prompts", prompt.target)
         assertEquals(
-            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/kimi-for-coding-highspeed"}""",
+            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/kimi-for-coding-highspeed","swarm_mode":false}""",
             prompt.body!!.utf8(),
         )
     }
@@ -924,7 +1003,7 @@ class ChatRepositoryTest {
         assertTrue(result.isSuccess)
         val prompt = server.takeRequest()
         assertEquals(
-            """{"content":[{"type":"text","text":"Stop counting"}],"model":"kimi-code/kimi-for-coding-highspeed"}""",
+            """{"content":[{"type":"text","text":"Stop counting"}],"model":"kimi-code/kimi-for-coding-highspeed","swarm_mode":false}""",
             prompt.body!!.utf8(),
         )
         assertEquals("/api/v1/sessions/session_1/prompts:steer", server.takeRequest().target)
@@ -966,7 +1045,7 @@ class ChatRepositoryTest {
         val prompt = server.takeRequest()
         assertEquals("/api/v1/sessions/session_1/prompts", prompt.target)
         assertEquals(
-            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/k3","thinking":"low"}""",
+            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/k3","thinking":"low","swarm_mode":false}""",
             prompt.body!!.utf8(),
         )
     }
@@ -988,7 +1067,7 @@ class ChatRepositoryTest {
         assertTrue(result.isSuccess)
         val prompt = server.takeRequest()
         assertEquals(
-            """{"content":[{"type":"text","text":"Stop counting"}],"model":"kimi-code/k3","thinking":"max"}""",
+            """{"content":[{"type":"text","text":"Stop counting"}],"model":"kimi-code/k3","thinking":"max","swarm_mode":false}""",
             prompt.body!!.utf8(),
         )
         assertEquals("/api/v1/sessions/session_1/prompts:steer", server.takeRequest().target)
@@ -1004,7 +1083,7 @@ class ChatRepositoryTest {
 
         assertTrue(result.isSuccess)
         assertEquals(
-            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/k3"}""",
+            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/k3","swarm_mode":false}""",
             server.takeRequest().body!!.utf8(),
         )
     }
@@ -1022,7 +1101,7 @@ class ChatRepositoryTest {
 
         assertTrue(result.isSuccess)
         assertEquals(
-            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/kimi-for-coding"}""",
+            """{"content":[{"type":"text","text":"hello"}],"model":"kimi-code/kimi-for-coding","swarm_mode":false}""",
             server.takeRequest().body!!.utf8(),
         )
     }
@@ -1042,7 +1121,7 @@ class ChatRepositoryTest {
         val prompt = server.takeRequest()
         assertEquals("/api/v1/sessions/session_1/prompts", prompt.target)
         assertEquals(
-            """{"content":[{"type":"text","text":"hello"}],"permission_mode":"manual"}""",
+            """{"content":[{"type":"text","text":"hello"}],"permission_mode":"manual","swarm_mode":false}""",
             prompt.body!!.utf8(),
         )
     }
@@ -1064,7 +1143,7 @@ class ChatRepositoryTest {
         assertEquals("/api/v1/config", server.takeRequest().target)
         val prompt = server.takeRequest()
         assertEquals(
-            """{"content":[{"type":"text","text":"Stop counting"}],"permission_mode":"yolo"}""",
+            """{"content":[{"type":"text","text":"Stop counting"}],"permission_mode":"yolo","swarm_mode":false}""",
             prompt.body!!.utf8(),
         )
         assertEquals("/api/v1/sessions/session_1/prompts:steer", server.takeRequest().target)
@@ -1082,9 +1161,51 @@ class ChatRepositoryTest {
         assertTrue(result.isSuccess)
         assertEquals("/api/v1/config", server.takeRequest().target)
         assertEquals(
-            """{"content":[{"type":"text","text":"hello"}]}""",
+            """{"content":[{"type":"text","text":"hello"}],"swarm_mode":false}""",
             server.takeRequest().body!!.utf8(),
         )
+    }
+
+    @Test
+    fun `sendPrompt carries swarm_mode true when the chip is on and false when off`() = runBlocking {
+        // Ticket 174: the server applies swarm_mode before enqueueing and an omitted
+        // field leaves the mode unchanged — so false is sent explicitly, never dropped.
+        enqueueConfigWithoutDefaultModel()
+        enqueuePromptAck()
+        enqueuePromptAck()
+
+        assertTrue(repository.sendPrompt(settings(), "session_1", "fan out", swarmMode = true).isSuccess)
+        assertTrue(repository.sendPrompt(settings(), "session_1", "back to one", swarmMode = false).isSuccess)
+
+        assertEquals("/api/v1/config", server.takeRequest().target)
+        assertEquals(
+            """{"content":[{"type":"text","text":"fan out"}],"swarm_mode":true}""",
+            server.takeRequest().body!!.utf8(),
+        )
+        assertEquals(
+            """{"content":[{"type":"text","text":"back to one"}],"swarm_mode":false}""",
+            server.takeRequest().body!!.utf8(),
+        )
+    }
+
+    @Test
+    fun `steer carries the swarm chip on its posted prompt`() = runBlocking {
+        enqueueConfigWithoutDefaultModel()
+        enqueuePromptAck()
+        server.enqueue(
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"steered":true,"prompt_ids":["msg_1"]},"request_id":"01KX"}""",
+            ),
+        )
+
+        assertTrue(repository.steer(settings(), "session_1", "split it", swarmMode = true).isSuccess)
+
+        assertEquals("/api/v1/config", server.takeRequest().target)
+        assertEquals(
+            """{"content":[{"type":"text","text":"split it"}],"swarm_mode":true}""",
+            server.takeRequest().body!!.utf8(),
+        )
+        assertEquals("/api/v1/sessions/session_1/prompts:steer", server.takeRequest().target)
     }
 
     @Test
@@ -1114,422 +1235,49 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun `getSessionStatus maps the busy flag and the context usage`() = runBlocking {
-        server.enqueue(
-            MockResponse(body = 
-                """{"code":0,"msg":"success","data":{"busy":true,"context_tokens":25050,""" +
-                    """"max_context_tokens":1048576,"context_usage":0.0239},"request_id":"01KX"}""",
-            ),
-        )
-
-        assertEquals(
-            SessionStatus(busy = true, contextUsage = ContextUsage(25050, 1048576)),
-            repository.getSessionStatus(settings(), "session_1").getOrThrow(),
-        )
-        assertEquals("/api/v1/sessions/session_1/status", server.takeRequest().target)
-    }
-
-    @Test
-    fun `getSessionStatus drops the context usage when max_context_tokens is omitted`() = runBlocking {
-        // 0.34.0 (ticket 100): max_context_tokens is omittable; 0 is the engine's
-        // unknown marker, never a real limit — no ContextUsage must reach the UI.
-        server.enqueue(
-            MockResponse(body =
-                """{"code":0,"msg":"success","data":{"busy":true,"context_tokens":25050,""" +
-                    """"context_usage":0.0239},"request_id":"01KX"}""",
-            ),
-        )
-
-        assertEquals(
-            SessionStatus(busy = true, contextUsage = null),
-            repository.getSessionStatus(settings(), "session_1").getOrThrow(),
-        )
-    }
-
-    @Test
-    fun `getSessionStatus drops the context usage when max_context_tokens is zero`() = runBlocking {
-        server.enqueue(
-            MockResponse(body =
-                """{"code":0,"msg":"success","data":{"busy":false,"context_tokens":25050,""" +
-                    """"max_context_tokens":0,"context_usage":0.0},"request_id":"01KX"}""",
-            ),
-        )
-
-        assertEquals(
-            SessionStatus(busy = false, contextUsage = null),
-            repository.getSessionStatus(settings(), "session_1").getOrThrow(),
-        )
-    }
-
-    @Test
-    fun `getSessionStatus maps the bound model and the thinking level`() = runBlocking {
-        // 0.39.1 (ticket 107, live-verified 2026-09-01): /status serves the session's
-        // persisted binding — also for sessions cold since server start.
-        server.enqueue(
-            MockResponse(body =
-                """{"code":0,"msg":"success","data":{"busy":false,"model":"kimi-code/k3-256k",""" +
-                    """"thinking_level":"low","context_tokens":100,""" +
-                    """"max_context_tokens":262144,"context_usage":0.0},"request_id":"01KX"}""",
-            ),
-        )
-
-        assertEquals(
-            SessionStatus(
-                busy = false,
-                contextUsage = ContextUsage(100, 262144),
-                model = "kimi-code/k3-256k",
-                thinkingLevel = "low",
-            ),
-            repository.getSessionStatus(settings(), "session_1").getOrThrow(),
-        )
-    }
-
-    @Test
-    fun `getSessionStatus maps an omitted model and a blank thinking level to null`() = runBlocking {
-        // Fresh never-prompted session (live-verified 2026-09-01): no model key at all,
-        // thinking_level "" — both must read as "no value", never as a choice to store.
-        server.enqueue(
-            MockResponse(body =
-                """{"code":0,"msg":"success","data":{"busy":false,"thinking_level":"",""" +
-                    """"context_tokens":0,"max_context_tokens":1048576,"context_usage":0},"request_id":"01KX"}""",
-            ),
-        )
-
-        val status = repository.getSessionStatus(settings(), "session_1").getOrThrow()
-        assertNull(status.model)
-        assertNull(status.thinkingLevel)
-    }
-
-    @Test
-    fun `getSessionStatus maps the permission mode`() = runBlocking {
-        // Ticket 141: /status always reports the session's mode (a fresh session reads
-        // the server default — "yolo" on Louis's server).
-        server.enqueue(
-            MockResponse(body =
-                """{"code":0,"msg":"success","data":{"busy":false,"permission":"manual",""" +
-                    """"context_tokens":100,"max_context_tokens":1048576,"context_usage":0.0},"request_id":"01KX"}""",
-            ),
-        )
-
-        assertEquals(
-            SessionStatus(busy = false, contextUsage = ContextUsage(100, 1048576), permission = "manual"),
-            repository.getSessionStatus(settings(), "session_1").getOrThrow(),
-        )
-    }
-
-    @Test
-    fun `agent status usage frame emits the context usage and the session model, phase frame emits the activity phase`() = runBlocking {
-        // Verbatim 0.29.0 shapes (docs/server-api.md, Agent status). The phase frame
-        // leaves the token fields null — nothing clobbers the stored usage — and,
-        // since ticket 148, surfaces the agent's live activity.
-        val emitted = runSocketEvents(
-            """{"type":"agent.status.updated","seq":2,"epoch":"ep_1","volatile":true,""" +
-                """"session_id":"session_1","timestamp":"2026-07-26T00:00:00.000Z",""" +
-                """"payload":{"type":"agent.status.updated","model":"kimi-code/k3",""" +
-                """"thinkingEffort":"high","maxContextTokens":1048576,"usage":{},""" +
-                """"contextTokens":25050,"agentId":"main","sessionId":"session_1"}}""",
-            """{"type":"agent.status.updated","seq":5,"epoch":"ep_1","volatile":true,""" +
-                """"session_id":"session_1","timestamp":"2026-07-26T00:00:01.000Z",""" +
-                """"payload":{"type":"agent.status.updated",""" +
-                """"phase":{"kind":"running","turnId":0,"step":0,"stepId":"",""" +
-                """"since":1784777223312},"agentId":"main","sessionId":"session_1"}}""",
-            eventCount = 3,
-            settleMillis = 200,
-        )
-
-        assertEquals(
-            listOf(
-                SocketEvent.Event(SessionEvent.ContextUsageUpdated(ContextUsage(25050, 1048576))),
-                SocketEvent.Event(SessionEvent.SessionModelUpdated("kimi-code/k3", "high")),
-                SocketEvent.Event(
-                    SessionEvent.AgentStatusUpdated(
-                        AgentPhase(AgentPhase.Kind.Running, Instant.ofEpochMilli(1784777223312)),
-                    ),
-                ),
-            ),
-            emitted.filterIsInstance<SocketEvent.Event>(),
-        )
-    }
-
-    @Test
-    fun `socket subscribes and emits parsed events`() = runBlocking {
+    fun `socket subscribes with subscribe_v2 and emits parsed events`() = runBlocking {
         val clientFrames = CopyOnWriteArrayList<String>()
         server.enqueue(
-            webSocketUpgradeResponse(
-                object : WebSocketListener() {
-                    override fun onOpen(webSocket: WebSocket, response: Response) {
-                        webSocket.send("""{"type":"server_hello","payload":{"protocol_version":2,"heartbeat_ms":30000}}""")
-                        webSocket.send(
-                            """{"type":"assistant.delta","seq":5,"epoch":"ep_1","volatile":true,"offset":0,""" +
-                                """"session_id":"session_1","timestamp":"2026-07-17T04:11:00.603Z",""" +
-                                """"payload":{"type":"assistant.delta","turnId":1,"delta":"ok","agentId":"main","sessionId":"session_1"}}""",
-                        )
-                    }
-
-                    override fun onMessage(webSocket: WebSocket, text: String) {
-                        clientFrames += text
-                    }
-                },
-            ),
+            wsUpgrade(clientFrames) { webSocket ->
+                webSocket.send("""{"type":"server_hello","payload":{"protocol_version":2,"heartbeat_ms":10000}}""")
+                webSocket.send(TranscriptFrames.ackFrame())
+                webSocket.send(TranscriptFrames.opsFrame(TranscriptFrames.textOp("t1.1.f2", "ok")))
+            },
         )
 
         val emitted = CopyOnWriteArrayList<SocketEvent>()
         val job = launch { repository.observeSession(settings(), "session_1").collect { emitted += it } }
         try {
-            awaitCondition { emitted.any { it is SocketEvent.Event } }
+            awaitCondition { emitted.count { it is SocketEvent.Event } >= 3 }
         } finally {
             job.cancel()
         }
 
         assertEquals(SocketEvent.Connected, emitted.first())
         assertEquals(
-            SocketEvent.Event(SessionEvent.AssistantDelta("ok")),
-            emitted.first { it is SocketEvent.Event },
-        )
-        val subscribe = clientFrames.first { "\"subscribe\"" in it }
-        assertTrue(subscribe.contains("session_1"))
-        Unit
-    }
-
-    @Test
-    fun `volatile frames do not advance the resume cursor`() = runBlocking {
-        val clientFrames = CopyOnWriteArrayList<String>()
-        server.enqueue(
-            webSocketUpgradeResponse(
-                object : WebSocketListener() {
-                    override fun onOpen(webSocket: WebSocket, response: Response) {
-                        webSocket.send(
-                            """{"type":"turn.started","seq":5,"epoch":"ep_1","session_id":"session_1",""" +
-                                """"timestamp":"2026-07-23T03:28:34.668Z","payload":{"type":"turn.started","turnId":0}}""",
-                        )
-                        // Volatile frames share the seq of the event they piggyback on
-                        // (docs/server-api.md): this one must not move the resume cursor,
-                        // or the replay after a drop could skip the substantive seq-6 event.
-                        webSocket.send(
-                            """{"type":"assistant.delta","seq":6,"epoch":"ep_1","volatile":true,"offset":0,""" +
-                                """"session_id":"session_1","timestamp":"2026-07-23T03:28:34.768Z",""" +
-                                """"payload":{"type":"assistant.delta","turnId":0,"delta":"ok"}}""",
-                        )
-                        webSocket.close(1000, "drop")
-                    }
-
-                    override fun onMessage(webSocket: WebSocket, text: String) {
-                        clientFrames += text
-                    }
-                },
-            ),
-        )
-        server.enqueue(
-            webSocketUpgradeResponse(
-                object : WebSocketListener() {
-                    override fun onMessage(webSocket: WebSocket, text: String) {
-                        clientFrames += text
-                    }
-                },
-            ),
-        )
-
-        val job = launch { repository.observeSession(settings(), "session_1").collect {} }
-        try {
-            // The reconnect goes through the 1 s first backoff step; only the resume
-            // subscribe carries a cursor (the first one may race the server's close and
-            // never reach the MockWebServer listener — it is not what is asserted).
-            awaitCondition(10_000) { clientFrames.any { "\"cursors\"" in it } }
-        } finally {
-            job.cancel()
-        }
-
-        val resubscribe = clientFrames.first { "\"cursors\"" in it }
-        assertTrue(resubscribe, resubscribe.contains("\"seq\":5"))
-        assertTrue(resubscribe, resubscribe.contains("\"epoch\":\"ep_1\""))
-        Unit
-    }
-
-    @Test
-    fun `a fresh collection resumes with the stored cursor and emits Reconnected`() = runBlocking {
-        // The chat screen's ON_STOP/ON_START gate cycle (ticket 048): cancelling one
-        // observe() collection must not lose the resume cursor — the next collection
-        // re-subscribes with it and the missed window replays.
-        val clientFrames = CopyOnWriteArrayList<String>()
-        server.enqueue(
-            wsUpgrade(clientFrames) { ws ->
-                ws.send(
-                    """{"type":"turn.started","seq":5,"epoch":"ep_1","session_id":"session_1",""" +
-                        """"timestamp":"2026-07-29T00:00:00.000Z","payload":{"type":"turn.started","turnId":0}}""",
-                )
-            },
-        )
-        server.enqueue(wsUpgrade(clientFrames))
-
-        val first = CopyOnWriteArrayList<SocketEvent>()
-        val job1 = launch { repository.observeSession(settings(), "session_1").collect { first += it } }
-        awaitCondition { first.any { it is SocketEvent.Event } }
-        job1.cancel()
-
-        val second = CopyOnWriteArrayList<SocketEvent>()
-        val job2 = launch { repository.observeSession(settings(), "session_1").collect { second += it } }
-        try {
-            awaitCondition { second.isNotEmpty() && clientFrames.any { "\"cursors\"" in it } }
-        } finally {
-            job2.cancel()
-        }
-
-        assertEquals(SocketEvent.Connected, first.first())
-        // A subscribe carrying a stored cursor IS a resume, even as the collection's
-        // first connection — the collector heals via the Reconnected path, and the
-        // event carries the cursor the subscribe resumed with (ticket 085).
-        assertEquals(SocketEvent.Reconnected(5, "ep_1"), second.first())
-        val resubscribe = clientFrames.first { "\"cursors\"" in it }
-        assertTrue(resubscribe, resubscribe.contains("\"seq\":5"))
-        assertTrue(resubscribe, resubscribe.contains("\"epoch\":\"ep_1\""))
-        Unit
-    }
-
-    @Test
-    fun `a resync_required ack drops the stored cursor and emits ResyncRequired`() = runBlocking {
-        val clientFrames = CopyOnWriteArrayList<String>()
-        server.enqueue(
-            wsUpgrade(clientFrames) { ws ->
-                // A cursor-worthy frame first, then the ack refusing the resume
-                // (docs/server-api.md, subscribe ack): no replay will come.
-                ws.send(
-                    """{"type":"turn.started","seq":5,"epoch":"ep_1","session_id":"session_1",""" +
-                        """"timestamp":"2026-07-29T00:00:00.000Z","payload":{"type":"turn.started","turnId":0}}""",
-                )
-                ws.send(
-                    """{"type":"ack","id":"c_1","code":0,"msg":"success","payload":{"accepted":[],""" +
-                        """"not_found":[],"resync_required":["session_1"],"cursors":{}}}""",
-                )
-            },
-        )
-        server.enqueue(wsUpgrade(clientFrames))
-
-        val first = CopyOnWriteArrayList<SocketEvent>()
-        val job1 = launch { repository.observeSession(settings(), "session_1").collect { first += it } }
-        try {
-            awaitCondition { first.any { it is SocketEvent.ResyncRequired } }
-        } finally {
-            job1.cancel()
-        }
-
-        assertEquals(
+            // The accepted ack resets the approval and question queues (tickets
+            // 171/172), then the op.
             listOf(
-                SocketEvent.Connected,
-                SocketEvent.Event(SessionEvent.TurnStarted()),
-                SocketEvent.ResyncRequired,
+                SessionEvent.ApprovalsReset(emptyList()),
+                SessionEvent.QuestionsReset(emptyList()),
+                SessionEvent.AssistantDelta("ok"),
             ),
-            first,
+            emitted.filterIsInstance<SocketEvent.Event>().map { it.event },
         )
-
-        // The refused cursor is gone: the next collection starts blind again.
-        val second = CopyOnWriteArrayList<SocketEvent>()
-        val job2 = launch { repository.observeSession(settings(), "session_1").collect { second += it } }
-        try {
-            awaitCondition { second.isNotEmpty() && clientFrames.count { "\"subscribe\"" in it } >= 2 }
-        } finally {
-            job2.cancel()
-        }
-
-        assertEquals(SocketEvent.Connected, second.first())
-        assertFalse(clientFrames.last { "\"subscribe\"" in it }.contains("\"cursors\""))
+        val subscribe = clientFrames.first()
+        assertTrue(subscribe.contains("\"type\":\"subscribe_v2\""))
+        assertTrue(subscribe.contains("\"session_id\":\"session_1\""))
+        Unit
     }
 
     @Test
-    fun `tool call started frame emits the server description or args preview`() = runBlocking {
+    fun `an undo marker emits the spliced user message`() = runBlocking {
+        // The captured prompt round (docs/server-api.md, Transcript protocol): the sent
+        // message rides an `undo` marker.
         val emitted = runSocketEvents(
-            // Verbatim tool.call.started shape (docs/server-api.md: args, description
-            // and display on start). The server description is the row preview
-            // (ticket 153); without one it derives from display/args.
-            """{"type":"tool.call.started","seq":9,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-19T15:07:43.000Z","payload":{"type":"tool.call.started",""" +
-                """"turnId":0,"toolCallId":"tool_3oZjtQUGzDwUwQwfkXioAtne","name":"Bash",""" +
-                """"args":{"command":"echo hello-from-spike"},""" +
-                """"description":"Running: echo hello-from-spike",""" +
-                """"display":{"kind":"command","command":"echo hello-from-spike",""" +
-                """"cwd":"/tmp/spike","language":"bash"},"agentId":"main","sessionId":"session_1"}}""",
-            // No description and no display object: the preview is derived from args.
-            """{"type":"tool.call.started","seq":10,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-19T15:07:44.000Z","payload":{"type":"tool.call.started",""" +
-                """"turnId":0,"toolCallId":"tool_2","name":"Read",""" +
-                """"args":{"path":"/tmp/spike/a.txt"},"agentId":"main","sessionId":"session_1"}}""",
-        )
-
-        val events = emitted.filterIsInstance<SocketEvent.Event>().map { it.event }
-        assertEquals(
-            SessionEvent.ToolCallStarted(
-                "tool_3oZjtQUGzDwUwQwfkXioAtne",
-                "Bash",
-                "Running: echo hello-from-spike",
-                input = "{\n    \"command\": \"echo hello-from-spike\"\n}",
-                args = buildJsonObject { put("command", "echo hello-from-spike") },
-                description = "Running: echo hello-from-spike",
+            TranscriptFrames.opsFrame(
+                TranscriptFrames.undoOp("live-m4", TranscriptFrames.userMessage("msg_1", "hello from the phone")),
             ),
-            events[0],
-        )
-        assertEquals(
-            SessionEvent.ToolCallStarted(
-                "tool_2",
-                "Read",
-                "/tmp/spike/a.txt",
-                input = "{\n    \"path\": \"/tmp/spike/a.txt\"\n}",
-                args = buildJsonObject { put("path", "/tmp/spike/a.txt") },
-            ),
-            events[1],
-        )
-    }
-
-    @Test
-    fun `tool result frame emits the full output and the error flag`() = runBlocking {
-        val emitted = runSocketEvents(
-            // tool.result shape (docs/server-api.md): toolCallId + output; the output is
-            // a plain string for shell tools (ticket 023).
-            """{"type":"tool.result","seq":14,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-19T15:07:50.000Z","payload":{"type":"tool.result",""" +
-                """"turnId":0,"toolCallId":"tool_1","output":"ok\n","agentId":"main","sessionId":"session_1"}}""",
-            // Structured tools (AskUserQuestion) carry a JSON object output.
-            """{"type":"tool.result","seq":15,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-19T15:07:51.000Z","payload":{"type":"tool.result",""" +
-                """"turnId":0,"toolCallId":"tool_2","is_error":true,""" +
-                """"output":{"answers":{"Color?":"blue"}},"agentId":"main","sessionId":"session_1"}}""",
-        )
-
-        val events = emitted.filterIsInstance<SocketEvent.Event>().map { it.event }
-        assertEquals(SessionEvent.ToolCallResult("tool_1", false, "ok\n"), events[0])
-        assertEquals(
-            SessionEvent.ToolCallResult("tool_2", true, "{\n    \"answers\": {\n        \"Color?\": \"blue\"\n    }\n}"),
-            events[1],
-        )
-    }
-
-    @Test
-    fun `tool progress frame emits the output chunk`() = runBlocking {
-        // Verbatim tool.progress shape (docs/server-api.md, 0.29.0): a volatile frame
-        // whose update carries one live output chunk.
-        val emitted = runSocketEvents(
-            """{"type":"tool.progress","seq":14,"epoch":"ep_1","volatile":true,""" +
-                """"session_id":"session_1","timestamp":"2026-07-23T03:28:40.000Z",""" +
-                """"payload":{"type":"tool.progress","turnId":0,""" +
-                """"toolCallId":"tool_RMgBIy1asIorg1eV8P3ZhHiL",""" +
-                """"update":{"kind":"stdout","text":"doc-verify-0290\n"},""" +
-                """"agentId":"main","sessionId":"session_1"}}""",
-        )
-
-        val events = emitted.filterIsInstance<SocketEvent.Event>().map { it.event }
-        assertEquals(
-            SessionEvent.ToolCallProgress("tool_RMgBIy1asIorg1eV8P3ZhHiL", "doc-verify-0290\n"),
-            events.first(),
-        )
-    }
-
-    @Test
-    fun `context spliced frame emits the spliced user message`() = runBlocking {
-        // Verbatim 0.27.0 shape (docs/server-api.md, "Core event payloads").
-        val emitted = runSocketEvents(
-            """{"type":"context.spliced","seq":5,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-19T00:00:00.500Z","payload":{"type":"context.spliced",""" +
-                """"start":0,"deleteCount":0,"messages":[{"role":"user",""" +
-                """"content":[{"type":"text","text":"hello from the phone"}],"toolCalls":[],""" +
-                """"origin":{"kind":"user"},"id":"msg_1"}],"agentId":"main","sessionId":"session_1"}}""",
         )
 
         assertEquals(
@@ -1550,15 +1298,14 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun `context spliced frame without a message id emits the steered user message`() = runBlocking {
-        // Steer echo shape (docs/server-api.md, steer round-trip): the spliced steered
-        // message carries no id.
+    fun `an undo marker without a message id emits the id-less user message`() = runBlocking {
         val emitted = runSocketEvents(
-            """{"type":"context.spliced","seq":12,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-20T00:00:01.000Z","payload":{"type":"context.spliced",""" +
-                """"start":1,"deleteCount":0,"messages":[{"role":"user",""" +
-                """"content":[{"type":"text","text":"Stop counting. Reply with exactly: steered-ok"}],""" +
-                """"toolCalls":[],"origin":{"kind":"user"}}],"agentId":"main","sessionId":"session_1"}}""",
+            TranscriptFrames.opsFrame(
+                TranscriptFrames.undoOp(
+                    "live-m9",
+                    TranscriptFrames.userMessage(null, "Stop counting. Reply with exactly: steered-ok"),
+                ),
+            ),
         )
 
         assertEquals(
@@ -1605,14 +1352,15 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun `context spliced filters internal envelopes from the echoed user message`() = runBlocking {
+    fun `an undo marker splice filters internal envelopes from the echoed user message`() = runBlocking {
         val emitted = runSocketEvents(
-            """{"type":"context.spliced","seq":5,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-21T00:00:00.000Z","payload":{"type":"context.spliced",""" +
-                """"start":0,"deleteCount":0,"messages":[{"role":"user",""" +
-                """"content":[{"type":"text","text":"<system-reminder>\ninternal\n</system-reminder>"}],""" +
-                """"toolCalls":[],"origin":{"kind":"injection"},"id":"msg_9"}],""" +
-                """"agentId":"main","sessionId":"session_1"}}""",
+            TranscriptFrames.opsFrame(
+                TranscriptFrames.undoOp(
+                    "live-m5",
+                    """{"role":"user","content":[{"type":"text","text":"<system-reminder>\ninternal\n</system-reminder>"}],""" +
+                        """"origin":{"kind":"user"},"id":"msg_9"}""",
+                ),
+            ),
         )
 
         val timeline = testChatTimeline()
@@ -1621,206 +1369,21 @@ class ChatRepositoryTest {
         assertEquals(emptyList<ChatItem>(), timeline.items())
     }
 
-    @Test
-    fun `question frames emit the requested question then the resolved id`() = runBlocking {
-        // Verbatim 0.27.0 shapes (docs/server-api.md, "Core event payloads").
-        val emitted = runSocketEvents(
-            """{"type":"event.question.requested","seq":9,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-20T06:06:49.808Z","payload":{"type":"event.question.requested",""" +
-                """"question_id":"tool_mU6ITagcpKjwSyiUKLHPZYWw","session_id":"session_1","turn_id":0,""" +
-                """"tool_call_id":"tool_mU6ITagcpKjwSyiUKLHPZYWw",""" +
-                """"questions":[{"id":"q_0","question":"Red or blue?","header":"Color",""" +
-                """"options":[{"id":"opt_0_0","label":"red","description":"warm color"},""" +
-                """{"id":"opt_0_1","label":"blue","description":"cool color"}],"allow_other":true}],""" +
-                """"created_at":"2026-07-20T06:06:49.808Z","agentId":"main","sessionId":"session_1"}}""",
-            """{"type":"event.question.answered","seq":11,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-20T06:08:12.548Z","payload":{"type":"event.question.answered",""" +
-                """"question_id":"tool_mU6ITagcpKjwSyiUKLHPZYWw","answers":{"Red or blue?":"blue"},""" +
-                """"resolved_at":"2026-07-20T06:08:12.548Z","agentId":"main","sessionId":"session_1"}}""",
-            """{"type":"event.question.dismissed","seq":28,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-20T06:12:37.844Z","payload":{"type":"event.question.dismissed",""" +
-                """"question_id":"tool_TThzzORvQB8tHTKyLhIL5bQt","dismissed_at":"2026-07-20T06:12:37.844Z",""" +
-                """"agentId":"main","sessionId":"session_1"}}""",
-        )
-
-        val events = emitted.filterIsInstance<SocketEvent.Event>().map { it.event }
-        assertEquals(
-            SessionEvent.QuestionRequested(
-                PendingQuestion(
-                    questionId = "tool_mU6ITagcpKjwSyiUKLHPZYWw",
-                    toolCallId = "tool_mU6ITagcpKjwSyiUKLHPZYWw",
-                    items = listOf(
-                        PendingQuestion.Item(
-                            id = "q_0",
-                            header = "Color",
-                            text = "Red or blue?",
-                            options = listOf(
-                                PendingQuestion.Option("opt_0_0", "red", "warm color"),
-                                PendingQuestion.Option("opt_0_1", "blue", "cool color"),
-                            ),
-                            allowOther = true,
-                        ),
-                    ),
-                ),
-            ),
-            events[0],
-        )
-        assertEquals(SessionEvent.QuestionResolved("tool_mU6ITagcpKjwSyiUKLHPZYWw"), events[1])
-        assertEquals(SessionEvent.QuestionResolved("tool_TThzzORvQB8tHTKyLhIL5bQt"), events[2])
-    }
+    // --- Question responses on the interactions route (ticket 172) --------------------
 
     @Test
-    fun `question requested decodes the 0_38_0 split question and tool call ids`() = runBlocking {
-        // Verbatim 0.38.0 capture (docs/server-api.md, "Core event payloads" →
-        // Question requested): question_id is a dedicated question_<uuid> id,
-        // distinct from the tool row's tool_call_id (ticket 106).
-        val emitted = runSocketEvents(
-            """{"type":"event.question.requested","seq":10,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-08-20T19:33:45.150Z","payload":{"type":"event.question.requested",""" +
-                """"question_id":"question_a38aaf28-7dfe-489d-bca3-ea43c93b86fa",""" +
-                """"session_id":"session_1","turn_id":0,""" +
-                """"tool_call_id":"tool_EwFXscDF0HraGfTelCTRdRe9",""" +
-                """"questions":[{"id":"q_0","question":"Pick a color?",""" +
-                """"options":[{"id":"opt_0_0","label":"Red"},{"id":"opt_0_1","label":"Blue"}],""" +
-                """"allow_other":true}],""" +
-                """"created_at":"2026-08-20T19:33:45.150Z","agentId":"main","sessionId":"session_1"}}""",
-        )
-
-        val events = emitted.filterIsInstance<SocketEvent.Event>().map { it.event }
-        assertEquals(
-            SessionEvent.QuestionRequested(
-                PendingQuestion(
-                    questionId = "question_a38aaf28-7dfe-489d-bca3-ea43c93b86fa",
-                    toolCallId = "tool_EwFXscDF0HraGfTelCTRdRe9",
-                    items = listOf(
-                        PendingQuestion.Item(
-                            id = "q_0",
-                            header = "",
-                            text = "Pick a color?",
-                            options = listOf(
-                                PendingQuestion.Option("opt_0_0", "Red", null),
-                                PendingQuestion.Option("opt_0_1", "Blue", null),
-                            ),
-                            allowOther = true,
-                        ),
-                    ),
-                ),
-            ),
-            events.single(),
-        )
-    }
-
-    @Test
-    fun `getPendingQuestions parses the poll list`() = runBlocking {
-        // The poll items carry the 0.38.0 dual-id shape (docs/server-api.md,
-        // Questions — ticket 106).
-        server.enqueue(
-            MockResponse(body = 
-                """
-                {"code":0,"msg":"success","data":{"items":[
-                  {"type":"event.question.requested","question_id":"question_q1","session_id":"session_1",
-                   "turn_id":0,"tool_call_id":"tool_q1",
-                   "questions":[{"id":"q_0","question":"Red or blue?","header":"Color",
-                                 "options":[{"id":"opt_0_0","label":"red"},
-                                            {"id":"opt_0_1","label":"blue","description":"cool color"}],
-                                 "allow_other":true}],
-                   "created_at":"2026-07-20T06:06:49.808Z","agentId":"main","sessionId":"session_1"}
-                ]},"request_id":"01KX"}
-                """.trimIndent(),
-            ),
-        )
-
-        val result = repository.getPendingQuestions(settings(), "session_1")
-
-        assertEquals("/api/v1/sessions/session_1/questions?status=pending", server.takeRequest().target)
-        assertEquals(
-            listOf(
-                PendingQuestion(
-                    questionId = "question_q1",
-                    toolCallId = "tool_q1",
-                    items = listOf(
-                        PendingQuestion.Item(
-                            id = "q_0",
-                            header = "Color",
-                            text = "Red or blue?",
-                            options = listOf(
-                                PendingQuestion.Option("opt_0_0", "red", null),
-                                PendingQuestion.Option("opt_0_1", "blue", "cool color"),
-                            ),
-                            allowOther = true,
-                        ),
-                    ),
-                ),
-            ),
-            result.getOrThrow(),
-        )
-    }
-
-    @Test
-    fun `pending question items decode the 2_0_2 agent_id stamp`() = runBlocking {
-        // Verbatim 2.0.2 pending-poll item (docs/server-api.md, the 2.0.2 drift
-        // block — ticket 156): the poll's items gained the optional snake_case
-        // `agent_id`. The second entry is the same shape stamped with a member's
-        // id — a sub-agent's question names the asking member.
+    fun `answerQuestion posts the per-item answers to the interactions route`() = runBlocking {
+        // The verbatim 2.4.0+ success (docs/server-api.md, Interactions → Respond).
         server.enqueue(
             MockResponse(body =
-                """
-                {"code":0,"msg":"success","data":{"items":[
-                  {"question_id":"question_be59fa0e-0fe6-4437-b407-29cc6b7dd723","session_id":"session_...",
-                   "questions":[{"id":"q_0","question":"Cake or pie?",
-                                 "options":[{"id":"opt_0_0","label":"Cake"},{"id":"opt_0_1","label":"Pie"}],
-                                 "header":"Dessert","allow_other":true}],
-                   "created_at":"2026-09-19T19:32:06.261Z","agent_id":"main","turn_id":1,
-                   "tool_call_id":"tool_5gF7ty3rd1ssoctEgV3yoPuQ"},
-                  {"question_id":"question_q2","session_id":"session_...",
-                   "questions":[{"id":"q_0","question":"Cake or pie?","options":[],"allow_other":false}],
-                   "created_at":"2026-09-19T19:32:06.261Z","agent_id":"agent-1","turn_id":1,
-                   "tool_call_id":"tool_q2"}
-                ]},"request_id":"01KX"}
-                """.trimIndent(),
-            ),
-        )
-
-        val questions = repository.getPendingQuestions(settings(), "session_1").getOrThrow()
-
-        assertEquals(listOf("main", "agent-1"), questions.map { it.agentId })
-    }
-
-    @Test
-    fun `question requested frame decodes the 2_0_2 agent_id stamp`() = runBlocking {
-        // The 0.38.0 verbatim frame (docs/server-api.md, "Core event payloads") plus
-        // its documented 2.0.2 drift: the frame's payload gained the optional
-        // snake_case `agent_id` (ticket 156). The trailing camelCase `agentId` is
-        // the envelope mirror every payload carries, NOT the asker — unlike
-        // approvals, the asking member decodes from the snake_case stamp only.
-        val emitted = runSocketEvents(
-            """{"type":"event.question.requested","seq":10,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-08-20T19:33:45.150Z","payload":{"type":"event.question.requested",""" +
-                """"question_id":"question_a38aaf28-7dfe-489d-bca3-ea43c93b86fa","agent_id":"agent-12",""" +
-                """"session_id":"session_1","turn_id":0,""" +
-                """"tool_call_id":"tool_EwFXscDF0HraGfTelCTRdRe9",""" +
-                """"questions":[{"id":"q_0","question":"Pick a color?",""" +
-                """"options":[{"id":"opt_0_0","label":"Red"},{"id":"opt_0_1","label":"Blue"}],""" +
-                """"allow_other":true}],""" +
-                """"created_at":"2026-08-20T19:33:45.150Z","agentId":"main","sessionId":"session_1"}}""",
-        )
-
-        val event = emitted.filterIsInstance<SocketEvent.Event>().single().event
-        assertEquals("agent-12", (event as SessionEvent.QuestionRequested).question.agentId)
-    }
-
-    @Test
-    fun `answerQuestion posts the per-item answers keyed by item id`() = runBlocking {
-        server.enqueue(
-            MockResponse(body = 
-                """{"code":0,"msg":"success","data":{"resolved":true,"resolved_at":"2026-07-20T06:08:12.548Z"},"request_id":"01KX"}""",
+                """{"code":0,"msg":"success","data":{"outcome":"answered","ended_at":"2026-10-28T19:28:18.858Z"},"request_id":"01KX"}""",
             ),
         )
 
         val result = repository.answerQuestion(
             settings(),
             "session_1",
-            "tool_q1",
+            "question_10025aea",
             listOf(
                 QuestionAnswer.OptionPick("q_0", "opt_0_1"),
                 QuestionAnswer.Other("q_1", "ramen"),
@@ -1830,26 +1393,27 @@ class ChatRepositoryTest {
         assertTrue(result.isSuccess)
         val request = server.takeRequest()
         assertEquals("POST", request.method)
-        assertEquals("/api/v1/sessions/session_1/questions/tool_q1", request.target)
+        assertEquals("/api/v1/sessions/session_1/interactions/question_10025aea", request.target)
         assertEquals(
-            """{"answers":{"q_0":{"kind":"single","option_id":"opt_0_1"},"q_1":{"kind":"other","text":"ramen"}}}""",
+            """{"kind":"question","answers":{"q_0":{"kind":"single","option_id":"opt_0_1"},""" +
+                """"q_1":{"kind":"other","text":"ramen"}}}""",
             request.body!!.utf8(),
         )
     }
 
     @Test
     fun `answerQuestion serializes the multi-select answer kinds`() = runBlocking {
-        // Ticket 090: verified live against server 0.31.1 (docs/server-api.md).
+        // Ticket 090's mapping, unchanged by the 2.4.0 route move (ticket 172).
         server.enqueue(
             MockResponse(body =
-                """{"code":0,"msg":"success","data":{"resolved":true,"resolved_at":"2026-07-20T06:08:12.548Z"},"request_id":"01KX"}""",
+                """{"code":0,"msg":"success","data":{"outcome":"answered","ended_at":"2026-10-28T19:28:18.858Z"},"request_id":"01KX"}""",
             ),
         )
 
         val result = repository.answerQuestion(
             settings(),
             "session_1",
-            "tool_q1",
+            "question_1",
             listOf(
                 QuestionAnswer.Multi("q_0", listOf("opt_0_0", "opt_0_2")),
                 QuestionAnswer.MultiWithOther("q_1", listOf("opt_1_0"), "Fish"),
@@ -1858,87 +1422,63 @@ class ChatRepositoryTest {
 
         assertTrue(result.isSuccess)
         assertEquals(
-            """{"answers":{"q_0":{"kind":"multi","option_ids":["opt_0_0","opt_0_2"]},""" +
+            """{"kind":"question","answers":{"q_0":{"kind":"multi","option_ids":["opt_0_0","opt_0_2"]},""" +
                 """"q_1":{"kind":"multi_with_other","option_ids":["opt_1_0"],"other_text":"Fish"}}}""",
             server.takeRequest().body!!.utf8(),
         )
     }
 
     @Test
-    fun `pending questions poll parses multi_select and defaults it to false`() = runBlocking {
+    fun `answerQuestion surfaces the ended 40902 and the unknown 40404 as Api errors`() = runBlocking {
+        // Verbatim error envelopes (docs/server-api.md, Interactions → Respond).
         server.enqueue(
             MockResponse(body =
-                """
-                {"code":0,"msg":"success","data":{"items":[
-                  {"type":"event.question.requested","question_id":"tool_q1","session_id":"session_1",
-                   "turn_id":0,"tool_call_id":"tool_q1",
-                   "questions":[
-                     {"id":"q_0","question":"Colors?","header":"Palette",
-                      "options":[{"id":"opt_0_0","label":"red"}],
-                      "allow_other":true,"multi_select":true},
-                     {"id":"q_1","question":"Mode?","header":"Mode",
-                      "options":[{"id":"opt_1_0","label":"fast"}],
-                      "allow_other":false,"multi_select":false},
-                     {"id":"q_2","question":"Confirm?","header":"Confirm",
-                      "options":[{"id":"opt_2_0","label":"yes"}],
-                      "allow_other":false}
-                   ],
-                   "created_at":"2026-07-20T06:06:49.808Z","agentId":"main","sessionId":"session_1"}
-                ]},"request_id":"01KX"}
-                """.trimIndent(),
+                """{"code":40902,"msg":"interaction question_0c93eb23 has ended","data":null,"request_id":"01KX"}""",
             ),
         )
-
-        val result = repository.getPendingQuestions(settings(), "session_1")
-
-        assertEquals(
-            listOf(true, false, false),
-            result.getOrThrow().single().items.map { it.multiSelect },
+        server.enqueue(
+            MockResponse(body =
+                """{"code":40404,"msg":"interaction question_00000000 not found","data":null,"request_id":"01KX"}""",
+            ),
         )
+        val answers = listOf(QuestionAnswer.OptionPick("q_0", "opt_0_1"))
+
+        val ended = repository.answerQuestion(settings(), "session_1", "question_0c93eb23", answers).exceptionOrNull()
+        val unknown = repository.answerQuestion(settings(), "session_1", "question_00000000", answers).exceptionOrNull()
+
+        assertEquals(DataError.Api(40902, "interaction question_0c93eb23 has ended"), ended)
+        assertEquals(DataError.Api(40404, "interaction question_00000000 not found"), unknown)
     }
 
     @Test
-    fun `answerQuestion maps an already-resolved question to Api error`() = runBlocking {
+    fun `dismissQuestion posts dismissed true and succeeds on the code 0 dismissed outcome`() = runBlocking {
+        // 2.4.0+: a dismissal is an ordinary code-0 success (no 40909 special case).
         server.enqueue(
-            MockResponse(body = """{"code":40405,"msg":"question tool_q1 not found","data":null,"request_id":"01KX"}"""),
-        )
-
-        val result = repository.answerQuestion(
-            settings(), "session_1", "tool_q1", listOf(QuestionAnswer.OptionPick("q_0", "opt_0_1")),
-        )
-
-        assertTrue(result.exceptionOrNull() is DataError.Api)
-    }
-
-    @Test
-    fun `dismissQuestion treats the 40909 envelope as success`() = runBlocking {
-        // docs/server-api.md: a successful dismiss is HTTP 200 with the non-zero code
-        // 40909 — success is data.dismissed, not code == 0.
-        server.enqueue(
-            MockResponse(body = 
-                """{"code":40909,"msg":"question tool_q1 dismissed",""" +
-                    """"data":{"dismissed":true,"dismissed_at":"2026-07-20T06:17:24.711Z"},"request_id":"01KX"}""",
+            MockResponse(body =
+                """{"code":0,"msg":"success","data":{"outcome":"dismissed","ended_at":"2026-10-28T19:30:02.112Z"},"request_id":"01KX"}""",
             ),
         )
 
-        val result = repository.dismissQuestion(settings(), "session_1", "tool_q1")
+        val result = repository.dismissQuestion(settings(), "session_1", "question_1")
 
         assertTrue(result.isSuccess)
         val request = server.takeRequest()
         assertEquals("POST", request.method)
-        assertEquals("/api/v1/sessions/session_1/questions/tool_q1:dismiss", request.target)
-        assertEquals("{}", request.body!!.utf8())
+        assertEquals("/api/v1/sessions/session_1/interactions/question_1", request.target)
+        assertEquals("""{"kind":"question","dismissed":true}""", request.body!!.utf8())
     }
 
     @Test
-    fun `dismissQuestion maps an already-resolved question to Api error`() = runBlocking {
+    fun `dismissQuestion maps a non-zero code to Api error`() = runBlocking {
         server.enqueue(
-            MockResponse(body = """{"code":40405,"msg":"question tool_q1 not found","data":null,"request_id":"01KX"}"""),
+            MockResponse(body =
+                """{"code":40902,"msg":"interaction question_1 has ended","data":null,"request_id":"01KX"}""",
+            ),
         )
 
-        val result = repository.dismissQuestion(settings(), "session_1", "tool_q1")
+        val result = repository.dismissQuestion(settings(), "session_1", "question_1")
 
-        assertTrue(result.exceptionOrNull() is DataError.Api)
+        assertEquals(DataError.Api(40902, "interaction question_1 has ended"), result.exceptionOrNull())
     }
 
     @Test
@@ -2000,7 +1540,7 @@ class ChatRepositoryTest {
             """{"content":[""" +
                 """{"type":"image","source":{"kind":"file","file_id":"f_img"}},""" +
                 """{"type":"file","file_id":"f_txt","name":"notes.txt","media_type":"text/plain","size":27},""" +
-                """{"type":"text","text":"look at these"}]}""",
+                """{"type":"text","text":"look at these"}],"swarm_mode":false}""",
             server.takeRequest().body!!.utf8(),
         )
     }
@@ -2020,7 +1560,7 @@ class ChatRepositoryTest {
         assertTrue(result.isSuccess)
         assertEquals("/api/v1/config", server.takeRequest().target)
         assertEquals(
-            """{"content":[{"type":"file","file_id":"f_txt","name":"notes.txt","media_type":"text/plain","size":27}]}""",
+            """{"content":[{"type":"file","file_id":"f_txt","name":"notes.txt","media_type":"text/plain","size":27}],"swarm_mode":false}""",
             server.takeRequest().body!!.utf8(),
         )
     }
@@ -2035,269 +1575,8 @@ class ChatRepositoryTest {
         assertTrue(result.isSuccess)
         assertEquals("/api/v1/config", server.takeRequest().target)
         assertEquals(
-            """{"content":[{"type":"text","text":"hello"}]}""",
+            """{"content":[{"type":"text","text":"hello"}],"swarm_mode":false}""",
             server.takeRequest().body!!.utf8(),
-        )
-    }
-
-    @Test
-    fun `sub-agent transcript frames emit events tagged with their agentId`() = runBlocking {
-        // Sub-agents stream over the same session channel tagged with their own agentId
-        // (docs/server-api.md, Sub-agents; fixtures from the 2026-07-28 0.29.2 capture).
-        // Since ticket 045 every frame emits its event carrying the emitting agentId —
-        // routing, not dropping, is what keeps them out of the main chat. The two main
-        // frames (one with the tag, one without — absent means main) read as "main".
-        val emitted = runSocketEvents(
-            """{"type":"turn.started","seq":20,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:35.493Z","payload":{"type":"turn.started","turnId":0,""" +
-                """"origin":{"kind":"system_trigger","name":"subagent"},"agentId":"agent-12","sessionId":"session_1"}}""",
-            """{"type":"context.spliced","seq":21,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:35.494Z","payload":{"type":"context.spliced","start":0,""" +
-                """"deleteCount":0,"messages":[{"role":"user","content":[{"type":"text","text":"sub task"}],""" +
-                """"toolCalls":[],"origin":{"kind":"system_trigger","name":"subagent"},"id":"msg_sub"}],""" +
-                """"agentId":"agent-12","sessionId":"session_1"}}""",
-            """{"type":"thinking.delta","seq":23,"epoch":"ep_1","volatile":true,"offset":0,""" +
-                """"session_id":"session_1","timestamp":"2026-07-28T03:37:36.000Z",""" +
-                """"payload":{"type":"thinking.delta","turnId":0,"delta":"sub hmm","agentId":"agent-12","sessionId":"session_1"}}""",
-            """{"type":"assistant.delta","seq":23,"epoch":"ep_1","volatile":true,"offset":0,""" +
-                """"session_id":"session_1","timestamp":"2026-07-28T03:37:36.100Z",""" +
-                """"payload":{"type":"assistant.delta","turnId":0,"delta":"sub text","agentId":"agent-12","sessionId":"session_1"}}""",
-            """{"type":"tool.call.delta","seq":23,"epoch":"ep_1","volatile":true,""" +
-                """"session_id":"session_1","timestamp":"2026-07-28T03:37:36.200Z",""" +
-                """"payload":{"type":"tool.call.delta","turnId":0,"toolCallId":"tool_sub","name":"Bash",""" +
-                """"agentId":"agent-12","sessionId":"session_1"}}""",
-            """{"type":"tool.call.started","seq":24,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:36.300Z","payload":{"type":"tool.call.started","turnId":0,""" +
-                """"toolCallId":"tool_sub","name":"Bash","args":{"command":"ls"},"agentId":"agent-12","sessionId":"session_1"}}""",
-            """{"type":"tool.progress","seq":24,"epoch":"ep_1","volatile":true,""" +
-                """"session_id":"session_1","timestamp":"2026-07-28T03:37:36.400Z",""" +
-                """"payload":{"type":"tool.progress","toolCallId":"tool_sub",""" +
-                """"update":{"kind":"stdout","text":"sub out"},"agentId":"agent-12","sessionId":"session_1"}}""",
-            """{"type":"tool.result","seq":25,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:36.500Z","payload":{"type":"tool.result","turnId":0,""" +
-                """"toolCallId":"tool_sub","output":"sub result","agentId":"agent-12","sessionId":"session_1"}}""",
-            """{"type":"agent.status.updated","seq":25,"epoch":"ep_1","volatile":true,""" +
-                """"session_id":"session_1","timestamp":"2026-07-28T03:37:36.600Z",""" +
-                """"payload":{"type":"agent.status.updated","contextTokens":13967,"maxContextTokens":1048576,""" +
-                """"agentId":"agent-12","sessionId":"session_1"}}""",
-            """{"type":"turn.ended","seq":26,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:38.980Z","payload":{"type":"turn.ended","turnId":0,""" +
-                """"reason":"completed","durationMs":3487,"agentId":"agent-12","sessionId":"session_1"}}""",
-            """{"type":"assistant.delta","seq":27,"epoch":"ep_1","volatile":true,"offset":0,""" +
-                """"session_id":"session_1","timestamp":"2026-07-28T03:37:39.000Z",""" +
-                """"payload":{"type":"assistant.delta","turnId":1,"delta":"main text","agentId":"main","sessionId":"session_1"}}""",
-            """{"type":"assistant.delta","seq":27,"epoch":"ep_1","volatile":true,"offset":9,""" +
-                """"session_id":"session_1","timestamp":"2026-07-28T03:37:39.100Z",""" +
-                """"payload":{"type":"assistant.delta","turnId":1,"delta":" more"}}""",
-            eventCount = 12,
-        )
-
-        assertEquals(
-            listOf(
-                SocketEvent.Event(SessionEvent.TurnStarted("agent-12")),
-                SocketEvent.Event(
-                    SessionEvent.ContextSpliced(
-                        listOf(
-                            ChatMessage(
-                                "msg_sub",
-                                ChatMessage.Role.User,
-                                listOf(ChatMessage.Part.Text("sub task")),
-                                originKind = "system_trigger",
-                            ),
-                        ),
-                        "agent-12",
-                    ),
-                ),
-                SocketEvent.Event(SessionEvent.ThinkingDelta("sub hmm", "agent-12")),
-                SocketEvent.Event(SessionEvent.AssistantDelta("sub text", "agent-12")),
-                SocketEvent.Event(SessionEvent.ToolCallDelta("tool_sub", "Bash", "agent-12")),
-                SocketEvent.Event(
-                    SessionEvent.ToolCallStarted(
-                        "tool_sub", "Bash", "ls",
-                        input = "{\n    \"command\": \"ls\"\n}",
-                        args = buildJsonObject { put("command", "ls") },
-                        agentId = "agent-12",
-                    ),
-                ),
-                SocketEvent.Event(SessionEvent.ToolCallProgress("tool_sub", "sub out", "agent-12")),
-                SocketEvent.Event(SessionEvent.ToolCallResult("tool_sub", false, "sub result", "agent-12")),
-                SocketEvent.Event(SessionEvent.ContextUsageUpdated(ContextUsage(13967, 1048576), "agent-12")),
-                SocketEvent.Event(SessionEvent.TurnEnded("completed", "agent-12")),
-                SocketEvent.Event(SessionEvent.AssistantDelta("main text")),
-                SocketEvent.Event(SessionEvent.AssistantDelta(" more")),
-            ),
-            emitted.filterIsInstance<SocketEvent.Event>(),
-        )
-    }
-
-    @Test
-    fun `turn ended interruptReason decodes onto the event`() = runBlocking {
-        // 0.31.1 (docs/server-api.md, turn.started / turn.ended — ticket 155): an early
-        // stop carries interruptReason next to the always-"cancelled" reason. The
-        // user_cancelled payload is the verbatim abort round-trip capture; the other
-        // values share its shape.
-        fun frame(interruptReason: String) =
-            """{"type":"turn.ended","seq":26,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:38.980Z","payload":{"type":"turn.ended","turnId":1,""" +
-                """"reason":"cancelled","durationMs":5030,"interruptReason":"$interruptReason",""" +
-                """"agentId":"main","sessionId":"session_1"}}"""
-
-        val emitted = runSocketEvents(
-            frame("user_cancelled"),
-            frame("aborted"),
-            frame("max_steps"),
-            frame("error"),
-            frame("filtered"),
-            frame("blocked"),
-            eventCount = 6,
-        )
-
-        assertEquals(
-            listOf("user_cancelled", "aborted", "max_steps", "error", "filtered", "blocked").map { reason ->
-                SocketEvent.Event(SessionEvent.TurnEnded("cancelled", "main", reason))
-            },
-            emitted.filterIsInstance<SocketEvent.Event>(),
-        )
-    }
-
-    @Test
-    fun `subagent lifecycle frames decode to their events`() = runBlocking {
-        // Verbatim subagent.spawned/completed payloads from the 2026-07-28 0.29.2
-        // capture (docs/server-api.md, Sub-agents); started/failed/suspended share the
-        // payload minus/plus their own field. All are tagged agentId "main" yet scoped
-        // to the sub-agent by the payload's subagentId.
-        val emitted = runSocketEvents(
-            """{"type":"subagent.spawned","seq":19,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:35.492Z","payload":{"type":"subagent.spawned",""" +
-                """"subagentId":"agent-12","subagentName":"explore",""" +
-                """"parentToolCallId":"tool_mhF8UXcf5QwvZbh5223tiIng","parentAgentId":"main",""" +
-                """"callerAgentId":"main","description":"doc-verify-subagent","runInBackground":false,""" +
-                """"agentId":"main","sessionId":"session_1"}}""",
-            """{"type":"subagent.started","seq":22,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:35.600Z","payload":{"type":"subagent.started",""" +
-                """"subagentId":"agent-12","agentId":"main","sessionId":"session_1"}}""",
-            """{"type":"subagent.completed","seq":33,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:51.951Z","payload":{"type":"subagent.completed",""" +
-                """"subagentId":"agent-12","resultSummary":"the sub-agent's result summary",""" +
-                """"usage":{"inputOther":6462,"output":359,"inputCacheRead":21504,"inputCacheCreation":0},""" +
-                """"contextTokens":14358,"agentId":"main","sessionId":"session_1"}}""",
-            """{"type":"subagent.failed","seq":34,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:52.000Z","payload":{"type":"subagent.failed",""" +
-                """"subagentId":"agent-13","error":"boom","agentId":"main","sessionId":"session_1"}}""",
-            """{"type":"subagent.suspended","seq":35,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:53.000Z","payload":{"type":"subagent.suspended",""" +
-                """"subagentId":"agent-13","reason":"waiting_on_input","agentId":"main","sessionId":"session_1"}}""",
-        )
-
-        assertEquals(
-            listOf(
-                SocketEvent.Event(
-                    SessionEvent.SubagentSpawned(
-                        subagentId = "agent-12",
-                        name = "explore",
-                        parentToolCallId = "tool_mhF8UXcf5QwvZbh5223tiIng",
-                        description = "doc-verify-subagent",
-                        runInBackground = false,
-                    ),
-                ),
-                SocketEvent.Event(SessionEvent.SubagentStarted("agent-12")),
-                SocketEvent.Event(SessionEvent.SubagentCompleted("agent-12", "the sub-agent's result summary")),
-                SocketEvent.Event(SessionEvent.SubagentFailed("agent-13", "boom")),
-                SocketEvent.Event(SessionEvent.SubagentSuspended("agent-13", "waiting_on_input")),
-            ),
-            emitted.filterIsInstance<SocketEvent.Event>(),
-        )
-    }
-
-    @Test
-    fun `a swarm member's spawned frame decodes swarmIndex, taskId and the model pair`() = runBlocking {
-        // The verbatim 0.38.0 capture (docs/server-api.md:3257) with swarmIndex added:
-        // a swarm member's frame carries the member's position and its background-task
-        // registration id next to the shared parentToolCallId (ticket 134), plus the
-        // run's bound model/effort (0.34.0, ticket 135).
-        val emitted = runSocketEvents(
-            """{"type":"subagent.spawned","seq":41,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-08-20T10:00:00.000Z","payload":{"type":"subagent.spawned",""" +
-                """"time":1787254524517,"subagentId":"agent-1","subagentName":"explore",""" +
-                """"parentToolCallId":"tool_ArVyKiUhCDxXT341BmjTba8L","parentAgentId":"main",""" +
-                """"callerAgentId":"main","description":"Ask what is 2+2","runInBackground":false,""" +
-                """"model":"kimi-code/k3","thinkingEffort":"high","swarmIndex":2,""" +
-                """"taskId":"agent-rhh36xem","agentId":"main","sessionId":"session_1"}}""",
-        )
-
-        assertEquals(
-            listOf(
-                SocketEvent.Event(
-                    SessionEvent.SubagentSpawned(
-                        subagentId = "agent-1",
-                        name = "explore",
-                        parentToolCallId = "tool_ArVyKiUhCDxXT341BmjTba8L",
-                        description = "Ask what is 2+2",
-                        runInBackground = false,
-                        swarmIndex = 2,
-                        taskId = "agent-rhh36xem",
-                        model = "kimi-code/k3",
-                        thinkingEffort = "high",
-                    ),
-                ),
-            ),
-            emitted.filterIsInstance<SocketEvent.Event>(),
-        )
-    }
-
-    @Test
-    fun `a subagent cancelled frame decodes to the cancelled event`() = runBlocking {
-        // Schema-level upstream (never captured live — docs/server-api.md): the
-        // started-family payload, subagentId only (ticket 135).
-        val emitted = runSocketEvents(
-            """{"type":"subagent.cancelled","seq":36,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-09-12T09:00:00.000Z","payload":{"type":"subagent.cancelled",""" +
-                """"subagentId":"agent-12","agentId":"main","sessionId":"session_1"}}""",
-        )
-
-        assertEquals(
-            listOf(SocketEvent.Event(SessionEvent.SubagentCancelled("agent-12"))),
-            emitted.filterIsInstance<SocketEvent.Event>(),
-        )
-    }
-
-    @Test
-    fun `sub-agent approval and question frames still emit`() = runBlocking {
-        // Interaction events are actionable whoever raised them (todo/044): a filtered
-        // sub-agent approval would hang the session on an answer nobody can give.
-        val emitted = runSocketEvents(
-            """{"type":"event.approval.requested","seq":30,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:40.000Z","payload":{"type":"event.approval.requested",""" +
-                """"session_id":"session_1","approval_id":"tool_sub_bash","turn_id":0,""" +
-                """"tool_call_id":"tool_sub_bash","tool_name":"Bash","action":"Running: ls",""" +
-                """"tool_input_display":{"kind":"command","command":"ls","cwd":"/tmp/spike","language":"bash"},""" +
-                """"created_at":"2026-07-28T03:37:40.000Z","expires_at":"2026-07-29T03:37:40.000Z",""" +
-                """"agentId":"agent-12","sessionId":"session_1"}}""",
-            """{"type":"event.question.requested","seq":31,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:41.000Z","payload":{"type":"event.question.requested",""" +
-                """"question_id":"tool_sub_q","session_id":"session_1","turn_id":0,"tool_call_id":"tool_sub_q",""" +
-                """"questions":[{"id":"q_0","question":"Red or blue?","options":[],"allow_other":true}],""" +
-                """"created_at":"2026-07-28T03:37:41.000Z","agentId":"agent-12","sessionId":"session_1"}}""",
-        )
-
-        val events = emitted.filterIsInstance<SocketEvent.Event>().map { it.event }
-        // The payload's agentId stamp lands on the event (ticket 139) — presentation
-        // only; the emission this test guards is unchanged.
-        assertEquals(
-            SessionEvent.ApprovalRequested("tool_sub_bash", "Bash", "ls", agentId = "agent-12"),
-            events[0],
-        )
-        assertEquals(
-            SessionEvent.QuestionRequested(
-                PendingQuestion(
-                    questionId = "tool_sub_q",
-                    toolCallId = "tool_sub_q",
-                    items = listOf(
-                        PendingQuestion.Item(id = "q_0", header = "", text = "Red or blue?", options = emptyList(), allowOther = true),
-                    ),
-                ),
-            ),
-            events[1],
         )
     }
 
@@ -2466,74 +1745,22 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun `socket parses the compaction lifecycle frames`() = runBlocking {
-        // Verbatim 0.30.0 shapes (docs/server-api.md, Compact), started with an
-        // instruction, then completed with its result.
+    fun `an undo marker decodes the top-level origin kind`() = runBlocking {
+        // The compaction context rewrite (docs/server-api.md, Compact → WebSocket
+        // sequence): the summary is an id-less user message with origin.kind
+        // "compaction_summary" at the message's TOP level; the continuation injection
+        // is dropped by the fold.
         val emitted = runSocketEvents(
-            """{"type":"compaction.started","seq":25,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-30T05:48:54.194Z","payload":{"type":"compaction.started",""" +
-                """"trigger":"manual","instruction":"Keep the marker verbatim.",""" +
-                """"agentId":"main","sessionId":"session_1"}}""",
-            """{"type":"compaction.completed","seq":37,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-30T05:44:56.676Z","payload":{"type":"compaction.completed",""" +
-                """"result":{"summary":"Completed spike, nothing pending.",""" +
-                """"compactedCount":8,"tokensBefore":850,"tokensAfter":386,"keptUserMessageCount":3},""" +
-                """"agentId":"main","sessionId":"session_1"}}""",
-        )
-
-        assertEquals(
-            listOf(
-                SocketEvent.Event(SessionEvent.CompactionStarted("manual", "Keep the marker verbatim.")),
-                SocketEvent.Event(
-                    SessionEvent.CompactionCompleted(
-                        summary = "Completed spike, nothing pending.",
-                        compactedCount = 8,
-                        tokensBefore = 850,
-                        tokensAfter = 386,
-                        keptUserMessageCount = 3,
-                    ),
+            TranscriptFrames.opsFrame(
+                TranscriptFrames.undoOp(
+                    "live-m6",
+                    TranscriptFrames.userMessage("msg_1", "kept message"),
+                    """{"role":"user","content":[{"type":"text","text":"The conversation so far has been compacted…"}],""" +
+                        """"origin":{"kind":"compaction_summary"},"id":null}""",
+                    """{"role":"user","content":[{"type":"text","text":"Continue."}],""" +
+                        """"origin":{"kind":"injection","variant":"compaction_continuation"}}""",
                 ),
             ),
-            emitted.filterIsInstance<SocketEvent.Event>(),
-        )
-    }
-
-    @Test
-    fun `socket decodes the compaction failure family permissively, payload or not`() = runBlocking {
-        // failed/cancelled/blocked were never observed on this server (protocol-bundle
-        // schemas only): any shape — including no payload at all — must still emit, so
-        // the compacting state always ends (ticket 056).
-        val emitted = runSocketEvents(
-            """{"type":"compaction.failed","seq":40,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-30T05:50:00.000Z","payload":{"type":"compaction.failed",""" +
-                """"message":"summarizer unreachable","agentId":"main","sessionId":"session_1"}}""",
-            """{"type":"compaction.cancelled","seq":41,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-30T05:50:01.000Z"}""",
-        )
-
-        assertEquals(
-            listOf(
-                SocketEvent.Event(SessionEvent.CompactionFailed("compaction.failed", "summarizer unreachable")),
-                SocketEvent.Event(SessionEvent.CompactionFailed("compaction.cancelled", null)),
-            ),
-            emitted.filterIsInstance<SocketEvent.Event>(),
-        )
-    }
-
-    @Test
-    fun `a splice frame decodes the top-level origin kind`() = runBlocking {
-        // The compaction context rewrite (docs/server-api.md, Compact): the summary is
-        // an id-less user message with origin.kind "compaction_summary" at the
-        // message's TOP level (history keeps it under metadata.origin).
-        val emitted = runSocketEvents(
-            """{"type":"context.spliced","seq":36,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-30T05:44:56.600Z","payload":{"type":"context.spliced",""" +
-                """"start":0,"deleteCount":8,"messages":[""" +
-                """{"role":"user","content":[{"type":"text","text":"kept message"}],""" +
-                """"origin":{"kind":"user"},"id":"msg_1"},""" +
-                """{"role":"user","content":[{"type":"text","text":"The conversation so far has been compacted…"}],""" +
-                """"origin":{"kind":"compaction_summary"},"id":null}],""" +
-                """"agentId":"main","sessionId":"session_1"}}""",
         )
 
         val splice = emitted.filterIsInstance<SocketEvent.Event>().single().event as SessionEvent.ContextSpliced

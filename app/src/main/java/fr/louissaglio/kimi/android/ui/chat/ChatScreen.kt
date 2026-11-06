@@ -277,6 +277,7 @@ fun ChatScreen(
         onEffortSwitchConfirmed = viewModel::onEffortSwitchConfirmed,
         onEffortSwitchDismissed = viewModel::onEffortSwitchDismissed,
         onPermissionModeSelected = viewModel::onPermissionModeSelected,
+        onSwarmModeToggle = viewModel::onSwarmModeToggled,
         onOpenCompactionSummary = onOpenCompactionSummary,
         onAttach = onAttach,
         onAttachmentRemoved = viewModel::onAttachmentRemoved,
@@ -403,6 +404,7 @@ private fun ChatContent(
     onEffortSwitchConfirmed: () -> Unit = {},
     onEffortSwitchDismissed: () -> Unit = {},
     onPermissionModeSelected: (PermissionMode) -> Unit,
+    onSwarmModeToggle: () -> Unit,
     onOpenCompactionSummary: (ChatItem.CompactionDivider) -> Unit = {},
     onAttach: () -> Unit,
     onAttachmentRemoved: (String) -> Unit,
@@ -518,7 +520,7 @@ private fun ChatContent(
         bottomBar = {
             Column {
                 // The card shows the head of the approval queue and stays until the
-                // matching approval.resolved event, however the decision was made.
+                // matching `ended` interaction frame, however the decision was made.
                 uiState.pendingApprovals.firstOrNull()?.let { approval ->
                     ApprovalCard(
                         approval = approval,
@@ -554,7 +556,7 @@ private fun ChatContent(
                     )
                 }
                 // Questions are input, not a yes/no guard: the card collects the
-                // answers and stays until the matching question.answered/dismissed event.
+                // answers and stays until the matching `ended` interaction frame.
                 // Minimized (ticket 088): nothing renders — the pending AskUserQuestion
                 // tool row in the timeline reopens the card.
                 if (uiState.resolvedQuestionView == null && !uiState.questionCardMinimized) {
@@ -592,11 +594,11 @@ private fun ChatContent(
                     onOpenJob = onOpenJob,
                     onCancelJob = onCancelJob,
                 )
-                // Live activity phase (ticket 148): the status line — spinner, label,
-                // elapsed — shows what the generic working state cannot ("thinking" vs
-                // "running a tool" vs "waiting for my approval"). The 1 s ticker runs
-                // only while a phase is on screen (the null-status frame removes the
-                // whole block, ticker included).
+                // Live activity (ticket 148, derived since 177): the status line — spinner,
+                // label, elapsed — shows what the generic working state cannot
+                // ("thinking" vs "running a tool" vs "waiting for my approval"). The 1 s
+                // ticker runs only while a status is on screen (an idle agent removes
+                // the whole block, ticker included).
                 uiState.activityStatus?.let { status ->
                     var now by remember { mutableStateOf(Instant.now()) }
                     LaunchedEffect(Unit) {
@@ -618,13 +620,17 @@ private fun ChatContent(
                     modelLabel = uiState.currentModelLabel,
                     modelEffort = uiState.effectiveEffort,
                     // The permission chip (ticket 141): the session's effective mode,
-                    // hidden until the /status seed or a stored pick lands.
+                    // hidden until the `agent` frame or a stored pick lands.
                     permissionMode = uiState.currentPermissionMode,
+                    // The swarm chip (ticket 174): seeded and followed from the `agent`
+                    // frame's swarm_mode; its value rides every prompt.
+                    swarmMode = uiState.swarmMode,
                     contextUsage = uiState.contextUsage,
                     compactEnabled = canCompact,
                     onCompact = onCompact,
                     onModelClick = { showModelPicker = true },
                     onPermissionClick = { showPermissionPicker = true },
+                    onSwarmModeToggle = onSwarmModeToggle,
                     onTextChange = onInputChange,
                     // Send/Steer both funnel here; bump first so the jump rides
                     // the same recomposition as the ViewModel's echo append.
@@ -921,6 +927,7 @@ private fun ChatContentPreview() {
             onModelSelected = {},
             onEffortSelected = {},
             onPermissionModeSelected = {},
+            onSwarmModeToggle = {},
             onAttach = {},
             onAttachmentRemoved = {},
             onImageClick = {},

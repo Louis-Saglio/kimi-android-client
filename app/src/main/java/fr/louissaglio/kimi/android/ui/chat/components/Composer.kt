@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
@@ -42,12 +43,15 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
 import fr.louissaglio.kimi.android.ui.common.formatFileSize
+import fr.louissaglio.kimi.android.ui.common.icons.SparklesIcon
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -61,13 +65,17 @@ internal fun ChatInputBar(
     /** The chip's effective effort (ticket 108); null on effort-less models. */
     modelEffort: String?,
     /** The session's effective permission mode (ticket 141); null hides the chip
-     * until the /status seed or a stored pick lands. */
+     * until the `agent` frame or a stored pick lands. */
     permissionMode: PermissionMode?,
+    /** The composer's swarm chip (ticket 174): on = the next prompt carries
+     * `swarm_mode:true`, off = `false`. */
+    swarmMode: Boolean,
     contextUsage: ContextUsage?,
     compactEnabled: Boolean,
     onCompact: () -> Unit,
     onModelClick: () -> Unit,
     onPermissionClick: () -> Unit,
+    onSwarmModeToggle: () -> Unit,
     onTextChange: (String) -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
@@ -96,8 +104,8 @@ internal fun ChatInputBar(
             }
             // One rounded container echoes the web composer pill (ticket 038): the field
             // spans the full width on top, an action row below holds attach, the model
-            // chip, the context ring, the permission chip (ticket 141) and stop/send
-            // (ticket 053). The field carries no
+            // chip, the context ring, the permission chip (ticket 141), the swarm chip
+            // (ticket 174) and stop/send (ticket 053). The field carries no
             // outline or fill of its own — the container is the boundary.
             Surface(
                 shape = MaterialTheme.shapes.extraLarge,
@@ -161,6 +169,7 @@ internal fun ChatInputBar(
                                 ContextUsageRing(it, compactEnabled = compactEnabled, onCompact = onCompact)
                             }
                             permissionMode?.let { PermissionModeChip(mode = it, onClick = onPermissionClick) }
+                            SwarmModeChip(selected = swarmMode, onToggle = onSwarmModeToggle)
                         }
                         if (isWorking) {
                             // Stop sits with the turn controls (ticket 053), for app- and
@@ -281,6 +290,58 @@ private fun PermissionModeChip(mode: PermissionMode, onClick: () -> Unit) {
         )
     }
 }
+
+/** Swarm-mode toggle after the permission chip (ticket 174, the web's composer
+ * "Swarm" chip): the sparkles glyph plus a "Swarm" label, on the selected
+ * (secondaryContainer) fill when on, transparent when off. Its state rides every
+ * prompt as `swarm_mode`. The label ellipsizes rather than clipping when the
+ * middle zone runs short (a running turn's Stop + Steer); 48dp touch target like
+ * the other chips. */
+@Composable
+private fun SwarmModeChip(selected: Boolean, onToggle: () -> Unit) {
+    val container = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent
+    val content = if (selected) {
+        MaterialTheme.colorScheme.onSecondaryContainer
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Box(
+        modifier = Modifier
+            .heightIn(min = 48.dp)
+            .clip(MaterialTheme.shapes.large)
+            .toggleable(value = selected, role = Role.Switch, onValueChange = { onToggle() })
+            .semantics { contentDescription = "Toggle swarm mode" }
+            .testTag(SWARM_MODE_CHIP_TAG),
+        contentAlignment = Alignment.Center,
+    ) {
+        Row(
+            modifier = Modifier
+                .clip(MaterialTheme.shapes.large)
+                .background(container)
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Icon(
+                imageVector = SparklesIcon,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = content,
+            )
+            Text(
+                text = "Swarm",
+                style = MaterialTheme.typography.labelMedium,
+                color = content,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+/** Stable test tag of the composer's swarm chip (ticket 174). */
+internal const val SWARM_MODE_CHIP_TAG = "swarmModeChip"
 
 /** One staged attachment above the input (ticket 033): a bounded thumbnail for images,
  * a generic sheet glyph otherwise, then name + size. A spinner marks the in-flight

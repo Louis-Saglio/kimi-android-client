@@ -5226,9 +5226,9 @@ still what the transcript renders:
   `TodoWrite` compatibility. This server's `TodoList` tool emits only the
   schema above; the Android app does not replicate those fallbacks.
 
-The Android app implements this derivation in `TodoParser` + `ChatTimeline`
-(ticket 042) and hides `TodoList` tool rows from the timeline in favour of a
-summary widget.
+The Android app no longer derives the list (ticket 178): the widget is the
+`todo` frame's, and `ChatTimeline` only hides `TodoList` tool rows from the
+timeline in favour of that summary widget (ticket 042).
 
 ## Tools
 

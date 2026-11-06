@@ -169,7 +169,7 @@ class SubagentScreenTest {
         composeTestRule.onNodeWithContentDescription("Sub-agent options").performClick()
         composeTestRule.onNodeWithText("To background").assertIsNotEnabled()
 
-        // The conversion's task.started flips the record: the whole affordance
+        // The replied detached:true task state flips the record: the whole affordance
         // disappears (the member now lives the background lifecycle).
         composeTestRule.runOnIdle {
             state.value = state.value.copy(detachable = false, detaching = false)

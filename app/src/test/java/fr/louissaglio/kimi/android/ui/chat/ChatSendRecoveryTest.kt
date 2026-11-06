@@ -13,7 +13,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** Ticket 168's stale-session send recovery: one reload, one fresh snapshot resync,
+/** Ticket 168's stale-session send recovery: one reload, one fresh cold-start resync
+ * (the transcript cold start since ticket 176),
  * the draft preserved and the prompt never resubmitted. */
 class ChatSendRecoveryTest : ChatViewModelTestBase() {
 
@@ -45,11 +46,12 @@ class ChatSendRecoveryTest : ChatViewModelTestBase() {
             assertFalse(viewModel.uiState.value.isSending)
 
             val requests = generateSequence { server.takeRequest(100, TimeUnit.MILLISECONDS) }.toList()
-            // Exactly one prompt POST, one reload, one fresh snapshot — never a second
-            // prompt POST (a retry is always the user's explicit action).
-            assertEquals(1, requests.count { it.target == "/api/v1/sessions/session_1/prompts" })
+            // Exactly one prompt POST, one reload, one fresh cold start — never a
+            // second prompt POST (a retry is always the user's explicit action).
+            assertEquals(1, requests.count { it.method == "POST" && it.target == "/api/v1/sessions/session_1/prompts" })
             assertEquals(1, requests.count { it.target == "/api/v1/sessions/session_1:reload" })
-            assertEquals(1, requests.count { it.target == "/api/v1/sessions/session_1/snapshot" })
+            assertEquals(1, requests.count { it.target.orEmpty().startsWith("/api/v1/sessions/session_1/transcript?agent_id=main") })
+            assertEquals(0, requests.count { it.target.orEmpty().endsWith("/snapshot") })
         } finally {
             effectJob.cancel()
         }
@@ -71,9 +73,9 @@ class ChatSendRecoveryTest : ChatViewModelTestBase() {
             assertEquals("hi", viewModel.uiState.value.inputText)
 
             val requests = generateSequence { server.takeRequest(100, TimeUnit.MILLISECONDS) }.toList()
-            assertEquals(1, requests.count { it.target == "/api/v1/sessions/session_1/prompts" })
+            assertEquals(1, requests.count { it.method == "POST" && it.target == "/api/v1/sessions/session_1/prompts" })
             assertEquals(1, requests.count { it.target == "/api/v1/sessions/session_1:reload" })
-            assertEquals(0, requests.count { it.target == "/api/v1/sessions/session_1/snapshot" })
+            assertEquals(0, requests.count { it.target.orEmpty().startsWith("/api/v1/sessions/session_1/transcript?agent_id=main") })
         } finally {
             effectJob.cancel()
         }

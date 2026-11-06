@@ -49,9 +49,12 @@ the task lifecycle; this ticket owns the job detail's output.
    keep a bounded tail so a long-running command cannot grow memory without
    limit (the old `output_preview` cap was 32 KiB; 1 MiB is the server's
    maximum first chunk).
-4. Delete the `getTask` poll, its `POLL_INTERVAL_MILLIS` and the
-   `with_output` DTO fields; the task frame (ticket 179) is the status
-   source and `task.output` the output source.
+4. ~~Delete the `getTask` poll, its `POLL_INTERVAL_MILLIS` and the
+   `with_output` DTO fields~~ — done by ticket 179 (the job screen now reads
+   `ChatRepository.observeTask`); the task frame is the status source and
+   `task.output` the output source. Ticket 179's
+   `SessionSocket.sendTaskControl` already sends flat controls and matches
+   `response` replies by `request_id` — extend it for `task.watch`/`unwatch`.
 5. Store-backed mode (a sub-agent task visited from the sub-agent page) has
    no watch target unless it has a `task_id`; keep its current behaviour.
 
@@ -82,3 +85,49 @@ Relevant code: `ui/chat/JobDetailViewModel.kt` (poll loop, `outputPreview`),
 `data/chat/ChatApi.kt` (`getTask`), `data/chat/SessionSocket.kt`,
 `data/chat/ChatEvents.kt`. Wire reference: `docs/server-api.md` →
 Sub-agents → Task frames and controls; WebSocket → Session frames.
+
+## Implementation notes
+
+**2026-11-06 —** `SessionSocket` sends the flat `task.watch` (`watchTask(sessionId,
+agentId, taskId, sinceOffset?, tailBytes?)`, on ticket 179's control path — the reply
+is matched by `request_id`, its code-0 task state applied like any task frame, a
+non-zero code fails with `DataError.Api`) and `task.unwatch` (`unwatchTask`,
+fire-and-forget: the leaving screen cannot await the reply, which is dropped as an
+unknown request). Each `task.output` frame (`TaskOutputFrame` in `ChatDtos.kt`) is
+emitted as a `TaskOutputChunk` on a hot, replay-less per-session flow
+(`observeTaskOutput`). `observeConnection` exposes the open connection's id (null while
+none is open), so a watcher knows when its watch died with a connection. `ChatRepository`
+exposes them as `watchTaskOutput`/`unwatchTaskOutput`/`observeTaskOutput`/
+`observeSocketConnection`.
+
+- `TaskOutputTail` (`data/chat/TaskOutput.kt`, pure): chunks assembled by UTF-8 byte
+  offset — a chunk ending at or before the held end is a duplicate (ignored), a
+  straddling one keeps only its new bytes, a later one opens a new segment rendered
+  behind a `[… N bytes missing …]` marker; at most 64 KiB is retained (oldest bytes
+  cut on a character boundary, `[… N earlier bytes not shown …]` in front).
+- `JobDetailViewModel` (frame-backed mode): subscribes to the chunks UNDISPATCHED at
+  init, then while the screen is started and a connection is open sends ONE watch per
+  connection — `tail_bytes` 32768 and, once output is held, `since_offset` = the tail's
+  byte end (reconnect and ON_STOP→ON_START re-entry). ON_STOP sends `task.unwatch`
+  before the page count drops; an ended task (also one already ended when the screen
+  opened) unwatches once the watch's first chunk (its final tail) arrived and is never
+  re-watched. A `DataError.Api` reply (`40406`, `50003`) stops watching for good and sets
+  `UiState.outputError`; `UiState.output` (renamed from `outputPreview`) is the
+  streamed tail, else the task frame's `result_summary`/`error`. `isLoading` is true
+  while a watch waits for its first chunk with nothing held. The store-backed mode is
+  unchanged (no watch).
+- `JobDetailScreen`'s `JobOutputBlock` shows "Output unavailable: <msg>" above the
+  fallback output.
+- Tests: `TaskOutputTailTest` (new — byte offsets with multi-byte text, empty first
+  chunk, duplicate/overlap, visible gaps, head marker, bounded trim on a character
+  boundary), `SessionSocketTest` (flat `task.watch` with offsets, reply applied, chunks
+  filtered to their watcher; first watch without `since_offset`; flat `task.unwatch`,
+  false with no connection; `50003` reply; connection id set and cleared),
+  `JobDetailViewModelTest` (one watch and no poll over 2.5 s, no non-WS request;
+  duplicate ignored and gap visible; unwatch on leave and `since_offset` in bytes on
+  re-entry; reconnect re-watch with an overlapping chunk; a task ending while watched
+  keeps state/output, unwatches, is not re-watched; an already-ended task's final tail;
+  `40406`/`50003` errors fall back to the summary and are not retried). Frame builder
+  `TranscriptFrames.taskOutputFrame`. androidTest `JobOutputBlockTest` moved to
+  `output` and covers the error line.
+- Docs: `docs/conventions.md` (socket output stream, data layer, job screen).

@@ -98,3 +98,31 @@ fetch/render path). Wire reference: `docs/server-api.md` → Messages → Histor
 and Transcript → Frames; the upstream projection is
 `packages/kap-server/src/services/messages/messageProjection.ts` at tag
 2.5.1.
+
+## Implementation notes
+
+**2026-11-06 —** New domain type `ToolMedia(fileId, kind Image|Video, name?)` plus
+`ToolOutput(text, media)` in `data/chat/ToolMedia.kt`. `ChatMessageMapper.toolOutput`
+is the one parse of a tool result's `output`, shared by the history `tool_result`
+part (`ChatMessage.Part.ToolResult.media`), the REST transcript tool frame
+(`TranscriptFrame.Tool.media`; a media-only result no longer lets the progress tail
+stand in) and the live fold (`TranscriptFold` → `SessionEvent.ToolCallResult.media`).
+A content-part array (every element a typed object, at least one
+`text`/`image`/`video`) yields its text parts joined by "\n", minus bare
+`<image …>`/`</image>` (or video) wrapper tags when the array carried media, and one
+`ToolMedia` per `session_media` image/video part; unknown part types and other
+sources are ignored; every other value (strings, objects, other arrays) keeps
+`formatDetail`. `ChatTimeline` carries the media to `ChatItem.ToolActivity.media`
+on every row path (history + orphan results, transcript flatten, running-turn seed,
+live result) under the output's merge rules. `ToolRows`: a row with media always
+expands to `ToolMediaBlock` — images via `HistoryImageThumbnail` + the full-screen
+viewer (named when `name` is present), videos as a "▶ name"/"▶ video" chip that never
+reaches the image loader — and the collapsed row gains only `ToolMediaIndicator`.
+The bytes come from the new shared `resolveImageBytes` (`ui/chat/ChatAttachments.kt`,
+ticket 104's `downloadSessionMedia` route), used by `ChatAttachments.imageBytes` and
+the new `SubagentViewModel.imageBytes`; `MessageList` threads `onImageClick`/
+`loadImageBytes` into the tool rows, and `SubagentScreen` mounts the viewer.
+Tests: `ToolResultMediaTest` (the verbatim capture through all three entry points,
+text/unknown-part/video/wrapper rules, string and structured-output regressions),
+`ChatTimelineToolMediaTest` (every row path), and the instrumented
+`ToolRowTest` media cases (indicator, media-only expansion, video chip never loaded).

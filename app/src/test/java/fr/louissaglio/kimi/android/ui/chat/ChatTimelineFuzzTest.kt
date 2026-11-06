@@ -63,8 +63,8 @@ class ChatTimelineFuzzTest {
                 }
                 1 -> {
                     val id = toolIds.random(rnd)
-                    log += "ToolCallDelta($id)"
-                    timeline.apply(SessionEvent.ToolCallDelta(id, toolNames.random(rnd)))
+                    log += "ToolCallStarted($id, no args)"
+                    timeline.apply(SessionEvent.ToolCallStarted(id, toolNames.random(rnd)))
                 }
                 2 -> {
                     val id = toolIds.random(rnd)
@@ -77,9 +77,8 @@ class ChatTimelineFuzzTest {
                     timeline.apply(SessionEvent.ToolCallResult(id, rnd.nextBoolean(), "out-$id"))
                 }
                 4 -> {
-                    val id = toolIds.random(rnd)
-                    log += "ToolCallProgress($id)"
-                    timeline.apply(SessionEvent.ToolCallProgress(id, "chunk"))
+                    log += "TurnEnded(cancelled)"
+                    timeline.apply(SessionEvent.TurnEnded("cancelled", interruptReason = "user_cancelled"))
                 }
                 5 -> {
                     log += "AssistantDelta"
@@ -129,8 +128,8 @@ class ChatTimelineFuzzTest {
                     timeline.compactionCompleted("summary", 10, 5)
                 }
                 14 -> {
-                    log += "compactionFailed"
-                    timeline.compactionFailed()
+                    log += "compactionAbandoned"
+                    timeline.compactionAbandoned()
                 }
                 15 -> {
                     val id = toolIds.random(rnd)

@@ -10,14 +10,13 @@ import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.booleanOrNull
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonObject
 import okhttp3.MultipartBody
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 
@@ -53,8 +52,11 @@ class ChatApi @Inject constructor(
     /**
      * Fetches one page of an agent's turn-granular transcript
      * (`GET /api/v1/sessions/{id}/transcript`, docs/server-api.md, Transcript) — the
-     * history backing of the sub-agent page (ticket 046). [beforeTurn] = null fetches
-     * the newest page; turns come back ascending within the page and stay so.
+     * history backing of the sub-agent page (ticket 046) and, since 2.5.0, the main
+     * chat's cold-start read model (ticket 176: the page's running turn, pending
+     * interactions, prompt entities, agent roster and `seq` watermark). [beforeTurn] =
+     * null fetches the newest page; turns come back ascending within the page and stay
+     * so.
      */
     suspend fun transcript(
         settings: ServerSettings,
@@ -135,7 +137,10 @@ class ChatApi @Inject constructor(
      * docs/server-api.md); null leaves the field out. [permissionMode] is the
      * per-prompt permission-mode stamp (ticket 141, manual/yolo/auto): it binds the
      * session for its remaining turns; null leaves the field out (the session follows
-     * the server). [attachments] become content items
+     * the server). [swarmMode] is the composer's swarm chip (ticket 174), ALWAYS sent:
+     * the server applies `swarm_mode` before enqueueing and an omitted field leaves the
+     * session's mode unchanged, so `false` must be explicit to turn it off. [attachments]
+     * become content items
      * before the text item (ticket 033): an `image` part for image MIME types, a `file`
      * part otherwise (docs/server-api.md, Prompts). A blank [text] adds no text item — the
      * caller guarantees text and attachments are not both empty. */
@@ -147,6 +152,7 @@ class ChatApi @Inject constructor(
         model: String?,
         thinking: String?,
         permissionMode: String?,
+        swarmMode: Boolean,
     ): Result<String> {
         val body = api.jsonBody {
             putJsonArray("content") {
@@ -179,6 +185,7 @@ class ChatApi @Inject constructor(
             if (model != null) put("model", model)
             if (thinking != null) put("thinking", thinking)
             if (permissionMode != null) put("permission_mode", permissionMode)
+            put("swarm_mode", swarmMode)
         }
         return api.post(settings, "/api/v1/sessions/$sessionId/prompts", body) { responseBody ->
             api.json.decodeFromString<Envelope<PromptData>>(responseBody).toResult().map { it.promptId }
@@ -207,10 +214,13 @@ class ChatApi @Inject constructor(
         }
 
     /**
-     * Posts the user's decision for one approval request
-     * (`POST /api/v1/sessions/{id}/approvals/{approvalId}`, docs/server-api.md). The ack
-     * only confirms the decision was registered; the pending UI clears when the
-     * `event.approval.resolved` frame arrives over the WebSocket.
+     * Posts the user's decision for one approval interaction
+     * (`POST /api/v1/sessions/{id}/interactions/{interactionId}`, docs/server-api.md →
+     * Interactions — ticket 171) with `{"kind":"approval","decision":"approved"|"rejected"}`.
+     * Success is `code:0` with `data:{outcome, ended_at}`, which only confirms the
+     * decision: the card clears on the `ended` `interaction` frame every subscriber
+     * receives. `40404` (unknown interaction) and `40902` (already ended) are
+     * [fr.louissaglio.kimi.android.data.DataError.Api] failures like any other code.
      */
     suspend fun postApprovalDecision(
         settings: ServerSettings,
@@ -219,34 +229,34 @@ class ChatApi @Inject constructor(
         approved: Boolean,
     ): Result<Unit> {
         val body = api.jsonBody {
+            put("kind", "approval")
             put("decision", if (approved) "approved" else "rejected")
         }
-        return api.post(settings, "/api/v1/sessions/$sessionId/approvals/$approvalId", body) { responseBody ->
-            api.json.decodeFromString<Envelope<JsonObject>>(responseBody).toAckResult()
-        }
+        return postInteraction(settings, sessionId, approvalId, body)
     }
 
-    /**
-     * Polls the pending questions of the session
-     * (`GET /api/v1/sessions/{id}/questions?status=pending`, docs/server-api.md) — the
-     * source of truth used to re-derive the pending question after a reconnect or a
-     * history refetch, since `GET .../questions/{qid}` does not exist.
-     */
-    suspend fun pendingQuestions(settings: ServerSettings, sessionId: String): Result<List<PendingQuestion>> =
-        api.get(settings, "/api/v1/sessions/$sessionId/questions?status=pending") { body ->
-            api.json.decodeFromString<Envelope<QuestionListData>>(body).toResult().map { data ->
-                data.items.map { mapper.toDomain(it) }
-            }
+    /** The one response route of both interaction kinds
+     * (`POST /api/v1/sessions/{id}/interactions/{interactionId}`): any non-zero code is
+     * a [DataError.Api] failure. */
+    private suspend fun postInteraction(
+        settings: ServerSettings,
+        sessionId: String,
+        interactionId: String,
+        body: RequestBody,
+    ): Result<Unit> =
+        api.post(settings, "/api/v1/sessions/$sessionId/interactions/$interactionId", body) { responseBody ->
+            api.json.decodeFromString<Envelope<JsonObject>>(responseBody).toAckResult()
         }
 
     /**
-     * Posts the user's answers for one question
-     * (`POST /api/v1/sessions/{id}/questions/{questionId}`, docs/server-api.md): keys are
-     * the per-question item ids, values are a discriminated union on `kind` (`single` /
+     * Posts the user's answers for one question interaction
+     * (`POST /api/v1/sessions/{id}/interactions/{questionId}`, docs/server-api.md →
+     * Interactions — ticket 172) with `{"kind":"question","answers":{…}}`: keys are the
+     * per-question item ids, values are a discriminated union on `kind` (`single` /
      * `other` / `multi` / `multi_with_other`, the last two for multi-select items —
-     * ticket 090). The ack
-     * only confirms the answers were registered; the pending UI clears when the
-     * `event.question.answered` frame arrives over the WebSocket.
+     * ticket 090). Success (`data:{outcome, ended_at}`) only confirms the answers: the
+     * card clears on the `ended` `interaction` frame. `40404` (unknown interaction) and
+     * `40902` (already ended) are [DataError.Api] failures like any other code.
      */
     suspend fun answerQuestion(
         settings: ServerSettings,
@@ -255,6 +265,7 @@ class ChatApi @Inject constructor(
         answers: List<QuestionAnswer>,
     ): Result<Unit> {
         val body = api.jsonBody {
+            put("kind", "question")
             putJsonObject("answers") {
                 for (answer in answers) {
                     putJsonObject(answer.itemId) {
@@ -281,162 +292,39 @@ class ChatApi @Inject constructor(
                 }
             }
         }
-        return api.post(settings, "/api/v1/sessions/$sessionId/questions/$questionId", body) { responseBody ->
-            api.json.decodeFromString<Envelope<JsonObject>>(responseBody).toAckResult()
-        }
+        return postInteraction(settings, sessionId, questionId, body)
     }
 
     /**
-     * Dismisses one pending question (`POST /api/v1/sessions/{id}/questions/{questionId}:dismiss`,
-     * docs/server-api.md). Beware: a successful dismiss comes back with the non-zero
-     * envelope code 40909 — success is `data.dismissed`, not `code == 0`. The pending UI
-     * clears when the `event.question.dismissed` frame arrives over the WebSocket.
+     * Dismisses one pending question interaction
+     * (`POST /api/v1/sessions/{id}/interactions/{questionId}` with
+     * `{"kind":"question","dismissed":true}`, docs/server-api.md → Interactions —
+     * ticket 172). Success is the ordinary `code:0` with `outcome:"dismissed"`; the card
+     * clears on the `ended` `interaction` frame.
      */
     suspend fun dismissQuestion(
         settings: ServerSettings,
         sessionId: String,
         questionId: String,
     ): Result<Unit> =
-        api.post(settings, "/api/v1/sessions/$sessionId/questions/$questionId:dismiss", api.jsonBody {}) { body ->
-            // Dismiss acks succeed with envelope code 40909 (docs/server-api.md):
-            // gate on `data.dismissed`.
-            val envelope = api.json.decodeFromString<Envelope<JsonObject>>(body)
-            val dismissed = envelope.data?.get("dismissed")?.jsonPrimitive?.booleanOrNull == true
-            when {
-                envelope.code == 0 || dismissed -> Result.success(Unit)
-                else -> Result.failure(DataError.Api(envelope.code, envelope.msg))
-            }
-        }
+        postInteraction(
+            settings, sessionId, questionId,
+            api.jsonBody {
+                put("kind", "question")
+                put("dismissed", true)
+            },
+        )
 
     /**
      * Starts a compaction (`POST /api/v1/sessions/{id}:compact`, docs/server-api.md,
      * Compact — ticket 056). Fire-and-forget: the ack only confirms the request; the
-     * progress (`compaction.started` → `compaction.completed`) arrives over the
-     * WebSocket, so success carries no payload. The non-zero envelope `msg` (40910
+     * progress (the `compaction` transcript markers, started → completed — ticket
+     * 181) arrives over the WebSocket, so success carries no payload. The non-zero envelope `msg` (40910
      * empty session / turn active, 40401 unknown session) rides DataError.Api's
      * serverMessage to the snackbar unchanged.
      */
     suspend fun compact(settings: ServerSettings, sessionId: String): Result<Unit> =
         api.post(settings, "/api/v1/sessions/$sessionId:compact", api.jsonBody {}) { body ->
             api.json.decodeFromString<Envelope<JsonObject>>(body).toAckResult()
-        }
-
-    /**
-     * Fetches the session snapshot (`GET /api/v1/sessions/{id}/snapshot`,
-     * docs/server-api.md, Session snapshot — ticket 085): the whole session state as
-     * one atomic bundle at an event-stream watermark — the single cold-start/resync
-     * entry point. Everything the event stream never replays (sub-agent roster,
-     * pending approvals/questions) or never persisted arrives here.
-     */
-    suspend fun snapshot(settings: ServerSettings, sessionId: String): Result<SessionSnapshot> =
-        api.get(settings, "/api/v1/sessions/$sessionId/snapshot") { body ->
-            api.json.decodeFromString<Envelope<SnapshotData>>(body).toResult().map(mapper::toDomain)
-        }
-
-    /** Lightweight live status (`GET /api/v1/sessions/{id}/status`): the mid-turn flag
-     * and the context window fill (ticket 041). A data-less success envelope degrades
-     * to "not busy, fill unknown" (see SessionStatus). */
-    suspend fun sessionStatus(settings: ServerSettings, sessionId: String): Result<SessionStatus> =
-        api.get(settings, "/api/v1/sessions/$sessionId/status") { body ->
-            api.json.decodeFromString<Envelope<SessionStatusData>>(body).toNullableResult().map { data ->
-                SessionStatus(
-                    busy = data?.busy == true,
-                    // 0.34.0: max_context_tokens is omittable, 0 decodes as the unknown
-                    // marker — drop the usage instead of leaking a phantom 0/0 fill
-                    // (same rule as the snapshot guard, ChatMessageMapper).
-                    contextUsage = data?.takeIf { it.maxContextTokens > 0 }
-                        ?.let { ContextUsage(it.contextTokens, it.maxContextTokens) },
-                    // The session's binding (ticket 107): a blank thinking_level is a
-                    // fresh session's "none", never a value to store.
-                    model = data?.model?.takeIf { it.isNotBlank() },
-                    thinkingLevel = data?.thinkingLevel?.takeIf { it.isNotBlank() },
-                    // Permission mode (ticket 141): always reported (a fresh session
-                    // reads the server default) — same blank guard regardless.
-                    permission = data?.permission?.takeIf { it.isNotBlank() },
-                )
-            }
-        }
-
-    /**
-     * Lists the session's background tasks (`GET /api/v1/sessions/{id}/tasks`,
-     * docs/server-api.md, REST /tasks — ticket 092): background sub-agents and bash;
-     * question flows (kind `tool`) are filtered out by the mapper. Terminal tasks stay
-     * listed. [status] is the optional wire filter (`running|completed|failed|
-     * cancelled`); null fetches unfiltered — the jobs sheet's cold-start seed, so
-     * recently finished jobs linger in the list.
-     */
-    suspend fun listTasks(settings: ServerSettings, sessionId: String, status: String? = null): Result<List<BackgroundTask>> {
-        val filter = status?.let { "?status=$it" }.orEmpty()
-        return api.get(settings, "/api/v1/sessions/$sessionId/tasks$filter") { body ->
-            api.json.decodeFromString<Envelope<TaskListData>>(body).toResult().map { data ->
-                data.items.mapNotNull(mapper::toDomain)
-            }
-        }
-    }
-
-    /**
-     * Fetches one background task (`GET /api/v1/sessions/{id}/tasks/{taskId}`,
-     * docs/server-api.md, REST /tasks — ticket 096): the job screen's data source.
-     * [withOutput] adds `output_preview` (the stored stdout/stderr tail — live while
-     * a bash task runs, growing between polls; no `tool.progress` frames exist for
-     * background bash) and `output_bytes`. An unknown task answers envelope 40406,
-     * which surfaces as the typed [DataError.Api].
-     */
-    suspend fun getTask(
-        settings: ServerSettings,
-        sessionId: String,
-        taskId: String,
-        withOutput: Boolean = true,
-    ): Result<BackgroundTask> {
-        val query = if (withOutput) "?with_output=true" else ""
-        return api.get(settings, "/api/v1/sessions/$sessionId/tasks/$taskId$query") { body ->
-            api.json.decodeFromString<Envelope<TaskDto>>(body).toResult().mapCatching { dto ->
-                // A kind/status/timestamp the mapper cannot place drops the entry on
-                // list reads; on a single read that IS the response — fail typed.
-                mapper.toDomain(dto)
-                    ?: throw DataError.MalformedResponse(IllegalStateException("Unusable task '${dto.id}'"))
-            }
-        }
-    }
-
-    /**
-     * Cancels one background task (`POST /api/v1/sessions/{id}/tasks/{taskId}:cancel`,
-     * docs/server-api.md — ticket 092). A running task acks `{"cancelled":true}`; a
-     * terminal one answers envelope code 40904, which surfaces as the typed
-     * [DataError.Api] so the caller can treat it as already-terminal success. The
-     * teardown (`task.terminated`) arrives over the WebSocket, so success carries no
-     * payload.
-     */
-    suspend fun cancelTask(settings: ServerSettings, sessionId: String, taskId: String): Result<Unit> =
-        api.post(settings, "/api/v1/sessions/$sessionId/tasks/$taskId:cancel", api.jsonBody {}) { body ->
-            api.json.decodeFromString<Envelope<TaskCancelData>>(body).toAckResult()
-        }
-
-    /**
-     * Detaches one running FOREGROUND task (`POST /api/v1/sessions/{id}/tasks/{taskId}:detach`,
-     * docs/server-api.md, REST /tasks — 0.39.0, ticket 138): the run converts to
-     * background — the foreground `Agent` call resolves with a stub, `task.started`
-     * fires for it, and completion follows the background lifecycle, all over the
-     * WebSocket, so success carries no payload. Beware the ack shape: an
-     * already-background or terminal task answers envelope code 0 with
-     * `{"detached":false,"status":<current>}` — success is `data.detached` (the
-     * dismissQuestion shape), and the refusal surfaces as [DataError.Api] like any
-     * envelope error (an unknown task's 40406 included, via the [toResult] idiom).
-     */
-    suspend fun detachTask(settings: ServerSettings, sessionId: String, taskId: String): Result<Unit> =
-        api.post(settings, "/api/v1/sessions/$sessionId/tasks/$taskId:detach", api.jsonBody {}) { body ->
-            val envelope = api.json.decodeFromString<Envelope<TaskDetachData>>(body)
-            val data = envelope.data
-            when {
-                envelope.code != 0 -> Result.failure(DataError.Api(envelope.code, envelope.msg))
-                data?.detached == true -> Result.success(Unit)
-                else -> Result.failure(
-                    DataError.Api(
-                        envelope.code,
-                        "task is not a running foreground task" +
-                            data?.status?.takeIf { it.isNotBlank() }?.let { " (status: $it)" }.orEmpty(),
-                    ),
-                )
-            }
         }
 }

@@ -5,9 +5,9 @@ package fr.louissaglio.kimi.android.data.chat
  * document rendered by the upstream tool (`renderSwarmResults`,
  * packages/agent-core-v2 at tag 0.43.1 — never captured live, the shapes here are
  * pinned from the source and its tests). It is the ONLY persisted per-member record
- * of a settled swarm: `subagent.*` events are never replayed on cursor resume and
- * the snapshot roster clears when the main agent starts its next turn, so a swarm
- * reopened from history heals its member states from this text.
+ * of a settled swarm: the members' ended `task` frames are live-only and
+ * `task.list` never re-lists an ended task, so a swarm reopened from history heals
+ * its member states from this text.
  *
  * ```
  * <agent_swarm_result>

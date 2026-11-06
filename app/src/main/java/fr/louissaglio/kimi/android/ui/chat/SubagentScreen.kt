@@ -39,6 +39,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import fr.louissaglio.kimi.android.data.chat.BashTimeout
+import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.ToolPayload
 import fr.louissaglio.kimi.android.data.chat.bashCommandOf
 import fr.louissaglio.kimi.android.data.chat.bashDescriptionOf
@@ -58,7 +59,7 @@ import fr.louissaglio.kimi.android.ui.theme.warningColor
  * the sub-agent's own todo list and its own background tasks. Background `Bash` rows
  * — timeline and jobs sheet alike — open the job screen (ticket 098), which runs
  * store-backed for these sub-agent-owned tasks; the sheet stays without a Stop
- * (REST `/tasks` serves only the main agent's task store — docs/server-api.md).
+ * (the sub-agent's own task controls are not wired — no ticket owns them yet).
  * The top bar's overflow hosts "To background" (ticket 138) while the record is a
  * running FOREGROUND member with a known task id — the single home of the detach
  * affordance, covering plain agents and swarm members alike since both open this
@@ -132,6 +133,14 @@ fun SubagentScreen(
             )
         }
     }
+    // Ticket 184: tool-result images — the chat's thumbnail tap → full-screen viewer,
+    // bytes through the page's session-media fetch. Hoisted to stable references
+    // (ChatScreen's rationale: fresh lambdas would defeat lazy-item skipping).
+    val fullScreenImageState = remember { mutableStateOf<ChatMessage.Part.Image?>(null) }
+    var fullScreenImage by fullScreenImageState
+    val onImageClick = remember { { image: ChatMessage.Part.Image -> fullScreenImageState.value = image } }
+    val loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray? =
+        remember(viewModel) { viewModel::imageBytes }
     SubagentContent(
         uiState = uiState,
         onNavigateBack = onNavigateBack,
@@ -144,7 +153,16 @@ fun SubagentScreen(
         onRetry = viewModel::onRetry,
         onHistoryTopReached = viewModel::onHistoryTopReached,
         snackbarHostState = snackbarHostState,
+        onImageClick = onImageClick,
+        loadImageBytes = loadImageBytes,
     )
+    fullScreenImage?.let { image ->
+        FullScreenImageViewer(
+            image = image,
+            loadImageBytes = loadImageBytes,
+            onDismiss = { fullScreenImage = null },
+        )
+    }
 }
 
 /** The page body, split from the ViewModel for semantics tests (the SwarmContent
@@ -167,6 +185,10 @@ internal fun SubagentContent(
     onRetry: () -> Unit = {},
     onHistoryTopReached: () -> Unit = {},
     snackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
+    /** Ticket 184: a tool-result image's thumbnail tap. */
+    onImageClick: (ChatMessage.Part.Image) -> Unit = {},
+    /** Ticket 184: resolves a tool-result image's bytes. */
+    loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray? = { null },
 ) {
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -179,9 +201,14 @@ internal fun SubagentContent(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        uiState.name?.takeIf { it.isNotBlank() }?.let { name ->
+                        // The subagent type, and the background badge (ticket 182:
+                        // the spawn task frame's `detached:true`).
+                        listOfNotNull(
+                            uiState.name?.takeIf { it.isNotBlank() },
+                            "Background".takeIf { uiState.runInBackground },
+                        ).joinToString(" · ").takeIf { it.isNotEmpty() }?.let { subtitle ->
                             Text(
-                                text = name,
+                                text = subtitle,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 style = MaterialTheme.typography.bodySmall,
@@ -203,9 +230,9 @@ internal fun SubagentContent(
                     // timeline card, not the roster row) and only while the record
                     // is a running foreground member with a known task id — a
                     // background member and a terminal one never see it. The item
-                    // disables while the POST is in flight; the conversion's
-                    // task.started flips the record, which removes the whole
-                    // affordance (web-parity label).
+                    // disables while the `task.background` control is in flight;
+                    // the replied `detached:true` state flips the record, which
+                    // removes the whole affordance (web-parity label).
                     if (uiState.detachable) {
                         var menuExpanded by remember { mutableStateOf(false) }
                         Box {
@@ -246,7 +273,7 @@ internal fun SubagentContent(
                     )
                 }
                 // The sub-agent's own todos/jobs — the chat's dock, minus the
-                // affordance REST `/tasks` cannot back for a sub-agent (cancel).
+                // cancel (the sub-agent's own task controls are not wired yet).
                 TodoJobsDock(
                     todos = uiState.todos,
                     jobs = uiState.jobs,
@@ -277,6 +304,8 @@ internal fun SubagentContent(
                     // Ticket 158: a nested spawn row's Continue takes the same
                     // pop-back-to-composer route as the page's own section.
                     onContinueSubagent = onContinueWithResume,
+                    onImageClick = onImageClick,
+                    loadImageBytes = loadImageBytes,
                     isLoadingMoreHistory = uiState.isLoadingMoreHistory,
                     onHistoryTopReached = onHistoryTopReached,
                 )

@@ -10,13 +10,13 @@ import fr.louissaglio.kimi.android.data.sessions.UnreadSessionsStore
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
 import fr.louissaglio.kimi.android.navigation.Chat
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.testChatRepository
 import fr.louissaglio.kimi.android.testutil.testSessionsRepository
-import fr.louissaglio.kimi.android.testutil.testSnapshotSync
+import fr.louissaglio.kimi.android.testutil.testColdStart
 import fr.louissaglio.kimi.android.testutil.testSubagentStreamStore
 import fr.louissaglio.kimi.android.testutil.webSocketUpgradeResponse
-import fr.louissaglio.kimi.android.testutil.testTodoParser
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -36,10 +36,6 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.booleanOrNull
-import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Response
@@ -74,17 +70,17 @@ abstract class ChatViewModelTestBase {
     protected val unreadStore = UnreadSessionsStore(createTempDirectory("chat-view-model-unread-test").toFile(), Json { ignoreUnknownKeys = true })
 
     /** 0 ms window: sub-agent frames apply on arrival, no flush timer involved.
-     * Shares the test's ChatRepository/SnapshotSync (the production singleton
-     * shape): its release → forget lands on the SAME sync the ViewModels use. */
+     * Shares the test's ChatRepository/TranscriptColdStart (the production singleton
+     * shape): its release → forget lands on the SAME cold start the ViewModels use. */
     protected lateinit var subagentStore: SubagentStreamStore
 
-    /** Shared by the ViewModels and the snapshot sync (the production singleton shape):
-     * one ChatRepository — one SessionSocket, one cursor map — so the seeded resume
-     * cursor lands on the very socket the ViewModel collects. */
+    /** Shared by the ViewModels and the cold start (the production singleton shape):
+     * one ChatRepository — one SessionSocket, one watermark map — so the seeded resume
+     * watermark lands on the very socket the ViewModel collects. */
     protected lateinit var chatRepository: ChatRepository
 
-    /** The session's cold-start owner (ticket 085), shared by every started ViewModel. */
-    protected lateinit var snapshotSync: SnapshotSync
+    /** The session's cold-start owner (ticket 176), shared by every started ViewModel. */
+    protected lateinit var coldStart: TranscriptColdStart
 
     @Volatile
     protected var approvalsSucceed = true
@@ -92,8 +88,10 @@ abstract class ChatViewModelTestBase {
     @Volatile
     protected var abortsSucceed = true
 
+    /** When set, a question response (`"kind":"question"` on `.../interactions/{id}` —
+     * ticket 172) answers this envelope instead of the `{outcome, ended_at}` success. */
     @Volatile
-    protected var answersSucceed = true
+    protected var questionFailureBody: String? = null
 
     @Volatile
     protected var uploadsSucceed = true
@@ -116,58 +114,49 @@ abstract class ChatViewModelTestBase {
     protected var takeoversSucceed = true
 
     @Volatile
-    protected var questionsBody =
-        """{"code":0,"msg":"success","data":{"items":[]},"request_id":"r"}"""
-
-    /** Served for GET /tasks (ticket 092 — the jobs widget's cold-start seed). */
-    @Volatile
-    protected var tasksBody =
-        """{"code":0,"msg":"success","data":{"items":[]},"request_id":"r"}"""
-
-    @Volatile
     protected var messagesBody =
         """{"code":0,"msg":"success","data":{"items":[],"has_more":false},"request_id":"r"}"""
 
     /**
-     * The served `/snapshot` body (ticket 085 — the cold-start bundle, fetched before
-     * the session's first socket subscribe). When null (the default), the body is
-     * DERIVED from [messagesBody] and [statusBody]: the snapshot is the cold-start
-     * history source now (busy derives from [statusBody]; its usage carries a zero
-     * limit — "unknown" — so the ring's fill converges from the /status re-read),
-     * and tests seeding those see them at first start without snapshot-specific
-     * setup. Set explicitly to exercise the roster, pending approvals/questions, or
-     * the watermark.
+     * The served main-agent `GET .../transcript` body (ticket 176 — the cold-start read
+     * model: the newest turn plus the session's pending interactions, prompt entities,
+     * agent roster and `seq` watermark). When null (the default), an idle transcript
+     * with no turn, nothing pending, the main agent alone and watermark seq 1. Set it
+     * via [transcriptData] to exercise a running turn, interactions or the roster.
      */
     @Volatile
-    protected var snapshotBody: String? = null
+    protected var transcriptBody: String? = null
 
-    /** Same as [statusResponseGate], for the /snapshot fetch: parks the response so a
-     * test can make a socket event win over the in-flight sync on purpose. */
+    /** Parks the main transcript response so a test can make a socket event win over
+     * the in-flight cold start on purpose. */
     @Volatile
-    protected var snapshotResponseGate: CountDownLatch? = null
+    protected var transcriptResponseGate: CountDownLatch? = null
+
+    /** The served `GET .../prompts` queue (ticket 176): idle by default. */
+    @Volatile
+    protected var promptQueueBody =
+        """{"code":0,"msg":"success","data":{"active":null,"queued":[]},"request_id":"r"}"""
+
+    /** The served `GET .../transcript/ops` catch-up probe (ticket 176): a journal that
+     * covers any watermark by default. */
+    @Volatile
+    protected var catchUpBody =
+        """{"code":0,"msg":"success","data":{"agent_id":"main","batches":[],"latest_seq":1000000,"complete":true},"request_id":"r"}"""
+
+    /** A main transcript envelope: [items] the turn/marker array, the rest the global
+     * state (raw JSON). */
+    protected fun transcriptData(
+        items: String = "[]",
+        interactions: String = "[]",
+        pendingInteractions: String = "[]",
+        prompts: String = "[]",
+        agents: String = """[{"agentId":"main","type":"main"}]""",
+        seq: Long? = 1,
+    ): String = """{"code":0,"msg":"success","data":{"agent_id":"main","items":$items,"has_more":false,""" +
+        """"interactions":$interactions,"pending_interactions":$pendingInteractions,""" +
+        """"prompts":$prompts,"agents":$agents${seq?.let { ""","seq":$it""" }.orEmpty()}},"request_id":"r"}"""
 
     private val testJson = Json { ignoreUnknownKeys = true }
-
-    /** The default snapshot: [messagesBody]'s page + [statusBody]'s busy, empty roster
-     * and pending lists, watermark seq 1 — read at response time, like the other
-     * bodies. The usage carries a zero limit — the "unknown" wire case (0.38.0 made
-     * `context_limit` optional; absent decodes to the same 0), so the ring's fill
-     * converges from the /status re-read. The server serves the SAME page in
-     * opposite orders (live-verified on 0.31.1, 2026-08-02): `/messages` items are
-     * newest-first, the snapshot's OLDEST-first — tests seed [messagesBody] in
-     * `/messages` wire order, so the derivation flips it. */
-    private fun defaultSnapshotBody(): String {
-        val messagesData = testJson.parseToJsonElement(messagesBody).jsonObject.getValue("data").jsonObject
-        val oldestFirst = JsonArray(messagesData["items"]?.jsonArray?.reversed().orEmpty())
-        val snapshotMessages = JsonObject(messagesData + ("items" to oldestFirst))
-        val statusData = testJson.parseToJsonElement(statusBody).jsonObject.getValue("data").jsonObject
-        val busy = statusData["busy"]?.jsonPrimitive?.booleanOrNull == true
-        return """{"code":0,"msg":"success","data":{"as_of_seq":1,"epoch":"ep_1",""" +
-            """"session":{"id":"session_1","busy":$busy,""" +
-            """"usage":{"context_tokens":0,"context_limit":0}},""" +
-            """"messages":$snapshotMessages,"in_flight_turn":null,"subagents":[],""" +
-            """"pending_approvals":[],"pending_questions":[]},"request_id":"r"}"""
-    }
 
     /** Served for /messages requests carrying a `before_id` cursor (ticket 043). */
     @Volatile
@@ -207,10 +196,10 @@ abstract class ChatViewModelTestBase {
     protected var effortSwitchConfigBody =
         """{"code":0,"msg":"success","data":{"name":"effort_switch_confirm","config":null},"request_id":"r"}"""
 
-    @Volatile
-    protected var statusBody =
-        """{"code":0,"msg":"success","data":{"busy":false,"context_tokens":0,""" +
-            """"max_context_tokens":1048576,"context_usage":0.0},"request_id":"r"}"""
+    /** Every request target the server dispatched, in arrival order — unlike
+     * [awaitRequest] it is never drained, so a test can assert a route was NEVER hit
+     * (ticket 177: no `/status`). */
+    protected val requestedTargets = CopyOnWriteArrayList<String>()
 
     @Volatile
     protected var serverSocket: WebSocket? = null
@@ -256,17 +245,9 @@ abstract class ChatViewModelTestBase {
         }
     }
 
-    /** When set, the /status response is held back server-side until the test releases
-     * it, so a test can make a socket event win over the in-flight seed on purpose. */
-    @Volatile
-    protected var statusResponseGate: CountDownLatch? = null
-
-    /** Same as [statusResponseGate], for the /questions poll. */
-    @Volatile
-    protected var questionsResponseGate: CountDownLatch? = null
-
-    /** Same as [statusResponseGate], for the /api/v1/files upload (ticket 033): parks
-     * the response so a test can observe the send while the upload is in flight. */
+    /** When set, the /api/v1/files upload (ticket 033) response is held back
+     * server-side until the test releases it, so a test can observe the send while the
+     * upload is in flight. */
     @Volatile
     protected var filesResponseGate: CountDownLatch? = null
 
@@ -285,7 +266,8 @@ abstract class ChatViewModelTestBase {
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 val path = request.target.orEmpty()
-                // Stamped at arrival, not at response time: the /status and /questions
+                requestedTargets += path
+                // Stamped at arrival, not at response time: the transcript
                 // responses may be parked behind a test gate below, and the WS upgrade's
                 // quiet window must not wait for those. The WS path is itself a GET but
                 // is excluded — the window measures the poll burst only.
@@ -295,16 +277,16 @@ abstract class ChatViewModelTestBase {
                 return when {
                     path == "/api/v1/sessions/session_1" && request.method == "GET" ->
                         MockResponse(body = sessionBody)
-                    path == "/api/v1/sessions/session_1/snapshot" -> {
-                        snapshotResponseGate?.await(5, TimeUnit.SECONDS)
-                        MockResponse(body = snapshotBody ?: defaultSnapshotBody())
+                    path.startsWith("/api/v1/sessions/session_1/transcript/ops") ->
+                        MockResponse(body = catchUpBody)
+                    path.startsWith("/api/v1/sessions/session_1/transcript?agent_id=main") -> {
+                        transcriptResponseGate?.await(5, TimeUnit.SECONDS)
+                        MockResponse(body = transcriptBody ?: transcriptData())
                     }
+                    path == "/api/v1/sessions/session_1/prompts" && request.method == "GET" ->
+                        MockResponse(body = promptQueueBody)
                     path.startsWith("/api/v1/sessions/session_1/messages") ->
                         MockResponse(body = if ("before_id" in path) olderMessagesBody else messagesBody)
-                    path == "/api/v1/sessions/session_1/status" -> {
-                        statusResponseGate?.await(5, TimeUnit.SECONDS)
-                        MockResponse(body = statusBody)
-                    }
                     path == "/api/v1/sessions/session_1/prompts" ->
                         promptFailureBody?.let { MockResponse(body = it) } ?: MockResponse(body = 
                             """{"code":0,"msg":"success","data":{"prompt_id":"msg_1","user_message_id":"msg_1",""" +
@@ -376,53 +358,28 @@ abstract class ChatViewModelTestBase {
                                 """{"code":40001,"msg":"no running prompt","data":null,"request_id":"r"}""",
                             )
                         }
-                    path.startsWith("/api/v1/sessions/session_1/approvals/") ->
-                        if (approvalsSucceed) {
-                            MockResponse(body = 
-                                """{"code":0,"msg":"success","data":{"resolved":true,"resolved_at":"2026-07-19T00:00:01.000Z"},"request_id":"r"}""",
+                    // The 2.4.0+ response route (docs/server-api.md, Interactions →
+                    // Respond — tickets 171/172): success carries {outcome, ended_at};
+                    // an approval's failure is the verbatim already-ended 40902, a
+                    // question's is [questionFailureBody].
+                    path.startsWith("/api/v1/sessions/session_1/interactions/") -> {
+                        val body = request.body?.utf8().orEmpty()
+                        when {
+                            "\"kind\":\"question\"" in body -> questionFailureBody?.let { MockResponse(body = it) }
+                                ?: MockResponse(body =
+                                    """{"code":0,"msg":"success","data":{"outcome":""" +
+                                        (if ("\"dismissed\":true" in body) "\"dismissed\"" else "\"answered\"") +
+                                        ""","ended_at":"2026-10-28T19:28:18.858Z"},"request_id":"r"}""",
+                                )
+                            approvalsSucceed -> MockResponse(body =
+                                """{"code":0,"msg":"success","data":{"outcome":"approved",""" +
+                                    """"ended_at":"2026-10-28T19:27:20.145Z"},"request_id":"r"}""",
                             )
-                        } else {
-                            MockResponse(body = 
-                                """{"code":40401,"msg":"approval does not exist","data":null,"request_id":"r"}""",
+                            else -> MockResponse(body =
+                                """{"code":40902,"msg":"interaction approval_1 has ended","data":null,"request_id":"r"}""",
                             )
-                        }
-                    path.startsWith("/api/v1/sessions/session_1/questions") -> when {
-                        path.endsWith(":dismiss") ->
-                            if (answersSucceed) {
-                                MockResponse(body = 
-                                    """{"code":40909,"msg":"question tool_q1 dismissed",""" +
-                                        """"data":{"dismissed":true,"dismissed_at":"2026-07-20T06:17:24.711Z"},"request_id":"r"}""",
-                                )
-                            } else {
-                                MockResponse(body = 
-                                    """{"code":40405,"msg":"question tool_q1 not found","data":null,"request_id":"r"}""",
-                                )
-                            }
-                        request.method == "POST" ->
-                            if (answersSucceed) {
-                                MockResponse(body = 
-                                    """{"code":0,"msg":"success","data":{"resolved":true,""" +
-                                        """"resolved_at":"2026-07-20T06:08:12.548Z"},"request_id":"r"}""",
-                                )
-                            } else {
-                                MockResponse(body = 
-                                    """{"code":40405,"msg":"question tool_q1 not found","data":null,"request_id":"r"}""",
-                                )
-                            }
-                        else -> {
-                            questionsResponseGate?.await(5, TimeUnit.SECONDS)
-                            MockResponse(body = questionsBody)
                         }
                     }
-                    path.startsWith("/api/v1/sessions/session_1/tasks") ->
-                        if (request.method == "POST") {
-                            // POST .../tasks/{id}:cancel — a running task acks cancelled:true.
-                            MockResponse(body =
-                                """{"code":0,"msg":"success","data":{"cancelled":true},"request_id":"r"}""",
-                            )
-                        } else {
-                            MockResponse(body = tasksBody)
-                        }
                     path.startsWith("/api/v1/sessions/session_1/media/") ->
                         MockResponse(body = "session-media-bytes")
                     path == "/api/v1/files" -> {
@@ -479,12 +436,12 @@ abstract class ChatViewModelTestBase {
         )
         settingsRepository = SettingsRepository(dataStore, appScope)
         chatRepository = testChatRepository(dataStore)
-        snapshotSync = testSnapshotSync(chatRepository, settingsRepository) { subagentStore }
+        coldStart = testColdStart(chatRepository, settingsRepository) { subagentStore }
         subagentStore = testSubagentStreamStore(
             streamCoalesceWindowMillis = 0,
             chatRepository = chatRepository,
             settingsRepository = settingsRepository,
-            snapshotSync = snapshotSync,
+            coldStart = coldStart,
         )
         viewModel = ChatViewModel(
             chatRepository,
@@ -492,9 +449,8 @@ abstract class ChatViewModelTestBase {
             settingsRepository,
             FakeAttachmentStore(),
             subagentStore,
-            snapshotSync,
+            coldStart,
             Chat("session_1"),
-            todoParser = testTodoParser(),
             unreadStore = unreadStore,
             // The suite asserts per-event application: 0 publishes every delta on
             // arrival (the pre-conflation behavior), no timer involved.
@@ -511,7 +467,12 @@ abstract class ChatViewModelTestBase {
         // back — joining after resetMain would crash it on the dispatcher thread
         // ("Module with the Main dispatcher had failed to initialize"). See
         // startedViewModels (ticket 049).
-        runBlocking { startedViewModels.forEach { it.viewModelScope.coroutineContext.job.cancelAndJoin() } }
+        runBlocking {
+            startedViewModels.forEach { it.viewModelScope.coroutineContext.job.cancelAndJoin() }
+            // A resync (a recreated ViewModel joining the cached cold start) fetches on
+            // the cold start's own scope, which no ViewModel cancellation reaches.
+            coldStart.awaitInFlight()
+        }
         Dispatchers.resetMain()
         appScope.cancel()
         server.close()
@@ -532,9 +493,8 @@ abstract class ChatViewModelTestBase {
         settingsRepository,
         FakeAttachmentStore(),
         subagentStore,
-        snapshotSync,
+        coldStart,
         Chat("session_1"),
-        todoParser = testTodoParser(),
         unreadStore = unreadStore,
         streamCoalesceWindowMillis = streamCoalesceWindowMillis,
     ).also { startedViewModels += it }
@@ -565,236 +525,99 @@ abstract class ChatViewModelTestBase {
         return texts to job
     }
 
-    /** Drains recorded requests until the approvals POST arrives (history/status/WS came first). */
-    protected fun awaitRequest(pathSubstring: String): RecordedRequest {
+    /** Drains recorded requests until one matching [pathSubstring] (and [method], when
+     * given) arrives — history/status/WS came first. `/prompts` serves both the cold
+     * start's queue GET and the send POST (ticket 176): send assertions pass `POST`. */
+    protected fun awaitRequest(pathSubstring: String, method: String? = null): RecordedRequest {
         val deadline = System.currentTimeMillis() + 5_000
         while (System.currentTimeMillis() < deadline) {
             val request = server.takeRequest(100, TimeUnit.MILLISECONDS) ?: continue
-            if (request.target.orEmpty().contains(pathSubstring)) return request
+            if (request.target.orEmpty().contains(pathSubstring) && (method == null || request.method == method)) {
+                return request
+            }
         }
         error("Timed out waiting for request to $pathSubstring")
     }
 
+    // --- 2.5.0 transcript frames (ticket 175, TranscriptFrames) ------------------------
+    // The helpers keep their pre-2.5.0 names and meaning; each produces the
+    // `transcript.ops` batch the server now sends for the same transition.
+
+    /** The current helper turn: [turnStartedFrame] opens a new one, [turnEndedFrame]
+     * ends it (turn ids are opaque strings; an ended turn never restarts). */
+    private var helperTurn = 0
+
+    private var helperFrame = 0
+
     protected fun turnStartedFrame(): String =
-        """{"type":"turn.started","seq":20,"epoch":"ep_1","session_id":"session_1",""" +
-            """"timestamp":"2026-07-19T00:00:00.000Z","payload":{"type":"turn.started","turnId":1,""" +
-            """"origin":{"kind":"user"},"agentId":"main","sessionId":"session_1"}}"""
+        TranscriptFrames.opsFrame(TranscriptFrames.turnOp("t${++helperTurn}", "running"))
 
-    /** Verbatim 0.29.0 volatile streaming frame (docs/server-api.md, assistant.delta). */
+    /** One assistant text chunk: a fresh text frame per call (the fold emits its text
+     * as one delta; the timeline merges consecutive deltas into the live bubble). It
+     * rides a turn id the helpers never end, so a chunk sent after a turn end still
+     * streams like the old volatile frame did. */
     protected fun assistantDeltaFrame(delta: String, seq: Int): String =
-        """{"type":"assistant.delta","seq":$seq,"epoch":"ep_1","volatile":true,"offset":0,""" +
-            """"session_id":"session_1","timestamp":"2026-07-19T00:00:00.000Z",""" +
-            """"payload":{"type":"assistant.delta","turnId":1,"delta":"$delta","agentId":"main","sessionId":"session_1"}}"""
+        TranscriptFrames.opsFrame(
+            TranscriptFrames.textOp("tx.1.f${++helperFrame}", delta, turnId = "tx"),
+            seq = seq.toLong(),
+        )
 
+    /** [reason] is the turn's terminal state: completed/cancelled/failed. */
     protected fun turnEndedFrame(reason: String): String =
-        """{"type":"turn.ended","seq":21,"epoch":"ep_1","session_id":"session_1",""" +
-            """"timestamp":"2026-07-19T00:00:01.000Z","payload":{"type":"turn.ended","turnId":1,""" +
-            """"reason":"$reason","durationMs":1000,"agentId":"main","sessionId":"session_1"}}"""
+        TranscriptFrames.opsFrame(TranscriptFrames.turnOp("t$helperTurn", reason, ""","durationMs":1000"""))
 
-    /** Verbatim 0.31.0 frame (docs/server-api.md, Step retrying — ticket 058): an LLM
-     * call retried on provider 429; delayMs is a double on the wire. */
+    /** A running step carrying the (schema-level) `retry` object (ticket 058). */
     protected fun stepRetryingFrame(nextAttempt: Int): String =
-        """{"type":"turn.step.retrying","seq":21,"epoch":"ep_1","session_id":"session_1",""" +
-            """"timestamp":"2026-07-30T00:00:00.000Z","payload":{"type":"turn.step.retrying","turnId":1,""" +
-            """"step":1,"stepId":"d09585d5-old","failedAttempt":${nextAttempt - 1},"nextAttempt":$nextAttempt,""" +
-            """"maxAttempts":10,"delayMs":592.08,"errorName":"APIProviderRateLimitError",""" +
-            """"errorMessage":"429 The engine is currently overloaded, please try again later","statusCode":429,""" +
-            """"agentId":"main","sessionId":"session_1"}}"""
+        TranscriptFrames.opsFrame(
+            TranscriptFrames.stepOp(
+                "t$helperTurn", "t$helperTurn.1", "running",
+                ""","retry":{"nextAttempt":$nextAttempt,"maxAttempts":10,""" +
+                    """"errorMessage":"429 The engine is currently overloaded, please try again later"}""",
+            ),
+        )
 
-    /** The replacement step start after a retry (docs/server-api.md): new stepId, same step. */
+    /** A new step entering running — clears the retry status. */
     protected fun stepStartedFrame(step: Int, stepId: String): String =
-        """{"type":"turn.step.started","seq":22,"epoch":"ep_1","session_id":"session_1",""" +
-            """"timestamp":"2026-07-30T00:00:00.600Z","payload":{"type":"turn.step.started","turnId":1,""" +
-            """"step":$step,"stepId":"$stepId","agentId":"main","sessionId":"session_1"}}"""
+        TranscriptFrames.opsFrame(TranscriptFrames.stepOp("t$helperTurn", stepId, "running"))
 
+    /** The sent prompt's echo: an `undo` marker splicing the user message. */
     protected fun contextSplicedFrame(id: String, text: String): String =
-        """{"type":"context.spliced","seq":6,"epoch":"ep_1","session_id":"session_1",""" +
-            """"timestamp":"2026-07-19T00:00:00.500Z","payload":{"type":"context.spliced","start":0,""" +
-            """"deleteCount":0,"messages":[{"role":"user","content":[{"type":"text","text":"$text"}],""" +
-            """"toolCalls":[],"origin":{"kind":"user"},"id":"$id"}],"agentId":"main","sessionId":"session_1"}}"""
+        TranscriptFrames.opsFrame(TranscriptFrames.undoOp("m_${++helperFrame}", TranscriptFrames.userMessage(id, text)))
 
-    /** `prompt.queued` (ticket 154): the prompt waits server-side while the agent is
-     * busy; [queueLength] is the queue size at submission (0.39.1 verification log). */
+    /** A queued `prompt.upsert` (ticket 154): the fold derives the queue length from
+     * the prompts it holds queued, so [queueLength] queued prompts are sent — fillers
+     * first, [promptId] last. */
     protected fun promptQueuedFrame(promptId: String, queueLength: Int): String =
-        """{"type":"prompt.queued","seq":40,"epoch":"ep_1","session_id":"session_1",""" +
-            """"timestamp":"2026-08-28T19:34:45.036Z","payload":{"type":"prompt.queued",""" +
-            """"time":1787945685036,"agentId":"main","promptId":"$promptId","queueLength":$queueLength,""" +
-            """"sessionId":"session_1"}}"""
+        TranscriptFrames.opsFrame(
+            *(List(queueLength - 1) { TranscriptFrames.promptOp("msg_filler_$it", "queued") } +
+                TranscriptFrames.promptOp(promptId, "queued")).toTypedArray(),
+        )
 
-    /** `prompt.started` (0.39.0 — ticket 154): the prompt actually began executing. */
+    /** The prompt began executing: its `prompt.upsert` turns running. */
     protected fun promptStartedFrame(promptId: String): String =
-        """{"type":"prompt.started","seq":52,"epoch":"ep_1","session_id":"session_1",""" +
-            """"timestamp":"2026-08-28T19:34:58.703Z","payload":{"type":"prompt.started",""" +
-            """"time":1787945698703,"agentId":"main","promptId":"$promptId","sessionId":"session_1"}}"""
+        TranscriptFrames.opsFrame(TranscriptFrames.promptOp(promptId, "running"))
 
-    /** Steer echo shape: the spliced steered message carries no id (docs/server-api.md). */
+    /** An id-less steered message spliced by an `undo` marker. */
     protected fun steerEchoSplicedFrame(text: String): String =
-        """{"type":"context.spliced","seq":12,"epoch":"ep_1","session_id":"session_1",""" +
-            """"timestamp":"2026-07-20T00:00:01.000Z","payload":{"type":"context.spliced","start":1,""" +
-            """"deleteCount":0,"messages":[{"role":"user","content":[{"type":"text","text":"$text"}],""" +
-            """"toolCalls":[],"origin":{"kind":"user"}}],"agentId":"main","sessionId":"session_1"}}"""
-
-    protected fun approvalRequestedFrame(id: String, tool: String, action: String, command: String, agentId: String = "main"): String =
-        """{"type":"event.approval.requested","seq":7,"epoch":"ep_1","session_id":"session_1",""" +
-            """"timestamp":"2026-07-19T00:00:00.000Z","payload":{"type":"event.approval.requested",""" +
-            """"sessionId":"session_1","agentId":"$agentId","approval_id":"$id","session_id":"session_1",""" +
-            """"turn_id":0,"tool_call_id":"tool_1","tool_name":"$tool","action":"$action",""" +
-            """"tool_input_display":{"kind":"command","command":"$command","cwd":"/tmp","language":"bash"},""" +
-            """"created_at":"2026-07-19T00:00:00.000Z","expires_at":"2026-07-19T00:01:00.000Z"}}"""
-
-    protected fun approvalResolvedFrame(id: String): String =
-        """{"type":"event.approval.resolved","seq":8,"epoch":"ep_1","session_id":"session_1",""" +
-            """"timestamp":"2026-07-19T00:00:00.500Z","payload":{"type":"event.approval.resolved",""" +
-            """"approval_id":"$id","decision":"approved","resolved_at":"2026-07-19T00:00:00.500Z"}}"""
-
-    /** Verbatim 0.29.0 model/usage variant (docs/server-api.md, Agent status). */
-    protected fun agentStatusUsageFrame(
-        used: Long,
-        max: Long,
-        model: String = "kimi-code/k3",
-        effort: String = "high",
-    ): String =
-        """{"type":"agent.status.updated","seq":30,"epoch":"ep_1","volatile":true,""" +
-            """"session_id":"session_1","timestamp":"2026-07-26T00:00:00.000Z",""" +
-            """"payload":{"type":"agent.status.updated","model":"$model","thinkingEffort":"$effort",""" +
-            """"maxContextTokens":$max,"usage":{},"contextTokens":$used,""" +
-            """"agentId":"main","sessionId":"session_1"}}"""
-
-    /** 2.2.0 permission variant (docs/server-api.md; ticket 165): the usage/model
-     * fields ride along, the new `permission` field names the mode. */
-    protected fun agentStatusPermissionFrame(permission: String): String =
-        """{"type":"agent.status.updated","seq":90,"epoch":"ep_1","volatile":true,""" +
-            """"session_id":"session_1","timestamp":"2026-10-14T00:00:00.000Z",""" +
-            """"payload":{"type":"agent.status.updated","time":1792006993469,"agentId":"main",""" +
-            """"permission":"$permission","usage":{},"contextTokens":30317,""" +
-            """"maxContextTokens":1048576,"model":"kimi-code/k3","sessionId":"session_1"}}"""
-
-    /** Verbatim 0.29.0 phase variant: no token counts, must not clobber the ring. */
-    protected fun agentStatusPhaseFrame(): String =        """{"type":"agent.status.updated","seq":31,"epoch":"ep_1","volatile":true,""" +
-            """"session_id":"session_1","timestamp":"2026-07-26T00:00:01.000Z",""" +
-            """"payload":{"type":"agent.status.updated",""" +
-            """"phase":{"kind":"running","turnId":0,"step":0,"stepId":"","since":1784777223312},""" +
-            """"agentId":"main","sessionId":"session_1"}}"""
-
-    /** Parameterized phase variant of agent.status.updated (docs/server-api.md —
-     * ticket 148): [name] rides the tool_call kind only; the terminal kinds carry
-     * `at` instead of `since` (pass [since] = null for them). */
-    protected fun agentPhaseFrame(kind: String, name: String? = null, since: Long? = 1784777223312L): String =
-        """{"type":"agent.status.updated","seq":32,"epoch":"ep_1","volatile":true,""" +
-            """"session_id":"session_1","timestamp":"2026-07-26T00:00:02.000Z",""" +
-            """"payload":{"type":"agent.status.updated",""" +
-            """"phase":{"kind":"$kind","turnId":0,"step":1,"stepId":"",""" +
-            (if (name != null) """"toolCallId":"tool_1","name":"$name",""" else "") +
-            (if (since != null) """"since":$since""" else """"at":1784777314665""") +
-            """},"agentId":"main","sessionId":"session_1"}}"""
-
-    /** Verbatim 0.29.2 subagent.spawned (docs/server-api.md, Sub-agents). */
-    protected fun subagentSpawnedFrame(id: String = "agent-12"): String =
-        """{"type":"subagent.spawned","seq":19,"epoch":"ep_1","session_id":"session_1",""" +
-            """"timestamp":"2026-07-28T03:37:35.492Z","payload":{"type":"subagent.spawned",""" +
-            """"subagentId":"$id","subagentName":"explore","parentToolCallId":"tool_agent",""" +
-            """"parentAgentId":"main","callerAgentId":"main","description":"doc-verify",""" +
-            """"runInBackground":false,"agentId":"main","sessionId":"session_1"}}"""
-
-    protected fun subagentStartedFrame(): String =
-        """{"type":"subagent.started","seq":22,"epoch":"ep_1","session_id":"session_1",""" +
-            """"timestamp":"2026-07-28T03:37:35.600Z","payload":{"type":"subagent.started",""" +
-            """"subagentId":"agent-12","agentId":"main","sessionId":"session_1"}}"""
-
-    protected fun subagentCompletedFrame(): String =
-        """{"type":"subagent.completed","seq":33,"epoch":"ep_1","session_id":"session_1",""" +
-            """"timestamp":"2026-07-28T03:37:51.951Z","payload":{"type":"subagent.completed",""" +
-            """"subagentId":"agent-12","resultSummary":"done","usage":{},"contextTokens":14358,""" +
-            """"agentId":"main","sessionId":"session_1"}}"""
+        TranscriptFrames.opsFrame(TranscriptFrames.undoOp("m_${++helperFrame}", TranscriptFrames.userMessage(null, text)))
 
     protected fun subTurnStartedFrame(): String =
-        """{"type":"turn.started","seq":20,"epoch":"ep_1","session_id":"session_1",""" +
-            """"timestamp":"2026-07-28T03:37:35.493Z","payload":{"type":"turn.started","turnId":0,""" +
-            """"origin":{"kind":"system_trigger","name":"subagent"},"agentId":"agent-12","sessionId":"session_1"}}"""
+        TranscriptFrames.opsFrame(TranscriptFrames.turnOp("t0", "running"), agentId = "agent-12")
 
-    /** The sub-agent's first internal prompt, spliced as a user message (docs/server-api.md). */
+    /** The sub-agent's first internal prompt, spliced by its own `undo` marker. */
     protected fun subContextSplicedFrame(): String =
-        """{"type":"context.spliced","seq":21,"epoch":"ep_1","session_id":"session_1",""" +
-            """"timestamp":"2026-07-28T03:37:35.494Z","payload":{"type":"context.spliced","start":0,""" +
-            """"deleteCount":0,"messages":[{"role":"user","content":[{"type":"text","text":"sub task"}],""" +
-            """"toolCalls":[],"origin":{"kind":"system_trigger","name":"subagent"},"id":"msg_sub"}],""" +
-            """"agentId":"agent-12","sessionId":"session_1"}}"""
+        TranscriptFrames.opsFrame(
+            TranscriptFrames.undoOp(
+                "sub_m1",
+                """{"role":"user","content":[{"type":"text","text":"sub task"}],""" +
+                    """"origin":{"kind":"system_trigger","name":"subagent"},"id":"msg_sub"}""",
+            ),
+            agentId = "agent-12",
+        )
 
     protected fun subAssistantDeltaFrame(delta: String): String =
-        """{"type":"assistant.delta","seq":23,"epoch":"ep_1","volatile":true,"offset":0,""" +
-            """"session_id":"session_1","timestamp":"2026-07-28T03:37:36.100Z",""" +
-            """"payload":{"type":"assistant.delta","turnId":0,"delta":"$delta","agentId":"agent-12","sessionId":"session_1"}}"""
-
-    /** Verbatim-shaped 0.31.0 task.started (docs/server-api.md, Background lifecycle —
-     * ticket 092): CORE status vocabulary, epoch-millis times, info.agentId linking a
-     * sub-agent task to its page id (null on bash). [ownerAgentId] is the payload
-     * stamp naming the agent whose task store holds the task — "main" by default, a
-     * sub-agent id for a sub-agent-spawned task. */
-    protected fun taskStartedFrame(
-        taskId: String,
-        description: String,
-        kind: String = "agent",
-        agentId: String? = "agent-13",
-        seq: Int = 52,
-        ownerAgentId: String = "main",
-    ): String =
-        """{"type":"task.started","seq":$seq,"epoch":"ep_1","session_id":"session_1",""" +
-            """"timestamp":"2026-08-03T00:00:00.000Z","payload":{"type":"task.started",""" +
-            """"info":{"taskId":"$taskId","description":"$description","status":"running",""" +
-            """"detached":true,"startedAt":1785210101939,"timeoutMs":7200000,""" +
-            """"kind":"$kind","agentId":${agentId?.let { "\"$it\"" } ?: "null"},""" +
-            """"subagentType":"explore"},"agentId":"$ownerAgentId","sessionId":"session_1"}}"""
-
-    /** Verbatim-shaped 0.31.0 task.terminated (docs/server-api.md — the cancel run's
-     * frame carries status "killed" + stopReason "Aborted by the user"). [status] is
-     * the CORE vocabulary. [ownerAgentId] is the payload stamp, as on
-     * [taskStartedFrame]. */
-    protected fun taskTerminatedFrame(
-        taskId: String,
-        status: String,
-        description: String = "doc-verify-bg",
-        kind: String = "agent",
-        agentId: String? = "agent-13",
-        seq: Int = 109,
-        ownerAgentId: String = "main",
-    ): String =
-        """{"type":"task.terminated","seq":$seq,"epoch":"ep_1","session_id":"session_1",""" +
-            """"timestamp":"2026-08-03T00:00:01.000Z","payload":{"type":"task.terminated",""" +
-            """"info":{"taskId":"$taskId","description":"$description","status":"$status",""" +
-            """"detached":true,"startedAt":1785210101939,"endedAt":1785210118804,""" +
-            """"stopReason":"Aborted by the user","timeoutMs":7200000,""" +
-            """"kind":"$kind","agentId":${agentId?.let { "\"$it\"" } ?: "null"},""" +
-            """"subagentType":"agent"},"agentId":"$ownerAgentId","sessionId":"session_1"}}"""
-
-    /** Verbatim 0.30.0 compaction.started (docs/server-api.md, Compact — ticket 056). */
-    protected fun compactionStartedFrame(): String =
-        """{"type":"compaction.started","seq":25,"epoch":"ep_1","session_id":"session_1",""" +
-            """"timestamp":"2026-07-30T05:48:54.194Z","payload":{"type":"compaction.started",""" +
-            """"trigger":"manual","agentId":"main","sessionId":"session_1"}}"""
-
-    /** Verbatim 0.30.0 compaction.completed (docs/server-api.md, Compact — ticket 056). */
-    protected fun compactionCompletedFrame(): String =
-        """{"type":"compaction.completed","seq":37,"epoch":"ep_1","session_id":"session_1",""" +
-            """"timestamp":"2026-07-30T05:44:56.676Z","payload":{"type":"compaction.completed",""" +
-            """"result":{"summary":"Completed spike, nothing pending.",""" +
-            """"compactedCount":8,"tokensBefore":850,"tokensAfter":386,"keptUserMessageCount":3},""" +
-            """"agentId":"main","sessionId":"session_1"}}"""
-
-    /** Unverified shape (protocol bundle only): the permissive decode must still emit. */
-    protected fun compactionFailedFrame(): String =
-        """{"type":"compaction.failed","seq":40,"epoch":"ep_1","session_id":"session_1",""" +
-            """"timestamp":"2026-07-30T05:50:00.000Z","payload":{"type":"compaction.failed",""" +
-            """"message":"summarizer unreachable","agentId":"main","sessionId":"session_1"}}"""
-
-    /** The compaction context rewrite (docs/server-api.md, Compact): the kept user
-     * message verbatim with its original id, then the id-less prefixed summary. */
-    protected fun compactionSpliceFrame(): String =
-        """{"type":"context.spliced","seq":36,"epoch":"ep_1","session_id":"session_1",""" +
-            """"timestamp":"2026-07-30T05:44:56.600Z","payload":{"type":"context.spliced",""" +
-            """"start":0,"deleteCount":8,"messages":[""" +
-            """{"role":"user","content":[{"type":"text","text":"run echo hi"}],""" +
-            """"toolCalls":[],"origin":{"kind":"user"},"id":"msg_1"},""" +
-            """{"role":"user","content":[{"type":"text","text":"The conversation so far has been compacted…"}],""" +
-            """"toolCalls":[],"origin":{"kind":"compaction_summary"},"id":null}],""" +
-            """"agentId":"main","sessionId":"session_1"}}"""
+        TranscriptFrames.opsFrame(
+            TranscriptFrames.textOp("t0.1.f${++helperFrame}", delta, turnId = "t0"),
+            agentId = "agent-12",
+        )
 }

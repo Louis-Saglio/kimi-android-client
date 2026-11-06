@@ -18,6 +18,9 @@ sealed class DataError(message: String, cause: Throwable? = null) : Exception(me
     data class Api(val code: Int, val serverMessage: String, val details: JsonObject? = null) :
         DataError("Server error $code: $serverMessage")
     data class MalformedResponse(override val cause: Throwable) : DataError("Malformed server response", cause)
+    /** The session socket's `subscribe_v2` was acked `not_found` (ticket 175): the
+     * server does not know the session (deleted, or another server). */
+    data object SessionNotFound : DataError("Session not found")
 }
 
 /** The one error → user-facing message mapping, shared by the ViewModels. */
@@ -28,5 +31,6 @@ internal fun Throwable.toUserMessage(): String = when (this) {
     is DataError.Http -> "Unexpected server response (HTTP $code)"
     is DataError.Api -> serverMessage.ifBlank { "Server error $code" }
     is DataError.MalformedResponse -> "Malformed server response"
+    is DataError.SessionNotFound -> "This session no longer exists on the server"
     else -> message ?: "Unknown error"
 }

@@ -81,3 +81,44 @@ Original design and rationale: `done/140-composer-swarm-mode-toggle.md`
 (status seed/send), `ui/chat/components/Composer.kt` (`ChatInputBar`). Wire
 reference: `docs/server-api.md` → Prompts (`swarm_mode` bullet) and
 `/status` (`swarm_mode`).
+
+## Implementation notes
+
+**2026-11-06 —** Implemented against server 2.5.1, where `GET .../status` is gone
+(ticket 177): the description's `/status` seed and post-prompt refresh map onto the
+subscription's `agent` frame, which carries `swarm_mode` and is re-sent on every change
+— so steps 1 and 4 are the same mechanism, and it converges live rather than only
+after a prompt (no new endpoint, event route or polling).
+
+- Data layer: `AgentStateFrame` (`ChatDtos.kt`) decodes `swarm_mode`, and
+  `AgentStateFrame.toSessionEvents` (`SessionSocket.kt`) maps it to the new
+  `SessionEvent.SessionSwarmModeUpdated(swarmMode, agentId)` (absent = nothing said;
+  a child's is tagged and ignored by `SubagentStreamStore`). `ChatApi.postPrompt` takes
+  a required `swarmMode: Boolean` and ALWAYS writes `"swarm_mode"` — true and false
+  alike, per the omission semantics; `ChatRepository.sendPrompt` and `steer` thread it
+  through (a steer's posted prompt carries the chip too). Other body fields unchanged.
+- `ChatViewModel`: `UiState.swarmMode` seeds from the subscribe's first `agent` frame and
+  follows later ones; `onSwarmModeToggled` flips it and sets `pendingSwarmPick`, which
+  keeps frames that still report the old mode from flipping the chip back until the send
+  carrying the toggle succeeds (a re-toggle while that POST is in flight stays pending).
+  `onSend` reads the chip at send time. No `SavedStateHandle` entry: the ViewModel itself
+  survives configuration change, and after recreation or process death the subscribe's
+  `agent` frame re-seeds from the server, which is what the ticket asks for. A
+  saved-state copy would only be overwritten by that frame.
+- UI: `SwarmModeChip` in `ui/chat/components/Composer.kt`, after the permission chip:
+  sparkles glyph (`SparklesIcon`) + "Swarm" label, `secondaryContainer` fill when on,
+  `toggleable` with `Role.Switch`, contentDescription "Toggle swarm mode", testTag
+  `SWARM_MODE_CHIP_TAG` (`"swarmModeChip"`), 48dp touch target. The label ellipsizes
+  rather than clipping when a running turn's Stop + Steer squeeze the middle zone.
+  `ChatInputBar` gains `swarmMode` / `onSwarmModeToggle`, wired from `ChatScreen`.
+- Tests: `ChatRepositoryTest` (`swarm_mode:true` on, `false` off; steer carries it; every
+  existing body assertion now ends in `"swarm_mode":false`), `SessionSocketTest` (the
+  subscribe seed, the model-less and child frames, and the mapping both ways),
+  `ChatViewModelTest` (chip seeds from the first `agent` frame and a send carries `true`;
+  toggling off sends `false`; an unsent toggle survives frames, then the chip adopts the
+  server's report again), androidTest `SwarmModeChipTest` (toggle state, content
+  description, test tag, and a send with the chip on reaching the send fake with
+  `true`), and `ComposerLayoutTest` now includes the chip in its overflow guard.
+- Not done here: the on-device criterion (toggle on, `AgentSwarm` runs, toggle off). It
+  needs the e2e runner / a live server, which this run had no access to, and the
+  androidTests compile but were not run.

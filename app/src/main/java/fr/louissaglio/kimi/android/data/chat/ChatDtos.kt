@@ -4,6 +4,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 // DTOs for GET /api/v1/sessions/{id}/messages and the /api/v1/ws frames
 // (docs/server-api.md). Unknown fields are ignored (Json { ignoreUnknownKeys = true });
@@ -97,69 +98,6 @@ data class MediaSourceDto(
     @SerialName("file_id") val fileId: String? = null,
 )
 
-@Serializable
-data class SessionStatusData(
-    val busy: Boolean = false,
-    // Context window fill (ticket 041); defaulted like every DTO field so a server
-    // omission degrades to a partial read instead of failing the whole status poll.
-    @SerialName("context_tokens") val contextTokens: Long = 0,
-    @SerialName("max_context_tokens") val maxContextTokens: Long = 0,
-    // The session's bound model/effort (ticket 107): `model` is omitted entirely when
-    // unbound, `thinking_level` reads "" on a fresh never-prompted session.
-    val model: String? = null,
-    @SerialName("thinking_level") val thinkingLevel: String? = null,
-    // The session's permission mode (ticket 141): manual/yolo/auto. Unlike `model` it
-    // is ALWAYS reported — a fresh session reads the server default.
-    val permission: String? = null,
-)
-
-/**
- * `agent.status.updated` payload (docs/server-api.md, volatile). Three variants share
- * the event type: the model/usage one carries [contextTokens]/[maxContextTokens], the
- * phase one carries [phase], and the permission one carries [permission] — its null
- * fields must not clobber the stored values.
- */
-@Serializable
-data class AgentStatusUpdatedPayload(
-    val contextTokens: Long? = null,
-    val maxContextTokens: Long? = null,
-    // Model/usage variant only (ticket 107): the session's bound model and effort.
-    val model: String? = null,
-    val thinkingEffort: String? = null,
-    // Phase variant only (ticket 148): the agent's live activity.
-    val phase: AgentPhaseDto? = null,
-    // Permission variant only (2.2.0, ticket 165): manual/yolo/auto, pushed the
-    // moment the session's mode changes — from any client.
-    val permission: String? = null,
-)
-
-/** `phase` of the agent.status.updated phase variant (docs/server-api.md — ticket 148):
- * every field beyond [kind] fills only for its own kind — [since] (epoch ms) rides the
- * ACTIVE kinds, [name]/[toolCallId] the tool_call kind, [approval] awaiting_approval;
- * `ended`/`interrupted` carry `at` instead of [since] (not decoded — no elapsed readout
- * exists for them). The `streaming` kind was removed in 0.43.0 (the phase stays
- * `running` while tokens stream). */
-@Serializable
-data class AgentPhaseDto(
-    val kind: String = "",
-    val turnId: Long? = null,
-    val step: Int? = null,
-    val stepId: String? = null,
-    val since: Long? = null,
-    val name: String? = null,
-    val toolCallId: String? = null,
-    val approval: AgentPhaseApprovalDto? = null,
-)
-
-/** awaiting_approval's inline approval; this ticket consumes the kind only, never the
- * ids ([approvalId] is the dedicated `approval_<uuid>` since 0.39.0, distinct from
- * [toolCallId]). */
-@Serializable
-data class AgentPhaseApprovalDto(
-    val approvalId: String? = null,
-    val toolCallId: String? = null,
-)
-
 /** `data` of `GET /api/v1/config` (and the POST's echo): the app consumes the
  * server-wide default model, the default thinking effort, the default permission
  * mode (ticket 142) and the providers map (credentials redacted to `has_api_key`)
@@ -239,38 +177,190 @@ data class FileUploadData(
     val size: Long = 0,
 )
 
-/** Envelope of one WebSocket frame; [payload] is decoded per [type] by the repository. */
+/** Envelope of one session-socket frame (docs/server-api.md, WebSocket); [payload] is
+ * decoded per [type] by SessionSocket. The flat state frames (`agent`, `usage`,
+ * `interaction`, `task`…) carry their fields beside `type` and no `payload`. */
 @Serializable
 data class WsFrame(
     val type: String = "",
-    val seq: Long? = null,
-    val epoch: String? = null,
-    // The emitting session, on event frames only (docs/server-api.md, Event envelope).
-    // 0.31.0 sends events for sessions this connection never subscribed to, so
-    // SessionSocket drops any frame whose sessionId is not the subscribed one.
+    // The frame's session; absent on control frames (ack, server_hello, ping). Global
+    // events reach every connection, so SessionSocket drops any frame whose sessionId
+    // is not the subscribed one.
     @SerialName("session_id") val sessionId: String? = null,
-    // Only on high-frequency deltas; absent otherwise (docs/server-api.md). Volatile
-    // frames share the seq of the event they piggyback on, so they must not move the
-    // resume cursor.
-    val volatile: Boolean = false,
+    // Control-frame request id: an `ack` echoes the subscribe_v2 frame's `id`.
+    val id: String? = null,
+    val code: Int = 0,
+    val msg: String? = null,
     val payload: JsonObject? = null,
 )
 
-/** Peek at the emitter tag every event payload carries (docs/server-api.md,
- * Sub-agents): `"main"` for the main agent, the sub-agent's id for its own frames.
- * Untagged payloads (the interaction families) read as main. */
+/**
+ * The flat `agent` state frame (docs/server-api.md, WebSocket → Session frames —
+ * server 2.5.0, ticket 177): the agent's live state, sent before the subscribe ack and
+ * again on every change, replacing the client copy wholesale. [status] is
+ * `idle`/`running` (running while a turn or background work keeps the agent busy);
+ * [model]/[thinking] are omitted on a model-less session; [permissionMode] is the
+ * effective `manual`/`yolo`/`auto`. Of the mode booleans only [swarmMode] is consumed
+ * (ticket 174 — the composer's swarm chip); `plan_mode`/`tower_mode` are ignored.
+ */
 @Serializable
-data class AgentIdPeek(val agentId: String = "main")
+data class AgentStateFrame(
+    @SerialName("agent_id") val agentId: String = MAIN_AGENT_ID,
+    val status: String? = null,
+    val model: String? = null,
+    val thinking: String? = null,
+    @SerialName("permission_mode") val permissionMode: String? = null,
+    @SerialName("swarm_mode") val swarmMode: Boolean? = null,
+)
 
 /**
- * `payload` of a subscribe/unsubscribe `ack` frame (docs/server-api.md); only
- * `resync_required` is consumed — the sessions whose resume cursor the server
- * could not honor (replay buffer overrun). No replay will come for them: the
- * collector must re-sync from REST (ticket 048).
+ * `payload` of the global `event.session.work_changed` frame as the chat reads it
+ * (docs/server-api.md, Global events — ticket 181): only [busy]. Absent = unreadable,
+ * never "idle" — a drifted frame must not end a running compaction.
+ */
+@Serializable
+data class ChatWorkChangedPayload(
+    val busy: Boolean? = null,
+)
+
+/**
+ * The flat `usage` state frame (docs/server-api.md, WebSocket → Session frames —
+ * ticket 177): the agent's context fill, coalesced server-side to a few frames per
+ * second. [maxContextTokens] is optional — absent or `0` is the engine's "unknown"
+ * limit, never a real one.
+ */
+@Serializable
+data class UsageFrame(
+    @SerialName("agent_id") val agentId: String = MAIN_AGENT_ID,
+    @SerialName("context_tokens") val contextTokens: Long? = null,
+    @SerialName("max_context_tokens") val maxContextTokens: Long? = null,
+)
+
+/**
+ * The flat `todo` state frame (docs/server-api.md, Todos — server 2.5.0, ticket 178):
+ * the agent's FULL todo list, sent when the agent joins the subscription (before the
+ * subscribe ack) and on every change, undo and cold restore included. It replaces the
+ * client's list wholesale; `[]` clears it. Mapped by [toTodos].
+ */
+@Serializable
+data class TodoFrame(
+    @SerialName("agent_id") val agentId: String = MAIN_AGENT_ID,
+    val items: List<TodoItemDto> = emptyList(),
+)
+
+/** One `todo` frame item: `{title, status:"pending"|"in_progress"|"done"}`. */
+@Serializable
+data class TodoItemDto(
+    val title: String? = null,
+    val status: String? = null,
+)
+
+/**
+ * One task's full state (docs/server-api.md, Sub-agents → Task frames and controls —
+ * server 2.5.0, ticket 179): the body of a flat `task` frame (its fields sit beside
+ * `type`), a `task.list` entry, and a task control reply's `task`. Mapped by
+ * [toTaskState]. The timestamps are ISO-8601 strings on the wire; [JsonPrimitive]
+ * keeps an epoch-millis number decodable too.
+ */
+@Serializable
+data class TaskStateDto(
+    @SerialName("task_id") val taskId: String = "",
+    val kind: String = "",
+    val status: String = "",
+    val outcome: String? = null,
+    val phase: String? = null,
+    val detached: Boolean = false,
+    val description: String? = null,
+    @SerialName("child_agent_id") val childAgentId: String? = null,
+    @SerialName("parent_tool_call_id") val parentToolCallId: String? = null,
+    @SerialName("swarm_index") val swarmIndex: Int? = null,
+    val command: String? = null,
+    @SerialName("started_at") val startedAt: JsonPrimitive? = null,
+    @SerialName("ended_at") val endedAt: JsonPrimitive? = null,
+    @SerialName("result_summary") val resultSummary: String? = null,
+    val error: String? = null,
+    @SerialName("state_reason") val stateReason: String? = null,
+    val model: String? = null,
+    val thinking: String? = null,
+)
+
+/** The flat `task` frame: the owning agent ([agentId] — `main`, or the child agent that
+ * started the task) plus the task's full state, decoded from the same frame text. */
+@Serializable
+data class TaskFrame(
+    @SerialName("agent_id") val agentId: String = MAIN_AGENT_ID,
+)
+
+/** The flat `task.list` frame: every RUNNING task of [agentId], sent when a connection
+ * starts receiving the agent (before the subscribe ack, again on every reconnect). */
+@Serializable
+data class TaskListFrame(
+    @SerialName("agent_id") val agentId: String = MAIN_AGENT_ID,
+    val tasks: List<TaskStateDto> = emptyList(),
+)
+
+/** The flat `task.output` frame (ticket 180): sent only to a connection that sent
+ * `task.watch` — [text] starts at UTF-8 byte [offset] of the task's output. */
+@Serializable
+data class TaskOutputFrame(
+    @SerialName("agent_id") val agentId: String = MAIN_AGENT_ID,
+    @SerialName("task_id") val taskId: String,
+    val offset: Long,
+    val text: String = "",
+)
+
+/** The reply to a flat task control (`task.stop`/`task.background`, ticket 179;
+ * `task.watch`/`task.unwatch`, ticket 180):
+ * `{type:"response",request_id,code,msg?,task?}` — matched to its request by
+ * [requestId]; [task] is the task's state after the control (also sent on some
+ * errors, e.g. `40933`). */
+@Serializable
+data class TaskControlResponse(
+    @SerialName("request_id") val requestId: String? = null,
+    val code: Int = 0,
+    val msg: String? = null,
+    val task: TaskStateDto? = null,
+)
+
+/**
+ * The flat `interaction` frame (docs/server-api.md, Interactions → The `interaction`
+ * frame — tickets 171/172): one approval or question of any agent of the session, sent on
+ * every state change and re-sent for every still-pending one after each accepted
+ * `subscribe_v2`. No `payload` and no `seq`: the fields sit beside `type`. [status] is
+ * `pending`/`ended`; [outcome] is set on `ended` only. [request] stays raw — its shape
+ * depends on [kind] ([ApprovalInteractionRequestDto] for `approval`,
+ * [QuestionRequestDto] for `question` — ticket 172).
+ */
+@Serializable
+data class InteractionFrame(
+    @SerialName("agent_id") val agentId: String = MAIN_AGENT_ID,
+    @SerialName("interaction_id") val interactionId: String = "",
+    val status: String = "",
+    val outcome: String? = null,
+    @SerialName("tool_call_id") val toolCallId: String? = null,
+    val kind: String = "",
+    val request: JsonObject? = null,
+)
+
+/** The `request` of an approval [InteractionFrame] — snake_case, unlike the transcript
+ * entity's camelCase [TranscriptApprovalRequestDto]. `tool_input_display` is optional
+ * (the card then falls back to [action]); `expires_at` is not consumed. */
+@Serializable
+data class ApprovalInteractionRequestDto(
+    @SerialName("tool_name") val toolName: String = "",
+    val action: String = "",
+    @SerialName("tool_input_display") val toolInputDisplay: ToolInputDisplayDto? = null,
+)
+
+/**
+ * `payload` of the `subscribe_v2` `ack` (docs/server-api.md, Control frames): an
+ * unknown session answers `code:0` with its id in [notFound] — the socket surfaces it
+ * as a load failure instead of silence (ticket 175).
  */
 @Serializable
 data class AckPayload(
-    @SerialName("resync_required") val resyncRequired: List<String> = emptyList(),
+    val accepted: List<String> = emptyList(),
+    @SerialName("not_found") val notFound: List<String> = emptyList(),
 )
 
 /**
@@ -283,122 +373,13 @@ data class ServerHelloPayload(
     @SerialName("heartbeat_ms") val heartbeatMs: Long? = null,
 )
 
-@Serializable
-data class DeltaPayload(val delta: String = "")
-
-@Serializable
-data class ToolCallPayload(
-    @SerialName("toolCallId") val toolCallId: String = "",
-    val name: String = "",
-    // tool.call.started only (docs/server-api.md): the full arguments, plus the
-    // server's display rendering — both feed the live row preview.
-    val args: JsonObject? = null,
-    val display: ToolInputDisplayDto? = null,
-    // tool.call.started only: the server-rendered human-readable action (same text
-    // as the approval's `action`) — the row title's first choice (ticket 153).
-    val description: String? = null,
-)
-
-@Serializable
-data class ToolResultPayload(
-    @SerialName("toolCallId") val toolCallId: String = "",
-    // String for shell-style tools, a JSON value for structured ones (docs/server-api.md).
-    val output: JsonElement? = null,
-    @SerialName("is_error") val isError: Boolean = false,
-)
-
-/** `tool.progress` payload (docs/server-api.md, volatile live tool output):
- * `update` carries one output chunk (`kind` "stdout", possibly others later). */
-@Serializable
-data class ToolProgressPayload(
-    @SerialName("toolCallId") val toolCallId: String = "",
-    val update: ToolProgressUpdateDto? = null,
-)
-
-@Serializable
-data class ToolProgressUpdateDto(
-    val kind: String = "",
-    val text: String = "",
-)
-
-/** `turn.ended` payload. [interruptReason] (0.31.1, docs/server-api.md — ticket 155)
- * says why a turn stopped early ("user_cancelled" on a REST `:abort`, else
- * "aborted"/"max_steps"/"error"/"filtered"/"blocked"); null on a completed turn. */
-@Serializable
-data class TurnEndedPayload(val reason: String = "", val interruptReason: String? = null)
-
-/** `turn.step.retrying` payload (docs/server-api.md, 0.31.0 — ticket 058): the step's
- * LLM call failed ([errorName]/[errorMessage]/[statusCode]) and attempt [nextAttempt]
- * of [maxAttempts] starts after [delayMs]; a fresh `turn.step.started` with a NEW
- * stepId then re-fires for the same step number. [delayMs] is a double on the wire. */
-@Serializable
-data class StepRetryingPayload(
-    val step: Int = 0,
-    val stepId: String = "",
-    val failedAttempt: Int = 0,
-    val nextAttempt: Int = 0,
-    val maxAttempts: Int = 0,
-    val delayMs: Double = 0.0,
-    val errorName: String = "",
-    val errorMessage: String = "",
-    val statusCode: Int? = null,
-)
-
-/** Shared consumed shape of `turn.step.started`/`turn.step.completed`: only the step
- * identity is used — clearing the retry status (ticket 058). Every other field
- * (usage, latency stats, finishReason) stays ignored. */
-@Serializable
-data class TurnStepPayload(
-    val step: Int = 0,
-    val stepId: String = "",
-)
-
-// --- prompt.* lifecycle (docs/server-api.md — ticket 154) ----------------------
-
-/** `prompt.submitted` payload: the submission echo. Only [promptId] is consumed
- * (correlation with the local echo bubble); status/content/userMessageId/createdAt
- * stay ignored. */
-@Serializable
-data class PromptSubmittedPayload(val promptId: String = "")
-
-/** `prompt.queued` payload: the prompt waits server-side while the agent is busy.
- * [queueLength] is the queue size at submission — the echo bubble's "Queued #N". */
-@Serializable
-data class PromptQueuedPayload(val promptId: String = "", val queueLength: Int = 0)
-
-/** `prompt.started` payload (0.39.0): the prompt actually began executing. The
- * emitting agent rides the envelope peek like every transcript frame. */
-@Serializable
-data class PromptStartedPayload(val promptId: String = "")
-
-/** `context.spliced` payload: full message objects, decoded with the history MessageDto
- * (its extra fields — toolCalls — are ignored; origin IS decoded, ticket 056). */
-@Serializable
-data class ContextSplicedPayload(
-    val messages: List<MessageDto> = emptyList(),
-)
-
-@Serializable
-data class ApprovalRequestedPayload(
-    @SerialName("approval_id") val approvalId: String = "",
-    @SerialName("tool_name") val toolName: String = "",
-    val action: String = "",
-    @SerialName("tool_input_display") val toolInputDisplay: ToolInputDisplayDto? = null,
-    /** The ASKING agent (0.33.0 — ticket 139): "main", or the sub-agent's id for a
-     * swarm member's request. This is the camelCase spelling the live WS frame's
-     * payload stamps; the socket reads it. */
-    val agentId: String = MAIN_AGENT_ID,
-    /** The same asking agent, snake_case spelling (2.0.2 — ticket 156): the snapshot's
-     * `pending_approvals` items and the `/approvals?status=pending` poll items stamp
-     * `agent_id` only (the 2.0.2 WS frame carries both spellings, equal). The
-     * snapshot mapping reads this one — decode per surface, never rename. */
-    @SerialName("agent_id") val agentIdSnakeCase: String = MAIN_AGENT_ID,
-)
-
-/** `tool_input_display` of an approval request; only `command` (kind "command") is consumed.
- * On a `tool.call.started` the same shape carries the `agent_call` kind instead (an
- * `Agent` spawn, 0.31.0 — docs/server-api.md, Sub-agents): [agentName]/[prompt] feed
- * the spawn row (ticket 157), [background] marks a background spawn. */
+/** `tool_input_display` of an approval request: `command` (kind "command") is the
+ * card's summary; kind `plan_review` (`ExitPlanMode`, 2.4.0 — docs/server-api.md,
+ * Plan review approvals) carries the plan Markdown in [plan] and the plan file in
+ * [path] (decoded, not consumed — ticket 173). A tool frame's `display` has the same
+ * shape, and carries the `agent_call` kind (an `Agent` spawn, 0.31.0 —
+ * docs/server-api.md, Sub-agents): [agentName]/[prompt] feed the spawn row (ticket
+ * 157), [background] marks a background spawn. */
 @Serializable
 data class ToolInputDisplayDto(
     val kind: String = "",
@@ -406,32 +387,24 @@ data class ToolInputDisplayDto(
     @SerialName("agent_name") val agentName: String? = null,
     val prompt: String? = null,
     val background: Boolean = false,
-)
-
-@Serializable
-data class ApprovalResolvedPayload(
-    @SerialName("approval_id") val approvalId: String = "",
+    val plan: String? = null,
+    val path: String? = null,
 )
 
 /**
- * `event.question.requested` payload (docs/server-api.md, Questions); the same
- * shape comes back as items of `GET .../questions?status=pending` and of the
- * snapshot's `pending_questions`. Since 0.38.0 `question_id` is a dedicated
- * `question_<uuid>` interaction id and [toolCallId] is distinct (they were equal
- * before): answer/dismiss route by `question_id`, the transcript row carries
- * `tool_call_id`. There is no v2 camelCase duplicate of this event family.
+ * The `request` of a question interaction (docs/server-api.md, Interactions): the
+ * flat `interaction` frame carries `{questions[]}` only (ticket 172); the transcript
+ * entity's `request` (`GET .../transcript` and `transcript.reset.snapshot.
+ * interactions`) adds `question_id`, `tool_call_id`, `turn_id` and `created_at`. The
+ * mapper always keys the card on the interaction id — the one the response route
+ * takes — and prefers the frame's/entity's own `tool_call_id`. The asking agent is
+ * the frame's `agent_id`; the entity's request carries none (main, until the post-ack
+ * re-send stamps it).
  */
 @Serializable
-data class QuestionRequestedPayload(
-    @SerialName("question_id") val questionId: String = "",
+data class QuestionRequestDto(
     @SerialName("tool_call_id") val toolCallId: String = "",
     val questions: List<QuestionItemDto> = emptyList(),
-    /** The ASKING agent (2.0.2 — ticket 156), optional in the schema: the pending
-     * poll's items, the snapshot's `pending_questions` items and the live frame all
-     * stamp snake_case `agent_id`; absent = the main agent. Unlike approvals there is
-     * no camelCase twin to decode — the frame's trailing `agentId` is the envelope
-     * mirror, not the asker. */
-    @SerialName("agent_id") val agentId: String? = null,
 )
 
 @Serializable
@@ -453,209 +426,6 @@ data class QuestionOptionDto(
     val description: String? = null,
 )
 
-/** Shared shape of `event.question.answered` and `event.question.dismissed`: only the id is consumed. */
-@Serializable
-data class QuestionResolvedPayload(
-    @SerialName("question_id") val questionId: String = "",
-)
-
-/** `data` of `GET .../questions?status=pending`. */
-@Serializable
-data class QuestionListData(
-    val items: List<QuestionRequestedPayload> = emptyList(),
-)
-
-// --- REST /tasks + task.* WS events (docs/server-api.md, Background lifecycle —
-// ticket 092) ------------------------------------------------------------------
-// Background tasks only: background sub-agents, background bash, question flows (the
-// last filtered out at the mapping boundary). Terminal tasks stay listed.
-
-/** `data` of `GET .../tasks?status=…`. */
-@Serializable
-data class TaskListData(
-    val items: List<TaskDto> = emptyList(),
-)
-
-/** One REST task object; created_at == started_at. Times are ISO-8601 strings.
- * [runInBackground] rides every task since 0.39.0 (list and get, running and
- * terminal; `false` on a listed foreground sub-agent) — the jobs seed's foreground
- * filter (ticket 162). The shape also carries `subagent_type` and
- * `parent_tool_call_id` (since 0.36.1; `parent_tool_call_id` on bash-kind tasks
- * since 0.39.0), not decoded here. [command] rides on bash-kind tasks;
- * [outputPreview]/[outputBytes] only on a get-with-output read (ticket 096).
- * [model]/[thinkingEffort] ride on subagent-kind tasks (0.34.0 — the swarm
- * aggregate's shared-model line, ticket 135). */
-@Serializable
-data class TaskDto(
-    val id: String = "",
-    val kind: String = "",
-    val description: String = "",
-    val status: String = "",
-    @SerialName("created_at") val createdAt: String? = null,
-    @SerialName("started_at") val startedAt: String? = null,
-    @SerialName("run_in_background") val runInBackground: Boolean = false,
-    @SerialName("completed_at") val completedAt: String? = null,
-    // Subagent-kind tasks carry it since 0.36.1 (docs/server-api.md); bash tasks never do.
-    @SerialName("agent_id") val agentId: String? = null,
-    val command: String? = null,
-    @SerialName("output_preview") val outputPreview: String? = null,
-    @SerialName("output_bytes") val outputBytes: Int? = null,
-    val model: String? = null,
-    @SerialName("thinking_effort") val thinkingEffort: String? = null,
-)
-
-/** `data` of `POST .../tasks/{id}:cancel`; a terminal task answers envelope 40904 with
- * `cancelled:false`. */
-@Serializable
-data class TaskCancelData(
-    val cancelled: Boolean = false,
-)
-
-/** `data` of `POST .../tasks/{id}:detach` (0.39.0 — ticket 138): a converted
- * foreground task answers `detached:true, status:"running"`; an already-background
- * or terminal task answers envelope code 0 with `detached:false` and the current
- * status — success is `data.detached`, not `code == 0` (the dismissQuestion shape). */
-@Serializable
-data class TaskDetachData(
-    val detached: Boolean = false,
-    val status: String = "",
-)
-
-/** Shared payload shape of `task.started`/`task.terminated` (docs/server-api.md).
- * [agentId] is the envelope stamp naming the OWNING agent — the one whose task store
- * holds the task ("main", or the sub-agent that spawned the task); it differs from
- * `info.agentId`, which links a sub-agent-kind task to the spawned sub-agent's page. */
-@Serializable
-data class TaskEventPayload(
-    val info: TaskInfoDto? = null,
-    val agentId: String = MAIN_AGENT_ID,
-)
-
-/** The WS task `info` object: [status] is the CORE vocabulary (running | completed |
- * failed | timed_out | killed | lost), times are epoch MILLIS (not REST's ISO strings).
- * `detached`/`timeoutMs` exist on the wire but are not consumed. */
-@Serializable
-data class TaskInfoDto(
-    val taskId: String = "",
-    val description: String = "",
-    val status: String = "",
-    val startedAt: Long = 0,
-    val endedAt: Long? = null,
-    val stopReason: String? = null,
-    val kind: String = "",
-    val agentId: String? = null,
-    val subagentType: String? = null,
-)
-
-/** `subagent.spawned` payload (docs/server-api.md, Sub-agents): the only frame carrying
- * a sub-agent's identity metadata. `parentToolCallUuid` exists upstream but is not
- * consumed. The frame itself is tagged `agentId:"main"`. [model]/[thinkingEffort]
- * (camelCase) ride the frame since 0.34.0. */
-@Serializable
-data class SubagentSpawnedPayload(
-    val subagentId: String = "",
-    val subagentName: String = "",
-    val parentToolCallId: String = "",
-    val description: String = "",
-    val runInBackground: Boolean = false,
-    val swarmIndex: Int? = null,
-    val taskId: String? = null,
-    val model: String? = null,
-    val thinkingEffort: String? = null,
-)
-
-/** Shared shape of `subagent.started`/`completed`/`failed`/`suspended`/`cancelled`:
- * every variant carries [subagentId], plus only its own extra field (resultSummary,
- * error, reason). */
-@Serializable
-data class SubagentLifecyclePayload(
-    val subagentId: String = "",
-    val resultSummary: String? = null,
-    val error: String? = null,
-    val reason: String? = null,
-)
-
-// --- GET /api/v1/sessions/{id}/snapshot (docs/server-api.md, Session snapshot —
-// ticket 085) ------------------------------------------------------------------
-// The cold-start/resync bundle, verified live on 0.31.1 (2026-08-01). The roster is
-// the newest surface of the API: every field stays optional/defensive.
-
-@Serializable
-data class SnapshotData(
-    @SerialName("as_of_seq") val asOfSeq: Long = 0,
-    val epoch: String = "",
-    val session: SnapshotSessionDto? = null,
-    val messages: MessageListData? = null,
-    @SerialName("in_flight_turn") val inFlightTurn: InFlightTurnDto? = null,
-    val subagents: List<SubagentRosterEntryDto> = emptyList(),
-    // The snapshot items are the legacy event.approval.requested /
-    // event.question.requested payload shapes verbatim (verified live), so the
-    // existing payload DTOs decode them.
-    @SerialName("pending_approvals") val pendingApprovals: List<ApprovalRequestedPayload> = emptyList(),
-    @SerialName("pending_questions") val pendingQuestions: List<QuestionRequestedPayload> = emptyList(),
-)
-
-/** The snapshot's rich `session` object; only [busy] and the context fill of [usage]
- * are consumed (usage carries `context_tokens`/`context_limit` — not the /status
- * `max_context_tokens` naming). The usage has been real since 0.38.0 and seeds the
- * cold-start ring directly (ticket 161); the same server version made
- * `total_cost_usd`/`context_limit`/`turn_count` optional — the snapshot omits cost
- * and turn count (never decoded here), and an absent limit decodes to 0, the
- * "unknown" marker the mapper drops like an explicit 0 (100's rule). */
-@Serializable
-data class SnapshotSessionDto(
-    val busy: Boolean = false,
-    val usage: SnapshotUsageDto? = null,
-)
-
-@Serializable
-data class SnapshotUsageDto(
-    @SerialName("context_tokens") val contextTokens: Long = 0,
-    @SerialName("context_limit") val contextLimit: Long = 0,
-)
-
-@Serializable
-data class SubagentRosterEntryDto(
-    val id: String = "",
-    @SerialName("subagent_type") val subagentType: String = "",
-    val description: String = "",
-    @SerialName("subagent_phase") val subagentPhase: String = "",
-    @SerialName("parent_tool_call_id") val parentToolCallId: String = "",
-    @SerialName("run_in_background") val runInBackground: Boolean = false,
-    // Optional (docs/server-api.md, Session snapshot roster): the member's position
-    // inside an AgentSwarm call. The roster carries no task-id field — its `id` is
-    // the subagent id (verified upstream, ticket 134).
-    @SerialName("swarm_index") val swarmIndex: Int? = null,
-    // Present once the run is terminal (the result summary tail).
-    @SerialName("output_preview") val outputPreview: String? = null,
-    // The run's bound model/effort (0.34.0, snake_case here — ticket 135).
-    val model: String? = null,
-    @SerialName("thinking_effort") val thinkingEffort: String? = null,
-)
-
-/** The active turn's live tail: the ONLY carrier of the turn's pre-watermark content
- * (the resume-cursor replay covers frames after the watermark only, and the turn's
- * messages commit to history at its end), so the cold start seeds the live tail from
- * it (ticket 144). `running_tools` entries also carry a `description` — ignored. */
-@Serializable
-data class InFlightTurnDto(
-    @SerialName("turn_id") val turnId: Long = 0,
-    @SerialName("assistant_text") val assistantText: String = "",
-    @SerialName("thinking_text") val thinkingText: String = "",
-    @SerialName("running_tools") val runningTools: List<RunningToolDto> = emptyList(),
-    @SerialName("current_prompt_id") val currentPromptId: String = "",
-)
-
-@Serializable
-data class RunningToolDto(
-    @SerialName("tool_call_id") val toolCallId: String = "",
-    val name: String = "",
-    val args: JsonObject? = null,
-    // Same shape as tool.call.started's display (the 0.31.1 verbatim capture,
-    // docs/server-api.md): it feeds the seeded row's preview.
-    val display: ToolInputDisplayDto? = null,
-)
-
 // --- GET /api/v1/sessions/{id}/transcript (docs/server-api.md, Transcript) -----------
 // Turn-granular per-agent history (046), pinned from live 0.29.2 captures. The
 // cold-rebuild path omits the warm-only fields (startedAt/endedAt, usage/timing,
@@ -666,6 +436,71 @@ data class TranscriptData(
     @SerialName("agent_id") val agentId: String = "",
     val items: List<TranscriptItemDto> = emptyList(),
     @SerialName("has_more") val hasMore: Boolean = false,
+    // The session's unpaginated global state, shipped with every page (2.5.0 — the
+    // cold-start read model replacing the removed snapshot, ticket 176). [seq] is the
+    // agent's op-batch watermark for `transcript_since` (live sessions only — absent
+    // on a cold session). [interactions] is the full entity list, ended ones
+    // included; [pendingInteractions] the ids still waiting.
+    val interactions: List<InteractionEntityDto> = emptyList(),
+    @SerialName("pending_interactions") val pendingInteractions: List<String> = emptyList(),
+    val prompts: List<PromptEntityDto> = emptyList(),
+    val agents: List<TranscriptAgentDto> = emptyList(),
+    val seq: Long? = null,
+)
+
+/** One `agents` roster entry of the transcript (2.5.0): every agent of the session,
+ * children included. [type] is `main` or `sub`. */
+@Serializable
+data class TranscriptAgentDto(
+    val agentId: String = "",
+    val type: String = "",
+    val parentAgentId: String? = null,
+)
+
+/** The `request` of a pending APPROVAL interaction on the REST transcript — camelCase,
+ * unlike the WS `interaction` frame's snake_case request (re-verified live on 2.5.1,
+ * docs/server-api.md, Pending state on REST). [display] is the same discriminated
+ * object tool frames carry; [agentId] is the asking agent. */
+@Serializable
+data class TranscriptApprovalRequestDto(
+    val toolName: String = "",
+    val action: String = "",
+    val display: ToolInputDisplayDto? = null,
+    val agentId: String? = null,
+)
+
+// --- GET /api/v1/sessions/{id}/prompts (docs/server-api.md, Prompts → Queue
+// snapshot — new in 2.5.0) ------------------------------------------------------
+
+/** `data` of the main agent's prompt queue: the running prompt and the queued ones,
+ * in queue order. */
+@Serializable
+data class PromptQueueData(
+    val active: QueuePromptDto? = null,
+    val queued: List<QueuePromptDto> = emptyList(),
+)
+
+/** One prompt of the queue view (snake_case, unlike the camelCase transcript prompt
+ * entity). [content] is the submitted content array — the history part shapes. */
+@Serializable
+data class QueuePromptDto(
+    @SerialName("prompt_id") val promptId: String = "",
+    @SerialName("user_message_id") val userMessageId: String? = null,
+    val status: String = "",
+    val content: List<ContentPartDto> = emptyList(),
+    @SerialName("created_at") val createdAt: String? = null,
+)
+
+// --- GET /api/v1/sessions/{id}/transcript/ops (docs/server-api.md, Transcript
+// catch-up — 2.5.0) -----------------------------------------------------------
+
+/** `data` of the transcript catch-up. Only the journal coverage is consumed: the
+ * batches themselves are replayed over the WebSocket by `transcript_since`. */
+@Serializable
+data class TranscriptCatchUpData(
+    @SerialName("agent_id") val agentId: String = "",
+    @SerialName("latest_seq") val latestSeq: Long = 0,
+    val complete: Boolean = false,
 )
 
 /** Flat item shape: [kind] is `turn` or `marker`, each filling only its own fields.
@@ -728,41 +563,3 @@ data class TranscriptFrameDto(
     // String for shell-style tools, a JSON value for structured ones (like tool_result).
     val output: JsonElement? = null,
 )
-
-
-// --- compaction.* (docs/server-api.md, Compact — ticket 056) -------------------------
-
-/** `compaction.started` payload: [instruction] is the optional summarizer hint sent
- * with the POST (consumed only for completeness — the app sends no instruction). */
-@Serializable
-data class CompactionStartedPayload(
-    val trigger: String = "",
-    val instruction: String? = null,
-)
-
-@Serializable
-data class CompactionCompletedPayload(
-    val result: CompactionResultDto? = null,
-)
-
-@Serializable
-data class CompactionResultDto(
-    val summary: String = "",
-    val compactedCount: Int = 0,
-    val tokensBefore: Long = 0,
-    val tokensAfter: Long = 0,
-    val keptUserMessageCount: Int = 0,
-)
-
-/** `compaction.failed`/`cancelled`/`blocked` payload: the schemas exist only in the
- * protocol bundle and were never observed on this server — every field stays optional
- * so any shape decodes, and a missing payload still ends the compacting state. */
-@Serializable
-data class CompactionFailedPayload(
-    val reason: String? = null,
-    val message: String? = null,
-    val error: String? = null,
-) {
-    /** Best-effort human-readable cause, whichever field the variant carries. */
-    val cause: String? get() = message ?: error ?: reason
-}

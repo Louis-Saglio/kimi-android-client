@@ -1,6 +1,7 @@
 package fr.louissaglio.kimi.android.ui.search
 
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
@@ -107,5 +108,20 @@ class SearchScreenTest {
         composeTestRule.onNodeWithText("Deploy hotfix").performClick()
 
         assertEquals(listOf(expected), opened)
+    }
+
+    @Test
+    fun disabledSearchExplainsWithoutRetryAndLocksTheField() {
+        // Ticket 183: the server's index is off — a phone-level explanation, no
+        // raw server sentence, no Retry, and the query field disabled.
+        searchContent(
+            SearchViewModel.UiState(query = "deploy", submittedQuery = "deploy", searchDisabled = true),
+        )
+
+        composeTestRule.onNodeWithText("Search is disabled on this server").assertIsDisplayed()
+        composeTestRule.onNodeWithText("The server operator can enable the search index.").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Retry").assertDoesNotExist()
+        // A disabled TextField drops its SetText action, so match it by its text.
+        composeTestRule.onNodeWithText("deploy").assertIsNotEnabled()
     }
 }

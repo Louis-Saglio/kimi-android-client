@@ -4,8 +4,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
-/** The jobs sheet's tap navigation for REST-seeded sub-agent jobs (REST /tasks omits
- * the agentId): the page id is recovered from the spawning `Agent` row's result
+/** The jobs sheet's tap navigation for sub-agent jobs without an agentId (a
+ * transcript-healed job has no `child_agent_id`): the page id is recovered from the spawning `Agent` row's result
  * stub, which carries `task_id: <taskId>` next to the row's sub-agent link. */
 class SubagentIdForTaskTest {
 

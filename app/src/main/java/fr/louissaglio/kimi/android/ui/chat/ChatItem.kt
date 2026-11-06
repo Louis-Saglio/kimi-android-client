@@ -2,6 +2,7 @@ package fr.louissaglio.kimi.android.ui.chat
 
 import fr.louissaglio.kimi.android.data.chat.AgentCallDisplay
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
+import fr.louissaglio.kimi.android.data.chat.ToolMedia
 import fr.louissaglio.kimi.android.data.chat.ToolPayload
 import java.time.Instant
 import kotlinx.serialization.json.JsonObject
@@ -20,8 +21,9 @@ sealed interface ChatItem {
      * [createdAt] is the server timestamp, shown as a caption under the bubble
      * (ticket 039); null on live spliced messages until the turn-end refetch.
      * [queued] is the prompt's queue position while it waits server-side (ticket 154):
-     * set on the optimistic local echo by `prompt.queued`, cleared by `prompt.started`
-     * (or when the splice heals the echo) — the caption shows "Queued #N" while set. */
+     * set on the optimistic local echo by a queued `prompt.upsert`, cleared when the
+     * prompt leaves the queue (or when the splice heals the echo) — the caption shows
+     * "Queued #N" while set. */
     data class UserMessage(
         override val id: String,
         val text: String,
@@ -56,8 +58,7 @@ sealed interface ChatItem {
      * ticket 124).
      * [output] is the result
      * text; either may be blank while the call is still running.
-     * While running, [output] accumulates the volatile tool.progress chunks (ticket 025)
-     * — the definitive tool.result output replaces them wholesale. [subagentId] links an
+     * The definitive result output replaces it wholesale. [subagentId] links an
      * `Agent` row to its sub-agent's page (ticket 045); null rows are not tappable.
      * It stays the single-`Agent` link (ticket 134): an `AgentSwarm` row never carries
      * it — the swarm card navigates by the tool call id the row already holds.
@@ -76,7 +77,12 @@ sealed interface ChatItem {
      * (ticket 097) — the job screen's budget display derives
      * from them (REST never exposes the timeout). All three link/budget fields are
      * derived by the ONE enrichment pass every row path routes through
-     * ([enriched], ticket 098). */
+     * ([enriched], ticket 098).
+     * [media] are the result's `session_media` references (ticket 184 — a 2.5.1
+     * content-part array output): the expanded row renders the images through the
+     * chat's session-media thumbnail path and videos as filename chips, the collapsed
+     * row a small media indicator. They follow [output]'s merge rules (the definitive
+     * result replaces them, history/orphan merges keep the first non-empty). */
     data class ToolActivity(
         override val id: String,
         val name: String,
@@ -94,6 +100,7 @@ sealed interface ChatItem {
         val nextStep: String? = null,
         val timeoutSeconds: Int? = null,
         val timeoutDisabled: Boolean = false,
+        val media: List<ToolMedia> = emptyList(),
     ) : ChatItem
 
     /** A run of consecutive tool calls collapsed into one card (ticket 037), like the

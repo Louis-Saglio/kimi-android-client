@@ -89,3 +89,66 @@ Relevant code: `ui/chat/SubagentStreamStore.kt`,
 (`Subagent*`), `data/chat/SessionSocket.kt`, `data/chat/ChatApi.kt`
 (`transcript`). Wire reference: `docs/server-api.md` → Sub-agents and
 WebSocket → Transcript protocol.
+
+## Implementation notes
+
+**2026-11-06 —** The sub-agent record is now built from the spawn `task` frame. In
+`SubagentStreamStore`, `applySpawnTask` (it replaces 179's `mergeSpawnTask` and the
+`spawn`/`onLifecycle` handlers) takes every subagent-kind `task.list`/`task` entry,
+whoever owns it, and creates or updates the record keyed by `child_agent_id`. It writes:
+- the task id (first writer) and the `parent_tool_call_id` row link, registered in the
+  link registry (so ticket 157's navigation is unchanged);
+- the owning agent, the description and `swarm_index` (first writer);
+- `detached` → `runInBackground`, and the model/effort pair;
+- the status, pinned Live: running + `phase:"suspended"` → Suspended (`state_reason` is
+  the suspend cause), any other running phase → Working; ended → Completed /
+  Cancelled (`killed`) / Failed (`failed`/`timed_out`/`lost`), with
+  `result_summary`/`error`. The summary stands in as the final bubble while the timeline
+  is empty.
+
+A `task.list` that no longer names a live-pinned running spawn of the same owner releases
+the pin, so the `Agent` result / transcript heal lands after a missed ended frame.
+`ChatViewModel` forwards main-owned task frames to the store, then re-mines its `Agent`
+rows. The new link names the record, and the call args fill the subagent type and the
+task prompt.
+
+- Child streams: a child's own frames (ops, reset signal, `todo`, `task`, `agent`)
+  create its record when they arrive before the spawn frame; nothing is dropped any more.
+  `SessionSocket` now emits a child's `agent` frame tagged with its id. Its model/effort
+  update the record; busy/permission render nothing. `usage` stays main-only.
+- Live hand-over: when `applyTranscriptPage` replaces the live rows, it seeds the child's
+  socket fold and watermark from the page (`ChatRepository.seedTranscript`) and renders a
+  running newest turn as live rows (`ChatTimeline.seedRunningTurn`). Replacing happens on
+  a reconcile, a cold open with no live rows, a stale flag, or a still-running newest
+  turn. The ops after the page extend those rows instead of duplicating the in-flight
+  bubble. A child `TranscriptStale` flags the live rows stale and bumps
+  `SubagentState.resyncGeneration`; `SubagentViewModel.maybeResync` then refetches the
+  open page. New `ChatTimeline.hasLiveRows`.
+- Cold open: `applyRoster(sessionId, List<TranscriptAgent>)` creates identity-only
+  records from the main transcript's `agents`. The page's transcript fetch and the
+  `Agent` result (its `agent_id:` marker) fill history, status and link.
+- Deleted: the `subagent.*` events (`SessionEvent.Subagent*`, `SubagentLifecycleEvent`),
+  `SubagentRosterEntry`/`SubagentRosterPhase` (`data/chat/SubagentRoster.kt`), the store's
+  Roster status tier and the stale `/snapshot` route of `SubagentViewModelTest`.
+  `isSubagentScoped` is now "agent-scoped and not main".
+- UI: `SubagentViewModel.UiState.runInBackground`; the page's top-bar subtitle shows
+  "Background".
+- Unrelated pre-existing bug fixed (it made `SubagentStreamStoreKeepAliveTest`'s
+  hand-over test fail deterministically on its own, on HEAD too). `ChatViewModel`'s
+  socket-gate `init` ran the cold start inline when a sub-agent page was already open,
+  before `turnSeedGuard`/`coldStartJob`/`coldStartDone` were initialised: an NPE, or a
+  reset by their initialisers. The gate now starts from the class body's last `init`
+  block.
+- Tests: `SubagentStreamStoreTest` (rebuilt on spawn task frames: creation, every
+  outcome, summary bubble, child-frame creation, the child agent frame, the roster cold
+  open of a finished child, pin release, the hand-over without duplicates, stale resync),
+  `SubagentViewModelTest` (task-frame spawns, background badge, stale refetch),
+  `ChatViewModelTest` (a live foreground spawn end to end over the socket: row link,
+  child stream, completed summary, killed → Cancelled; a background spawn streaming
+  after the main turn ends; the approval badge from the call's type), `SessionSocketTest`
+  (child `agent` frame emitted and tagged), and `SwarmViewModelTest`,
+  `SubagentStreamStoreKeepAliveTest`, `JobDetailViewModelTest` ported. There is a shared
+  `TranscriptFrames.spawnTaskState`/`spawnTaskFrame` builder.
+- Left open: the sub-agent page's own task controls (Stop on a child-owned job). Ticket
+  179 deferred them here, but this ticket puts task controls out of scope; the stale
+  "ticket 182's" cross-references now say "not wired yet".

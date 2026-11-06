@@ -150,9 +150,9 @@ data class WorkspaceDto(
 @Serializable
 data class SessionListWsFrame(
     val type: String = "",
-    // The emitting session, on event frames only. 0.31.0 also broadcasts events for
-    // sessions this connection never subscribed to, so the socket drops any frame
-    // whose sessionId is not in the subscribed set.
+    // The emitting session, on event frames only. The per-session pushes reach every
+    // connection, so the socket drops any frame whose sessionId is not in the set of
+    // loaded ids it observes.
     @SerialName("session_id") val sessionId: String? = null,
     val payload: JsonObject? = null,
 )

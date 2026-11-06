@@ -5,15 +5,15 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import fr.louissaglio.kimi.android.data.chat.BackgroundTask
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
 /** Semantics tests for the job screen's output block: the loading placeholder that
- * stands in while the entry fetch runs (the shell renders from the route seeds
- * first), then the output tail / the "No output yet" placeholder. */
+ * stands in while the `task.watch` awaits its first chunk (the shell renders from the
+ * route seeds first), then the output tail / the "No output yet" placeholder, and a
+ * watch error above the fallback (ticket 180). */
 @RunWith(AndroidJUnit4::class)
 class JobOutputBlockTest {
 
@@ -37,8 +37,8 @@ class JobOutputBlockTest {
         outputBlock(
             JobDetailViewModel.UiState(
                 taskId = "bash-1",
-                status = BackgroundTask.Status.Running,
-                outputPreview = "tick 41\n",
+                status = Job.Status.Running,
+                output = "tick 41\n",
                 isLoading = false,
             ),
         )
@@ -52,7 +52,7 @@ class JobOutputBlockTest {
         outputBlock(
             JobDetailViewModel.UiState(
                 taskId = "bash-1",
-                status = BackgroundTask.Status.Completed,
+                status = Job.Status.Completed,
                 isLoading = false,
             ),
         )
@@ -62,13 +62,28 @@ class JobOutputBlockTest {
     }
 
     @Test
+    fun aWatchErrorShowsAboveTheFallbackSummary() {
+        outputBlock(
+            JobDetailViewModel.UiState(
+                taskId = "bash-1",
+                status = Job.Status.Completed,
+                output = "done",
+                outputError = "task not found",
+            ),
+        )
+
+        composeTestRule.onNodeWithText("Output unavailable: task not found").assertIsDisplayed()
+        composeTestRule.onNodeWithText("done").assertIsDisplayed()
+    }
+
+    @Test
     fun aSubAgentOwnedJobShowsTheOutputUnavailablePlaceholder() {
         // Store-backed mode (ticket 098): no output channel exists for these tasks —
         // an explicit placeholder, never the poll spinner or the "No output yet" copy.
         outputBlock(
             JobDetailViewModel.UiState(
                 taskId = "bash-1",
-                status = BackgroundTask.Status.Running,
+                status = Job.Status.Running,
                 storeBacked = true,
                 isLoading = false,
             ),

@@ -33,7 +33,7 @@ class AgentSpawnTapTest {
 
     @Test
     fun `a spawn row whose link has not landed yet is inert`() {
-        // Foreground before subagent.spawned correlates; background before the
+        // Foreground before the spawn task frame correlates; background before the
         // spawn result's `task_id:` head arrives.
         assertNull(spawn(background = false).agentSpawnTap())
         assertNull(spawn(background = true).agentSpawnTap())

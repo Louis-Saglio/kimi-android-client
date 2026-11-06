@@ -10,7 +10,6 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import fr.louissaglio.kimi.android.data.chat.BackgroundTask
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 import java.time.Instant
 import org.junit.Rule
@@ -19,7 +18,7 @@ import org.junit.runner.RunWith
 
 /** Semantics tests for the job screen's status line (ticket 097): the budget text
  * (`elapsed / budget`, default labeled), the determinate progress fraction, and the
- * "timed out" terminal label vs a REST-seeded "failed". */
+ * "timed out" terminal label vs a plain "failed". */
 @RunWith(AndroidJUnit4::class)
 class JobStatusLineTest {
 
@@ -38,7 +37,7 @@ class JobStatusLineTest {
         budgetIsDefault: Boolean = false,
     ) = JobDetailViewModel.UiState(
         taskId = "bash-1",
-        status = BackgroundTask.Status.Running,
+        status = Job.Status.Running,
         startedAt = now.minusSeconds(elapsedSeconds),
         budgetSeconds = budgetSeconds,
         budgetIsDefault = budgetIsDefault,
@@ -90,7 +89,7 @@ class JobStatusLineTest {
         statusLine(
             JobDetailViewModel.UiState(
                 taskId = "bash-1",
-                status = BackgroundTask.Status.Failed,
+                status = Job.Status.Failed,
                 startedAt = now.minusSeconds(30),
                 completedAt = now,
                 budgetSeconds = 30,
@@ -103,12 +102,12 @@ class JobStatusLineTest {
     }
 
     @Test
-    fun aRestSeededFailureReadsPlainFailed() {
-        // REST collapses timed_out to failed — without the live flag nothing is claimed.
+    fun aPlainFailureReadsFailed() {
+        // A failed (not timed_out) outcome — without the flag nothing is claimed.
         statusLine(
             JobDetailViewModel.UiState(
                 taskId = "bash-1",
-                status = BackgroundTask.Status.Failed,
+                status = Job.Status.Failed,
                 startedAt = now.minusSeconds(5),
                 completedAt = now,
             ),

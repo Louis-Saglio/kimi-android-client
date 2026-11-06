@@ -37,8 +37,16 @@ data class ChatMessage(
             val args: JsonObject? = null,
         ) : Part
 
-        /** [output] is the full result text, shown by the expanded row (ticket 023). */
-        data class ToolResult(val toolCallId: String, val isError: Boolean, val output: String = "") : Part
+        /** [output] is the full result text, shown by the expanded row (ticket 023).
+         * [media] are the result's `session_media` references (ticket 184 — a 2.5.1
+         * content-part array output, ChatMessageMapper.toolOutput); empty for a
+         * plain-string output. */
+        data class ToolResult(
+            val toolCallId: String,
+            val isError: Boolean,
+            val output: String = "",
+            val media: List<ToolMedia> = emptyList(),
+        ) : Part
 
         /** A non-image uploaded file, from the message origin's structured `attachments`
          * array (ticket 160, 0.39.1+ — docs/server-api.md, Prompts). [fileId] comes from
@@ -76,6 +84,6 @@ data class MessagePage(
 )
 
 /** `origin.kind` of the user message a compaction appends to history (bare summary,
- * docs/server-api.md, Compact) — and of the id-less summary in the `context.spliced`
- * rewrite (prefixed text there; both are kept out of the user-bubble path). */
+ * docs/server-api.md, Compact) — and of the id-less summary in the compaction's `undo`
+ * marker rewrite (prefixed text there; both are kept out of the user-bubble path). */
 const val ORIGIN_KIND_COMPACTION_SUMMARY = "compaction_summary"

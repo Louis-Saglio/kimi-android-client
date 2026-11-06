@@ -85,3 +85,42 @@ Relevant code: `data/chat/SessionSocket.kt` (compaction branches),
 `data/chat/ChatEvents.kt` (`CompactionStarted`/`Completed`/`Failed`),
 `ui/chat/ChatViewModel.kt` (compacting state). Wire reference:
 `docs/server-api.md` → Compact and WebSocket → Transcript protocol.
+
+## Implementation notes
+
+**2026-11-06 —** `TranscriptFold.onCompactionMarker` folds the `marker:"compaction"`
+items (`CompactionMarkerPayload`/`CompactionResultDto` in `TranscriptOpsDtos.kt`):
+`phase:"started"` → `SessionEvent.CompactionStarted(trigger, agentId)`, `phase:"completed"`
+→ `CompactionCompleted(summary, compactedCount, tokensBefore, tokensAfter,
+keptUserMessageCount, agentId)`. Both are now `AgentScopedEvent`s (a child's go to the
+sub-agent store, which ignores them) and dedup by marker id with the `undo` markers, so
+a resume replay never re-opens a finished compaction. A completed marker without
+`result`, or an unknown phase, emits nothing. The `undo` marker between them goes
+through the existing splice path unchanged (kept user messages dedup by id, the
+continuation injection is dropped by the fold, the id-less summary by `ChatTimeline`).
+
+- No failure marker: `SessionSocket` now emits the global `event.session.work_changed`
+  for its own session as `SessionEvent.SessionWorkChanged(busy)` (`ChatWorkChangedPayload`;
+  a payload without `busy` emits nothing). `ChatViewModel.settleDroppedCompaction` ends a
+  compacting state still open when the session goes idle — `SessionWorkChanged(false)`
+  or the `agent` frame's `AgentBusyUpdated(running = false)`; after a completed marker
+  it is a no-op.
+- `SessionEvent.CompactionFailed` and the ViewModel branch that sent a failure snackbar
+  for it are deleted. `ChatTimeline.compactionFailed` became `compactionAbandoned`,
+  which removes only a PENDING live divider (a previous run's done trace stays).
+  `Effect.CompactionFailed` now only covers the REST refusal (`40910`), whose handling
+  is unchanged.
+- `CompactionStarted.instruction` was dropped instead of kept as an always-null field:
+  2.5.0 does not echo it, and nothing read it.
+- No duplicate divider: `ChatTimeline.pruneCoveredLiveRows` drops a done live divider
+  when a keep-live refetch's history carries a divider with the same summary (the
+  completed marker's `result.summary` is the bare text history persists). A clear-live
+  refetch already replaced it.
+- Tests: `TranscriptFoldTest` (the three markers, replay dedup, agent tagging,
+  unreadable phases), `SessionSocketTest` (markers + this session's `work_changed`,
+  foreign/busy-less frames ignored), `ChatTimelineTest` (abandon keeps a done trace,
+  keep-live refetch after a completion shows one divider), `ChatViewModelTest` (full
+  marker round with summary and token delta, next history fetch renders one divider,
+  idle `work_changed`/`agent` ends a dropped compaction, `40910` never enters the
+  compacting state). Shared builders in `testutil/TranscriptFrames`
+  (`compactionStartedOp`/`compactionUndoOp`/`compactionCompletedOp`/`workChangedFrame`).

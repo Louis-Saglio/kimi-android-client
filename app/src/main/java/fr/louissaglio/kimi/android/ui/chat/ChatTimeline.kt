@@ -3,11 +3,11 @@ package fr.louissaglio.kimi.android.ui.chat
 import fr.louissaglio.kimi.android.data.chat.AGENT_TOOL_NAME
 import fr.louissaglio.kimi.android.data.chat.AgentCallDisplay
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
-import fr.louissaglio.kimi.android.data.chat.InFlightTurn
 import fr.louissaglio.kimi.android.data.chat.ORIGIN_KIND_COMPACTION_SUMMARY
+import fr.louissaglio.kimi.android.data.chat.PromptStatus
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
-import fr.louissaglio.kimi.android.data.chat.Todo
-import fr.louissaglio.kimi.android.data.chat.TodoParser
+import fr.louissaglio.kimi.android.data.chat.TODO_LIST_TOOL_NAME
+import fr.louissaglio.kimi.android.data.chat.ToolMedia
 import fr.louissaglio.kimi.android.data.chat.ToolPayloads
 import fr.louissaglio.kimi.android.data.chat.TranscriptFrame
 import fr.louissaglio.kimi.android.data.chat.TranscriptTurn
@@ -38,7 +38,6 @@ import kotlinx.serialization.json.JsonObject
  * turn pages into the same prefix/tail split.
  */
 class ChatTimeline(
-    private val todoParser: TodoParser,
     private val historyBacked: Boolean = true,
 ) {
 
@@ -62,15 +61,9 @@ class ChatTimeline(
 
     /** Todo tool calls seen so far (ticket 042): their rows are suppressed — the
      * widget replaces them — and their results must not surface as orphan rows. Ids
-     * are globally unique per session, so the set is never pruned. */
+     * are globally unique per session, so the set is never pruned. The widget's list
+     * itself is not timeline state: the `todo` frame drives it (ticket 178). */
     private val todoCallIds = mutableSetOf<String>()
-
-    // The widget mirrors the latest TodoList call (ticket 042). Committed and live
-    // states are tracked apart: a mid-turn refetch re-derives the committed value
-    // while a live call not yet committed stays the latest. null = no call seen,
-    // empty = the last call cleared the list; both hide the widget.
-    private var committedTodos: List<Todo>? = null
-    private var liveTodos: List<Todo>? = null
 
     /** Copy of the newest ended turn's footer (ticket 155), null when the last
      * `turn.ended` carried no known `interruptReason`. Set by [onTurnEnded]; the row
@@ -96,9 +89,9 @@ class ChatTimeline(
 
     fun items(): List<ChatItem> = rows.toList()
 
-    /** Live calls win over history (they are newer) until the turn-end refetch
-     * commits them. */
-    fun todos(): List<Todo>? = liveTodos ?: committedTodos
+    /** True while rows sit past the committed boundary — the live tail a socket fold
+     * is feeding (the sub-agent store's transcript hand-over test, ticket 182). */
+    val hasLiveRows: Boolean get() = rows.size > liveStart
 
     /**
      * Replaces committed rows from a fresh history fetch. With [keepLive] (mid-turn
@@ -108,11 +101,10 @@ class ChatTimeline(
      */
     fun replaceHistory(messages: List<ChatMessage>, keepLive: Boolean) {
         committedMessageIds.clear()
-        committedTodos = null
         val fresh = mutableListOf<ChatItem>()
         messages.forEach { message ->
             committedMessageIds += message.id
-            flatten(fresh, message, updateTodos = true)
+            flatten(fresh, message)
         }
         replaceCommitted(fresh, keepLive)
     }
@@ -123,15 +115,14 @@ class ChatTimeline(
      * [replaceHistory] can never make a page apply twice. Id-less messages are always
      * kept: they never come from history pages (the steer/splice echoes, which carry no
      * id, stay live-end only), so dedup by id is sound. The live tail is untouched: it
-     * only ever grows at the newest end. The todo widget is untouched too — it mirrors
-     * the newest page's latest call, and an older page's call must not regress it.
+     * only ever grows at the newest end.
      * Tool pairs split by the page boundary are re-joined by [completeOrphanResults].
      */
     fun prependHistory(messages: List<ChatMessage>) {
         val fresh = messages.filter { it.id.isBlank() || committedMessageIds.add(it.id) }
         if (fresh.isEmpty()) return
         val head = mutableListOf<ChatItem>()
-        fresh.forEach { flatten(head, it, updateTodos = false) }
+        fresh.forEach { flatten(head, it) }
         completeOrphanResults(head)
         prependCommitted(head)
     }
@@ -173,6 +164,7 @@ class ChatTimeline(
                         preview = call.preview,
                         input = call.input,
                         output = tool.output.ifBlank { call.output },
+                        media = tool.media.ifEmpty { call.media },
                         args = tool.args ?: call.args,
                         payload = tool.payload ?: ToolPayloads.of(call.name, tool.args ?: call.args),
                     ).enriched(name = call.name, input = call.input, output = tool.output)
@@ -202,7 +194,6 @@ class ChatTimeline(
      */
     fun replaceTranscript(turns: List<TranscriptTurn>, keepLive: Boolean) {
         committedTurnIds.clear()
-        committedTodos = null
         val fresh = mutableListOf<ChatItem>()
         turns.forEach { turn ->
             flatten(fresh, turn)
@@ -226,35 +217,76 @@ class ChatTimeline(
     }
 
     /**
-     * The snapshot cold start's in-flight turn seed (ticket 144): the resume-cursor
-     * replay covers only frames AFTER the snapshot's watermark, so the running turn's
-     * pre-watermark tail — the aggregated assistant/thinking text and the still-running
-     * tools — must be restored from the bundle, or a cold open of a busy session shows
-     * a gap between the last committed message and the live stream. The aggregated
-     * text predates the still-running tools (they are running AT the watermark), so
-     * the bubble seeds first and the tools tail it — a delta arriving after a tool row
-     * then opens a fresh bubble, the ordinary live rule. Seeded rows are ordinary live
-     * rows: post-watermark frames upsert/heal them in place and the turn-end refetch
-     * replaces them with the canonical committed turn.
+     * The cold start's running-turn seed (ticket 176, 144's role — the removed
+     * snapshot's `in_flight_turn` is now the newest `GET .../transcript` turn while it
+     * runs): the turn's steps/frames become ordinary LIVE rows, so a cold open of a
+     * busy session shows the in-flight text, thinking and tool calls (running or
+     * already settled) instead of a gap between the last committed message and the live
+     * stream. Frames flatten like a transcript page's — consecutive text/thinking frames
+     * share one bubble, a tool frame breaks it — and the socket fold is seeded with the
+     * same frames, so the replayed/live ops after the page's watermark extend these rows
+     * in place (the last bubble absorbs the text deltas, tool events heal their row by
+     * call id): no gap, no duplicate. User-role frames (steered-in prompts) and the
+     * turn's prompt are left to history and the splice echoes. Whatever history
+     * already committed of the turn is pruned from the seed (the ordinary keep-live
+     * merge), and the turn-end refetch replaces the rows with the canonical turn.
      */
-    fun seedInFlight(turn: InFlightTurn) {
-        if (turn.assistantText.isNotBlank() || turn.thinkingText.isNotBlank()) {
-            rows += ChatItem.AssistantMessage(
-                id = "live_${liveBubbleCount++}",
-                text = turn.assistantText,
-                thinking = turn.thinkingText,
-            )
-        }
-        turn.runningTools.forEach { tool ->
-            if (isTodoCall(tool.toolCallId, tool.name)) {
-                // Same rule as a live TodoList call: no row, the widget mirrors it.
-                todoParser.of(tool.name, tool.input)?.let { liveTodos = it }
-            } else {
-                upsertTool(
-                    tool.toolCallId, tool.name, ToolStatus.Running, tool.preview,
-                    input = tool.input, args = tool.args, agentCall = tool.agentCall,
-                )
+    fun seedRunningTurn(turn: TranscriptTurn) {
+        for (step in turn.steps) {
+            var text = ""
+            var thinking = ""
+            fun flushBubble() {
+                if (text.isNotBlank() || thinking.isNotBlank()) {
+                    rows += ChatItem.AssistantMessage(id = "live_${liveBubbleCount++}", text = text, thinking = thinking)
+                }
+                text = ""
+                thinking = ""
             }
+            for (frame in step.frames) {
+                when (frame) {
+                    is TranscriptFrame.Thinking ->
+                        thinking = listOf(thinking, frame.text).filter { it.isNotBlank() }.joinToString("\n")
+                    is TranscriptFrame.Text ->
+                        if (frame.role == TranscriptFrame.Text.Role.Assistant) {
+                            text = listOf(text, frame.text).filter { it.isNotBlank() }.joinToString("\n")
+                        }
+                    is TranscriptFrame.Tool -> {
+                        flushBubble()
+                        // Same rule as a live TodoList call: no row (ticket 042).
+                        if (!isTodoCall(frame.toolCallId, frame.name)) {
+                            upsertTool(
+                                frame.toolCallId, frame.name, frame.toolStatus(), frame.preview,
+                                input = frame.input, output = frame.output, args = frame.args,
+                                agentCall = frame.agentCall, media = frame.media,
+                            )
+                            if (!frame.running) linkFromResult(frame.toolCallId, frame.output)
+                        }
+                    }
+                }
+            }
+            flushBubble()
+        }
+        pruneCoveredLiveRows()
+    }
+
+    /**
+     * The cold start's queued prompts (ticket 176, from `GET .../prompts`): each waiting
+     * prompt becomes a "Queued #N" bubble exactly like the optimistic echo of a prompt
+     * this client queued (ticket 154) — its message cannot be in history before its own
+     * turn starts, so the echo registry keeps it across refetches; the turn-start splice
+     * heals it in place (same message id) and the prompt's `prompt.upsert` clears the
+     * mark. [prompts] are in queue order; a message already shown (history, an echo)
+     * keeps its row.
+     */
+    fun seedQueuedPrompts(prompts: List<ChatMessage>) {
+        prompts.forEachIndexed { index, message ->
+            appendLocalEcho(
+                message.id,
+                message.parts.filterIsInstance<ChatMessage.Part.Text>().joinToString("\n") { it.text },
+                message.parts.filterIsInstance<ChatMessage.Part.Attachment>(),
+                message.parts.filterIsInstance<ChatMessage.Part.Image>(),
+            )
+            onPromptQueued(message.id, index + 1)
         }
     }
 
@@ -285,7 +317,6 @@ class ChatTimeline(
         }
         if (!keepLive) {
             rows.subList(liveStart, rows.size).clear()
-            liveTodos = null
         } else {
             pruneCoveredLiveRows()
         }
@@ -352,14 +383,19 @@ class ChatTimeline(
 
     /** Drops the live rows a refetch has since committed, so [keepLive]-style replaces
      * never show a row twice: tool rows dedup by call id (a half-committed group keeps
-     * its survivors under the first one's id), assistant bubbles by exact content. */
+     * its survivors under the first one's id), assistant bubbles by exact content, and
+     * a done live compaction divider by its summary (ticket 181: the completed marker's
+     * `result.summary` is the bare text history persists — a refetch landing after the
+     * compaction, mid-turn, carries the canonical divider). */
     private fun pruneCoveredLiveRows() {
         val committedToolIds = mutableSetOf<String>()
         val committedBubbles = mutableListOf<ChatItem.AssistantMessage>()
+        val committedSummaries = mutableSetOf<String?>()
         for (index in 0 until liveStart) {
             when (val item = rows[index]) {
                 is ChatItem.ToolGroup -> item.tools.forEach { committedToolIds += it.id }
                 is ChatItem.AssistantMessage -> committedBubbles += item
+                is ChatItem.CompactionDivider -> committedSummaries += item.summary
                 else -> Unit
             }
         }
@@ -376,6 +412,10 @@ class ChatTimeline(
                 }
                 is ChatItem.AssistantMessage ->
                     if (committedBubbles.any { it.text == item.text && it.thinking == item.thinking }) {
+                        rows.removeAt(index)
+                    }
+                is ChatItem.CompactionDivider ->
+                    if (!item.pending && item.summary != null && item.summary in committedSummaries) {
                         rows.removeAt(index)
                     }
                 else -> Unit
@@ -396,11 +436,8 @@ class ChatTimeline(
                     // (046) merge under the live tail instead of clearing it.
                     liveStart = rows.size
                 }
-                // Same clear as the rows: the previous turn's todo calls are committed
-                // (history-backed) or irrelevant now (sub-agent page renders no widget).
-                liveTodos = null
                 // The footer closed the PREVIOUS turn (ticket 155) — a new one starts
-                // clean. Removal keeps the committed/live boundary like compactionFailed.
+                // clean. Removal keeps the committed/live boundary like compactionAbandoned.
                 turnEndLabel = null
                 val turnEndIndex = rows.indexOfFirst { it.id == TURN_END_ROW_ID }
                 if (turnEndIndex >= 0) {
@@ -410,14 +447,10 @@ class ChatTimeline(
             }
             is SessionEvent.AssistantDelta -> appendDelta(event.delta, thinking = false)
             is SessionEvent.ThinkingDelta -> appendDelta(event.delta, thinking = true)
-            is SessionEvent.ToolCallDelta ->
-                if (isTodoCall(event.toolCallId, event.name)) Unit
-                else upsertTool(event.toolCallId, event.name, ToolStatus.Running)
             is SessionEvent.ToolCallStarted ->
-                if (isTodoCall(event.toolCallId, event.name)) {
-                    // The todo state comes from the call's input, not its result.
-                    todoParser.of(event.name, event.input)?.let { liveTodos = it }
-                } else {
+                // A TodoList call renders no row (ticket 042); the `todo` frame carries
+                // the list (ticket 178).
+                if (!isTodoCall(event.toolCallId, event.name)) {
                     upsertTool(
                         event.toolCallId, event.name, ToolStatus.Running, event.preview,
                         input = event.input, args = event.args, agentCall = event.agentCall,
@@ -431,37 +464,53 @@ class ChatTimeline(
                         "",
                         if (event.isError) ToolStatus.Error else ToolStatus.Done,
                         output = event.output,
+                        media = event.media,
                         // The definitive result replaces any accumulated progress wholesale.
                         replaceOutput = true,
                     )
                     linkFromResult(event.toolCallId, event.output)
                 }
-            is SessionEvent.ToolCallProgress ->
-                if (event.toolCallId !in todoCallIds) appendToolProgress(event.toolCallId, event.chunk)
             is SessionEvent.ContextSpliced -> event.messages.forEach(::appendSpliced)
-            // Prompt lifecycle (ticket 154): the queued mark lands on the optimistic
-            // local echo; started flips it back to the normal in-flight look. Both
-            // no-op when the id names no echo (e.g. a prompt queued from another
-            // client). Submitted is correlation-only — no row effect.
-            is SessionEvent.PromptQueued -> onPromptQueued(event.promptId, event.queueLength)
-            is SessionEvent.PromptStarted -> onPromptStarted(event.promptId)
-            // TurnEnded: the ViewModel refetches history instead; the early-stop footer
-            // arrives through onTurnEnded (ticket 155).
+            // Prompt lifecycle (ticket 154, `prompt.upsert` since 175): the queued mark
+            // lands on the optimistic local echo; any other status (running, steered
+            // into completion, aborted…) flips it back to the normal look. No-op when
+            // the id names no echo (e.g. a prompt queued from another client).
+            is SessionEvent.PromptUpdated ->
+                if (event.status == PromptStatus.Queued) onPromptQueued(event.promptId, event.queueLength)
+                else onPromptLeftQueue(event.promptId)
+            // The ViewModel refetches history on top; the sub-agent store's timelines
+            // get only this.
+            is SessionEvent.TurnEnded -> onTurnEnded(event.interruptReason, event.errorMessage)
             else -> Unit
         }
     }
 
     /**
-     * `turn.ended` (ticket 155): records WHY the turn stopped early — the footer copy
-     * derived from the 0.31.1 `interruptReason` — and shows the footer at once, ahead
-     * of the ViewModel's canonical refetch (which re-appends it via [replaceCommitted]).
-     * A completed turn (no/unknown reason) adds nothing: today's behavior. Main-chat
-     * timeline only — the sub-agent page's terminal states are a separate surface.
+     * A terminal turn (ticket 155; `turn.upsert` since 175): a turn that stopped early
+     * (any [interruptReason]) first settles its still-running live tool rows to Error
+     * — an abort's tool frames may never reach `done`, and the rows must not spin
+     * until the refetch lands (this is the sub-agent page's only settle). Then, on the
+     * main-chat timeline only, it records WHY the turn stopped — the footer copy, a
+     * failed turn's [errorMessage] included — and shows the footer at once, ahead of
+     * the ViewModel's canonical refetch (which re-appends it via [replaceCommitted]).
+     * A completed turn (no/unknown reason) adds nothing.
      */
-    fun onTurnEnded(interruptReason: String?) {
+    fun onTurnEnded(interruptReason: String?, errorMessage: String? = null) {
+        if (interruptReason != null) settleRunningLiveTools()
         if (!historyBacked) return
-        turnEndLabel = turnEndCopy(interruptReason)
+        turnEndLabel = turnEndCopy(interruptReason, errorMessage)
         appendTurnEndRow()
+    }
+
+    /** Running tool rows of the live tail → Error (an interrupted turn's leftovers). */
+    private fun settleRunningLiveTools() {
+        for (index in liveStart until rows.size) {
+            val group = rows[index] as? ChatItem.ToolGroup ?: continue
+            if (group.tools.none { it.status == ToolStatus.Running }) continue
+            rows[index] = group.copy(
+                tools = group.tools.map { if (it.status == ToolStatus.Running) it.copy(status = ToolStatus.Error) else it },
+            )
+        }
     }
 
     /** Upserts the footer row at the tail under one constant id (the compaction
@@ -474,7 +523,8 @@ class ChatTimeline(
     }
 
     /**
-     * `compaction.started` (ticket 056): a pending divider at the tail — or the previous
+     * The `started` compaction marker (ticket 056, marker-driven since 181): a pending
+     * divider at the tail — or the previous
      * run's done divider reset to pending (one constant id: the server runs one
      * compaction per session at a time, so successive runs reuse the row rather than
      * stacking keys). The row lives in the LIVE tail on purpose: a mid-compaction
@@ -488,7 +538,7 @@ class ChatTimeline(
         if (index >= 0) rows[index] = pending else rows += pending
     }
 
-    /** `compaction.completed`: the pending divider flips to done with the token delta
+    /** The `completed` compaction marker: the pending divider flips to done with the token delta
      * and the summary. With no pending row (the app subscribed mid-run), the done row
      * is appended directly — the compaction still gets its timeline trace. */
     fun compactionCompleted(summary: String, tokensBefore: Long, tokensAfter: Long) {
@@ -503,14 +553,15 @@ class ChatTimeline(
         if (index >= 0) rows[index] = done else rows += done
     }
 
-    /** `compaction.failed`/`cancelled`/`blocked`: the pending divider is removed — the
-     * error snackbar (ViewModel) carries the feedback instead. The removal keeps the
+    /** A compaction that never completed (ticket 181 — the session went idle without a
+     * `completed` marker; the server sends no failure marker): the PENDING divider is
+     * removed, a done one (a previous run's trace) stays. The removal keeps the
      * committed/live boundary: a divider sealed into the committed zone (a
      * non-history-backed timeline's turn.started moved it there) shifts [liveStart]
      * with it, or later boundary walks read past the row list. */
-    fun compactionFailed() {
+    fun compactionAbandoned() {
         val index = rows.indexOfFirst { it.id == LIVE_COMPACTION_DIVIDER_ID }
-        if (index < 0) return
+        if (index < 0 || (rows[index] as? ChatItem.CompactionDivider)?.pending != true) return
         rows.removeAt(index)
         if (index < liveStart) liveStart--
     }
@@ -541,7 +592,7 @@ class ChatTimeline(
                 // (canonical content, its timestamp, the queued mark cleared).
                 if (message.id in localEchoes) {
                     val healed = mutableListOf<ChatItem>()
-                    flatten(healed, message, updateTodos = true)
+                    flatten(healed, message)
                     val row = healed.filterIsInstance<ChatItem.UserMessage>().firstOrNull()
                     if (row != null) {
                         rows[index] = row
@@ -551,7 +602,7 @@ class ChatTimeline(
                 return
             }
             val fresh = mutableListOf<ChatItem>()
-            flatten(fresh, message, updateTodos = true)
+            flatten(fresh, message)
             fresh.forEach(::appendCommitted)
             return
         }
@@ -602,16 +653,16 @@ class ChatTimeline(
         appendCommitted(echo)
     }
 
-    /** `prompt.queued` (ticket 154): the echo shows its queue position ("Queued #N").
-     * Only one frame per prompt is expected; a later frame wins. No-op when the id
-     * names no local echo (a prompt queued from another client has none). */
+    /** A queued prompt (ticket 154): the echo shows its queue position ("Queued #N").
+     * A later frame wins. No-op when the id names no local echo (a prompt queued from
+     * another client has none). */
     private fun onPromptQueued(promptId: String, queueLength: Int) {
         healLocalEcho(promptId) { it.copy(queued = queueLength) }
     }
 
-    /** `prompt.started` (ticket 154): the prompt began executing — its echo flips back
-     * to the normal in-flight look. */
-    private fun onPromptStarted(promptId: String) {
+    /** The prompt left the queue (running, steered, aborted… — ticket 154): its echo
+     * flips back to the normal in-flight look. */
+    private fun onPromptLeftQueue(promptId: String) {
         healLocalEcho(promptId) { it.copy(queued = null) }
     }
 
@@ -642,17 +693,6 @@ class ChatTimeline(
         }
     }
 
-    /** Live output streaming (ticket 025): chunks append to the matching *running* row
-     * wherever it lives — a reconnect replay can lag the refetch that committed the
-     * call (ticket 055). Progress is volatile — it never creates a row (unknown ids
-     * are dropped), a finished call keeps its definitive result, and a history refetch
-     * replaces the rows wholesale, clearing whatever accumulated. */
-    private fun appendToolProgress(toolCallId: String, chunk: String) {
-        healTool(toolCallId) { existing ->
-            if (existing.status == ToolStatus.Running) existing.copy(output = existing.output + chunk) else existing
-        }
-    }
-
     /** The tool-row insertion choke point (ticket 055): [healTool] updates the row
      * wherever it lives — committed prefix included, so a replayed event for a call a
      * refetch just committed updates that row's status/output in place instead of
@@ -667,6 +707,7 @@ class ChatTimeline(
         replaceOutput: Boolean = false,
         args: JsonObject? = null,
         agentCall: AgentCallDisplay? = null,
+        media: List<ToolMedia> = emptyList(),
     ) {
         var found = false
         healTool(toolCallId) { existing ->
@@ -678,6 +719,8 @@ class ChatTimeline(
                 preview = existing.preview.ifBlank { preview },
                 input = existing.input.ifBlank { input },
                 output = if (replaceOutput) output else existing.output.ifBlank { output },
+                // The result's media (ticket 184) ride the output's rule.
+                media = if (replaceOutput) media else existing.media.ifEmpty { media },
                 args = mergedArgs,
                 // The typed payload (ticket 119) follows the args' first-writer-wins
                 // rule, derived from the row's EFFECTIVE name/args. The spawn row's
@@ -692,6 +735,7 @@ class ChatTimeline(
                 ChatItem.ToolActivity(
                     toolCallId, name, status, preview, input, output,
                     args = args,
+                    media = media,
                     payload = ToolPayloads.of(name, args),
                     agentCall = agentCall,
                 ),
@@ -699,8 +743,8 @@ class ChatTimeline(
         }
     }
 
-    /** Live row→sub-agent linkage (ticket 045): `subagent.spawned` names the `Agent`
-     * call it answers, so the row gains its open affordance. The whole timeline is
+    /** Live row→sub-agent linkage (ticket 045): the spawn `task` frame's
+     * `parent_tool_call_id` names the `Agent` call it answers (ticket 182), so the row gains its open affordance. The whole timeline is
      * searched — a mid-turn refetch may have committed the running row already.
      * Single-`Agent` only (ticket 134): an `AgentSwarm` row never carries a
      * subagentId — it fans out many members, and the swarm card navigates by the
@@ -748,20 +792,16 @@ class ChatTimeline(
     }
 
     /** Records a call as the agent's todo tool (ticket 042): its row is suppressed and
-     * later result/progress frames for the id are dropped too. */
+     * later result frames for the id are dropped too. */
     private fun isTodoCall(toolCallId: String, name: String): Boolean {
-        if (name != TodoParser.TOOL_NAME) return false
+        if (name != TODO_LIST_TOOL_NAME) return false
         todoCallIds += toolCallId
         return true
     }
 
-    /**
-     * Flattens one history message into [target] rows. [updateTodos] gates the
-     * [committedTodos] write: [replaceHistory] re-derives the widget from the newest
-     * page, while [prependHistory] must not let an older page's call regress it. Todo
-     * row suppression itself is unconditional — todo calls never become rows.
-     */
-    private fun flatten(target: MutableList<ChatItem>, message: ChatMessage, updateTodos: Boolean) {
+    /** Flattens one history message into [target] rows. Todo calls never become rows
+     * (ticket 042). */
+    private fun flatten(target: MutableList<ChatItem>, message: ChatMessage) {
         when (message.role) {
             ChatMessage.Role.User -> {
                 val text = message.parts.filterIsInstance<ChatMessage.Part.Text>().joinToString("\n") { it.text }
@@ -783,11 +823,7 @@ class ChatTimeline(
                     target += ChatItem.AssistantMessage(message.id, text, thinking)
                 }
                 message.parts.filterIsInstance<ChatMessage.Part.ToolUse>().forEach {
-                    if (isTodoCall(it.toolCallId, it.toolName)) {
-                        if (updateTodos) {
-                            todoParser.of(it.toolName, it.input)?.let { parsed -> committedTodos = parsed }
-                        }
-                    } else {
+                    if (!isTodoCall(it.toolCallId, it.toolName)) {
                         target.appendTool(
                             ChatItem.ToolActivity(
                                 it.toolCallId, it.toolName, ToolStatus.Running, it.preview, it.input,
@@ -808,11 +844,14 @@ class ChatTimeline(
                         existing.copy(
                             status = status,
                             output = existing.output.ifBlank { result.output },
+                            media = existing.media.ifEmpty { result.media },
                         ).enriched(output = result.output)
                     }
                     if (!found) {
                         // Result without a matching call (e.g. page boundary): show it anyway.
-                        target.appendTool(ChatItem.ToolActivity(result.toolCallId, "", status, output = result.output))
+                        target.appendTool(
+                            ChatItem.ToolActivity(result.toolCallId, "", status, output = result.output, media = result.media),
+                        )
                     }
                 }
             ChatMessage.Role.Other -> Unit
@@ -825,8 +864,8 @@ class ChatTimeline(
      * thinking/text frames accumulate into one assistant bubble (joined "\n" like the
      * message-history flatten) and tool frames break bubbles into their own grouped
      * rows — mirroring how live deltas and tool rows interleave. The sub-agent's own
-     * todo tool calls are suppressed exactly like the live path (no widget renders
-     * them). Row ids are the server frame/turn ids, so [prependTranscript] pages and
+     * todo tool calls are suppressed exactly like the live path (its `todo` frame feeds
+     * the page's dock — ticket 178). Row ids are the server frame/turn ids, so [prependTranscript] pages and
      * refetches dedup cleanly.
      */
     private fun flatten(target: MutableList<ChatItem>, turn: TranscriptTurn) {
@@ -862,21 +901,20 @@ class ChatTimeline(
                         }
                     is TranscriptFrame.Tool -> {
                         flushBubble()
-                        if (isTodoCall(frame.toolCallId, frame.name)) {
-                            todoParser.of(frame.name, frame.input)?.let { parsed -> committedTodos = parsed }
-                        } else {
+                        if (!isTodoCall(frame.toolCallId, frame.name)) {
                             // The same enrichment as every other row path (ticket 098)
                             // — transcript frames carry input and output in one frame.
                             target.appendTool(
                                 ChatItem.ToolActivity(
                                     frame.toolCallId,
                                     frame.name,
-                                    if (frame.running) ToolStatus.Running else ToolStatus.Done,
+                                    frame.toolStatus(),
                                     frame.preview,
                                     frame.input,
                                     frame.output,
                                     args = frame.args,
                                     payload = ToolPayloads.of(frame.name, frame.args),
+                                    media = frame.media,
                                 ).enriched(),
                             )
                         }
@@ -952,6 +990,14 @@ class ChatTimeline(
     }
 }
 
+/** A transcript tool frame's row status: running, else error (2.5.0's `error` state)
+ * or done. */
+private fun TranscriptFrame.Tool.toolStatus(): ToolStatus = when {
+    running -> ToolStatus.Running
+    failed -> ToolStatus.Error
+    else -> ToolStatus.Done
+}
+
 /**
  * The ONE tool-row enrichment (ticket 098 — the root fix for transcript-backed rows
  * losing their links): every [ChatItem.ToolActivity] field computable from the call's
@@ -994,11 +1040,13 @@ private const val AGENT_ID_PREFIX = "agent_id: "
  * early stop wore before the reason existed); the server's own stops say which. Null
  * — absent or unknown, the app's ignore-unknown rule — means no footer: today's
  * behavior for a turn that simply completed. */
-internal fun turnEndCopy(interruptReason: String?): String? = when (interruptReason) {
+internal fun turnEndCopy(interruptReason: String?, errorMessage: String? = null): String? = when (interruptReason) {
     "user_cancelled" -> "Cancelled"
     "aborted" -> "Aborted"
     "max_steps" -> "Stopped: max steps"
-    "error" -> "Stopped: error"
+    // A failed turn's `error` text rides the footer (ticket 175 — the standalone
+    // `error` frame is gone).
+    "error" -> errorMessage?.takeIf { it.isNotBlank() }?.let { "Stopped: error — $it" } ?: "Stopped: error"
     "filtered" -> "Stopped: filtered"
     "blocked" -> "Stopped: blocked"
     else -> null
