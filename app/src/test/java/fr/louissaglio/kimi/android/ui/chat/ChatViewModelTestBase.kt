@@ -113,11 +113,6 @@ abstract class ChatViewModelTestBase {
     @Volatile
     protected var takeoversSucceed = true
 
-    /** Served for GET /tasks (ticket 092 — the jobs widget's cold-start seed). */
-    @Volatile
-    protected var tasksBody =
-        """{"code":0,"msg":"success","data":{"items":[]},"request_id":"r"}"""
-
     @Volatile
     protected var messagesBody =
         """{"code":0,"msg":"success","data":{"items":[],"has_more":false},"request_id":"r"}"""
@@ -385,15 +380,6 @@ abstract class ChatViewModelTestBase {
                             )
                         }
                     }
-                    path.startsWith("/api/v1/sessions/session_1/tasks") ->
-                        if (request.method == "POST") {
-                            // POST .../tasks/{id}:cancel — a running task acks cancelled:true.
-                            MockResponse(body =
-                                """{"code":0,"msg":"success","data":{"cancelled":true},"request_id":"r"}""",
-                            )
-                        } else {
-                            MockResponse(body = tasksBody)
-                        }
                     path.startsWith("/api/v1/sessions/session_1/media/") ->
                         MockResponse(body = "session-media-bytes")
                     path == "/api/v1/files" -> {

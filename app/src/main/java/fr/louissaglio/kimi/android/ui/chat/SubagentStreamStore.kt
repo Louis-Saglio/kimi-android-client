@@ -4,7 +4,6 @@ import android.util.Log
 import fr.louissaglio.kimi.android.data.chat.AGENT_SWARM_TOOL_NAME
 import fr.louissaglio.kimi.android.data.chat.AGENT_TOOL_NAME
 import fr.louissaglio.kimi.android.data.chat.AgentScopedEvent
-import fr.louissaglio.kimi.android.data.chat.BackgroundTask
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.MAIN_AGENT_ID
@@ -14,7 +13,8 @@ import fr.louissaglio.kimi.android.data.chat.SubagentLifecycleEvent
 import fr.louissaglio.kimi.android.data.chat.SubagentRosterEntry
 import fr.louissaglio.kimi.android.data.chat.SubagentRosterPhase
 import fr.louissaglio.kimi.android.data.chat.SwarmResultParser
-import fr.louissaglio.kimi.android.data.chat.TaskInfo
+import fr.louissaglio.kimi.android.data.chat.TaskOutcome
+import fr.louissaglio.kimi.android.data.chat.TaskState
 import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.TranscriptPage
 import fr.louissaglio.kimi.android.data.chat.TranscriptState
@@ -45,9 +45,9 @@ import kotlinx.serialization.json.jsonPrimitive
 /** Lifecycle of one sub-agent (docs/server-api.md, Sub-agents): Queued between spawned
  * and started, Working while its turn streams (also after a resume), Suspended/Completed/
  * Failed per the matching lifecycle frame. Cancelled (ticket 135) is a deliberate stop —
- * it arrives as `subagent.cancelled` (schema-level), as a live `task.terminated` with
- * `status:"killed"`, as the roster's `cancelled` phase, or as REST `"cancelled"` on a
- * cold start — and never counts as failed in the swarm aggregate (web parity). */
+ * it arrives as `subagent.cancelled` (schema-level), as the member's ended `task` frame
+ * with `outcome:"killed"` (ticket 179), or as the roster's `cancelled` phase — and
+ * never counts as failed in the swarm aggregate (web parity). */
 enum class SubagentStatus { Queued, Working, Suspended, Completed, Failed, Cancelled }
 
 /**
@@ -128,19 +128,20 @@ class SubagentStreamStore @Inject constructor(
          * wholesale like the chat's (ticket 178); null until the first frame. */
         val todos: List<Todo>? = null,
         /** The sub-agent's own background tasks (nested background bash/sub-agents),
-         * fed live by its agent-tagged task.* frames and healed on a cold open by the
-         * transcript's `task` turn origins (ticket 099) — no REST seed exists: REST
-         * `/tasks` serves only the main agent's task store (docs/server-api.md). */
+         * fed live by its agent-tagged `task.list`/`task` frames (ticket 179) and
+         * healed on a cold open by the transcript's `task` turn origins (ticket 099)
+         * — an ended task is never re-listed. */
         val jobs: List<Job> = emptyList(),
         /** The member's position inside its `AgentSwarm` call (schema-only upstream —
          * ordering hint for the swarm roster, ticket 134); null for plain `Agent` spawns. */
         val swarmIndex: Int? = null,
-        /** The background-task registration id (0.38.0 spawned frame); null from the
-         * roster, which carries no such field. */
+        /** The member's task id (`agent-…`): the spawn task frame's (ticket 179 —
+         * foreground members have one too) or the spawning call's; null from the
+         * transcript roster, which carries no such field. */
         val taskId: String? = null,
-        /** The run's bound model/effort (ticket 135): the spawned frame (0.34.0) is
-         * the live carrier, the snapshot roster and the REST `/tasks` list the
-         * cold-start ones; the swarm aggregate's shared-model line reads them. */
+        /** The run's bound model/effort (ticket 135): blank-filled from the spawn
+         * task frame's `model`/`thinking` (ticket 179) and the roster; the swarm
+         * aggregate's shared-model line reads them. */
         val model: String? = null,
         val thinkingEffort: String? = null,
         /** The live suspend cause (ticket 136): set by `subagent.suspended`, cleared
@@ -161,8 +162,8 @@ class SubagentStreamStore @Inject constructor(
     ) {
 
         /** True while the swarm roster row offers its stop action (ticket 137): the
-         * member still runs (Queued/Working/Suspended), its task id — the REST
-         * `:cancel` target, carried only by the spawned frame — is known, and it is
+         * member still runs (Queued/Working/Suspended), its task id — the
+         * `task.stop` target — is known, and it is
          * no ghost row (a backfilled `not_started` member runs nothing). Terminal
          * members and ghosts never show it. */
         val stoppable: Boolean
@@ -175,7 +176,7 @@ class SubagentStreamStore @Inject constructor(
 
         /** True while the sub-agent page's overflow offers "To background" (ticket
          * 138): the member still runs IN THE FOREGROUND — a background run needs no
-         * conversion — with its task id (the REST `:detach` target) known. Terminal
+         * conversion — with its task id (the `task.background` target) known. Terminal
          * members, background members and ghosts never show it. */
         val detachable: Boolean
             get() = stoppable && !runInBackground
@@ -246,13 +247,14 @@ class SubagentStreamStore @Inject constructor(
          * spawned frame or snapshot roster; ticket 134). */
         var swarmIndex: Int? = null
 
-        /** The background-task registration id (first writer wins): only the spawned
-         * frame carries it — the roster has no such field. */
+        /** The member's task id (first writer wins): the spawn task frame
+         * (ticket 179) or the spawning call carries it — the roster has no such
+         * field. */
         var taskId: String? = null
 
         /** The run's bound model/effort (ticket 135): the spawned frame overwrites
          * when it carries them (the highest identity source), the roster and the
-         * REST tasks list fill blanks only. */
+         * spawn task frame fill blanks only. */
         var model: String? = null
         var thinkingEffort: String? = null
 
@@ -282,40 +284,42 @@ class SubagentStreamStore @Inject constructor(
         var resumeHint: String? = null
         var nextStep: String? = null
 
-        /** The sub-agent's own background tasks, keyed by task id (live-only — REST
-         * `/tasks` never serves them; a transcript `task` origin heals the terminal
-         * status on a cold open, ticket 099). Insertion-ordered; the jobs sheet owns
-         * the running-first/terminal-newest display sort. */
+        /** The sub-agent's own background tasks, keyed by task id (from the child's
+         * own `task.list`/`task` frames — ticket 179; a transcript `task` origin heals
+         * the terminal status on a cold open, ticket 099). Insertion-ordered; the jobs
+         * sheet owns the running-first/terminal-newest display sort. */
         private val jobs = LinkedHashMap<String, Job>()
 
-        /** Task ids whose live `task.terminated` was observed (ticket 099): the live
-         * frame is the terminal truth — it carries `endedAt`/`timedOut`/`stopReason`
-         * the transcript origin lacks — so the transcript heal never regresses one
-         * (first-writer-wins against live frames). Process-lifetime by construction:
-         * after process death the set is empty and the transcript heals, which is
-         * exactly the cold-open case. */
+        /** Task ids whose live ended frame was observed (ticket 099): the live frame is
+         * the terminal truth — it carries `endedAt`/the timeout outcome the transcript
+         * origin lacks — so the transcript heal never regresses one (first-writer-wins
+         * against live frames). Process-lifetime by construction: after process death
+         * the set is empty and the transcript heals, which is exactly the cold-open
+         * case. */
         private val liveTerminatedJobIds = mutableSetOf<String>()
 
-        /** One task.* frame's upsert; the page link and the timed-out flag survive a
-         * later upsert that doesn't carry them (the JobsStore merge rule). A terminal
-         * frame additionally pins the task against the transcript heal. */
-        fun upsertJob(job: Job, terminal: Boolean) {
-            if (terminal) liveTerminatedJobIds += job.taskId
+        /** One `task` frame's upsert — the full state, so it replaces the entry; the
+         * page link survives a later frame that omits it (the JobsStore merge rule). A
+         * terminal frame additionally pins the task against the transcript heal. */
+        fun upsertJob(job: Job) {
+            if (!job.isRunning) liveTerminatedJobIds += job.taskId
             val existing = jobs[job.taskId]
-            jobs[job.taskId] = if (existing == null) {
-                job
-            } else {
-                job.copy(
-                    agentId = job.agentId ?: existing.agentId,
-                    timedOut = job.timedOut || existing.timedOut,
-                )
-            }
+            jobs[job.taskId] = job.copy(agentId = job.agentId ?: existing?.agentId)
+        }
+
+        /** The child's `task.list` (ticket 179): the JobsStore merge — listed jobs
+         * upsert, a still-Running job the list no longer names ended unseen and is
+         * dropped, terminal jobs stay. */
+        fun applyListedJobs(listed: List<Job>) {
+            val listedIds = listed.mapTo(HashSet()) { it.taskId }
+            jobs.entries.removeAll { (taskId, job) -> job.isRunning && taskId !in listedIds }
+            listed.forEach(::upsertJob)
         }
 
         /** The transcript `task`-origin upsert (ticket 099): heals a job's terminal
          * status from canonical history. Everything the origin lacks (timestamps,
          * description, page link, timed-out flag) keeps the existing entry's values —
-         * a live-observed `task.started` (still Running) gets its status flipped but
+         * a live-observed running frame's job gets its status flipped but
          * keeps its real `startedAt`. A live-terminated task is skipped: the live
          * frame stays authoritative. */
         fun upsertJobFromTranscript(job: Job) {
@@ -577,12 +581,12 @@ class SubagentStreamStore @Inject constructor(
         when (event) {
             is SessionEvent.SubagentSpawned -> spawn(sessionId, event)
             is SubagentLifecycleEvent -> onLifecycle(sessionId, event)
-            // Background tasks owned by a sub-agent (the payload's agentId stamp —
-            // task events are agent-scoped since the sub-agent page's jobs widget):
-            // they feed only the owning record's jobs list. Main-owned ones are the
-            // chat's JobsStore business and drop here.
-            is SessionEvent.TaskStarted -> onTaskEvent(sessionId, event.agentId, event.info, terminal = false)
-            is SessionEvent.TaskTerminated -> onTaskEvent(sessionId, event.agentId, event.info, terminal = true)
+            // Task frames (ticket 179), tagged with the OWNING agent: a sub-agent's own
+            // tasks feed its record's jobs list; any subagent-kind task (main-owned
+            // spawns above all) merges into the record its child_agent_id names. The
+            // main-owned job listing itself is the chat's JobsStore business.
+            is SessionEvent.TaskListed -> onTaskListed(sessionId, event.agentId, event.tasks)
+            is SessionEvent.TaskUpdated -> onTaskUpdated(sessionId, event.agentId, event.task)
             is AgentScopedEvent -> if (event.agentId != MAIN_AGENT_ID) onTranscript(sessionId, event.agentId, event)
             else -> Unit
         }
@@ -794,8 +798,8 @@ class SubagentStreamStore @Inject constructor(
      * A NON-TERMINAL pin (live or roster) the member's own call owns is stale by
      * construction, though: the result only exists once every member settled
      * server-side, and a cancelled FOREGROUND member gets no live terminal frame at
-     * all (docs/server-api.md — no `task.terminated`, no `subagent.completed`/
-     * `subagent.failed`), so this parse is its ONLY terminal carrier; the pin is
+     * all (docs/server-api.md — no `subagent.completed`/`subagent.failed`; only a
+     * deliberate stop's `killed` task frame), so this parse is its terminal carrier; the pin is
      * demoted to the Result tier and the parse heals it. The guard is
      * [SubagentRecord.latestToolCallId]: only the member's LATEST call's result may
      * settle it, so an old call's re-mined result never flips a member since resumed
@@ -936,84 +940,82 @@ class SubagentStreamStore @Inject constructor(
         publish(sessionId)
     }
 
-    /** One sub-agent-scope task.* frame (started/terminated share the handling):
-     * sub-agent-OWNED tasks (the payload's agentId stamp) upsert the owning record's
-     * jobs list — the sub-agent page's jobs widget; main-owned ones are the chat's
-     * JobsStore business. Independently of the owner, a terminal `killed` frame whose
-     * [TaskInfo.agentId] names a record pins that member Cancelled (ticket 135): a
-     * deliberately stopped member gets NO `subagent.completed`/`failed` frame
-     * (docs/server-api.md), so the live task.terminated is the only live carrier of
-     * the cancelled truth — a main-owned swarm member's frame included.
-     *
-     * Independently of both, an AGENT-kind frame whose [TaskInfo.agentId] names a
-     * record merges the detach transition into it (ticket 138): a foreground run
-     * emits no task.* frames until it is detached (docs/server-api.md, REST /tasks
-     * `:detach`), so any such frame PROVES the run now lives in the background —
-     * the record's runInBackground flips and the registration id fills when the
-     * spawned frame never carried it (a roster seed has none). The frame merges
-     * into the EXISTING record only: no duplicate creation (an unknown id drops
-     * exactly like its transcript frames), no record job — the main-owned listing
-     * is the chat's JobsStore's business. */
-    private fun onTaskEvent(sessionId: String, agentId: String, info: TaskInfo, terminal: Boolean) {
+    /** A `task.list` (ticket 179): each listed task merges into its spawn's record
+     * ([mergeSpawnTask]); a sub-agent's OWN list replaces the running part of its
+     * record's jobs (the JobsStore merge rule). */
+    private fun onTaskListed(sessionId: String, agentId: String, tasks: List<TaskState>) {
         var changed = false
-        if (terminal && info.status == TaskInfo.Status.Killed) {
-            val member = info.agentId?.let { record(sessionId, it) }
-            if (member != null) {
-                member.applyStatus(SubagentStatus.Cancelled, StatusSource.Live)
-                changed = true
-            }
-        }
-        if (info.kind == TaskInfo.Kind.Agent) {
-            val member = info.agentId?.let { record(sessionId, it) }
-            if (member != null) {
-                if (!member.runInBackground) {
-                    member.runInBackground = true
-                    changed = true
-                }
-                if (member.taskId == null) {
-                    member.taskId = info.taskId
-                    changed = true
-                }
-            }
-        }
+        for (task in tasks) changed = mergeSpawnTask(sessionId, task) || changed
         if (agentId != MAIN_AGENT_ID) {
             val record = record(sessionId, agentId)
             if (record == null) {
-                Log.d(TAG, "Dropping task frame for unknown sub-agent '$agentId' (spawn missed)")
+                Log.d(TAG, "Dropping task list for unknown sub-agent '$agentId' (spawn missed)")
             } else {
-                record.upsertJob(info.toJob(), terminal)
+                record.applyListedJobs(tasks.mapNotNull { it.toBackgroundJob() })
                 changed = true
             }
         }
         if (changed) publish(sessionId)
     }
 
-    /** The REST `/tasks` list at a cold start (ticket 135), fed
-     * by the JobsStore's seed. A main-owned sub-agent task whose `agentId` names a
-     * record heals it the two ways the snapshot roster cannot: a BACKGROUND member
-     * is excluded from the roster (REST serves it — docs/server-api.md), so the
-     * list is its only cold-start carrier of the cancelled truth (wire "cancelled")
-     * and of the model/effort pair. Status writes ride the roster precedence tier:
-     * a live pin (a live lifecycle frame or killed task.terminated) always wins. */
-    fun applyTaskList(sessionId: String, tasks: List<BackgroundTask>) {
-        var changed = false
-        for (task in tasks) {
-            if (task.kind != BackgroundTask.Kind.Subagent) continue
-            val record = record(sessionId, task.agentId ?: continue) ?: continue
-            if (record.model == null && !task.model.isNullOrBlank()) {
-                record.model = task.model
-                changed = true
-            }
-            if (record.thinkingEffort == null && !task.thinkingEffort.isNullOrBlank()) {
-                record.thinkingEffort = task.thinkingEffort
-                changed = true
-            }
-            if (task.status == BackgroundTask.Status.Cancelled) {
-                record.applyStatus(SubagentStatus.Cancelled, StatusSource.Roster)
+    /** One `task` frame (ticket 179): the spawn merge ([mergeSpawnTask]), then — for a
+     * task OWNED by a sub-agent (the frame's agent_id) — the owning record's jobs
+     * upsert, the sub-agent page's jobs widget (background tasks only, the shared
+     * [toBackgroundJob] mapping). */
+    private fun onTaskUpdated(sessionId: String, agentId: String, task: TaskState) {
+        var changed = mergeSpawnTask(sessionId, task)
+        if (agentId != MAIN_AGENT_ID) {
+            val record = record(sessionId, agentId)
+            val job = task.toBackgroundJob()
+            if (record == null) {
+                Log.d(TAG, "Dropping task frame for unknown sub-agent '$agentId' (spawn missed)")
+            } else if (job != null) {
+                record.upsertJob(job)
                 changed = true
             }
         }
         if (changed) publish(sessionId)
+    }
+
+    /**
+     * A subagent-kind task whose `child_agent_id` names an EXISTING record (no duplicate
+     * creation — the record itself comes from the roster or the spawning call; the
+     * rest of the record's task-frame derivation is ticket 182's) merges what the
+     * member's controls and badges need:
+     * - the task id (first writer wins) — the handle `task.stop`/`task.background`
+     *   address (tickets 137/138); foreground members have one too since 2.5.0;
+     * - `detached:true` flips `runInBackground` (ticket 138: a detach's replied/frame
+     *   state is the conversion's live carrier, which hides "To background");
+     * - the model/effort pair, blank-filled (ticket 135);
+     * - an ended `killed` outcome pins the member Cancelled (ticket 135 — a stop is
+     *   no failure, and no other carrier says so).
+     * Returns whether the record changed.
+     */
+    private fun mergeSpawnTask(sessionId: String, task: TaskState): Boolean {
+        if (task.kind != TaskState.Kind.Subagent) return false
+        val member = task.childAgentId?.let { record(sessionId, it) } ?: return false
+        var changed = false
+        if (member.taskId == null) {
+            member.taskId = task.taskId
+            changed = true
+        }
+        if (task.detached && !member.runInBackground) {
+            member.runInBackground = true
+            changed = true
+        }
+        if (member.model == null && task.model != null) {
+            member.model = task.model
+            changed = true
+        }
+        if (member.thinkingEffort == null && task.thinking != null) {
+            member.thinkingEffort = task.thinking
+            changed = true
+        }
+        if (task.outcome == TaskOutcome.Killed) {
+            member.applyStatus(SubagentStatus.Cancelled, StatusSource.Live)
+            changed = true
+        }
+        return changed
     }
 
     /** The ticket-099 cold-open heal: a transcript page's task-completion notification
@@ -1027,16 +1029,25 @@ class SubagentStreamStore @Inject constructor(
     private fun mineTaskOrigins(record: SubagentRecord, turns: List<TranscriptTurn>) {
         for (turn in turns) {
             val origin = turn.taskOrigin ?: continue
-            val status = origin.status?.toWireStatus() ?: continue
             // A notification turn only exists once the task is terminal; a "running"
-            // origin would say nothing the live stream doesn't know better.
-            if (status == BackgroundTask.Status.Running) continue
+            // (or unknown) origin maps to null and says nothing the live stream
+            // doesn't know better.
+            val status = origin.status?.toJobStatus() ?: continue
             val kind = when {
-                origin.taskId.startsWith("bash-") -> BackgroundTask.Kind.Bash
-                origin.taskId.startsWith("agent-") -> BackgroundTask.Kind.Subagent
+                origin.taskId.startsWith("bash-") -> Job.Kind.Bash
+                origin.taskId.startsWith("agent-") -> Job.Kind.Subagent
                 else -> continue
             }
-            record.upsertJobFromTranscript(Job(origin.taskId, kind, description = "", status, startedAt = null))
+            record.upsertJobFromTranscript(
+                Job(
+                    origin.taskId,
+                    kind,
+                    description = "",
+                    status,
+                    startedAt = null,
+                    timedOut = origin.status == TaskOutcome.TimedOut,
+                ),
+            )
         }
         record.backfillJobDescriptions()
     }

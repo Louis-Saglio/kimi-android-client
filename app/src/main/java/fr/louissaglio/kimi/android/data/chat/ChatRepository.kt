@@ -259,31 +259,24 @@ class ChatRepository @Inject constructor(
     /** The agent's resume watermark on the session socket; null when none is known. */
     fun transcriptWatermark(sessionId: String, agentId: String): Long? = socket.watermark(sessionId, agentId)
 
-    /** The session's background tasks (`GET .../tasks` — ticket 092): background
-     * sub-agents and bash, terminal ones included. [status] is the optional wire
-     * filter; null fetches unfiltered. */
-    suspend fun getTasks(settings: ServerSettings, sessionId: String, status: String? = null): Result<List<BackgroundTask>> =
-        chatApi.listTasks(settings, sessionId, status)
+    /** Sends one flat task control (`task.stop`/`task.background` — ticket 179) for
+     * [agentId]'s task over the session's live socket and awaits its reply. Success
+     * carries the replied task state, which the socket has already emitted as a
+     * [SessionEvent.TaskUpdated] to the collector; a non-zero code (`40933` not
+     * movable, `40406` unknown task, …) surfaces as [DataError.Api], a missing or
+     * dropped connection as [DataError.Network]. */
+    suspend fun sendTaskControl(
+        sessionId: String,
+        control: TaskControl,
+        taskId: String,
+        agentId: String = MAIN_AGENT_ID,
+    ): Result<TaskState?> = socket.sendTaskControl(sessionId, control, agentId, taskId)
 
-    /** One background task with its stored output tail (`GET .../tasks/{taskId}` —
-     * ticket 096's job screen): the bash preview grows between polls while running.
-     * An unknown task surfaces as the typed DataError.Api(40406). */
-    suspend fun getTask(settings: ServerSettings, sessionId: String, taskId: String): Result<BackgroundTask> =
-        chatApi.getTask(settings, sessionId, taskId)
-
-    /** Cancels one background task (`POST .../tasks/{taskId}:cancel` — ticket 092);
-     * the `task.terminated` teardown arrives over the WebSocket. A terminal task
-     * surfaces as the typed DataError.Api(40904). */
-    suspend fun cancelTask(settings: ServerSettings, sessionId: String, taskId: String): Result<Unit> =
-        chatApi.cancelTask(settings, sessionId, taskId)
-
-    /** Detaches one running foreground task to the background
-     * (`POST .../tasks/{taskId}:detach` — ticket 138, server 0.39.0); the
-     * `task.started` conversion frame arrives over the WebSocket. An unknown task
-     * surfaces as the typed DataError.Api(40406), an already-background or terminal
-     * one as a refusal. */
-    suspend fun detachTask(settings: ServerSettings, sessionId: String, taskId: String): Result<Unit> =
-        chatApi.detachTask(settings, sessionId, taskId)
+    /** The latest known state of [agentId]'s task [taskId] in the session, from the
+     * task frames the socket has seen in this process (ticket 179 — the job screen's
+     * status source); null until one arrives. */
+    fun observeTask(sessionId: String, agentId: String, taskId: String): Flow<TaskState?> =
+        socket.observeTask(sessionId, agentId, taskId)
 
     /** One turn's changed files (`GET .../file-history/changes?turn_id=N` — ticket
      * 149, live since server 0.41.0): [turnId] is the main agent's 0-based turn

@@ -31,7 +31,6 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import fr.louissaglio.kimi.android.data.chat.BackgroundTask
 import fr.louissaglio.kimi.android.ui.common.formatElapsed
 import java.time.Duration
 import java.time.Instant
@@ -85,13 +84,14 @@ internal fun JobsSummaryRow(
  * The jobs sheet (ticket 092): every background task of the session — running first
  * (oldest first), then terminal (newest first) — with its kind badge, plain-English
  * status, and ticking elapsed time (startedAt → endedAt ?: now). Running rows get a
- * trailing Stop button when [onCancel] is non-null (null = read-only sheet — REST
- * task cancel serves only the main agent's store, so the sub-agent page has no
- * cancel); tapping a sub-agent row opens its page, tapping a bash row opens its job
- * screen (ticket 096) when [onOpenJob] is non-null (null = the row is not tappable —
- * the job screen's REST fetch is main-agent-only too). The sub-agent tap reports the
- * whole [Job]: REST seeds carry no agentId, so the caller resolves it from the
- * timeline when the job itself doesn't. Same transient-detail pattern as TodosSheet.
+ * trailing Stop button (`task.stop`) when [onCancel] is non-null (null = read-only
+ * sheet — the sub-agent page's own task controls are ticket 182's); tapping a
+ * sub-agent row opens its page, tapping a bash row opens its job screen (ticket 096)
+ * when [onOpenJob] is non-null (null = the row is not tappable). The sub-agent tap
+ * reports the whole [Job]: a transcript-healed job (ticket 099) carries no agentId,
+ * so the caller resolves it from the timeline when the job itself doesn't — a
+ * frame-fed one carries the frame's `child_agent_id`. Same transient-detail pattern
+ * as TodosSheet.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -138,7 +138,8 @@ internal fun JobsSheet(
 private val TASK_ID_PREFIX = "task_id:"
 
 /** Resolves a background sub-agent job's page id from the timeline ([TodoJobsDock]'s
- * jobs-sheet tap navigation): REST /tasks omits the agentId, but the spawning `Agent`
+ * jobs-sheet tap navigation) when the job carries no agentId (a transcript-healed
+ * job — ticket 099 — has no `child_agent_id`): the spawning `Agent`
  * row's result stub carries a `task_id: <taskId>` line and the row is linked to its
  * sub-agent ([ChatItem.ToolActivity.subagentId]). Null when the row is not among the
  * loaded history pages — the tap is then a no-op. */
@@ -156,7 +157,7 @@ internal fun subagentIdForTask(items: List<ChatItem>?, taskId: String): String? 
  * and a trailing Stop for running rows when [onCancel] is non-null. No status glyph —
  * the plain-English status on the secondary line carries it (Louis's call, ticket
  * 094). Sub-agent rows are tappable (the page navigation — the whole [Job] is
- * reported so the caller can resolve a REST-seeded row's missing agentId); bash rows
+ * reported so the caller can resolve a healed row's missing agentId); bash rows
  * are tappable when [onOpenJob] is non-null (ticket 096's job screen). */
 @Composable
 private fun JobRow(
@@ -167,23 +168,23 @@ private fun JobRow(
     onOpenJob: ((String) -> Unit)?,
 ) {
     val kindLabel = when (job.kind) {
-        BackgroundTask.Kind.Subagent -> "sub-agent"
-        BackgroundTask.Kind.Bash -> "bash"
+        Job.Kind.Subagent -> "sub-agent"
+        Job.Kind.Bash -> "bash"
     }
     val statusLabel = when {
         job.timedOut -> "timed out"
         else -> when (job.status) {
-            BackgroundTask.Status.Running -> "running"
-            BackgroundTask.Status.Completed -> "completed"
-            BackgroundTask.Status.Failed -> "failed"
-            BackgroundTask.Status.Cancelled -> "cancelled"
+            Job.Status.Running -> "running"
+            Job.Status.Completed -> "completed"
+            Job.Status.Failed -> "failed"
+            Job.Status.Cancelled -> "cancelled"
         }
     }
     // Null on a transcript-healed job (ticket 099): the task origin carries no
     // timestamps — the row then shows the bare status, never a fake elapsed.
     val elapsed = job.startedAt?.let { formatElapsed(Duration.between(it, job.endedAt ?: now)) }
     // A live-recorded timeout (ticket 097) reads "timed out after <elapsed>" in error
-    // color; a REST-seeded job can't tell timeout from crash and stays plain "failed".
+    // color (outcome `timed_out`, which the status collapses to Failed).
     val statusText = when {
         job.timedOut && elapsed != null -> "timed out after $elapsed"
         job.timedOut -> "timed out"
@@ -201,9 +202,9 @@ private fun JobRow(
             .heightIn(min = 48.dp)
             .let {
                 when {
-                    job.kind == BackgroundTask.Kind.Subagent ->
+                    job.kind == Job.Kind.Subagent ->
                         it.clickable { onOpenSubagent(job) }
-                    job.kind == BackgroundTask.Kind.Bash && onOpenJob != null ->
+                    job.kind == Job.Kind.Bash && onOpenJob != null ->
                         it.clickable { onOpenJob(job.taskId) }
                     else -> it
                 }

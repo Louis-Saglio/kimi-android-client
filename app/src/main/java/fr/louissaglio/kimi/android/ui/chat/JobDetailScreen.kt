@@ -46,8 +46,6 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import fr.louissaglio.kimi.android.data.chat.BackgroundTask
-import fr.louissaglio.kimi.android.ui.common.ErrorState
 import fr.louissaglio.kimi.android.ui.common.formatElapsed
 import fr.louissaglio.kimi.android.ui.theme.successColor
 import java.time.Duration
@@ -57,19 +55,17 @@ import kotlinx.coroutines.delay
 /**
  * Background-bash job screen (ticket 096): the job's description in the title, a
  * status line (glyph + label + elapsed — ticking every second while running), the
- * command, and the output tail, polled every ~2 s by the ViewModel while the job
- * runs and pinned to the newest output. Stop lives in the app bar while running:
- * killing a runaway job is the natural reaction while watching its output. Entry
+ * command, and the Output section (the ended task's summary until ticket 180 streams
+ * the live tail, pinned to the newest output). Stop lives in the app bar while
+ * running: killing a runaway job is the natural reaction while watching it. Entry
  * points: a linked chat row or the jobs sheet's bash rows — the chat row itself
  * stays free of the log. No full-screen loading gate: the title and the Command
  * section render immediately from the route arguments (the tapped row's call
- * input); only the status line (it needs the fetch's started_at) and the output
- * wait for the entry fetch.
+ * input); the status line waits for the task's frame (it carries started_at).
  *
  * Store-backed mode (ticket 098 — a sub-agent-owned task, opened from a sub-agent
- * page): no poll, no output tail (an explicit placeholder instead), no Stop —
- * REST `/tasks` serves only the main agent's task store; the status line follows
- * the store's live `task.*` frames.
+ * page): no output (an explicit placeholder instead), no Stop; the status line
+ * follows the sub-agent store's record of the child's task frames.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -82,8 +78,8 @@ fun JobDetailScreen(
     LaunchedEffect(Unit) {
         viewModel.effects.collect { effect -> snackbarHostState.showSnackbar(effect.message) }
     }
-    // The output poll is scoped to visibility (the SubagentScreen precedent): no
-    // polling while off-screen, none once the job reaches a terminal status.
+    // The socket-gate registration is scoped to visibility (the SubagentScreen
+    // precedent): the session socket stays collected while this screen is on top.
     LifecycleEventEffect(Lifecycle.Event.ON_START) { viewModel.onScreenStarted() }
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) { viewModel.onScreenStopped() }
     Scaffold(
@@ -103,9 +99,9 @@ fun JobDetailScreen(
                     }
                 },
                 actions = {
-                    // No Stop in store-backed mode (ticket 098): REST :cancel is
-                    // main-agent-only — no cancel channel exists for these tasks.
-                    if (!uiState.storeBacked && uiState.status == BackgroundTask.Status.Running) {
+                    // No Stop in store-backed mode (ticket 098): the sub-agent's own
+                    // task controls are ticket 182's.
+                    if (!uiState.storeBacked && uiState.status == Job.Status.Running) {
                         TextButton(onClick = viewModel::onStop) {
                             Text("Stop", color = MaterialTheme.colorScheme.error)
                         }
@@ -115,14 +111,9 @@ fun JobDetailScreen(
         },
     ) { innerPadding ->
         Box(Modifier.fillMaxSize().padding(innerPadding)) {
-            when {
-                // Unknown task / fetch failure: the StateViews pattern, retry re-runs
-                // the entry fetch; the app bar's Back is the way out.
-                uiState.error != null -> ErrorState(uiState.error.orEmpty(), onRetry = viewModel::onRetry)
-                // No loading gate: the shell renders from the route-seeded state
-                // while the entry fetch runs.
-                else -> JobDetailContent(uiState)
-            }
+            // No loading gate: the shell renders from the route-seeded state until
+            // the task's frame lands.
+            JobDetailContent(uiState)
         }
     }
 }
@@ -133,7 +124,7 @@ private fun JobDetailContent(uiState: JobDetailViewModel.UiState) {
     // job runs; a terminal job's elapsed stays frozen at completed_at.
     var now by remember { mutableStateOf(Instant.now()) }
     LaunchedEffect(uiState.status) {
-        if (uiState.status == BackgroundTask.Status.Running) {
+        if (uiState.status == Job.Status.Running) {
             while (true) {
                 delay(1_000)
                 now = Instant.now()
@@ -175,27 +166,27 @@ private fun JobDetailContent(uiState: JobDetailViewModel.UiState) {
  * is the harness's 600 s fallback — and a determinate bar fills toward the budget,
  * state-driven by the 1 s ticker (no infinite animation; the fraction coerces to
  * 0..1, a job can outlive a stale default). A live-recorded timeout reads
- * "timed out after <budget-or-elapsed>" in place of "failed"; REST-seeded jobs keep
- * "failed" (REST collapses the two). Internal for the semantics tests. */
+ * "timed out after <budget-or-elapsed>" in place of "failed" (outcome `timed_out`).
+ * Internal for the semantics tests. */
 @Composable
 internal fun JobStatusLine(uiState: JobDetailViewModel.UiState, now: Instant) {
     val status = uiState.status ?: return
     val label = when (status) {
-        BackgroundTask.Status.Running -> "running"
-        BackgroundTask.Status.Completed -> "completed"
-        BackgroundTask.Status.Failed -> if (uiState.timedOut) "timed out" else "failed"
-        BackgroundTask.Status.Cancelled -> "cancelled"
+        Job.Status.Running -> "running"
+        Job.Status.Completed -> "completed"
+        Job.Status.Failed -> if (uiState.timedOut) "timed out" else "failed"
+        Job.Status.Cancelled -> "cancelled"
     }
     val glyphDescription = "Job $label"
     val elapsedDuration = uiState.startedAt?.let { Duration.between(it, uiState.completedAt ?: now) }
     val elapsed = elapsedDuration?.let(::formatElapsed)
     val budget = uiState.budgetSeconds?.let { formatElapsed(Duration.ofSeconds(it.toLong())) }
     val text = when {
-        status == BackgroundTask.Status.Failed && uiState.timedOut -> {
+        status == Job.Status.Failed && uiState.timedOut -> {
             val after = budget ?: elapsed
             if (after != null) "timed out after $after" else "timed out"
         }
-        status == BackgroundTask.Status.Running && budget != null && elapsed != null ->
+        status == Job.Status.Running && budget != null && elapsed != null ->
             "$label · $elapsed / $budget" + if (uiState.budgetIsDefault) " · default" else ""
         elapsed != null -> "$label · $elapsed"
         else -> label
@@ -206,24 +197,24 @@ internal fun JobStatusLine(uiState: JobDetailViewModel.UiState, now: Instant) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             when (status) {
-                BackgroundTask.Status.Running -> CircularProgressIndicator(
+                Job.Status.Running -> CircularProgressIndicator(
                     modifier = Modifier.size(14.dp).semantics { contentDescription = glyphDescription },
                     strokeWidth = 1.5.dp,
                 )
                 // No success slot in the M3 scheme: a literal green, readable on both themes.
-                BackgroundTask.Status.Completed -> Text(
+                Job.Status.Completed -> Text(
                     text = "✓",
                     modifier = Modifier.semantics { contentDescription = glyphDescription },
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.successColor,
                 )
-                BackgroundTask.Status.Failed -> Text(
+                Job.Status.Failed -> Text(
                     text = "✗",
                     modifier = Modifier.semantics { contentDescription = glyphDescription },
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.error,
                 )
-                BackgroundTask.Status.Cancelled -> Text(
+                Job.Status.Cancelled -> Text(
                     text = "✗",
                     modifier = Modifier.semantics { contentDescription = glyphDescription },
                     style = MaterialTheme.typography.labelMedium,
@@ -233,14 +224,14 @@ internal fun JobStatusLine(uiState: JobDetailViewModel.UiState, now: Instant) {
             Text(
                 text = text,
                 style = MaterialTheme.typography.titleMedium,
-                color = if (uiState.timedOut && status == BackgroundTask.Status.Failed) {
+                color = if (uiState.timedOut && status == Job.Status.Failed) {
                     MaterialTheme.colorScheme.error
                 } else {
                     Color.Unspecified
                 },
             )
         }
-        if (status == BackgroundTask.Status.Running && uiState.budgetSeconds != null && elapsedDuration != null) {
+        if (status == Job.Status.Running && uiState.budgetSeconds != null && elapsedDuration != null) {
             val fraction = (elapsedDuration.toMillis() / (uiState.budgetSeconds * 1_000f)).coerceIn(0f, 1f)
             LinearProgressIndicator(
                 progress = { fraction },
@@ -263,12 +254,12 @@ private fun JobSection(title: String, modifier: Modifier = Modifier, content: @C
     }
 }
 
-/** The stored stdout/stderr tail (the ToolDetailBlock recipe): one monospace block
- * scrolling internally, re-pinned to the tail each time a poll grows it while the
- * job runs. Until the entry fetch answers, a small spinner stands in for the block —
+/** The output text (the ToolDetailBlock recipe): one monospace block scrolling
+ * internally, re-pinned to the tail each time it grows while the job runs. While
+ * [JobDetailViewModel.UiState.isLoading] a small spinner stands in for the block —
  * the rest of the shell already renders from the route-seeded state. In store-backed
- * mode (ticket 098) an explicit placeholder replaces the block: no output channel
- * exists for a sub-agent-owned task (no `tool.progress`, REST `/tasks` 40406).
+ * mode (ticket 098) an explicit placeholder replaces the block: no output channel is
+ * wired for a sub-agent-owned task.
  * Internal for the semantics tests. */
 @Composable
 internal fun JobOutputBlock(uiState: JobDetailViewModel.UiState, modifier: Modifier = Modifier) {
@@ -310,7 +301,7 @@ internal fun JobOutputBlock(uiState: JobDetailViewModel.UiState, modifier: Modif
             )
         } else {
             val scrollState = rememberScrollState()
-            if (uiState.status == BackgroundTask.Status.Running) {
+            if (uiState.status == Job.Status.Running) {
                 LaunchedEffect(output) { scrollState.scrollTo(scrollState.maxValue) }
             }
             Box(

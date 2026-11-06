@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.navigation.toRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
+import fr.louissaglio.kimi.android.data.chat.TaskControl
 import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.TranscriptPage
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
@@ -78,11 +79,11 @@ class SubagentViewModel internal constructor(
          * tasks — the dock at the page's bottom bar, same widgets as the chat's. */
         val todos: List<Todo>? = null,
         val jobs: List<Job> = emptyList(),
-        /** Ticket 138: the record's background-task registration id (the REST
-         * `:detach` target, null when the spawned frame never carried it) and the
+        /** Ticket 138: the record's task id (the `task.background` target, null
+         * until a spawn task frame or the spawning call carried it) and the
          * overflow's "To background" affordance — [detachable] mirrors the record's
          * own rule (a running foreground member with a known task id), [detaching]
-         * latches the tap until the wire's conversion frame hides the item. */
+         * latches the tap until the replied detached state hides the item. */
         val taskId: String? = null,
         val detachable: Boolean = false,
         val detaching: Boolean = false,
@@ -222,22 +223,23 @@ class SubagentViewModel internal constructor(
         historyPager.refresh(keepLive = true)
     }
 
-    /** Detaches the running foreground sub-agent to the background
-     * (`POST .../tasks/{taskId}:detach` — ticket 138, server 0.39.0) through the same
-     * repository wrapper the jobs sheet's cancel uses, so error surfacing stays
-     * consistent. No confirmation (web parity). The menu item disables on tap and
-     * stays down on success — NO optimistic flip: the detach's `task.started`
-     * (main-owned, kind agent — a foreground run emits no task.* frames until
-     * detached) flips the record's runInBackground, which hides the item; the page
-     * itself stays open and keeps streaming (the sub-agent id does not change). Any
-     * failure re-enables the item and snackbars. */
+    /** Moves the running foreground sub-agent to the background with the flat
+     * `task.background` control (ticket 179 — server 2.5.0 dropped REST `:detach`;
+     * the ticket-138 action), through the same repository call the jobs sheet's stop
+     * uses, so error surfacing stays consistent. No confirmation (web parity). The
+     * menu item disables on tap and stays down on success — the code-0 reply's
+     * `detached:true` state reaches the store as a task update before this resumes and
+     * flips the record's runInBackground, which hides the item (and lists the task in
+     * the chat's jobs sheet); the page itself stays open and keeps streaming (the
+     * sub-agent id does not change). An error reply — `40933`, a foreground-only task
+     * such as a swarm member — or a dropped socket re-enables the item and snackbars. */
     fun onDetachToBackground() {
         val state = uiState.value
         val taskId = state.taskId ?: return
         if (!state.detachable || state.detaching) return
         uiState.update { it.copy(detaching = true) }
         viewModelScope.launch {
-            chatRepository.detachTask(settingsRepository.current(), sessionId, taskId)
+            chatRepository.sendTaskControl(sessionId, TaskControl.Background, taskId)
                 .onSuccess {
                     _effects.send(Effect.DetachedToBackground("Moved to background — it keeps running in Jobs"))
                 }

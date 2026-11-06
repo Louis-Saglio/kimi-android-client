@@ -239,9 +239,9 @@ class ChatViewModel internal constructor(
          * the composer (ticket 042). Never derived from TodoList tool calls. */
         val todos: List<Todo>? = null,
         /** Background tasks of the session (ticket 092): background sub-agents and
-         * bash, fed by the JobsStore collaborator (REST seed + task.* events). The
-         * pill above the composer counts the Running ones; terminal jobs linger for
-         * the sheet. */
+         * bash, fed by the JobsStore collaborator (the main agent's `task.list` and
+         * `task` frames — ticket 179). The pill above the composer counts the Running
+         * ones; terminal jobs linger for the sheet. */
         val jobs: List<Job> = emptyList(),
         /** toolCallId → linked member states for every linked call of the session
          * (ticket 134; the member STATES since 135 — the swarm card's aggregate
@@ -400,8 +400,8 @@ class ChatViewModel internal constructor(
          * message) or a compaction ended with failed/cancelled/blocked. */
         data class CompactionFailed(override val message: String) : Effect
 
-        /** The task-cancel POST failed (ticket 092): the optimistic flip was reverted,
-         * the job is still running. */
+        /** The `task.stop` control failed (ticket 179 — an error reply such as
+         * `40933`, or no connection): nothing changed, the job is still running. */
         data class JobCancelFailed(override val message: String) : Effect
 
         /** The fork POST failed (ticket 127 — unknown id 40401, busy source 40901):
@@ -467,20 +467,16 @@ class ChatViewModel internal constructor(
         sendEffect = { effect -> _effects.send(effect) },
     )
 
-    /** The jobs widget's store (ticket 092): background-task list (REST seed +
-     * task.* events), task cancellation. Same logic-holder contract as [questions].
-     * The raw seed also feeds the sub-agent store (ticket 135): a main-owned
-     * subagent-kind entry's cancelled status and model/effort pair heal the member
-     * record — the background member's only cold-start carrier. */
+    /** The jobs widget's store (ticket 092): background-task list (the main agent's
+     * task frames — ticket 179), task stop. Same logic-holder contract as
+     * [questions]. */
     private val jobsStore = JobsStore(
         scope = { viewModelScope },
         chatRepository = chatRepository,
-        settingsRepository = settingsRepository,
         sessionId = sessionId,
         state = { uiState.value },
         updateState = { transform -> uiState.update(transform) },
         sendEffect = { effect -> _effects.send(effect) },
-        onTasksSeed = { tasks -> subagentStore.applyTaskList(sessionId, tasks) },
     )
 
     private val timeline = ChatTimeline()
@@ -592,9 +588,6 @@ class ChatViewModel internal constructor(
                 }
         }
         applyColdStart(bundle, guards)
-        // Background tasks (ticket 092): REST is only the cold-start sync — the
-        // socket's task.* events feed the list from here on.
-        jobsStore.seed()
         coldStartDone = true
     }
 
@@ -1031,7 +1024,6 @@ class ChatViewModel internal constructor(
                 coldStart.resync(sessionId)
                     .onSuccess { bundle ->
                         applyColdStart(bundle, guards)
-                        jobsStore.seed()
                         _effects.send(
                             Effect.SessionReloaded("The session was reloaded. Review the chat, then retry your message."),
                         )
@@ -1195,7 +1187,7 @@ class ChatViewModel internal constructor(
     // --- Jobs widget (ticket 092): the logic lives in [JobsStore] — this is the
     // screen-facing intent, kept as a one-line delegate. ----------------------------
 
-    /** Cancels one running background job; the server's task.terminated confirms it. */
+    /** Stops one running background job (`task.stop`); its ended state flips the row. */
     fun onCancelJob(taskId: String) = jobsStore.cancel(taskId)
 
     /**
@@ -1384,23 +1376,17 @@ class ChatViewModel internal constructor(
             is SessionEvent.QuestionRequested -> questions.onRequested(event)
             is SessionEvent.QuestionResolved -> questions.onResolved(event)
             is SessionEvent.QuestionsReset -> questions.onReset(event)
-            // Background tasks (ticket 092): the collaborator owns the list, including
-            // the core→wire status mapping.
-            is SessionEvent.TaskStarted -> {
-                jobsStore.onStarted(event.info)
-                // A main-owned agent-kind frame still concerns the store when its
-                // info.agentId names a member (ticket 138): the detach's task.started
-                // is the live carrier of the foreground → background conversion — the
-                // record's runInBackground flips off it. The funnel no-ops on
-                // everything else.
+            // Background tasks (tickets 092/179): the collaborator owns the list,
+            // including the frame → job mapping. A main-owned subagent-kind task still
+            // concerns the store when its child_agent_id names a member: it carries the
+            // member's task id, background flag, model/effort and — `killed` — its
+            // cancelled truth (tickets 135/137/138). The funnel no-ops on the rest.
+            is SessionEvent.TaskListed -> {
+                jobsStore.onListed(event.tasks)
                 subagentStore.apply(sessionId, event)
             }
-            is SessionEvent.TaskTerminated -> {
-                jobsStore.onTerminated(event.info)
-                // A main-owned frame still concerns the store when its info.agentId
-                // names a member (ticket 135): a deliberately killed member emits no
-                // terminal subagent.* frame, so this is its only live cancelled
-                // carrier. The funnel no-ops on everything else.
+            is SessionEvent.TaskUpdated -> {
+                jobsStore.onUpdated(event.task)
                 subagentStore.apply(sessionId, event)
             }
             // The `todo` frame (ticket 178): the full list, applied wholesale — `[]`

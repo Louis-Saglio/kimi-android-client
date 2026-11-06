@@ -68,6 +68,45 @@ object TranscriptFrames {
             items.joinToString(",") { (title, status) -> """{"title":"$title","status":"$status"}""" } + "]}"
 
     /**
+     * One task's full state (ticket 179), shaped after the verbatim 2.5.0 captures
+     * (docs/server-api.md, Sub-agents → Task frames and controls) — the body shared by
+     * [taskFrame], [taskListFrame] entries and [taskResponseFrame]'s `task`. [extra] is
+     * raw JSON appended to the object (`,"child_agent_id":"agent-0"`, …).
+     */
+    fun taskState(
+        taskId: String,
+        kind: String = "shell",
+        status: String = "running",
+        detached: Boolean = true,
+        outcome: String? = null,
+        description: String = "Bash: sleep 30",
+        startedAt: String = "2026-11-04T19:30:00.000Z",
+        endedAt: String? = null,
+        extra: String = "",
+    ): String =
+        """{"task_id":"$taskId","kind":"$kind","status":"$status","detached":$detached,""" +
+            """"description":"$description","started_at":"$startedAt"""" +
+            (outcome?.let { ""","outcome":"$it"""" } ?: "") +
+            (endedAt?.let { ""","ended_at":"$it"""" } ?: "") + extra + "}"
+
+    /** The flat `task` frame: [state] (a [taskState] object) with the frame's own
+     * `type`/`session_id`/`agent_id`/`event_created_at` beside its fields. */
+    fun taskFrame(state: String, agentId: String = "main", sessionId: String = "session_1"): String =
+        """{"type":"task","session_id":"$sessionId","agent_id":"$agentId",""" +
+            """"event_created_at":"2026-11-04T19:30:00.000Z",""" + state.removePrefix("{")
+
+    /** The flat `task.list` frame: the agent's running tasks ([taskState] objects). */
+    fun taskListFrame(vararg states: String, agentId: String = "main", sessionId: String = "session_1"): String =
+        """{"type":"task.list","session_id":"$sessionId","agent_id":"$agentId","tasks":[""" +
+            states.joinToString(",") + "]}"
+
+    /** A task control's reply: `{type:"response",request_id,code,msg?,task?}`. */
+    fun taskResponseFrame(requestId: String, code: Int = 0, msg: String? = null, task: String? = null): String =
+        """{"type":"response","request_id":"$requestId","code":$code""" +
+            (msg?.let { ""","msg":"$it"""" } ?: "") +
+            (task?.let { ""","task":$it""" } ?: "") + "}"
+
+    /**
      * The flat approval `interaction` frame (ticket 171), shaped after the verbatim
      * 2.4.0/2.5.0 captures (docs/server-api.md, Interactions): `pending` carries the
      * snake_case request; `ended` adds [outcome], `ended_at` and the response. A null

@@ -2,7 +2,6 @@ package fr.louissaglio.kimi.android.ui.chat
 
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
-import fr.louissaglio.kimi.android.data.chat.BackgroundTask
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
 import fr.louissaglio.kimi.android.data.chat.ServerModel
 import fr.louissaglio.kimi.android.data.chat.SessionEvent

@@ -2,15 +2,17 @@ package fr.louissaglio.kimi.android.ui.chat
 
 import androidx.datastore.preferences.core.preferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
-import fr.louissaglio.kimi.android.data.chat.BackgroundTask
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
-import fr.louissaglio.kimi.android.data.chat.TaskInfo
+import fr.louissaglio.kimi.android.data.chat.SocketEvent
+import fr.louissaglio.kimi.android.data.chat.TaskState
 import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.ToolPayload
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
 import fr.louissaglio.kimi.android.navigation.Subagent
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames.taskResponseFrame
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames.taskState
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.awaitState
 import fr.louissaglio.kimi.android.testutil.testChatRepository
@@ -23,6 +25,7 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job as CoroutineJob
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -31,8 +34,14 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import okhttp3.Response
+import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import mockwebserver3.Dispatcher
 import mockwebserver3.MockResponse
@@ -83,11 +92,21 @@ class SubagentViewModelTest {
     @Volatile
     private var olderTranscriptBody = ""
 
-    /** The `:detach` POST's envelope (the SwarmViewModelTest cancelBody pattern):
-     * swapped per test — success, refusal, unknown task. */
+    /** The server's reply to a `task.background` control (ticket 179), by request id:
+     * swapped per test — success (the detached state) or a refusal. */
     @Volatile
-    private var detachBody =
-        """{"code":0,"msg":"success","data":{"detached":true,"status":"running"},"request_id":"r"}"""
+    private var backgroundReply: (String) -> String = { requestId ->
+        taskResponseFrame(
+            requestId,
+            task = taskState("agent-t1", kind = "subagent", detached = true, extra = ""","child_agent_id":"agent-12""""),
+        )
+    }
+
+    /** Every `task.background` control the app sent. */
+    private val backgroundControls = CopyOnWriteArrayList<String>()
+
+    /** Socket collections a test started (the chat's role), cancelled in [tearDown]. */
+    private val socketJobs = CopyOnWriteArrayList<CoroutineJob>()
 
     @Before
     fun setUp() {
@@ -111,11 +130,19 @@ class SubagentViewModelTest {
                     MockResponse(body = SNAPSHOT_BODY)
                 } else if (path.startsWith("/api/v1/ws")) {
                     // The store's keep-alive collection (ticket 064, started by
-                    // onScreenStarted → pageOpened) idles on an open upgrade.
-                    webSocketUpgradeResponse(object : WebSocketListener() {})
-                } else if (path.endsWith(":detach")) {
-                    // Ticket 138: POST /sessions/{id}/tasks/{taskId}:detach.
-                    MockResponse(body = detachBody)
+                    // onScreenStarted → pageOpened) idles on an open upgrade; a
+                    // task.background control (ticket 179) is answered at once.
+                    webSocketUpgradeResponse(
+                        object : WebSocketListener() {
+                            override fun onMessage(webSocket: WebSocket, text: String) {
+                                val frame = Json.parseToJsonElement(text).jsonObject
+                                if (frame["type"]?.jsonPrimitive?.content == "task.background") {
+                                    backgroundControls += text
+                                    webSocket.send(backgroundReply(frame["request_id"]!!.jsonPrimitive.content))
+                                }
+                            }
+                        },
+                    )
                 } else {
                     MockResponse(code = 404)
                 }
@@ -135,6 +162,7 @@ class SubagentViewModelTest {
         // set and the server still up — a leaked socket coroutine outliving the test
         // crashes on the dispatcher thread (the ticket-049 pattern).
         runBlocking {
+            socketJobs.forEach { it.cancelAndJoin() }
             val keepAlive = store.keepAliveJob("session_1")
             store.release("session_1")
             keepAlive?.join()
@@ -182,10 +210,10 @@ class SubagentViewModelTest {
         )
         store.apply(
             "session_1",
-            SessionEvent.TaskStarted(
-                TaskInfo(
-                    "bash-1", "nested bg", TaskInfo.Status.Running,
-                    Instant.ofEpochMilli(1785210101939), kind = TaskInfo.Kind.Process,
+            SessionEvent.TaskUpdated(
+                TaskState(
+                    "bash-1", TaskState.Kind.Shell, TaskState.Status.Running, detached = true,
+                    description = "nested bg", startedAt = Instant.ofEpochMilli(1785210101939),
                 ),
                 agentId = "agent-12",
             ),
@@ -197,10 +225,7 @@ class SubagentViewModelTest {
         )
         assertEquals(
             listOf(
-                Job(
-                    "bash-1", BackgroundTask.Kind.Bash, "nested bg",
-                    BackgroundTask.Status.Running, Instant.ofEpochMilli(1785210101939),
-                ),
+                Job("bash-1", Job.Kind.Bash, "nested bg", Job.Status.Running, Instant.ofEpochMilli(1785210101939)),
             ),
             viewModel.uiState.value.jobs,
         )
@@ -414,15 +439,30 @@ class SubagentViewModelTest {
 
     // --- Detaching a member to the background (ticket 138) ---
 
+    /** The session socket collection the chat would hold, feeding the store like
+     * ChatViewModel does — the channel task controls go out on and replies come back
+     * through. Returns once the connection is open. */
+    private suspend fun connectSocket() {
+        val connected = CountDownLatch(1)
+        socketJobs += appScope.launch {
+            repository.observeSession(settingsRepository.current(), "session_1").collect { event ->
+                if (event is SocketEvent.Connected) connected.countDown()
+                (event as? SocketEvent.Event)?.event?.let { store.apply("session_1", it) }
+            }
+        }
+        awaitCondition { connected.count == 0L }
+    }
+
     @Test
-    fun `tapping to background posts the detach and the conversion frame hides the affordance`() = runBlocking {
-        // A foreground member whose spawn carried the background-task registration
-        // id (0.43.1 payload) — the overflow's "To background" shows.
+    fun `tapping to background sends task background and the replied state hides the affordance`() = runBlocking {
+        // A foreground member whose task id is known — the overflow's "To background"
+        // shows.
         store.apply(
             "session_1",
             SessionEvent.SubagentSpawned("agent-12", "explore", "tool_1", "doc-verify", false, taskId = "agent-t1"),
         )
         store.apply("session_1", SessionEvent.SubagentStarted("agent-12"))
+        connectSocket()
 
         val viewModel = newViewModel("agent-12")
         awaitState(viewModel.uiState) { it.detachable && it.taskId == "agent-t1" }
@@ -437,41 +477,36 @@ class SubagentViewModelTest {
             SubagentViewModel.Effect.DetachedToBackground("Moved to background — it keeps running in Jobs"),
             effects.single(),
         )
-        assertTrue(
-            drainRequestTargets().any { it == "/api/v1/sessions/session_1/tasks/agent-t1:detach" },
-        )
-        // The latch holds until the wire's conversion frame — a slow task.started
-        // must not re-enable a double-tap (the ticket 137 stopping idiom).
-        assertTrue(viewModel.uiState.value.detaching)
-        assertTrue(viewModel.uiState.value.detachable)
-
-        // The detach makes the core re-register the member's task as MAIN-OWNED:
-        // the agent-kind frame names the member in info.agentId, the record flips
-        // to background and the affordance disappears.
-        store.apply(
-            "session_1",
-            SessionEvent.TaskStarted(
-                TaskInfo(
-                    "agent-t1", "doc-verify", TaskInfo.Status.Running,
-                    Instant.ofEpochMilli(1785210101939),
-                    kind = TaskInfo.Kind.Agent, agentId = "agent-12",
-                ),
-            ),
-        )
+        val control = Json.parseToJsonElement(backgroundControls.single()).jsonObject
+        assertEquals("agent-t1", control["task_id"]?.jsonPrimitive?.content)
+        assertEquals("main", control["agent_id"]?.jsonPrimitive?.content)
+        assertEquals("session_1", control["session_id"]?.jsonPrimitive?.content)
+        // The reply's detached:true state reached the store before the success: the
+        // record is background, the affordance gone, the latch never re-enables it.
         awaitState(viewModel.uiState) { !it.detachable }
+        assertTrue(store.entry("session_1", "agent-12").first()!!.runInBackground)
+        assertTrue(viewModel.uiState.value.detaching)
+        assertTrue(drainRequestTargets().none { "/tasks" in it })
     }
 
     @Test
     fun `a detach refusal re-enables the item and reports the failure`() = runBlocking {
-        // code 0 with detached:false — the member already settled or went
-        // background between the page's render and the tap (docs/server-api.md).
-        detachBody =
-            """{"code":0,"msg":"success","data":{"detached":false,"status":"running"},"request_id":"r"}"""
+        // A foreground-only task (e.g. a swarm member) answers 40933 with its state
+        // (docs/server-api.md, Task frames and controls) — nothing is applied.
+        backgroundReply = { requestId ->
+            taskResponseFrame(
+                requestId,
+                code = 40933,
+                msg = "task cannot be moved to the background",
+                task = taskState("agent-t1", kind = "subagent", detached = false, extra = ""","child_agent_id":"agent-12""""),
+            )
+        }
         store.apply(
             "session_1",
             SessionEvent.SubagentSpawned("agent-12", "explore", "tool_1", "doc-verify", false, taskId = "agent-t1"),
         )
         store.apply("session_1", SessionEvent.SubagentStarted("agent-12"))
+        connectSocket()
 
         val viewModel = newViewModel("agent-12")
         awaitState(viewModel.uiState) { it.detachable }
@@ -482,12 +517,31 @@ class SubagentViewModelTest {
         viewModel.onDetachToBackground()
         awaitCondition { effects.isNotEmpty() }
         assertEquals(
-            SubagentViewModel.Effect.DetachFailed("task is not a running foreground task (status: running)"),
+            SubagentViewModel.Effect.DetachFailed("task cannot be moved to the background"),
             effects.single(),
         )
         // The run stays foreground: the latch clears, the affordance remains.
         assertFalse(viewModel.uiState.value.detaching)
         assertTrue(viewModel.uiState.value.detachable)
+    }
+
+    @Test
+    fun `a detach with no open session socket re-enables the item`() = runBlocking {
+        store.apply(
+            "session_1",
+            SessionEvent.SubagentSpawned("agent-12", "explore", "tool_1", "doc-verify", false, taskId = "agent-t1"),
+        )
+        store.apply("session_1", SessionEvent.SubagentStarted("agent-12"))
+        val viewModel = newViewModel("agent-12")
+        awaitState(viewModel.uiState) { it.detachable }
+        val effects = CopyOnWriteArrayList<SubagentViewModel.Effect>()
+        appScope.launch { viewModel.effects.collect { effects += it } }
+
+        viewModel.onDetachToBackground()
+
+        awaitCondition { effects.isNotEmpty() }
+        assertEquals(SubagentViewModel.Effect.DetachFailed("Server unreachable"), effects.single())
+        assertFalse(viewModel.uiState.value.detaching)
     }
 
     @Test
@@ -514,16 +568,17 @@ class SubagentViewModelTest {
         assertNull(idless.uiState.value.taskId)
         assertFalse(idless.uiState.value.detachable)
 
-        // Both intents no-op before any traffic: the transcript fetches are the
-        // only requests that ever went out.
+        // Both intents no-op before any traffic: no control ever goes out.
         background.onDetachToBackground()
         idless.onDetachToBackground()
         delay(300)
-        assertTrue(drainRequestTargets().none { it.endsWith(":detach") })
+        assertTrue(backgroundControls.isEmpty())
+        assertFalse(background.uiState.value.detaching)
+        assertFalse(idless.uiState.value.detaching)
     }
 
     /** Drains every recorded request (the pages' transcript fetches included) and
-     * returns the targets — detach assertions filter on the `:detach` suffix. */
+     * returns the targets. */
     private fun drainRequestTargets(): List<String> {
         val targets = mutableListOf<String>()
         while (true) {

@@ -5,7 +5,6 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import fr.louissaglio.kimi.android.data.chat.BackgroundTask
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
 import org.junit.Rule
 import org.junit.Test
@@ -37,7 +36,7 @@ class JobOutputBlockTest {
         outputBlock(
             JobDetailViewModel.UiState(
                 taskId = "bash-1",
-                status = BackgroundTask.Status.Running,
+                status = Job.Status.Running,
                 outputPreview = "tick 41\n",
                 isLoading = false,
             ),
@@ -52,7 +51,7 @@ class JobOutputBlockTest {
         outputBlock(
             JobDetailViewModel.UiState(
                 taskId = "bash-1",
-                status = BackgroundTask.Status.Completed,
+                status = Job.Status.Completed,
                 isLoading = false,
             ),
         )
@@ -68,7 +67,7 @@ class JobOutputBlockTest {
         outputBlock(
             JobDetailViewModel.UiState(
                 taskId = "bash-1",
-                status = BackgroundTask.Status.Running,
+                status = Job.Status.Running,
                 storeBacked = true,
                 isLoading = false,
             ),

@@ -13,6 +13,10 @@ import fr.louissaglio.kimi.android.testutil.TranscriptFrames.questionEntity
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.questionFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.resetFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.stepOp
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames.taskFrame
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames.taskListFrame
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames.taskResponseFrame
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames.taskState
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.textOp
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.todoFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.toolOp
@@ -22,16 +26,21 @@ import fr.louissaglio.kimi.android.testutil.TranscriptFrames.usageFrame
 import fr.louissaglio.kimi.android.testutil.TranscriptFrames.userMessage
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.webSocketUpgradeResponse
+import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.concurrent.thread
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
 import okhttp3.Response
@@ -155,11 +164,11 @@ class SessionSocketTest {
     }
 
     @Test
-    fun `the subscribe-time agent, usage and todo frames seed the state, the rest and the reset emit nothing`() = runBlocking {
+    fun `the subscribe-time task list, agent, usage and todo frames seed the state, the rest and the reset emit nothing`() = runBlocking {
         // The verbatim subscribe order: per-agent state frames, transcript.reset, ack.
-        // The agent/usage pair (ticket 177) and the todo list (ticket 178) are the
-        // chat's seed; the reset's items are always empty — it must neither render nor
-        // clear.
+        // The running-task list (ticket 179), the agent/usage pair (ticket 177) and the
+        // todo list (ticket 178) are the chat's seed; the reset's items are always
+        // empty — it must neither render nor clear.
         val emitted = runSocketEvents(
             """{"type":"task.list","session_id":"session_1","agent_id":"main","tasks":[]}""",
             agentFrame(model = "deepseek/deepseek-v4-flash", thinking = "max", permissionMode = "auto"),
@@ -169,13 +178,14 @@ class SessionSocketTest {
             resetFrame(seq = 18),
             ackFrame(),
             opsFrame(promptOp("msg_1", "running"), seq = 19),
-            eventCount = 8,
+            eventCount = 9,
             settleMillis = 100,
         )
 
         assertEquals(
             listOf(
                 SocketEvent.Connected,
+                SocketEvent.Event(SessionEvent.TaskListed(emptyList())),
                 SocketEvent.Event(SessionEvent.SessionModelUpdated("deepseek/deepseek-v4-flash", "max")),
                 SocketEvent.Event(SessionEvent.SessionPermissionUpdated("auto")),
                 SocketEvent.Event(SessionEvent.AgentBusyUpdated(running = false)),
@@ -260,6 +270,246 @@ class SessionSocketTest {
             AgentStateFrame(thinking = "low").toSessionEvents(),
         )
         assertEquals(null, UsageFrame(contextTokens = null, maxContextTokens = 100).toSessionEvent())
+    }
+
+    // --- task frames and controls (ticket 179) --------------------------------------
+
+    private fun shellTask(
+        taskId: String,
+        running: Boolean = true,
+        outcome: TaskOutcome? = null,
+        description: String = "Bash: sleep 30",
+        endedAt: Instant? = null,
+    ) = TaskState(
+        taskId = taskId,
+        kind = TaskState.Kind.Shell,
+        status = if (running) TaskState.Status.Running else TaskState.Status.Ended,
+        detached = true,
+        description = description,
+        outcome = outcome,
+        startedAt = Instant.parse("2026-11-04T19:30:00.000Z"),
+        endedAt = endedAt,
+    )
+
+    @Test
+    fun `task list and task frames emit the full states, tagged with the owning agent`() = runBlocking {
+        // Shaped after the verbatim 2.5.0 captures (docs/server-api.md, Task frames and
+        // controls): a foreground shell task and a background sub-agent spawn.
+        val emitted = runSocketEvents(
+            taskListFrame(),
+            taskFrame(
+                taskState(
+                    "bash-s9yny87s", detached = false, description = "Bash: sleep 30 && echo watched-ok",
+                    extra = ""","parent_tool_call_id":"call_00_x","command":"sleep 30 && echo watched-ok"""",
+                ),
+            ),
+            taskFrame(
+                taskState(
+                    "agent-v93x0tjv", kind = "subagent", description = "Sleep then reply bg-ok",
+                    extra = ""","phase":"working","child_agent_id":"agent-1","parent_tool_call_id":"call_00_y",""" +
+                        """"model":"deepseek/deepseek-v4-flash","thinking":"max"""",
+                ),
+            ),
+            taskListFrame(taskState("bash-2"), agentId = "agent-0"),
+            taskFrame(taskState("bash-9"), sessionId = "session_2"),
+            eventCount = 4,
+            settleMillis = 150,
+        )
+
+        assertEquals(
+            listOf(
+                SessionEvent.TaskListed(emptyList()),
+                SessionEvent.TaskUpdated(
+                    TaskState(
+                        taskId = "bash-s9yny87s",
+                        kind = TaskState.Kind.Shell,
+                        status = TaskState.Status.Running,
+                        detached = false,
+                        description = "Bash: sleep 30 && echo watched-ok",
+                        parentToolCallId = "call_00_x",
+                        command = "sleep 30 && echo watched-ok",
+                        startedAt = Instant.parse("2026-11-04T19:30:00.000Z"),
+                    ),
+                ),
+                SessionEvent.TaskUpdated(
+                    TaskState(
+                        taskId = "agent-v93x0tjv",
+                        kind = TaskState.Kind.Subagent,
+                        status = TaskState.Status.Running,
+                        detached = true,
+                        description = "Sleep then reply bg-ok",
+                        phase = "working",
+                        childAgentId = "agent-1",
+                        parentToolCallId = "call_00_y",
+                        startedAt = Instant.parse("2026-11-04T19:30:00.000Z"),
+                        model = "deepseek/deepseek-v4-flash",
+                        thinking = "max",
+                    ),
+                ),
+                SessionEvent.TaskListed(listOf(shellTask("bash-2")), agentId = "agent-0"),
+            ),
+            emitted.sessionEvents(),
+        )
+    }
+
+    @Test
+    fun `the task state mapping keeps the frame's vocabulary and drops unusable entries`() {
+        val json = Json { ignoreUnknownKeys = true }
+        fun decode(body: String) = json.decodeFromString<TaskStateDto>(body).toTaskState()
+
+        val ended = decode(
+            """{"task_id":"agent-1","kind":"subagent","status":"ended","outcome":"killed","detached":false,""" +
+                """"started_at":"2026-11-04T19:30:00.000Z","ended_at":1785210118804,""" +
+                """"result_summary":"","error":"Aborted by the user","state_reason":"user"}""",
+        )!!
+        assertEquals(TaskState.Status.Ended, ended.status)
+        assertEquals(TaskOutcome.Killed, ended.outcome)
+        assertEquals(Instant.ofEpochMilli(1785210118804), ended.endedAt)
+        assertEquals(null, ended.resultSummary)
+        assertEquals("Aborted by the user", ended.error)
+        assertEquals("user", ended.stateReason)
+
+        // Background questions and future kinds are "other"; an unknown outcome is none.
+        assertEquals(TaskState.Kind.Other, decode("""{"task_id":"q","kind":"other","status":"running"}""")!!.kind)
+        assertEquals(TaskState.Kind.Other, decode("""{"task_id":"q","kind":"cron","status":"running"}""")!!.kind)
+        assertEquals(null, decode("""{"task_id":"t","kind":"shell","status":"ended","outcome":"vanished"}""")!!.outcome)
+        // A running task carries no outcome even if the frame names one.
+        assertEquals(null, decode("""{"task_id":"t","kind":"shell","status":"running","outcome":"completed"}""")!!.outcome)
+        // No id or an unknown status: the entry is unusable.
+        assertEquals(null, decode("""{"task_id":"","kind":"shell","status":"running"}"""))
+        assertEquals(null, decode("""{"task_id":"t","kind":"shell","status":"paused"}"""))
+    }
+
+    @Test
+    fun `the task record follows frames and lists, keeping ended tasks`() = runBlocking {
+        runSocketEvents(
+            taskListFrame(taskState("bash-1"), taskState("bash-2")),
+            taskFrame(taskState("bash-1", status = "ended", outcome = "completed", endedAt = "2026-11-04T19:31:00.000Z")),
+            // A later list: bash-2 ended unseen and leaves the record; bash-1's final
+            // state stays.
+            taskListFrame(taskState("bash-3")),
+            eventCount = 3,
+        )
+
+        assertEquals(
+            shellTask("bash-1", running = false, outcome = TaskOutcome.Completed, endedAt = Instant.parse("2026-11-04T19:31:00.000Z")),
+            socket.observeTask("session_1", "main", "bash-1").first(),
+        )
+        assertEquals(null, socket.observeTask("session_1", "main", "bash-2").first())
+        assertEquals(shellTask("bash-3"), socket.observeTask("session_1", "main", "bash-3").first())
+        // Keyed by owning agent.
+        assertEquals(null, socket.observeTask("session_1", "agent-0", "bash-3").first())
+    }
+
+    /** Opens one interactive connection: [onControl] answers every client frame that
+     * carries a `request_id`. Returns the emitted events and the collection job. */
+    private suspend fun CoroutineScope.openInteractive(
+        clientFrames: MutableList<String>,
+        onControl: (WebSocket, String) -> Unit,
+    ): Pair<CopyOnWriteArrayList<SocketEvent>, kotlinx.coroutines.Job> {
+        server.enqueue(
+            webSocketUpgradeResponse(
+                object : WebSocketListener() {
+                    override fun onMessage(webSocket: WebSocket, text: String) {
+                        clientFrames += text
+                        val requestId = json.parseToJsonElement(text).jsonObject["request_id"]?.jsonPrimitive?.content
+                        if (requestId != null) onControl(webSocket, requestId)
+                    }
+                },
+            ),
+        )
+        val emitted = CopyOnWriteArrayList<SocketEvent>()
+        val job = launch { socket.observe(settings(), "session_1").collect { emitted += it } }
+        awaitCondition { emitted.contains(SocketEvent.Connected) && clientFrames.isNotEmpty() }
+        return emitted to job
+    }
+
+    @Test
+    fun `a task control is a flat frame and its code-0 reply's state is emitted before it returns`() = runBlocking {
+        val clientFrames = CopyOnWriteArrayList<String>()
+        coroutineScope {
+            val (emitted, job) = openInteractive(clientFrames) { webSocket, requestId ->
+                webSocket.send(
+                    taskResponseFrame(
+                        requestId,
+                        task = taskState("bash-1", status = "ended", outcome = "killed", endedAt = "2026-11-04T19:31:00.000Z"),
+                    ),
+                )
+            }
+            try {
+                val result = socket.sendTaskControl("session_1", TaskControl.Stop, "main", "bash-1")
+
+                val killed = shellTask("bash-1", running = false, outcome = TaskOutcome.Killed, endedAt = Instant.parse("2026-11-04T19:31:00.000Z"))
+                assertEquals(killed, result.getOrThrow())
+                // Applied like any task frame — already delivered when the call returns.
+                assertEquals(listOf(SessionEvent.TaskUpdated(killed)), emitted.sessionEvents())
+                assertEquals(killed, socket.observeTask("session_1", "main", "bash-1").first())
+                assertEquals(
+                    """{"type":"task.stop","request_id":"t_1","session_id":"session_1","agent_id":"main","task_id":"bash-1"}""",
+                    clientFrames.last(),
+                )
+            } finally {
+                job.cancel()
+            }
+        }
+    }
+
+    @Test
+    fun `an error reply fails with its code and applies nothing`() = runBlocking {
+        val clientFrames = CopyOnWriteArrayList<String>()
+        coroutineScope {
+            val (emitted, job) = openInteractive(clientFrames) { webSocket, requestId ->
+                webSocket.send(
+                    taskResponseFrame(
+                        requestId, code = 40933, msg = "task cannot be moved to the background",
+                        task = taskState("agent-1", kind = "subagent", detached = false),
+                    ),
+                )
+            }
+            try {
+                val error = socket.sendTaskControl("session_1", TaskControl.Background, "main", "agent-1").exceptionOrNull()
+
+                assertEquals(DataError.Api(40933, "task cannot be moved to the background"), error)
+                assertTrue(clientFrames.last().startsWith("""{"type":"task.background","request_id":"""))
+                delay(100)
+                assertEquals(emptyList<SessionEvent>(), emitted.sessionEvents())
+                assertEquals(null, socket.observeTask("session_1", "main", "agent-1").first())
+            } finally {
+                job.cancel()
+            }
+        }
+    }
+
+    @Test
+    fun `a control without an open connection or whose connection drops fails as a network error`() = runBlocking {
+        val noSocket = socket.sendTaskControl("session_1", TaskControl.Stop, "main", "bash-1").exceptionOrNull()
+        assertTrue(noSocket is DataError.Network)
+
+        val clientFrames = CopyOnWriteArrayList<String>()
+        coroutineScope {
+            // The server closes the socket instead of replying.
+            val (_, job) = openInteractive(clientFrames) { webSocket, _ -> webSocket.close(1000, "bye") }
+            try {
+                val dropped = withTimeout(5_000) {
+                    socket.sendTaskControl("session_1", TaskControl.Stop, "main", "bash-1")
+                }.exceptionOrNull()
+                assertTrue(dropped is DataError.Network)
+            } finally {
+                job.cancel()
+            }
+        }
+    }
+
+    @Test
+    fun `a reply for an unknown request id is ignored`() = runBlocking {
+        val emitted = runSocketEvents(
+            taskResponseFrame("t_404", task = taskState("bash-1")),
+            taskFrame(taskState("bash-2")),
+            eventCount = 1,
+            settleMillis = 100,
+        )
+
+        assertEquals(listOf(SessionEvent.TaskUpdated(shellTask("bash-2"))), emitted.sessionEvents())
     }
 
     // --- todo state frames (ticket 178) ----------------------------------------------

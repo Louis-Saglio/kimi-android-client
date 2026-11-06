@@ -25,13 +25,12 @@ import fr.louissaglio.kimi.android.data.chat.Todo
  * ([TodosSummaryRow]/[JobsSummaryRow], [TodosSheet]/[JobsSheet]). The caller only
  * supplies the data and the navigation/cancel intents.
  *
- * [items] (the caller's timeline rows) resolve a REST-seeded sub-agent job's missing
- * agentId when its sheet row is tapped (see [subagentIdForTask]); an unresolvable tap
- * is a no-op and keeps the sheet open. [onOpenJob] and [onCancelJob] are optional:
- * null hides the affordance. The sub-agent page wires [onOpenJob] too (ticket 098 —
- * the job screen's store-backed mode covers sub-agent-owned tasks) but keeps
- * [onCancelJob] null: REST `/tasks:cancel` serves only the main agent's task store
- * (docs/server-api.md, REST /tasks).
+ * [items] (the caller's timeline rows) resolve a transcript-healed sub-agent job's
+ * missing agentId when its sheet row is tapped (see [subagentIdForTask]); an
+ * unresolvable tap is a no-op and keeps the sheet open. [onOpenJob] and [onCancelJob]
+ * are optional: null hides the affordance. The sub-agent page wires [onOpenJob] too
+ * (ticket 098 — the job screen's store-backed mode covers sub-agent-owned tasks) but
+ * keeps [onCancelJob] null: its own task controls are ticket 182's.
  */
 @Composable
 internal fun TodoJobsDock(
@@ -92,9 +91,9 @@ internal fun TodoJobsDock(
             jobs = jobs,
             onCancel = onCancelJob,
             onOpenSubagent = { job ->
-                // A REST-seeded sub-agent job carries no agentId (REST /tasks omits
-                // it): the spawning `Agent` row's result stub links task id to
-                // sub-agent id, so the timeline fills the gap.
+                // A transcript-healed sub-agent job carries no agentId (the origin
+                // has no child_agent_id): the spawning `Agent` row's result stub links
+                // task id to sub-agent id, so the timeline fills the gap.
                 val agentId = job.agentId ?: subagentIdForTask(items, job.taskId)
                 if (agentId != null) {
                     showJobs = false

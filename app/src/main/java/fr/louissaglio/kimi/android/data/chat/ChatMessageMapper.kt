@@ -369,18 +369,11 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
         }
     }
 
-    /** The origin's status — only "completed" is verified on the wire (0.34.0); the
-     * rest of the core vocabulary is assumed, an unknown value maps to null and the
-     * store's heal skips the turn instead of guessing. */
-    private fun taskOriginStatus(status: String?): TaskInfo.Status? = when (status) {
-        "running" -> TaskInfo.Status.Running
-        "completed" -> TaskInfo.Status.Completed
-        "failed" -> TaskInfo.Status.Failed
-        "timed_out" -> TaskInfo.Status.TimedOut
-        "killed" -> TaskInfo.Status.Killed
-        "lost" -> TaskInfo.Status.Lost
-        else -> null
-    }
+    /** The origin's terminal outcome — only "completed" is verified on the wire
+     * (0.34.0); the rest of the task outcome vocabulary is assumed. "running" and an
+     * unknown value map to null and the store's heal skips the turn instead of
+     * guessing. */
+    private fun taskOriginStatus(status: String?): TaskOutcome? = TaskOutcome.fromWire(status)
 
     private fun toDomain(dto: TranscriptFrameDto): TranscriptFrame? = when (dto.kind) {
         "thinking" -> dto.text?.let { TranscriptFrame.Thinking(dto.frameId, it) }
@@ -442,59 +435,6 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
     /** The `{kind, text}` progress object of a tool frame; only the text is consumed. */
     private fun progressText(progress: JsonObject?): String =
         progress?.get("text")?.let { (it as? JsonPrimitive)?.contentOrNull }.orEmpty()
-
-    /** REST task → domain (ticket 092): kind `tool` (question flows) is excluded by
-     * design — those surface as question cards in chat; unknown kind/status values and
-     * unusable timestamps drop the entry with a Log.w, never crash. */
-    fun toDomain(dto: TaskDto): BackgroundTask? {
-        val kind = when (dto.kind) {
-            "subagent" -> BackgroundTask.Kind.Subagent
-            "bash" -> BackgroundTask.Kind.Bash
-            "tool" -> return null
-            else -> {
-                Log.w(TAG, "Dropping task '${dto.id}' with unknown kind '${dto.kind}'")
-                return null
-            }
-        }
-        val status = when (dto.status) {
-            "running" -> BackgroundTask.Status.Running
-            "completed" -> BackgroundTask.Status.Completed
-            "failed" -> BackgroundTask.Status.Failed
-            "cancelled" -> BackgroundTask.Status.Cancelled
-            else -> {
-                Log.w(TAG, "Dropping task '${dto.id}' with unknown status '${dto.status}'")
-                return null
-            }
-        }
-        // started_at == created_at on the wire (docs/server-api.md); a malformed one
-        // falls back to the other, and both missing drops the entry — the elapsed
-        // column has nothing to show for it.
-        val startedAt = parseInstant(dto.startedAt) ?: parseInstant(dto.createdAt)
-        val createdAt = parseInstant(dto.createdAt) ?: startedAt
-        if (startedAt == null || createdAt == null) {
-            Log.w(TAG, "Dropping task '${dto.id}' with unusable timestamps")
-            return null
-        }
-        return BackgroundTask(
-            id = dto.id,
-            kind = kind,
-            description = dto.description,
-            status = status,
-            runInBackground = dto.runInBackground,
-            createdAt = createdAt,
-            startedAt = startedAt,
-            completedAt = parseInstant(dto.completedAt),
-            agentId = dto.agentId,
-            command = dto.command,
-            outputPreview = dto.outputPreview,
-            outputBytes = dto.outputBytes,
-            model = dto.model?.takeIf { it.isNotBlank() },
-            thinkingEffort = dto.thinkingEffort?.takeIf { it.isNotBlank() },
-        )
-    }
-
-    private fun parseInstant(value: String?): Instant? =
-        value?.let { runCatching { Instant.parse(it) }.getOrNull() }
 
     private companion object {
         const val TAG = "ChatMessageMapper"

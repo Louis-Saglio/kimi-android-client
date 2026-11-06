@@ -49,9 +49,12 @@ the task lifecycle; this ticket owns the job detail's output.
    keep a bounded tail so a long-running command cannot grow memory without
    limit (the old `output_preview` cap was 32 KiB; 1 MiB is the server's
    maximum first chunk).
-4. Delete the `getTask` poll, its `POLL_INTERVAL_MILLIS` and the
-   `with_output` DTO fields; the task frame (ticket 179) is the status
-   source and `task.output` the output source.
+4. ~~Delete the `getTask` poll, its `POLL_INTERVAL_MILLIS` and the
+   `with_output` DTO fields~~ — done by ticket 179 (the job screen now reads
+   `ChatRepository.observeTask`); the task frame is the status source and
+   `task.output` the output source. Ticket 179's
+   `SessionSocket.sendTaskControl` already sends flat controls and matches
+   `response` replies by `request_id` — extend it for `task.watch`/`unwatch`.
 5. Store-backed mode (a sub-agent task visited from the sub-agent page) has
    no watch target unless it has a `task_id`; keep its current behaviour.
 

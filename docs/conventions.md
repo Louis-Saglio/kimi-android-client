@@ -56,7 +56,7 @@
   frame branches (approval/question/agent-status/task/subagent/compaction
   families) are deleted, and the domain events documented below for those
   features have no live feed until tickets 178–182 re-feed them from
-  the 2.5.0 frames (171/172 re-fed approvals and questions, below). Ticket 177 adds the main agent's flat `agent`/`usage`
+  the 2.5.0 frames (171/172 re-fed approvals and questions, 179 tasks, below). Ticket 177 adds the main agent's flat `agent`/`usage`
   state frames (decoded from the frame text — their fields sit beside `type`;
   a child agent's are ignored until 182): `agent` → `SessionModelUpdated`
   (only when it names a model or effort — a model-less session omits both, a
@@ -72,7 +72,24 @@
   it after an undo or a cold restore), a child's is sub-agent-scoped and
   replaces its `SubagentRecord.todos`. The list is never derived from
   `TodoList` tool calls — `ChatTimeline` only suppresses their rows and results
-  (ticket 042, by `TODO_LIST_TOOL_NAME`) and holds no todo state. Ticket 171 decodes the flat `interaction`
+  (ticket 042, by `TODO_LIST_TOOL_NAME`) and holds no todo state. Ticket 179
+  decodes the flat task frames for EVERY agent, tagged with the OWNING agent:
+  `task.list` (the agent's running tasks, before the ack on every connection) →
+  `SessionEvent.TaskListed(tasks, agentId)`, `task` (one task's full state on
+  every change) → `TaskUpdated(task, agentId)`, both mapped to the domain
+  `TaskState` (`data/chat/Tasks.kt`, `TaskStateDto.toTaskState()` — the frame's
+  own vocabulary: kind shell/subagent/other, status running/ended, the
+  `TaskOutcome`, `detached`, `child_agent_id`, …; a blank id or unknown status
+  drops the entry). The socket also keeps the latest state per (agent, task) at
+  instance level (`observeTask` — every frame and control reply upserts, a
+  `task.list` drops the agent's running entries it no longer names, ended ones
+  stay) and sends the flat task controls (`sendTaskControl` — `task.stop`/
+  `task.background`, `{type, request_id, session_id, agent_id, task_id}` on the
+  session's open connection): the `{type:"response", request_id, code, msg?,
+  task?}` reply is matched by `request_id`, a code-0 reply's task is emitted as
+  that agent's `TaskUpdated` (and recorded) BEFORE the call returns it, a
+  non-zero code fails with `DataError.Api` and applies nothing, and no
+  connection / a dropped one / no reply in 15 s fails with `DataError.Network`. Ticket 171 decodes the flat `interaction`
   frame (no `payload`, no `seq`; `InteractionFrame`, mapped by the pure
   `ChatMessageMapper.toInteractionEvent`, which dispatches on `kind` to
   `toApprovalEvent`/`toQuestionEvent`): an approval `pending` →
@@ -194,20 +211,11 @@
   record of successfully sent prompts/steers; the session list consumes it on
   return to bump those rows, ticket 086 — since ticket 112 no automatic refresh
   follows, so the bump itself is the visible update). New chat
-  endpoints belong in a collaborator, not the facade. Background tasks (ticket
-  092): `ChatApi.listTasks/cancelTask` (REST `/tasks`; a terminal-task cancel
-  answers envelope 40904 → typed `DataError.Api`), `task.started`/
-  `task.terminated` WS frames → `SessionEvent.TaskStarted/TaskTerminated` (the
-  shared `TaskInfo` carries the CORE status vocabulary — killed/timed_out/lost —
-  and epoch-millis times, unlike REST's ISO strings; `task.notified` and the
-  legacy `background.task.*` aliases are deliberately unparsed). The payload's
-  `agentId` stamp — the OWNING agent — is parsed onto the events, making them
-  `AgentScopedEvent`s: main-owned tasks feed the chat's `JobsStore`,
-  sub-agent-owned ones route to `SubagentStreamStore` (REST `/tasks` serves
-  only the main agent's store, so a sub-agent's tasks are live-only and not
-  REST-cancellable — docs/server-api.md, Background lifecycle). Domain:
-  `BackgroundTask`/`TaskInfo` in `data/chat/Tasks.kt` — kind `tool` (question
-  flows) is filtered out at the mapping boundary.
+  endpoints belong in a collaborator, not the facade. Background tasks (tickets
+  092/179): there is no REST task API since server 2.5.0 — the session socket's
+  task frames and controls (above) are the only channel, exposed through
+  `ChatRepository.sendTaskControl` and `observeTask`. Domain: `TaskState`/
+  `TaskOutcome`/`TaskControl` in `data/chat/Tasks.kt`.
 - `data/sessions/` — `SessionsRepository` (list/get/create/fork/archive/restore/delete REST
   facade; ticket 132 adds `listArchivedSessions` — the v1 list with
   `archived_only=true&exclude_empty=true` and the same `before_id` cursor, rows
@@ -363,24 +371,39 @@
   through constructor callbacks (a state-transform sink, an effect sink, a
   scope provider). New chat features grow a collaborator from day one instead
   of landing in `ChatViewModel`. Feature tests sit next to the collaborator on
-  the shared `ChatViewModelTestBase` harness. `JobsStore` (ticket 092) backs the
-  composer jobs pill/sheet (`UiState.jobs`, event-driven — REST `/tasks` is only
-  the cold-start/`resync_required` seed, never polled; cancel is optimistic,
-  40904 = already-terminal success). The seed lists only `run_in_background:
-  true` entries (the flag rides every task since 0.39.0 — ticket 162, replacing
-  101's known-background set fed by live `task.*` frames and `Agent` result
-  `task_id:` markers): a listed foreground sub-agent carries false and stays
-  out of the dock — the sub-agent roster/page is its UI home. The pill is sticky (ticket 094): visible
-  whenever the session has ANY background task (running or terminal — the
-  unfiltered REST seed resurrects it across re-entries), labeled
+  the shared `ChatViewModelTestBase` harness. `JobsStore` (ticket 092, on task
+  frames since 179) backs the composer jobs pill/sheet (`UiState.jobs`,
+  event-driven, no polling, no REST): the main agent's `task.list` merges
+  (`onListed` — authoritative for running tasks only: listed jobs upsert, a
+  still-running job the list no longer names ended unseen and is dropped,
+  terminal rows stay — the server never re-lists an ended task) and its `task`
+  frames upsert the full state (`onUpdated`). The shared pure mapping
+  `TaskState.toBackgroundJob()` keeps only BACKGROUND (`detached:true`) shell
+  (→ Bash) and subagent (→ Subagent, `child_agent_id` = the page link) tasks:
+  `other` tasks (background questions) and foreground tasks (their waiting tool
+  call is their UI) are no jobs; an ended task's outcome maps through
+  `toJobStatus()` (killed → Cancelled, completed → Completed, the rest → Failed,
+  `timed_out` also setting `Job.timedOut`). Stop is `task.stop` with no
+  optimistic flip — the ended state (the reply's, then the frame) turns the
+  row Cancelled; an error reply (`40933`, …) or no socket snackbars and changes
+  nothing. A `task.background` (the sub-agent page's "To background") replies
+  `detached:true`, which is what lists the row. The pill is sticky (ticket 094): visible
+  whenever the session has ANY background job (running or terminal — terminal
+  rows linger for the session's lifetime), labeled
   `Jobs · finished/total` (finished = completed/cancelled/failed — the Todos
   done/total polarity); deliberate divergence from the web dock, whose pills
   vanish at zero. The pills and their sheets are shared UI:
   `TodoJobsDock` (ui/chat) bundles the pill row, the sheet-open state, the
-  sheets and the sub-agent tap's timeline resolution; the chat mounts it above
+  sheets and the sub-agent tap's timeline resolution (a transcript-healed job
+  has no `child_agent_id`); the chat mounts it above
   the composer, the sub-agent page as its bottom bar — there with a null cancel
-  callback only (REST `/tasks:cancel` is main-agent-only): bash rows open the
+  callback only (the sub-agent's own task controls are ticket 182's): bash rows open the
   job screen's store-backed mode (ticket 098), wired exactly like the chat's.
+  The job screen's main-agent mode (`JobDetailViewModel`) reads the socket's
+  task record (`observeTask` — status, timestamps, description, command, the
+  ended task's `result_summary`/`error` as its output until ticket 180's
+  `task.watch`) and stops with `task.stop`; a task this process never saw keeps
+  the route seeds with an empty status line.
   The live activity status line (ticket 148) is smaller than a collaborator and
   follows the 058 `StepRetry` precedent. Since 2.5.0 (ticket 177) the server
   reports no phase — only the `agent` frame's busy `status` — so
@@ -487,13 +510,19 @@
   carrier (history rows, the cold start's messages page, the running transcript
   turn's tool frames) via `applyAgentCall`,
   transcript pages via `applyTranscriptPage`/`prependTranscriptPage`. Ticket 135
-  adds the member `Cancelled` status with four carriers — the live
-  `task.terminated` kill (`status` `killed`, keyed on the task's `agentId`,
-  pinning like any live lifecycle write), the schema-level `subagent.cancelled`
-  frame, the roster's `cancelled` phase, and the jobs REST seed
-  (`JobsStore.onTasksSeed` → `applyTaskList`, a background member's only
-  cold-start carrier) — plus the member `model`/`thinkingEffort` pair (the
-  spawned frame overwrites when non-blank, roster and REST blank-fill). The
+  adds the member `Cancelled` status with three carriers — the member's ended
+  `task` frame with `outcome:"killed"` (ticket 179: a subagent-kind task whose
+  `child_agent_id` names the record, pinning like any live lifecycle write),
+  the schema-level `subagent.cancelled` frame, and the roster's `cancelled`
+  phase — plus the member `model`/`thinkingEffort` pair (the spawned frame
+  overwrites when non-blank, the roster and the spawn task frame blank-fill).
+  Since 179 every subagent-kind `task.list`/`task` entry (main-owned spawns
+  above all, foreground ones included) merges into the EXISTING record its
+  `child_agent_id` names (`mergeSpawnTask`, no record creation — the rest of
+  the task-frame derivation is ticket 182's): the task id (first writer wins —
+  the `task.stop`/`task.background` handle, so foreground members are now
+  stoppable/detachable), `detached:true` → `runInBackground`, the model/effort
+  blank-fill and the killed pin. The
   `toolCallId → subagentIds` link registry lives in the store (learned from
   spawned/roster/result-marker); ChatViewModel re-drives `store.linksFor` into its
   timeline after every store-affecting apply. One-to-many since 134: an
@@ -509,9 +538,9 @@
   record, 135's killed-task Cancelled, a roster's terminal phase), but a
   NON-terminal pin (live or roster) the member's LATEST call owns yields to the
   parse — the result only exists once every member settled server-side, and a
-  cancelled FOREGROUND member gets no live terminal frame at all (no
-  `task.terminated`, no `subagent.completed`/`failed`), so the parse is its only
-  terminal carrier; the new `latestToolCallId` record field (last writer wins,
+  cancelled FOREGROUND member gets no `subagent.completed`/`failed` frame
+  (only a deliberate stop's killed task frame), so the parse is its terminal
+  carrier; the new `latestToolCallId` record field (last writer wins,
   unlike the first-writer-wins row link) guards the heal against an old call's
   re-mined result flipping a member since resumed under a new call — and
   `not_started` items backfill as ghost records (Cancelled, item-excerpt label,
@@ -531,19 +560,18 @@
   sub-agent page's store access (pageOpened/pageClosed included). Ticket 137
   adds the roster row's stop action: a trailing Stop IconButton shows while the
   member is `SubagentState.stoppable` (Queued/Working/Suspended, `taskId` known,
-  no ghost), tapping it disables the button and posts the member's
-  `tasks/{taskId}:cancel` through the same `ChatRepository.cancelTask` wrapper
-  the jobs sheet uses (40904 tolerated as already-terminal success; any other
-  failure re-enables and snackbars via the screen's own Effect channel) — no
-  optimistic flip, the row settles from the wire (the killed `task.terminated`'s
-  135 pin, or the settled call's result per the refined tier above). The store is fed by
+  no ghost), tapping it disables the button and sends the member's `task.stop`
+  through the same `ChatRepository.sendTaskControl` the jobs sheet uses (an
+  already-ended task just replies with its state; an error reply or a dropped
+  socket re-enables and snackbars via the screen's own Effect channel) — no
+  optimistic flip, the row settles from the wire (the killed ended state's 135
+  pin, or the settled call's result per the refined tier above). The store is fed by
   exactly ONE session-socket collection at a time (064): the chat's while its
   socket gate holds the session (ChatViewModel signals
   chatCollectionStarted/Stopped), otherwise the store's own keep-alive
   collection while a sub-agent page is open (SubagentViewModel registers via
   pageOpened/pageClosed; the job screen registers the same page count so the
-  socket — and with it the live `task.terminated` truth — survives watching
-  a job) — the keep-alive lives in the store because after
+  socket — and with it the live task frames — survives watching a job) — the keep-alive lives in the store because after
   process death with a page on top the chat ViewModel is never recreated. Two
   concurrent collections would double-feed on replay, so the keep-alive never
   runs while a chat collection does; never open a page-owned socket. The
@@ -553,25 +581,25 @@
   The page's one mutation is ticket 138's detach: the top bar's overflow shows
   "To background" (web-parity label) while the record is
   `SubagentState.detachable` (a running foreground member with a known
-  `taskId` — `stoppable && !runInBackground`), posting `tasks/{taskId}:detach`
-  through `ChatApi.detachTask` (success gates on `data.detached` — a code-0
-  `detached:false` refusal snackbars as a failure; the in-flight latch mirrors
-  137's stop idiom). The detach's main-owned agent-kind `task.started`
-  (`info.agentId` naming the member) routes to the store from `ChatViewModel`
-  like 135's `task.terminated` and flips the record's `runInBackground` — no
-  duplicate record, the main-owned listing itself stays JobsStore's — which
-  removes the affordance.
+  `taskId` — `stoppable && !runInBackground`), sending `task.background`
+  through `ChatRepository.sendTaskControl` (ticket 179; an error reply —
+  `40933` for a foreground-only task such as a swarm member — snackbars as a
+  failure; the in-flight latch mirrors 137's stop idiom). The code-0 reply's
+  `detached:true` state reaches the store as a main-owned `TaskUpdated` before
+  the call returns (routed there from `ChatViewModel`, or by the keep-alive)
+  and flips the record's `runInBackground` — no duplicate record, the
+  main-owned job row itself is JobsStore's — which removes the affordance.
   The record also owns the page's dock data: the sub-agent's own todo list
   (`SubagentRecord.todos`, replaced by the child's agent-tagged `todo` frame —
   ticket 178; outside the timeline, so no transcript replace touches it) and its
-  own background tasks (the live `task.*` frames stamped with its id, upserted
-  into `SubagentRecord.jobs` via the shared `TaskInfo.toJob()` mapping — no
-  REST seed exists, REST `/tasks` being main-agent-only; on a cold open the
-  transcript pages' `task` turn origins heal the terminal status into the
-  record's jobs — ticket 099, a live `task.terminated` stays authoritative
-  over the origin); the page mounts the
+  own background tasks (the child's own `task.list`/`task` frames, stamped with
+  its id: the list merges like JobsStore's, frames upsert into
+  `SubagentRecord.jobs` via the shared `TaskState.toBackgroundJob()` mapping;
+  on a cold open the transcript pages' `task` turn origins heal the terminal
+  status into the record's jobs — ticket 099, a live ended frame stays
+  authoritative over the origin); the page mounts the
   shared `TodoJobsDock` as its bottom bar, with the job screen wired
-  (store-backed mode, ticket 098) but no cancel (same REST limitation).
+  (store-backed mode, ticket 098) but no cancel (ticket 182's).
   Transcript backing (046): the page's history comes
   from `GET .../transcript?agent_id=…` (`ChatApi.transcript` →
   turn/step/frame domain model in `data/chat/Transcript.kt`, NOT

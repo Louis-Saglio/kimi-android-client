@@ -304,7 +304,7 @@ class ChatMessageMapperTest {
         )
 
         assertEquals(
-            TranscriptTaskOrigin("bash-xhlawxzk", TaskInfo.Status.Completed),
+            TranscriptTaskOrigin("bash-xhlawxzk", TaskOutcome.Completed),
             page.turns.single().taskOrigin,
         )
     }
@@ -322,7 +322,7 @@ class ChatMessageMapperTest {
         )
 
         assertEquals(
-            TranscriptTaskOrigin("agent-a7fxomh0", TaskInfo.Status.Killed),
+            TranscriptTaskOrigin("agent-a7fxomh0", TaskOutcome.Killed),
             page.turns.single().taskOrigin,
         )
     }

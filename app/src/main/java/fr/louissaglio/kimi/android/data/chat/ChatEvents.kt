@@ -187,9 +187,9 @@ sealed interface SessionEvent {
     data class SubagentSuspended(override val subagentId: String, val reason: String) : SubagentLifecycleEvent
 
     /** `subagent.cancelled` (upstream schema-level, never captured live): the run was
-     * stopped on purpose. The LIVE carrier of the same truth is `task.terminated`
-     * with `status:"killed"` (docs/server-api.md) — no `subagent.completed`/`failed`
-     * follows either path, so both map to the store's Cancelled state (ticket 135). */
+     * stopped on purpose. The LIVE carrier of the same truth is the member's ended
+     * `task` frame with `outcome:"killed"` (docs/server-api.md — ticket 179); both
+     * map to the store's Cancelled state (ticket 135). */
     data class SubagentCancelled(override val subagentId: String) : SubagentLifecycleEvent
 
     /** A tool call waits on the user's decision (a `pending` approval `interaction`
@@ -311,20 +311,22 @@ sealed interface SessionEvent {
      * null when the (unverified) shape carried none. */
     data class CompactionFailed(val kind: String, val cause: String?) : SessionEvent
 
-    /** `task.started` (docs/server-api.md, Background lifecycle — ticket 092): a
-     * background task (sub-agent or bash) registered in the task store — REST-visible
-     * from here. [info] carries the CORE status vocabulary. [agentId] (the envelope
-     * stamp) names the OWNING agent — "main", or the sub-agent that spawned the task
-     * (its tasks never reach REST `/tasks`, which serves only the main agent's store);
-     * `info.agentId` is a different link — the spawned sub-agent's page id. */
-    data class TaskStarted(val info: TaskInfo, override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
+    /** `task.list` (docs/server-api.md, Sub-agents → Task frames and controls — server
+     * 2.5.0, ticket 179): every RUNNING task of [agentId] (the OWNING agent — "main",
+     * or a child agent that started its own tasks), sent when the connection starts
+     * receiving that agent (before the subscribe ack, again on every reconnect). It is
+     * authoritative for running tasks only: ended tasks are never listed again, so
+     * consumers merge it instead of replacing their terminal rows. */
+    data class TaskListed(val tasks: List<TaskState>, override val agentId: String = MAIN_AGENT_ID) :
+        SessionEvent, AgentScopedEvent
 
-    /** `task.terminated`: the task reached its terminal status ([TaskInfo.status] still
-     * core vocabulary — killed/timed_out/lost included; the collector maps it to the
-     * REST wire one). `task.notified` and the legacy `background.task.*` aliases are
-     * deliberately NOT parsed (web parity) — they fall into the unknown-type Log path.
-     * [agentId] is the owning agent, exactly as on [TaskStarted]. */
-    data class TaskTerminated(val info: TaskInfo, override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
+    /** `task`: one task's FULL state after a change (start, phase change, detach, end) —
+     * also emitted for a task control's code-0 reply, whose `task` is the state after
+     * the control. The `status:"ended"` frame is the task's last. [agentId] is the
+     * owning agent, exactly as on [TaskListed]; a sub-agent spawn's own agent id is
+     * [TaskState.childAgentId]. */
+    data class TaskUpdated(val task: TaskState, override val agentId: String = MAIN_AGENT_ID) :
+        SessionEvent, AgentScopedEvent
 }
 
 /** A prompt entity's status (`prompt.upsert`, docs/server-api.md — ticket 175). */

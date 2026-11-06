@@ -8,15 +8,23 @@ import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
@@ -40,8 +48,11 @@ import okhttp3.WebSocketListener
  * session's [TranscriptFold] (server 2.5.0, ticket 175), the main agent's flat `agent`/
  * `usage` state frames mapped to its model/permission/busy/context events (ticket 177),
  * the flat `interaction` frame mapped to the approval card's and question wizard's
- * events and the ack-time pending-interaction resets (tickets 171/172) — plus the per-agent resume watermarks every
- * subscribe sends back as `transcript_since` (ticket 176).
+ * events and the ack-time pending-interaction resets (tickets 171/172), the flat
+ * `task.list`/`task` frames mapped to [SessionEvent.TaskListed]/[SessionEvent.TaskUpdated]
+ * and the flat task controls with their `response` replies (ticket 179) — plus the
+ * per-agent resume watermarks every subscribe sends back as `transcript_since`
+ * (ticket 176).
  */
 @Singleton
 class SessionSocket @Inject constructor(
@@ -84,6 +95,37 @@ class SessionSocket @Inject constructor(
      */
     private val watermarks = ConcurrentHashMap<String, ConcurrentHashMap<String, Long>>()
 
+    /**
+     * The latest task state per session, keyed by (owning agent, task id) (ticket 179):
+     * every `task` frame and code-0 control reply replaces its entry, every `task.list`
+     * upserts its running tasks and drops the agent's running entries it no longer
+     * lists (they ended unseen — their outcome is unknown). Ended entries stay: the
+     * server never re-sends them. Instance-level like [folds], so whichever collection
+     * feeds the session (the chat's or the sub-agent store's keep-alive) keeps it
+     * current — the job screen reads it through [observeTask].
+     */
+    private val tasks = ConcurrentHashMap<String, MutableStateFlow<Map<TaskKey, TaskState>>>()
+
+    private data class TaskKey(val agentId: String, val taskId: String)
+
+    private fun tasksOf(sessionId: String): MutableStateFlow<Map<TaskKey, TaskState>> =
+        tasks.getOrPut(sessionId) { MutableStateFlow(emptyMap()) }
+
+    /** The session's open connection, while one is open (one collection per session,
+     * ticket 064): the channel [sendTaskControl] writes to and awaits replies on. */
+    private val connections = ConcurrentHashMap<String, LiveConnection>()
+
+    private val requestIds = AtomicLong()
+
+    /** One open socket and its in-flight task controls by `request_id`. A control's
+     * owning agent rides along: the reply carries no `agent_id`, but its task state
+     * is emitted as that agent's [SessionEvent.TaskUpdated]. */
+    private class LiveConnection(val webSocket: WebSocket) {
+        val pending = ConcurrentHashMap<String, PendingControl>()
+    }
+
+    private class PendingControl(val agentId: String, val reply: CompletableDeferred<TaskControlResponse>)
+
     private fun foldOf(sessionId: String): TranscriptFold =
         folds.getOrPut(sessionId) { TranscriptFold(json, mapper) }
 
@@ -107,6 +149,61 @@ class SessionSocket @Inject constructor(
 
     /** The agent's resume watermark, null when none is known (ticket 176). */
     fun watermark(sessionId: String, agentId: String): Long? = watermarks[sessionId]?.get(agentId)
+
+    /** The latest state of [agentId]'s task [taskId] this process has seen (ticket
+     * 179): null until a `task.list`/`task` frame or a control reply names it. */
+    fun observeTask(sessionId: String, agentId: String, taskId: String): Flow<TaskState?> =
+        tasksOf(sessionId).map { it[TaskKey(agentId, taskId)] }.distinctUntilChanged()
+
+    /**
+     * Sends one flat task control for [agentId]'s task [taskId] on the session's open
+     * connection and awaits its `response` (ticket 179; docs/server-api.md → WebSocket →
+     * Control frames): `{type, request_id, session_id, agent_id, task_id}`. A code-0
+     * reply's task state is emitted to the collector as a [SessionEvent.TaskUpdated]
+     * (and recorded) BEFORE this returns it, so every consumer applies it like any task
+     * frame. A non-zero code fails with [DataError.Api] (`40933` not movable to the
+     * background, `40406` no such task, …) and applies nothing; no open connection, a
+     * connection dropped mid-request or no reply within [CONTROL_TIMEOUT_MILLIS] fail
+     * with [DataError.Network].
+     */
+    suspend fun sendTaskControl(
+        sessionId: String,
+        control: TaskControl,
+        agentId: String,
+        taskId: String,
+    ): Result<TaskState?> {
+        val connection = connections[sessionId]
+            ?: return Result.failure(DataError.Network(IOException("The session socket is not connected")))
+        val requestId = "t_${requestIds.incrementAndGet()}"
+        val pending = PendingControl(agentId, CompletableDeferred())
+        connection.pending[requestId] = pending
+        return try {
+            if (!connection.webSocket.send(taskControlFrame(control, requestId, sessionId, agentId, taskId))) {
+                return Result.failure(DataError.Network(IOException("The session socket is closing")))
+            }
+            val response = withTimeoutOrNull(CONTROL_TIMEOUT_MILLIS) { pending.reply.await() }
+                ?: return Result.failure(DataError.Network(TimeoutException("No reply to ${control.wire}")))
+            if (response.code != 0) {
+                Result.failure(DataError.Api(response.code, response.msg?.takeIf { it.isNotBlank() } ?: "${control.wire} failed"))
+            } else {
+                Result.success(response.task?.toTaskState())
+            }
+        } catch (e: IOException) {
+            Result.failure(DataError.Network(e))
+        } finally {
+            connection.pending.remove(requestId)
+        }
+    }
+
+    private fun recordTask(sessionId: String, agentId: String, task: TaskState) =
+        tasksOf(sessionId).update { it + (TaskKey(agentId, task.taskId) to task) }
+
+    private fun recordTaskList(sessionId: String, agentId: String, listed: List<TaskState>) =
+        tasksOf(sessionId).update { current ->
+            val listedIds = listed.mapTo(HashSet()) { it.taskId }
+            current.filter { (key, task) -> key.agentId != agentId || !task.isRunning || key.taskId in listedIds } +
+                listed.associateBy { TaskKey(agentId, it.taskId) }
+        }
 
     /**
      * Streams [SocketEvent]s for [sessionId]. One collection = one socket owned here
@@ -198,9 +295,6 @@ class SessionSocket @Inject constructor(
         // cheap unparsed strings here, never unbounded expensive downstream work.
         val signals = Channel<Signal>(Channel.UNLIMITED)
         val watchdog = SocketStallWatchdog(TAG)
-        // Rebuilt at open: the agents this connection's subscribe asked to resume — a
-        // reset for one of them means its journal could not cover the watermark.
-        var context = FrameContext(sessionId, subscribeId, fold, watermarks, resumed = emptySet(), watchdog)
         val webSocket = socketClient.newWebSocket(
             Request.Builder().url(url).build(),
             object : WebSocketListener() {
@@ -226,6 +320,10 @@ class SessionSocket @Inject constructor(
                 }
             },
         )
+        val connection = LiveConnection(webSocket)
+        // Rebuilt at open: the agents this connection's subscribe asked to resume — a
+        // reset for one of them means its journal could not cover the watermark.
+        var context = FrameContext(sessionId, subscribeId, fold, watermarks, resumed = emptySet(), watchdog, connection)
         try {
             while (true) {
                 when (val signal = watchdog.receive(signals)) {
@@ -233,7 +331,8 @@ class SessionSocket @Inject constructor(
                         watchdog.onOpen()
                         onOpen()
                         val since = watermarks.toMap()
-                        context = FrameContext(sessionId, subscribeId, fold, watermarks, resumed = since.keys, watchdog)
+                        context = FrameContext(sessionId, subscribeId, fold, watermarks, resumed = since.keys, watchdog, connection)
+                        connections[sessionId] = connection
                         webSocket.send(subscribeFrame(subscribeId, sessionId, since))
                     }
                     is Signal.Text ->
@@ -245,6 +344,12 @@ class SessionSocket @Inject constructor(
                 }
             }
         } finally {
+            connections.remove(sessionId, connection)
+            // A control in flight on this socket gets no reply any more: fail it now
+            // instead of waiting out the timeout.
+            connection.pending.values.forEach {
+                it.reply.completeExceptionally(IOException("The session socket closed before the reply"))
+            }
             webSocket.cancel()
             signals.close()
         }
@@ -254,7 +359,8 @@ class SessionSocket @Inject constructor(
      * connection's subscribe sent a watermark for. [resetApprovals]/[resetQuestions]
      * collect the pending approvals/questions of this connection's `transcript.reset`
      * snapshots (tickets 171/172), by interaction id — the ack's
-     * [SessionEvent.ApprovalsReset]/[SessionEvent.QuestionsReset]. */
+     * [SessionEvent.ApprovalsReset]/[SessionEvent.QuestionsReset]. [connection] holds
+     * the task controls awaiting a `response` (ticket 179). */
     private class FrameContext(
         val sessionId: String,
         val subscribeId: String,
@@ -262,6 +368,7 @@ class SessionSocket @Inject constructor(
         val watermarks: MutableMap<String, Long>,
         val resumed: Set<String>,
         val watchdog: SocketStallWatchdog,
+        val connection: LiveConnection,
     ) {
         val resetApprovals = LinkedHashMap<String, PendingApprovalRequest>()
         val resetQuestions = LinkedHashMap<String, PendingQuestion>()
@@ -387,8 +494,47 @@ class SessionSocket @Inject constructor(
             // child's (SessionEvent.isSubagentScoped).
             "todo" -> decodeFlat<TodoFrame>(frame.type, text)
                 ?.let { onEvent(SessionEvent.TodoUpdated(it.toTodos(), it.agentId)) }
-            // The other flat state frames (goal, task.list, task) are tickets 179–182
-            // or out of scope: ignored, but logged so a server rename shows up during
+            // The flat task frames (docs/server-api.md, Sub-agents → Task frames and
+            // controls — ticket 179), every agent's, tagged with the OWNING agent: the
+            // chat's jobs widget takes main's, the sub-agent store a child's
+            // (SessionEvent.isSubagentScoped). `task.list` (before the ack, on every
+            // connection) holds only the running tasks; `task` is one task's full state
+            // on every change. An undecodable entry (blank id, unknown status) is
+            // dropped alone.
+            "task.list" -> decodeFlat<TaskListFrame>(frame.type, text)
+                ?.let { list ->
+                    val listed = list.tasks.mapNotNull { it.toTaskState() }
+                    recordTaskList(sessionId, list.agentId, listed)
+                    onEvent(SessionEvent.TaskListed(listed, list.agentId))
+                }
+            "task" -> {
+                val owner = decodeFlat<TaskFrame>(frame.type, text)?.agentId
+                val task = decodeFlat<TaskStateDto>(frame.type, text)?.toTaskState()
+                if (owner != null && task != null) {
+                    recordTask(sessionId, owner, task)
+                    onEvent(SessionEvent.TaskUpdated(task, owner))
+                }
+            }
+            // A task control's reply (ticket 179), matched by request_id to the
+            // control sent on THIS connection. A code-0 reply's state applies like any
+            // task frame — emitted before the caller resumes; an error reply applies
+            // nothing (its state, when present, is the unchanged one).
+            "response" -> decodeFlat<TaskControlResponse>(frame.type, text)
+                ?.let { response ->
+                    val pending = response.requestId?.let { context.connection.pending[it] }
+                    if (pending == null) {
+                        Log.d(TAG, "Dropping 'response' for unknown request '${response.requestId}'")
+                        return@let
+                    }
+                    val task = response.task?.toTaskState()
+                    if (response.code == 0 && task != null) {
+                        recordTask(sessionId, pending.agentId, task)
+                        onEvent(SessionEvent.TaskUpdated(task, pending.agentId))
+                    }
+                    pending.reply.complete(response)
+                }
+            // The other flat state frames (goal, task.output) are out of scope or
+            // ticket 180: ignored, but logged so a server rename shows up during
             // development.
             else -> Log.d(TAG, "Ignoring '${frame.type}' frame")
         }
@@ -431,6 +577,22 @@ class SessionSocket @Inject constructor(
         }
     }.toString()
 
+    /** A flat task control (ticket 179): its fields sit beside `type` and `request_id`
+     * replaces `id` — a frame without a readable `request_id` closes the socket (1008). */
+    private fun taskControlFrame(
+        control: TaskControl,
+        requestId: String,
+        sessionId: String,
+        agentId: String,
+        taskId: String,
+    ): String = buildJsonObject {
+        put("type", control.wire)
+        put("request_id", requestId)
+        put("session_id", sessionId)
+        put("agent_id", agentId)
+        put("task_id", taskId)
+    }.toString()
+
     private fun pongFrame(nonce: String): String = buildJsonObject {
         put("type", "pong")
         putJsonObject("payload") { put("nonce", nonce) }
@@ -439,6 +601,9 @@ class SessionSocket @Inject constructor(
     private companion object {
         const val TAG = "SessionSocket"
         const val MAX_BACKOFF_SHIFT = 5 // 1 s << 5 = 32 s, clamped to 30 s below
+
+        /** How long a task control waits for its `response` before failing. */
+        const val CONTROL_TIMEOUT_MILLIS = 15_000L
 
         fun backoffMillis(attempt: Int): Long = (1_000L shl attempt).coerceAtMost(30_000L)
     }

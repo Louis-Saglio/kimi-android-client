@@ -2,6 +2,7 @@ package fr.louissaglio.kimi.android.data.chat
 
 import java.time.Instant
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -9,73 +10,122 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 
-// Domain models of the background-task store (docs/server-api.md, Background lifecycle
-// and REST /tasks — ticket 092): background sub-agents and background bash. Question
-// flows (kind "tool") are excluded — they already surface as question cards in chat.
+// The task domain (docs/server-api.md, Sub-agents → Task frames and controls —
+// server 2.5.0, ticket 179): the `task.list`/`task` frames' own vocabulary. There is
+// no REST task API any more; every task change arrives as a full-state `task` frame.
 
 /**
- * One background task as REST `/tasks` serves it: [kind] and [status] use the REST
- * wire vocabulary (the core one is already mapped server-side). [runInBackground]
- * (0.39.0) is the wire flag verbatim — `false` on a listed foreground sub-agent,
- * which the jobs seed filters out (ticket 162). [agentId] links a sub-agent task
- * to the WS sub-agent id for navigation (subagent-kind tasks carry it since
- * 0.36.1); absent on bash tasks — the link then arrives via `task.started`.
- * [command] rides on bash-kind tasks; [outputPreview]/[outputBytes] arrive only on a
- * get-with-output read (ticket 096's job screen) — the stored stdout/stderr tail,
- * live while a bash task runs. [model]/[thinkingEffort] ride on subagent-kind tasks
- * (0.34.0) — the sub-agent store heals a member's pair from the list on a cold
- * start (ticket 135).
+ * One task's full state, as a `task` frame (or a `task.list` entry, or a task control's
+ * reply) carries it. Every frame replaces the previous state wholesale. [kind] `Other`
+ * is non-shell/sub-agent work (e.g. a background question) — never a job row.
+ * [detached] is the background flag: `false` while a tool call waits on the task (a
+ * foreground spawn or command), `true` once it runs in the background (spawned so, or
+ * moved there by `task.background`). [childAgentId] is the spawned sub-agent's agent id
+ * (subagent kind only — `agent-0`, a different namespace from the `agent-…` task id).
+ * [outcome] is set exactly when [status] is [Status.Ended]; the ended frame is the
+ * task's last.
  */
-data class BackgroundTask(
-    val id: String,
+data class TaskState(
+    val taskId: String,
     val kind: Kind,
-    val description: String,
     val status: Status,
-    val runInBackground: Boolean,
-    val createdAt: Instant,
-    val startedAt: Instant,
-    val completedAt: Instant? = null,
-    val agentId: String? = null,
+    val detached: Boolean,
+    val description: String = "",
+    val outcome: TaskOutcome? = null,
+    val phase: String? = null,
+    val childAgentId: String? = null,
+    val parentToolCallId: String? = null,
+    val swarmIndex: Int? = null,
     val command: String? = null,
-    val outputPreview: String? = null,
-    val outputBytes: Int? = null,
+    val startedAt: Instant? = null,
+    val endedAt: Instant? = null,
+    val resultSummary: String? = null,
+    val error: String? = null,
+    val stateReason: String? = null,
     val model: String? = null,
-    val thinkingEffort: String? = null,
+    val thinking: String? = null,
 ) {
-    /** REST wire vocabulary (docs/server-api.md): core `agent`→Subagent,
-     * `process`→Bash. Question flows (`tool`) never reach the domain — filtered at
-     * the mapping boundary. */
-    enum class Kind { Subagent, Bash }
+    /** Wire `kind`: `shell`, `subagent`, anything else (`other`) → [Other]. */
+    enum class Kind { Shell, Subagent, Other }
 
-    /** REST wire vocabulary: core `killed`→Cancelled, `timed_out`/`lost`→Failed. */
-    enum class Status { Running, Completed, Failed, Cancelled }
+    /** Wire `status`: `running` or `ended`. */
+    enum class Status { Running, Ended }
+
+    val isRunning: Boolean get() = status == Status.Running
+}
+
+/** An ended task's `outcome` (docs/server-api.md): `killed` is a deliberate stop
+ * (`task.stop`), `timed_out` the kill budget, `lost` a task the server lost track of. */
+enum class TaskOutcome(val wire: String) {
+    Completed("completed"),
+    Failed("failed"),
+    TimedOut("timed_out"),
+    Killed("killed"),
+    Lost("lost"),
+    ;
+
+    companion object {
+        fun fromWire(value: String?): TaskOutcome? = entries.firstOrNull { it.wire == value }
+    }
+}
+
+/** The two task controls the app sends (docs/server-api.md → WebSocket → Control
+ * frames): flat `task.stop` (replaces REST `:cancel`) and `task.background` (replaces
+ * REST `:detach`). Both reply `{type:"response",request_id,code,msg?,task?}`. */
+enum class TaskControl(val wire: String) {
+    Stop("task.stop"),
+    Background("task.background"),
 }
 
 /**
- * The `info` object of `task.started`/`task.terminated` (docs/server-api.md —
- * [startedAt]/[endedAt] are epoch MILLIS on the wire, unlike REST's ISO strings).
- * [status] keeps the CORE vocabulary (killed/timed_out/lost included) — the collector
- * maps it to the REST wire one. [agentId] is null on bash tasks.
+ * The wire task state → [TaskState] (ticket 179). Null — the frame is dropped — when
+ * the task id is blank or the status is neither `running` nor `ended`; an unknown kind
+ * degrades to [TaskState.Kind.Other] (never a job), an unknown outcome to null. Blank
+ * optional strings read as absent.
  */
-data class TaskInfo(
-    val taskId: String,
-    val description: String,
-    val status: Status,
-    val startedAt: Instant,
-    val endedAt: Instant? = null,
-    val stopReason: String? = null,
-    val kind: Kind,
-    val agentId: String? = null,
-    val subagentType: String? = null,
-) {
-    /** Core vocabulary (docs/server-api.md): `agent` = background sub-agent,
-     * `process` = background bash. */
-    enum class Kind { Agent, Process }
+internal fun TaskStateDto.toTaskState(): TaskState? {
+    if (taskId.isBlank()) return null
+    val status = when (status) {
+        "running" -> TaskState.Status.Running
+        "ended" -> TaskState.Status.Ended
+        else -> return null
+    }
+    return TaskState(
+        taskId = taskId,
+        kind = when (kind) {
+            "shell" -> TaskState.Kind.Shell
+            "subagent" -> TaskState.Kind.Subagent
+            else -> TaskState.Kind.Other
+        },
+        status = status,
+        detached = detached,
+        description = description.orEmpty(),
+        outcome = if (status == TaskState.Status.Ended) TaskOutcome.fromWire(outcome) else null,
+        phase = phase.blankToNull(),
+        childAgentId = childAgentId.blankToNull(),
+        parentToolCallId = parentToolCallId.blankToNull(),
+        swarmIndex = swarmIndex,
+        command = command.blankToNull(),
+        startedAt = startedAt.toInstantOrNull(),
+        endedAt = endedAt.toInstantOrNull(),
+        resultSummary = resultSummary.blankToNull(),
+        error = error.blankToNull(),
+        stateReason = stateReason.blankToNull(),
+        model = model.blankToNull(),
+        thinking = thinking.blankToNull(),
+    )
+}
 
-    /** Core vocabulary — a superset of the REST wire one ([TimedOut] and [Lost]
-     * surface as Failed there, [Killed] as Cancelled). */
-    enum class Status { Running, Completed, Failed, TimedOut, Killed, Lost }
+private fun String?.blankToNull(): String? = this?.takeIf { it.isNotBlank() }
+
+/** An ISO-8601 string, or an epoch-millis number; anything else is unknown. */
+private fun JsonPrimitive?.toInstantOrNull(): Instant? {
+    val primitive = this ?: return null
+    if (primitive is JsonNull) return null
+    if (!primitive.isString) return primitive.longOrNull?.let(Instant::ofEpochMilli)
+    return runCatching { Instant.parse(primitive.content) }.getOrNull()
 }
 
 private val TASK_ID = Regex("""task_id:\s*(\S+)""")
@@ -83,7 +133,7 @@ private val TASK_ID = Regex("""task_id:\s*(\S+)""")
 /**
  * The row→job link of a background Bash call (ticket 096): the call's tool result is
  * an immediate plain-text stub whose FIRST line is `task_id: bash-…`
- * (docs/server-api.md, REST /tasks) — the real output lives in the task store, so the
+ * (docs/server-api.md, Sub-agents) — the real output lives in the task store, so the
  * row navigates to the job screen instead of expanding. History carries the same
  * text, so live and re-entered sessions link alike. The `bash-` prefix requirement is
  * the guard that keeps background **Agent** results (`task_id: agent-…`) for
@@ -118,8 +168,8 @@ const val DEFAULT_BACKGROUND_BASH_TIMEOUT_SECONDS = 600
 /**
  * The timeout knobs of a Bash tool call's input (ticket 097): [seconds] is the
  * explicit `timeout` (null when unset), [disabled] mirrors `disable_timeout: true`.
- * REST never exposes either — the call input (live args / history `tool_use` alike)
- * is the only wire location.
+ * No task frame exposes either — the call input (live args / history `tool_use`
+ * alike) is the only wire location.
  */
 data class BashTimeout(
     val seconds: Int?,
@@ -164,6 +214,6 @@ fun bashDescriptionOf(toolName: String, argsJson: String): String? =
     bashArgsOf(toolName, argsJson)?.get("description")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
 
 /** The `command` of a Bash call's input; null when absent — the job screen's Command
- * section then waits for the entry fetch (REST carries it). */
+ * section then waits for the task frame (shell tasks carry it). */
 fun bashCommandOf(toolName: String, argsJson: String): String? =
     bashArgsOf(toolName, argsJson)?.get("command")?.jsonPrimitive?.contentOrNull

@@ -4,6 +4,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 // DTOs for GET /api/v1/sessions/{id}/messages and the /api/v1/ws frames
 // (docs/server-api.md). Unknown fields are ignored (Json { ignoreUnknownKeys = true });
@@ -244,6 +245,62 @@ data class TodoItemDto(
 )
 
 /**
+ * One task's full state (docs/server-api.md, Sub-agents → Task frames and controls —
+ * server 2.5.0, ticket 179): the body of a flat `task` frame (its fields sit beside
+ * `type`), a `task.list` entry, and a task control reply's `task`. Mapped by
+ * [toTaskState]. The timestamps are ISO-8601 strings on the wire; [JsonPrimitive]
+ * keeps an epoch-millis number decodable too.
+ */
+@Serializable
+data class TaskStateDto(
+    @SerialName("task_id") val taskId: String = "",
+    val kind: String = "",
+    val status: String = "",
+    val outcome: String? = null,
+    val phase: String? = null,
+    val detached: Boolean = false,
+    val description: String? = null,
+    @SerialName("child_agent_id") val childAgentId: String? = null,
+    @SerialName("parent_tool_call_id") val parentToolCallId: String? = null,
+    @SerialName("swarm_index") val swarmIndex: Int? = null,
+    val command: String? = null,
+    @SerialName("started_at") val startedAt: JsonPrimitive? = null,
+    @SerialName("ended_at") val endedAt: JsonPrimitive? = null,
+    @SerialName("result_summary") val resultSummary: String? = null,
+    val error: String? = null,
+    @SerialName("state_reason") val stateReason: String? = null,
+    val model: String? = null,
+    val thinking: String? = null,
+)
+
+/** The flat `task` frame: the owning agent ([agentId] — `main`, or the child agent that
+ * started the task) plus the task's full state, decoded from the same frame text. */
+@Serializable
+data class TaskFrame(
+    @SerialName("agent_id") val agentId: String = MAIN_AGENT_ID,
+)
+
+/** The flat `task.list` frame: every RUNNING task of [agentId], sent when a connection
+ * starts receiving the agent (before the subscribe ack, again on every reconnect). */
+@Serializable
+data class TaskListFrame(
+    @SerialName("agent_id") val agentId: String = MAIN_AGENT_ID,
+    val tasks: List<TaskStateDto> = emptyList(),
+)
+
+/** The reply to a flat task control (`task.stop`/`task.background`, ticket 179):
+ * `{type:"response",request_id,code,msg?,task?}` — matched to its request by
+ * [requestId]; [task] is the task's state after the control (also sent on some
+ * errors, e.g. `40933`). */
+@Serializable
+data class TaskControlResponse(
+    @SerialName("request_id") val requestId: String? = null,
+    val code: Int = 0,
+    val msg: String? = null,
+    val task: TaskStateDto? = null,
+)
+
+/**
  * The flat `interaction` frame (docs/server-api.md, Interactions → The `interaction`
  * frame — tickets 171/172): one approval or question of any agent of the session, sent on
  * every state change and re-sent for every still-pending one after each accepted
@@ -345,62 +402,6 @@ data class QuestionOptionDto(
     val label: String = "",
     // Omitted when the option has none.
     val description: String? = null,
-)
-
-// --- REST /tasks + task.* WS events (docs/server-api.md, Background lifecycle —
-// ticket 092) ------------------------------------------------------------------
-// Background tasks only: background sub-agents, background bash, question flows (the
-// last filtered out at the mapping boundary). Terminal tasks stay listed.
-
-/** `data` of `GET .../tasks?status=…`. */
-@Serializable
-data class TaskListData(
-    val items: List<TaskDto> = emptyList(),
-)
-
-/** One REST task object; created_at == started_at. Times are ISO-8601 strings.
- * [runInBackground] rides every task since 0.39.0 (list and get, running and
- * terminal; `false` on a listed foreground sub-agent) — the jobs seed's foreground
- * filter (ticket 162). The shape also carries `subagent_type` and
- * `parent_tool_call_id` (since 0.36.1; `parent_tool_call_id` on bash-kind tasks
- * since 0.39.0), not decoded here. [command] rides on bash-kind tasks;
- * [outputPreview]/[outputBytes] only on a get-with-output read (ticket 096).
- * [model]/[thinkingEffort] ride on subagent-kind tasks (0.34.0 — the swarm
- * aggregate's shared-model line, ticket 135). */
-@Serializable
-data class TaskDto(
-    val id: String = "",
-    val kind: String = "",
-    val description: String = "",
-    val status: String = "",
-    @SerialName("created_at") val createdAt: String? = null,
-    @SerialName("started_at") val startedAt: String? = null,
-    @SerialName("run_in_background") val runInBackground: Boolean = false,
-    @SerialName("completed_at") val completedAt: String? = null,
-    // Subagent-kind tasks carry it since 0.36.1 (docs/server-api.md); bash tasks never do.
-    @SerialName("agent_id") val agentId: String? = null,
-    val command: String? = null,
-    @SerialName("output_preview") val outputPreview: String? = null,
-    @SerialName("output_bytes") val outputBytes: Int? = null,
-    val model: String? = null,
-    @SerialName("thinking_effort") val thinkingEffort: String? = null,
-)
-
-/** `data` of `POST .../tasks/{id}:cancel`; a terminal task answers envelope 40904 with
- * `cancelled:false`. */
-@Serializable
-data class TaskCancelData(
-    val cancelled: Boolean = false,
-)
-
-/** `data` of `POST .../tasks/{id}:detach` (0.39.0 — ticket 138): a converted
- * foreground task answers `detached:true, status:"running"`; an already-background
- * or terminal task answers envelope code 0 with `detached:false` and the current
- * status — success is `data.detached`, not `code == 0`. */
-@Serializable
-data class TaskDetachData(
-    val detached: Boolean = false,
-    val status: String = "",
 )
 
 // --- GET /api/v1/sessions/{id}/transcript (docs/server-api.md, Transcript) -----------

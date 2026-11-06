@@ -305,7 +305,7 @@ class ChatTimelineTest {
 
     @Test
     fun `a background bash result links the row to its job`() {
-        // Verbatim background Bash tool result (docs/server-api.md, REST /tasks —
+        // Verbatim background Bash tool result (docs/server-api.md, Sub-agents —
         // ticket 096): the first line's `task_id: bash-…` is the row→job link.
         val output = "task_id: bash-2q5gu61e\npid: 502439\ndescription: tick counter loop (120)\n" +
             "status: running\nautomatic_notification: true\nnext_step: …\n"

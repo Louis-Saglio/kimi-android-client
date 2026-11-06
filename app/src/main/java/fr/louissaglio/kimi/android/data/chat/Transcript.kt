@@ -86,12 +86,12 @@ data class TranscriptTurn(
 /** The origin of a background-task completion-notification turn (origin kind `task`,
  * verified on 0.34.0 — docs/server-api.md, Transcript): the finished task's id and
  * terminal status. This is the cold-open healing channel for sub-agent-owned jobs
- * (ticket 099) — the record's jobs are otherwise live-only (REST `/tasks` never
- * serves them). [status] keeps the core vocabulary; null when the wire value is not
- * a known one (the heal then skips the turn rather than guess). */
+ * (ticket 099) — the record's jobs are otherwise live-only (the task frames are
+ * never replayed). [status] is the task's terminal outcome; null when the wire value
+ * is not a known terminal one (the heal then skips the turn rather than guess). */
 data class TranscriptTaskOrigin(
     val taskId: String,
-    val status: TaskInfo.Status?,
+    val status: TaskOutcome?,
 )
 
 data class TranscriptStep(

@@ -89,3 +89,59 @@ Relevant code: `ui/chat/JobsStore.kt`, `data/chat/Tasks.kt`,
 `data/chat/ChatRepository.kt`, `ui/chat/JobDetailViewModel.kt`,
 `ui/chat/ChatEvents.kt`. Wire reference: `docs/server-api.md` →
 Sub-agents → Task frames and controls.
+
+## Implementation notes
+
+**2026-11-06 —** `SessionSocket` decodes the flat `task.list`/`task` frames for every
+agent (`TaskListFrame`/`TaskFrame`/`TaskStateDto` in `ChatDtos.kt`, mapped by the pure
+`TaskStateDto.toTaskState()` in `data/chat/Tasks.kt` into the new domain `TaskState` +
+`TaskOutcome` — the frame's own vocabulary; a blank id or unknown status drops the
+entry, an unknown kind is `Other`) and emits `SessionEvent.TaskListed(tasks, agentId)` /
+`TaskUpdated(task, agentId)`, tagged with the owning agent. It also keeps the latest
+state per (agent, task) at instance level (`observeTask`) and sends the flat controls
+(`sendTaskControl(sessionId, TaskControl.Stop|Background, agentId, taskId)` on the
+session's open connection, reply matched by `request_id`; a code-0 reply's `task` is
+emitted as a `TaskUpdated` before the call returns, a non-zero code fails with
+`DataError.Api`, no/dropped connection or a 15 s silence with `DataError.Network`).
+`ChatRepository.sendTaskControl`/`observeTask` expose both.
+
+- `JobsStore`: `seed()` (REST) and `onStarted`/`onTerminated` are replaced by
+  `onListed` (merge — listed running jobs upsert, a running job no longer listed ended
+  unseen and is dropped, terminal rows linger) and `onUpdated` (full-state upsert). The
+  shared `TaskState.toBackgroundJob()` keeps only `detached:true` shell → Bash and
+  subagent → Subagent tasks (`child_agent_id` = page link); `other` (background
+  questions) and foreground tasks are no jobs (ticket 162's background-only rule).
+  `toJobStatus()`: killed → Cancelled, completed → Completed, failed/timed_out/lost →
+  Failed, `timed_out` also sets `Job.timedOut`. `Job` keeps its UI shape with its own
+  `Job.Kind`/`Job.Status`. Stop is `task.stop` with no optimistic flip; an error reply
+  or no socket raises `JobCancelFailed`. The `SeedGuard` use and the ViewModel's seed
+  calls are gone.
+- `SubagentStreamStore`: `onTaskListed`/`onTaskUpdated` replace the `task.*` handler and
+  `applyTaskList`; a subagent-kind task merges into the record its `child_agent_id`
+  names (`mergeSpawnTask`: task id first-writer, `detached` → `runInBackground`,
+  model/effort blank-fill, `killed` → Cancelled pin) — no record creation (ticket 182);
+  a child's own tasks feed `SubagentRecord.jobs` (list merge + upsert).
+- Controls moved off REST: `SwarmViewModel.onStopMember` and `JobDetailViewModel.onStop`
+  send `task.stop`, `SubagentViewModel.onDetachToBackground` sends `task.background`
+  (40933 snackbars). `JobDetailViewModel` reads `observeTask` in main mode (status,
+  times, description/command, `result_summary`/`error` as output until ticket 180);
+  its poll, entry fetch, error state and retry are deleted.
+- Deleted: `ChatApi.listTasks/getTask/cancelTask/detachTask`, the `ChatRepository`
+  wrappers, `TaskListData`/`TaskDto`/`TaskCancelData`/`TaskDetachData`,
+  `ChatMessageMapper.toDomain(TaskDto)`, `BackgroundTask`, `TaskInfo`,
+  `SessionEvent.TaskStarted/TaskTerminated`, `ChatApiTest` (REST tasks only). The
+  transcript task origin now carries a `TaskOutcome?`.
+- Tests: `SessionSocketTest` (task frames tagged by owner, the mapping, the task record,
+  flat control frame + code-0 reply emitted before return, error reply applies nothing,
+  no/dropped connection, unknown request id; the subscribe-seed order includes
+  `task.list`), `ChatJobsTest` (new, VM harness: frames show jobs with no `/tasks`
+  request, list seed + lingering terminal row, cancel → `task.stop` → flips on the
+  killed reply, 40933 surfaces without change, `task.background` reply lists the row
+  once, 40933 on background, `other` kind never shown), `JobsStoreTest` (rewritten:
+  mapping, merge, no-socket stop), `JobDetailViewModelTest` (rewritten on a real
+  socket), `SubagentStreamStoreTest`, `SubagentViewModelTest`, `SwarmViewModelTest`
+  (ported to frames/controls). Frame builders: `TranscriptFrames.taskState/taskFrame/
+  taskListFrame/taskResponseFrame`. androidTest fixtures moved to `Job.Kind/Status`.
+- Docs: `docs/conventions.md` (socket task frames/controls, data layer, JobsStore, job
+  screen, sub-agent store carriers, swarm stop, detach). Ticket 180's item 4 is marked
+  done here.

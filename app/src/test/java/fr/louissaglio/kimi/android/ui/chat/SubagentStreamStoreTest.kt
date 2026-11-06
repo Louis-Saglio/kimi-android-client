@@ -1,12 +1,12 @@
 package fr.louissaglio.kimi.android.ui.chat
 
 import fr.louissaglio.kimi.android.data.chat.AGENT_SWARM_TOOL_NAME
-import fr.louissaglio.kimi.android.data.chat.BackgroundTask
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.SubagentRosterEntry
 import fr.louissaglio.kimi.android.data.chat.SubagentRosterPhase
-import fr.louissaglio.kimi.android.data.chat.TaskInfo
+import fr.louissaglio.kimi.android.data.chat.TaskOutcome
+import fr.louissaglio.kimi.android.data.chat.TaskState
 import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.TranscriptFrame
 import fr.louissaglio.kimi.android.data.chat.TranscriptPage
@@ -905,19 +905,15 @@ class SubagentStreamStoreTest {
     }
 
     @Test
-    fun `a main-owned killed task terminated pins the named member Cancelled`() = runBlocking {
-        // A deliberately stopped member gets no terminal subagent.* frame: the
-        // task.terminated with status killed (main-owned for a swarm member too) is
-        // its only live cancelled carrier.
+    fun `a main-owned killed spawn task pins the named member Cancelled`() = runBlocking {
+        // A stop (task.stop) ends the member's task with outcome killed — main-owned
+        // for a swarm member too — and no other carrier says "cancelled".
         store.apply(SESSION_ID, spawned("agent-12", taskId = "agent-t1"))
 
         store.apply(
             SESSION_ID,
-            SessionEvent.TaskTerminated(
-                taskInfo(
-                    "agent-t1", TaskInfo.Status.Killed, kind = TaskInfo.Kind.Agent,
-                    endedAt = Instant.ofEpochMilli(1785210118804), agentId = "agent-12",
-                ),
+            SessionEvent.TaskUpdated(
+                spawnTask("agent-t1", "agent-12", outcome = TaskOutcome.Killed, endedAt = Instant.ofEpochMilli(1785210118804)),
             ),
         )
 
@@ -929,16 +925,13 @@ class SubagentStreamStoreTest {
     }
 
     @Test
-    fun `a main-owned non-killed task terminated leaves the member status alone`() = runBlocking {
+    fun `a main-owned non-killed ended spawn task leaves the member status alone`() = runBlocking {
         store.apply(SESSION_ID, spawned("agent-12", taskId = "agent-t1"))
 
         store.apply(
             SESSION_ID,
-            SessionEvent.TaskTerminated(
-                taskInfo(
-                    "agent-t1", TaskInfo.Status.Completed, kind = TaskInfo.Kind.Agent,
-                    endedAt = Instant.ofEpochMilli(1785210118804), agentId = "agent-12",
-                ),
+            SessionEvent.TaskUpdated(
+                spawnTask("agent-t1", "agent-12", outcome = TaskOutcome.Completed, endedAt = Instant.ofEpochMilli(1785210118804)),
             ),
         )
 
@@ -946,14 +939,11 @@ class SubagentStreamStoreTest {
     }
 
     @Test
-    fun `a killed task terminated naming no record is dropped`() = runBlocking {
+    fun `a killed spawn task naming no record is dropped`() = runBlocking {
         store.apply(
             SESSION_ID,
-            SessionEvent.TaskTerminated(
-                taskInfo(
-                    "agent-t9", TaskInfo.Status.Killed, kind = TaskInfo.Kind.Agent,
-                    endedAt = Instant.ofEpochMilli(1785210118804), agentId = "agent-99",
-                ),
+            SessionEvent.TaskUpdated(
+                spawnTask("agent-t9", "agent-99", outcome = TaskOutcome.Killed, endedAt = Instant.ofEpochMilli(1785210118804)),
             ),
         )
 
@@ -1015,91 +1005,55 @@ class SubagentStreamStoreTest {
         assertEquals("high", entry("agent-13")!!.thinkingEffort)
     }
 
-    private fun backgroundTask(
-        id: String,
-        status: BackgroundTask.Status,
-        kind: BackgroundTask.Kind = BackgroundTask.Kind.Subagent,
-        agentId: String? = null,
-        model: String? = null,
-        thinkingEffort: String? = null,
-    ) = BackgroundTask(
-        id = id,
-        kind = kind,
-        description = "bg",
-        status = status,
-        runInBackground = true,
-        createdAt = Instant.ofEpochMilli(1785210101939),
-        startedAt = Instant.ofEpochMilli(1785210101939),
-        agentId = agentId,
-        model = model,
-        thinkingEffort = thinkingEffort,
-    )
-
     @Test
-    fun `the REST task list heals a member's cancelled status at roster precedence`() = runBlocking {
-        store.apply(SESSION_ID, spawned("agent-12", taskId = "agent-t1"))
+    fun `a main task list fills a member's task id, model and effort blank-only`() = runBlocking {
+        // The subscribe-time task.list is a running member's cold-start carrier of
+        // the task id (Stop/To background's handle) and the model/effort pair.
+        store.apply(SESSION_ID, spawned("agent-12", model = "kimi-code/k3", thinkingEffort = "high"))
+        store.apply(SESSION_ID, spawned("agent-13", toolCallId = "tool_2"))
+        store.apply(SESSION_ID, SessionEvent.SubagentStarted("agent-13"))
 
-        store.applyTaskList(
+        store.apply(
             SESSION_ID,
-            listOf(backgroundTask("agent-t1", status = BackgroundTask.Status.Cancelled, agentId = "agent-12")),
-        )
-
-        assertEquals(SubagentStatus.Cancelled, entry("agent-12")!!.status)
-    }
-
-    @Test
-    fun `the REST task list never regresses a live pin`() = runBlocking {
-        store.apply(SESSION_ID, spawned("agent-12", taskId = "agent-t1"))
-        store.apply(SESSION_ID, SessionEvent.SubagentStarted("agent-12"))
-
-        store.applyTaskList(
-            SESSION_ID,
-            listOf(backgroundTask("agent-t1", status = BackgroundTask.Status.Cancelled, agentId = "agent-12")),
-        )
-
-        assertEquals(SubagentStatus.Working, entry("agent-12")!!.status)
-    }
-
-    @Test
-    fun `the REST task list fills blank model and effort without touching a non-cancelled status`() = runBlocking {
-        store.apply(SESSION_ID, spawned("agent-12", taskId = "agent-t1", model = "kimi-code/k3", thinkingEffort = "high"))
-        store.apply(SESSION_ID, spawned("agent-13", toolCallId = "tool_2", taskId = "agent-t2"))
-
-        store.applyTaskList(
-            SESSION_ID,
-            listOf(
-                backgroundTask(
-                    "agent-t1", status = BackgroundTask.Status.Running, agentId = "agent-12",
-                    model = "other/m1", thinkingEffort = "low",
-                ),
-                backgroundTask(
-                    "agent-t2", status = BackgroundTask.Status.Running, agentId = "agent-13",
-                    model = "kimi-code/k3", thinkingEffort = "high",
+            SessionEvent.TaskListed(
+                listOf(
+                    spawnTask("agent-t1", "agent-12", model = "other/m1", thinking = "low"),
+                    spawnTask("agent-t2", "agent-13", model = "kimi-code/k3", thinking = "high"),
                 ),
             ),
         )
 
+        assertEquals("agent-t1", entry("agent-12")!!.taskId)
         assertEquals("kimi-code/k3", entry("agent-12")!!.model)
         assertEquals("high", entry("agent-12")!!.thinkingEffort)
+        assertEquals("agent-t2", entry("agent-13")!!.taskId)
         assertEquals("kimi-code/k3", entry("agent-13")!!.model)
         assertEquals("high", entry("agent-13")!!.thinkingEffort)
-        assertEquals(SubagentStatus.Queued, entry("agent-13")!!.status)
+        // A foreground member stays foreground, its status untouched, and becomes
+        // stoppable/detachable now that its task id is known.
+        val member = entry("agent-13")!!
+        assertFalse(member.runInBackground)
+        assertEquals(SubagentStatus.Working, member.status)
+        assertTrue(member.detachable)
     }
 
     @Test
-    fun `the REST task list skips bash tasks, id-less and unknown agents`() = runBlocking {
+    fun `shell tasks and spawn tasks naming unknown or no agents touch no record`() = runBlocking {
         store.apply(SESSION_ID, spawned("agent-12"))
 
-        store.applyTaskList(
+        store.apply(
             SESSION_ID,
-            listOf(
-                backgroundTask("bash-1", status = BackgroundTask.Status.Cancelled, kind = BackgroundTask.Kind.Bash, agentId = "agent-12"),
-                backgroundTask("agent-t9", status = BackgroundTask.Status.Cancelled, agentId = "agent-99"),
-                backgroundTask("agent-t8", status = BackgroundTask.Status.Cancelled, agentId = null),
+            SessionEvent.TaskListed(
+                listOf(
+                    task("bash-1", outcome = TaskOutcome.Killed),
+                    spawnTask("agent-t9", "agent-99", outcome = TaskOutcome.Killed),
+                    spawnTask("agent-t8", null, outcome = TaskOutcome.Killed),
+                ),
             ),
         )
 
         assertEquals(SubagentStatus.Queued, entry("agent-12")!!.status)
+        assertNull(entry("agent-12")!!.taskId)
         assertNull(store.entry(SESSION_ID, "agent-99").first())
     }
 
@@ -1184,11 +1138,8 @@ class SubagentStreamStoreTest {
         store.apply(SESSION_ID, spawned("agent-5", toolCallId = "tool_swarm", swarmIndex = 4, taskId = "agent-t5"))
         store.apply(
             SESSION_ID,
-            SessionEvent.TaskTerminated(
-                taskInfo(
-                    "agent-t5", TaskInfo.Status.Killed, kind = TaskInfo.Kind.Agent,
-                    endedAt = Instant.ofEpochMilli(1785210118804), agentId = "agent-5",
-                ),
+            SessionEvent.TaskUpdated(
+                spawnTask("agent-t5", "agent-5", outcome = TaskOutcome.Killed, endedAt = Instant.ofEpochMilli(1785210118804)),
             ),
         )
 
@@ -1265,7 +1216,7 @@ class SubagentStreamStoreTest {
 
     @Test
     fun `stoppable needs a running status, a known task id, and a real record`() = runBlocking {
-        // The task id is the REST :cancel target: without it (the snapshot roster
+        // The task id is the task.stop target: without it (the transcript roster
         // carries none) even a running member offers no stop.
         store.apply(SESSION_ID, spawned("agent-1"))
         store.apply(SESSION_ID, SessionEvent.SubagentStarted("agent-1"))
@@ -1298,8 +1249,8 @@ class SubagentStreamStoreTest {
     fun `a cancelled foreground member settles failed from the swarm result, the others complete`() = runBlocking {
         // The ticket-137 foreground case, end to end in the store: both members
         // streamed live (the Working pin), then the stop killed agent-1 — a
-        // FOREGROUND member gets no task.terminated and no subagent.completed/failed
-        // (docs/server-api.md, REST /tasks), so the settled call's result (the member
+        // FOREGROUND member gets no subagent.completed/failed (docs/server-api.md),
+        // so the settled call's result (the member
         // named failed, the stop cause riding as stop_reason) is its ONLY terminal
         // carrier. The roster row and the member's SubagentScreen read this same
         // record: both reflect the terminal state.
@@ -1362,8 +1313,8 @@ class SubagentStreamStoreTest {
 
     @Test
     fun `detachable needs a running foreground status, a known task id, and a real record`() = runBlocking {
-        // The task id is the REST :detach target: without it (the snapshot roster
-        // carries none) even a running foreground member offers no detach.
+        // The task id is the task.background target: without it (the transcript
+        // roster carries none) even a running foreground member offers no detach.
         store.apply(SESSION_ID, spawned("agent-1"))
         store.apply(SESSION_ID, SessionEvent.SubagentStarted("agent-1"))
         assertFalse(entry("agent-1")!!.detachable)
@@ -1397,21 +1348,17 @@ class SubagentStreamStoreTest {
     }
 
     @Test
-    fun `the detach's main-owned task started flips the member to background`() = runBlocking {
-        // The detach sequence (docs/server-api.md, REST /tasks :detach): the WS emits
-        // task.started for the converted task — main-owned, kind agent, info.agentId
-        // naming the member. A foreground run emits no task.* frames until detached,
-        // so the frame PROVES the conversion: it merges into the existing record.
+    fun `the detached spawn task flips the member to background`() = runBlocking {
+        // task.background's reply (and the server's own frame) carries the member's
+        // task with detached:true — main-owned, child_agent_id naming the member: it
+        // merges into the existing record.
         store.apply(SESSION_ID, spawned("agent-12", taskId = "agent-t1"))
         store.apply(SESSION_ID, SessionEvent.SubagentStarted("agent-12"))
+        // The foreground frame flips nothing.
+        store.apply(SESSION_ID, SessionEvent.TaskUpdated(spawnTask("agent-t1", "agent-12")))
         assertTrue(entry("agent-12")!!.detachable)
 
-        store.apply(
-            SESSION_ID,
-            SessionEvent.TaskStarted(
-                taskInfo("agent-t1", TaskInfo.Status.Running, kind = TaskInfo.Kind.Agent, agentId = "agent-12"),
-            ),
-        )
+        store.apply(SESSION_ID, SessionEvent.TaskUpdated(spawnTask("agent-t1", "agent-12", detached = true)))
 
         val state = entry("agent-12")!!
         assertTrue(state.runInBackground)
@@ -1424,19 +1371,14 @@ class SubagentStreamStoreTest {
     }
 
     @Test
-    fun `the detach frame fills the registration id a roster seed lacks`() = runBlocking {
-        // A cold start seeds the record from the snapshot roster, which carries no
-        // task id; the detach (done from another client) arrives as the task.started.
+    fun `a spawn task fills the registration id a roster seed lacks`() = runBlocking {
+        // A cold start seeds the record from the transcript roster, which carries no
+        // task id; the subscribe-time task frame supplies it.
         store.applyRoster(SESSION_ID, listOf(rosterEntry("agent-12", SubagentRosterPhase.Working)))
         assertNull(entry("agent-12")!!.taskId)
         assertFalse(entry("agent-12")!!.detachable)
 
-        store.apply(
-            SESSION_ID,
-            SessionEvent.TaskStarted(
-                taskInfo("agent-t1", TaskInfo.Status.Running, kind = TaskInfo.Kind.Agent, agentId = "agent-12"),
-            ),
-        )
+        store.apply(SESSION_ID, SessionEvent.TaskUpdated(spawnTask("agent-t1", "agent-12", detached = true)))
 
         val state = entry("agent-12")!!
         assertTrue(state.runInBackground)
@@ -1444,24 +1386,17 @@ class SubagentStreamStoreTest {
     }
 
     @Test
-    fun `a detached member's terminal frame keeps the background flag and settles no status`() = runBlocking {
-        // Completion then follows the background lifecycle: subagent.completed pins
-        // the status, the task.terminated (core completed) flips nothing back.
+    fun `a detached member's ended frame keeps the background flag and settles no status`() = runBlocking {
         store.apply(SESSION_ID, spawned("agent-12", taskId = "agent-t1"))
-        store.apply(
-            SESSION_ID,
-            SessionEvent.TaskStarted(
-                taskInfo("agent-t1", TaskInfo.Status.Running, kind = TaskInfo.Kind.Agent, agentId = "agent-12"),
-            ),
-        )
+        store.apply(SESSION_ID, SessionEvent.TaskUpdated(spawnTask("agent-t1", "agent-12", detached = true)))
         store.apply(SESSION_ID, SessionEvent.SubagentCompleted("agent-12", "the summary"))
 
         store.apply(
             SESSION_ID,
-            SessionEvent.TaskTerminated(
-                taskInfo(
-                    "agent-t1", TaskInfo.Status.Completed, kind = TaskInfo.Kind.Agent,
-                    endedAt = Instant.ofEpochMilli(1785210118804), agentId = "agent-12",
+            SessionEvent.TaskUpdated(
+                spawnTask(
+                    "agent-t1", "agent-12", detached = true,
+                    outcome = TaskOutcome.Completed, endedAt = Instant.ofEpochMilli(1785210118804),
                 ),
             ),
         )
@@ -1473,85 +1408,106 @@ class SubagentStreamStoreTest {
     }
 
     @Test
-    fun `a bash-kind or unnamed task frame never flips a member to background`() = runBlocking {
+    fun `a shell or unnamed task frame never flips a member to background`() = runBlocking {
         store.apply(SESSION_ID, spawned("agent-12", taskId = "agent-t1"))
 
-        // A process-kind frame is background bash, never the member's conversion...
-        store.apply(
-            SESSION_ID,
-            SessionEvent.TaskStarted(
-                taskInfo("bash-1", TaskInfo.Status.Running, kind = TaskInfo.Kind.Process, agentId = "agent-12"),
-            ),
-        )
-        // ...and an agent-kind frame naming no record creates none (the detach of an
-        // unknown member drops exactly like its transcript frames).
-        store.apply(
-            SESSION_ID,
-            SessionEvent.TaskStarted(
-                taskInfo("agent-t9", TaskInfo.Status.Running, kind = TaskInfo.Kind.Agent, agentId = "agent-99"),
-            ),
-        )
+        // A shell-kind frame is a background command, never the member's conversion...
+        store.apply(SESSION_ID, SessionEvent.TaskUpdated(task("bash-1", detached = true)))
+        // ...and a spawn frame naming no record creates none.
+        store.apply(SESSION_ID, SessionEvent.TaskUpdated(spawnTask("agent-t9", "agent-99", detached = true)))
 
         assertFalse(entry("agent-12")!!.runInBackground)
         assertNull(store.entry(SESSION_ID, "agent-99").first())
     }
 
-
-    private fun taskInfo(
+    private fun task(
         taskId: String,
-        status: TaskInfo.Status,
-        kind: TaskInfo.Kind = TaskInfo.Kind.Process,
+        kind: TaskState.Kind = TaskState.Kind.Shell,
+        outcome: TaskOutcome? = null,
+        detached: Boolean = true,
+        childAgentId: String? = null,
         endedAt: Instant? = null,
-        agentId: String? = null,
-    ) = TaskInfo(taskId, "nested bg", status, Instant.ofEpochMilli(1785210101939), endedAt, kind = kind, agentId = agentId)
+        model: String? = null,
+        thinking: String? = null,
+    ) = TaskState(
+        taskId = taskId,
+        kind = kind,
+        status = if (outcome == null) TaskState.Status.Running else TaskState.Status.Ended,
+        detached = detached,
+        description = "nested bg",
+        outcome = outcome,
+        childAgentId = childAgentId,
+        startedAt = Instant.ofEpochMilli(1785210101939),
+        endedAt = endedAt,
+        model = model,
+        thinking = thinking,
+    )
+
+    /** A main-owned spawn task (kind subagent): foreground unless [detached]. */
+    private fun spawnTask(
+        taskId: String,
+        childAgentId: String?,
+        outcome: TaskOutcome? = null,
+        detached: Boolean = false,
+        endedAt: Instant? = null,
+        model: String? = null,
+        thinking: String? = null,
+    ) = task(taskId, TaskState.Kind.Subagent, outcome, detached, childAgentId, endedAt, model, thinking)
 
     @Test
     fun `task frames feed the owning sub-agent's jobs list`() = runBlocking {
         store.apply(SESSION_ID, spawned("agent-12"))
 
-        store.apply(
-            SESSION_ID,
-            SessionEvent.TaskStarted(taskInfo("bash-1", TaskInfo.Status.Running), agentId = "agent-12"),
-        )
+        store.apply(SESSION_ID, SessionEvent.TaskUpdated(task("bash-1"), agentId = "agent-12"))
+        // The child's foreground command is no job.
+        store.apply(SESSION_ID, SessionEvent.TaskUpdated(task("bash-fg", detached = false), agentId = "agent-12"))
 
         assertEquals(
-            listOf(
-                Job(
-                    "bash-1", BackgroundTask.Kind.Bash, "nested bg",
-                    BackgroundTask.Status.Running, Instant.ofEpochMilli(1785210101939),
-                ),
-            ),
+            listOf(Job("bash-1", Job.Kind.Bash, "nested bg", Job.Status.Running, Instant.ofEpochMilli(1785210101939))),
             entry("agent-12")!!.jobs,
         )
 
-        // The terminal frame flips the same job — core timed_out maps to the wire
-        // Failed and retains the live-only timed-out flag (ticket 097).
+        // The ended frame flips the same job — timed_out maps to Failed and keeps the
+        // timed-out flag (ticket 097).
         store.apply(
             SESSION_ID,
-            SessionEvent.TaskTerminated(
-                taskInfo("bash-1", TaskInfo.Status.TimedOut, endedAt = Instant.ofEpochMilli(1785210118804)),
+            SessionEvent.TaskUpdated(
+                task("bash-1", outcome = TaskOutcome.TimedOut, endedAt = Instant.ofEpochMilli(1785210118804)),
                 agentId = "agent-12",
             ),
         )
         val terminated = entry("agent-12")!!.jobs.single()
-        assertEquals(BackgroundTask.Status.Failed, terminated.status)
+        assertEquals(Job.Status.Failed, terminated.status)
         assertTrue(terminated.timedOut)
         assertEquals(Instant.ofEpochMilli(1785210118804), terminated.endedAt)
     }
 
     @Test
-    fun `main-owned task frames never touch the records`() = runBlocking {
+    fun `the child's task list merges into its jobs, terminal ones linger`() = runBlocking {
+        store.apply(SESSION_ID, spawned("agent-12"))
+        store.apply(SESSION_ID, SessionEvent.TaskListed(listOf(task("bash-1"), task("bash-2")), agentId = "agent-12"))
+        store.apply(SESSION_ID, SessionEvent.TaskUpdated(task("bash-1", outcome = TaskOutcome.Completed), agentId = "agent-12"))
+
+        // A reconnect's list: bash-2 ended unseen (dropped), bash-3 is new.
+        store.apply(SESSION_ID, SessionEvent.TaskListed(listOf(task("bash-3")), agentId = "agent-12"))
+
+        assertEquals(listOf("bash-1", "bash-3"), entry("agent-12")!!.jobs.map { it.taskId })
+        assertEquals(Job.Status.Completed, entry("agent-12")!!.jobs.first().status)
+    }
+
+    @Test
+    fun `main-owned task frames never touch the records' jobs`() = runBlocking {
         store.apply(SESSION_ID, spawned("agent-12"))
 
         // The default agentId (main) — the chat's JobsStore owns those.
-        store.apply(SESSION_ID, SessionEvent.TaskStarted(taskInfo("bash-1", TaskInfo.Status.Running)))
+        store.apply(SESSION_ID, SessionEvent.TaskUpdated(task("bash-1")))
 
         assertTrue(entry("agent-12")!!.jobs.isEmpty())
     }
 
     @Test
     fun `a task frame for an unknown sub-agent is dropped without creating a record`() = runBlocking {
-        store.apply(SESSION_ID, SessionEvent.TaskStarted(taskInfo("bash-1", TaskInfo.Status.Running), agentId = "agent-99"))
+        store.apply(SESSION_ID, SessionEvent.TaskUpdated(task("bash-1"), agentId = "agent-99"))
 
         assertNull(store.entry(SESSION_ID, "agent-99").first())
     }
@@ -1560,7 +1516,7 @@ class SubagentStreamStoreTest {
 
     /** A task-completion notification turn (origin kind `task`, verified on 0.34.0):
      * no steps needed for the jobs heal — the origin is read off the turn. */
-    private fun taskOriginTurn(id: String, ordinal: Int, taskId: String, status: TaskInfo.Status?) = TranscriptTurn(
+    private fun taskOriginTurn(id: String, ordinal: Int, taskId: String, status: TaskOutcome?) = TranscriptTurn(
         id, ordinal, TranscriptState.Completed, null, emptyList(),
         taskOrigin = TranscriptTaskOrigin(taskId, status),
     )
@@ -1573,14 +1529,14 @@ class SubagentStreamStoreTest {
 
         store.applyTranscriptPage(
             SESSION_ID, "agent-12",
-            transcriptPage(listOf(taskOriginTurn("t1", 1, "bash-1", TaskInfo.Status.Completed))),
+            transcriptPage(listOf(taskOriginTurn("t1", 1, "bash-1", TaskOutcome.Completed))),
             keepLive = false,
         )
 
         val job = entry("agent-12")!!.jobs.single()
         assertEquals("bash-1", job.taskId)
-        assertEquals(BackgroundTask.Kind.Bash, job.kind)
-        assertEquals(BackgroundTask.Status.Completed, job.status)
+        assertEquals(Job.Kind.Bash, job.kind)
+        assertEquals(Job.Status.Completed, job.status)
         // The origin carries no timestamps or description: unknown stays unknown.
         assertNull(job.startedAt)
         assertNull(job.endedAt)
@@ -1600,35 +1556,35 @@ class SubagentStreamStoreTest {
         // The notification turn sits beyond the newest page; core killed → cancelled.
         store.prependTranscriptPage(
             SESSION_ID, "agent-12",
-            transcriptPage(listOf(taskOriginTurn("t0", 0, "bash-1", TaskInfo.Status.Killed))),
+            transcriptPage(listOf(taskOriginTurn("t0", 0, "bash-1", TaskOutcome.Killed))),
         )
 
         val job = entry("agent-12")!!.jobs.single()
-        assertEquals(BackgroundTask.Status.Cancelled, job.status)
+        assertEquals(Job.Status.Cancelled, job.status)
     }
 
     @Test
-    fun `a live task terminated is never regressed by a later transcript task origin`() = runBlocking {
-        // First-writer-wins against live frames (ticket 099): the live terminated
+    fun `a live ended task frame is never regressed by a later transcript task origin`() = runBlocking {
+        // First-writer-wins against live frames (ticket 099): the live ended frame
         // carries endedAt/timedOut the origin lacks — the heal must not touch it.
         store.apply(SESSION_ID, spawned("agent-12"))
-        store.apply(SESSION_ID, SessionEvent.TaskStarted(taskInfo("bash-1", TaskInfo.Status.Running), agentId = "agent-12"))
+        store.apply(SESSION_ID, SessionEvent.TaskUpdated(task("bash-1"), agentId = "agent-12"))
         store.apply(
             SESSION_ID,
-            SessionEvent.TaskTerminated(
-                taskInfo("bash-1", TaskInfo.Status.TimedOut, endedAt = Instant.ofEpochMilli(1785210118804)),
+            SessionEvent.TaskUpdated(
+                task("bash-1", outcome = TaskOutcome.TimedOut, endedAt = Instant.ofEpochMilli(1785210118804)),
                 agentId = "agent-12",
             ),
         )
 
         store.applyTranscriptPage(
             SESSION_ID, "agent-12",
-            transcriptPage(listOf(taskOriginTurn("t1", 1, "bash-1", TaskInfo.Status.Completed))),
+            transcriptPage(listOf(taskOriginTurn("t1", 1, "bash-1", TaskOutcome.Completed))),
             keepLive = false,
         )
 
         val job = entry("agent-12")!!.jobs.single()
-        assertEquals(BackgroundTask.Status.Failed, job.status)
+        assertEquals(Job.Status.Failed, job.status)
         assertTrue(job.timedOut)
         assertEquals(Instant.ofEpochMilli(1785210118804), job.endedAt)
     }
@@ -1638,16 +1594,16 @@ class SubagentStreamStoreTest {
         // The app saw the start but missed the termination (socket gap): the heal
         // flips the status while keeping the live frame's startedAt/description.
         store.apply(SESSION_ID, spawned("agent-12"))
-        store.apply(SESSION_ID, SessionEvent.TaskStarted(taskInfo("bash-1", TaskInfo.Status.Running), agentId = "agent-12"))
+        store.apply(SESSION_ID, SessionEvent.TaskUpdated(task("bash-1"), agentId = "agent-12"))
 
         store.applyTranscriptPage(
             SESSION_ID, "agent-12",
-            transcriptPage(listOf(taskOriginTurn("t1", 1, "bash-1", TaskInfo.Status.Completed))),
+            transcriptPage(listOf(taskOriginTurn("t1", 1, "bash-1", TaskOutcome.Completed))),
             keepLive = false,
         )
 
         val job = entry("agent-12")!!.jobs.single()
-        assertEquals(BackgroundTask.Status.Completed, job.status)
+        assertEquals(Job.Status.Completed, job.status)
         assertEquals(Instant.ofEpochMilli(1785210101939), job.startedAt)
         assertEquals("nested bg", job.description)
     }
@@ -1660,10 +1616,10 @@ class SubagentStreamStoreTest {
             SESSION_ID, "agent-12",
             transcriptPage(
                 listOf(
-                    taskOriginTurn("t1", 1, "bash-1", TaskInfo.Status.Running),
+                    taskOriginTurn("t1", 1, "bash-1", null),
                     taskOriginTurn("t2", 2, "bash-2", null),
                     // An id with no known prefix: no kind to render, skipped.
-                    taskOriginTurn("t3", 3, "tool-3", TaskInfo.Status.Completed),
+                    taskOriginTurn("t3", 3, "tool-3", TaskOutcome.Completed),
                 ),
             ),
             keepLive = false,
@@ -1704,7 +1660,7 @@ class SubagentStreamStoreTest {
             transcriptPage(
                 listOf(
                     bashCallTurn("t0", 0, "bash-1", "count ticks"),
-                    taskOriginTurn("t1", 1, "bash-1", TaskInfo.Status.Completed),
+                    taskOriginTurn("t1", 1, "bash-1", TaskOutcome.Completed),
                 ),
             ),
             keepLive = false,
@@ -1720,7 +1676,7 @@ class SubagentStreamStoreTest {
         store.apply(SESSION_ID, spawned("agent-12"))
         store.applyTranscriptPage(
             SESSION_ID, "agent-12",
-            transcriptPage(listOf(taskOriginTurn("t1", 1, "bash-1", TaskInfo.Status.Completed)), hasMore = true),
+            transcriptPage(listOf(taskOriginTurn("t1", 1, "bash-1", TaskOutcome.Completed)), hasMore = true),
             keepLive = false,
         )
         assertEquals("", entry("agent-12")!!.jobs.single().description)
