@@ -310,7 +310,10 @@ internal class TranscriptFold(
         }
         if (frame.state == "done" || frame.state == "error") {
             state.settled = true
-            events += SessionEvent.ToolCallResult(toolCallId, frame.state == "error", mapper.formatDetail(frame.output), agentId)
+            // The shared output parse (ticket 184): a media result's content-part array
+            // yields the row text plus its session-media references.
+            val output = mapper.toolOutput(frame.output)
+            events += SessionEvent.ToolCallResult(toolCallId, frame.state == "error", output.text, agentId, output.media)
         }
     }
 

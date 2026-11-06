@@ -5,6 +5,7 @@ import java.time.Instant
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -33,6 +34,50 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
         element is JsonPrimitive && element.isString -> element.content
         else -> prettyJson.encodeToString(JsonElement.serializer(), element)
     }
+
+    /**
+     * A tool result's `output` → the row's text plus its media (ticket 184 — server
+     * 2.5.1, docs/server-api.md, Messages → History and Transcript): the ONE parse every
+     * tool-result carrier shares (the history `tool_result` part, the REST transcript
+     * tool frame, the live `transcript.ops` fold). A content-part array — non-empty,
+     * every element an object with a string `type`, at least one of them
+     * `text`/`image`/`video` — yields its `text` parts joined by "\n" and one
+     * [ToolMedia] per `image`/`video` part whose source is `session_media`; any other
+     * part type is ignored. When the array carried media, a text part that is only an
+     * `<image …>`/`</image>` (or video) wrapper tag is dropped: it just frames the
+     * image. Anything else — a string, an object, any other array — keeps
+     * [formatDetail]'s rendering, with no media.
+     */
+    fun toolOutput(element: JsonElement?): ToolOutput {
+        val parts = (element as? JsonArray)
+            ?.takeIf { array -> array.isNotEmpty() && array.all { it.partType() != null } }
+            ?.map { it as JsonObject }
+            ?.takeIf { array -> array.any { it.partType() in TOOL_OUTPUT_PART_TYPES } }
+            ?: return ToolOutput(formatDetail(element))
+        val media = parts.mapNotNull { part ->
+            val kind = when (part.partType()) {
+                "image" -> ToolMedia.Kind.Image
+                "video" -> ToolMedia.Kind.Video
+                else -> return@mapNotNull null
+            }
+            val source = part["source"] as? JsonObject ?: return@mapNotNull null
+            if (source.string("kind") != "session_media") return@mapNotNull null
+            val fileId = source.string("file_id")?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            ToolMedia(fileId, kind, name = part.string("name")?.takeIf { it.isNotBlank() })
+        }
+        val text = parts
+            .filter { it.partType() == "text" }
+            .mapNotNull { it.string("text") }
+            .filterNot { media.isNotEmpty() && MEDIA_WRAPPER_TAG_RE.matches(it.trim()) }
+            .joinToString("\n")
+        return ToolOutput(text, media)
+    }
+
+    private fun JsonElement.partType(): String? =
+        ((this as? JsonObject)?.get("type") as? JsonPrimitive)?.takeIf { it.isString }?.content
+
+    private fun JsonObject.string(key: String): String? =
+        (get(key) as? JsonPrimitive)?.takeIf { it.isString }?.content
 
     /** The compact argument preview for the approval card (the display command for
      * shell calls, else the action). */
@@ -138,7 +183,9 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
             )
         }
         "tool_result" -> dto.toolCallId?.let {
-            ChatMessage.Part.ToolResult(it, dto.isError ?: false, formatDetail(dto.output))
+            // 2.5.1 (ticket 184): a media result's `output` is a content-part array.
+            val output = toolOutput(dto.output)
+            ChatMessage.Part.ToolResult(it, dto.isError ?: false, output.text, output.media)
         }
         else -> null
     }
@@ -404,6 +451,8 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
             val display = dto.display?.let {
                 runCatching { json.decodeFromJsonElement<ToolInputDisplayDto>(it) }.getOrNull()
             }
+            // 2.5.1 (ticket 184): a media result's `output` is a content-part array.
+            val output = toolOutput(dto.output)
             TranscriptFrame.Tool(
                 id = dto.frameId,
                 toolCallId = toolCallId,
@@ -411,8 +460,10 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
                 running = dto.state == "running",
                 preview = preview(name, args, display),
                 input = formatDetail(args),
-                // The volatile progress tail stands in while no definitive output exists.
-                output = formatDetail(dto.output).ifBlank { progressText(dto.progress) },
+                // The volatile progress tail stands in while no definitive output exists
+                // (a media-only result is definitive: its text stays blank).
+                output = if (output.text.isBlank() && output.media.isEmpty()) progressText(dto.progress) else output.text,
+                media = output.media,
                 // The raw args object (ticket 118) — null when the frame carries no
                 // `input` object, leaving the pretty string as the row's fallback.
                 args = args,
@@ -440,6 +491,13 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
         const val TAG = "ChatMessageMapper"
         const val PLAN_REVIEW_KIND = "plan_review"
         val DATA_URL_RE = Regex("""^data:([^;,]+);base64,(.*)$""", RegexOption.DOT_MATCHES_ALL)
+
+        /** The content-part types a tool-output array is recognized by (ticket 184). */
+        val TOOL_OUTPUT_PART_TYPES = setOf("text", "image", "video")
+
+        /** One bare `<image …>`/`</image>` (or video) tag — the wrapper text the media
+         * tools frame their media part with (docs/server-api.md, Messages → History). */
+        val MEDIA_WRAPPER_TAG_RE = Regex("""^(?:<(?:image|video)(?:\s[^<>]*)?>|</(?:image|video)>)$""")
 
         // File-store ids come in two shapes: v1 `f_`<26-char ULID> and v2 `f_`<randomUUID>.
         // Anchored at the start of the `<fileId>-<name>` basename — splitting on the first

@@ -39,6 +39,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import fr.louissaglio.kimi.android.data.chat.BashTimeout
+import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.ToolPayload
 import fr.louissaglio.kimi.android.data.chat.bashCommandOf
 import fr.louissaglio.kimi.android.data.chat.bashDescriptionOf
@@ -132,6 +133,14 @@ fun SubagentScreen(
             )
         }
     }
+    // Ticket 184: tool-result images — the chat's thumbnail tap → full-screen viewer,
+    // bytes through the page's session-media fetch. Hoisted to stable references
+    // (ChatScreen's rationale: fresh lambdas would defeat lazy-item skipping).
+    val fullScreenImageState = remember { mutableStateOf<ChatMessage.Part.Image?>(null) }
+    var fullScreenImage by fullScreenImageState
+    val onImageClick = remember { { image: ChatMessage.Part.Image -> fullScreenImageState.value = image } }
+    val loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray? =
+        remember(viewModel) { viewModel::imageBytes }
     SubagentContent(
         uiState = uiState,
         onNavigateBack = onNavigateBack,
@@ -144,7 +153,16 @@ fun SubagentScreen(
         onRetry = viewModel::onRetry,
         onHistoryTopReached = viewModel::onHistoryTopReached,
         snackbarHostState = snackbarHostState,
+        onImageClick = onImageClick,
+        loadImageBytes = loadImageBytes,
     )
+    fullScreenImage?.let { image ->
+        FullScreenImageViewer(
+            image = image,
+            loadImageBytes = loadImageBytes,
+            onDismiss = { fullScreenImage = null },
+        )
+    }
 }
 
 /** The page body, split from the ViewModel for semantics tests (the SwarmContent
@@ -167,6 +185,10 @@ internal fun SubagentContent(
     onRetry: () -> Unit = {},
     onHistoryTopReached: () -> Unit = {},
     snackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
+    /** Ticket 184: a tool-result image's thumbnail tap. */
+    onImageClick: (ChatMessage.Part.Image) -> Unit = {},
+    /** Ticket 184: resolves a tool-result image's bytes. */
+    loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray? = { null },
 ) {
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -282,6 +304,8 @@ internal fun SubagentContent(
                     // Ticket 158: a nested spawn row's Continue takes the same
                     // pop-back-to-composer route as the page's own section.
                     onContinueSubagent = onContinueWithResume,
+                    onImageClick = onImageClick,
+                    loadImageBytes = loadImageBytes,
                     isLoadingMoreHistory = uiState.isLoadingMoreHistory,
                     onHistoryTopReached = onHistoryTopReached,
                 )

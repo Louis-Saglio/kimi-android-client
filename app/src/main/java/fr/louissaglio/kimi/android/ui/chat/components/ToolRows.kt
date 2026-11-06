@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -52,11 +53,13 @@ import androidx.compose.ui.unit.dp
 import fr.louissaglio.kimi.android.data.chat.AGENT_SWARM_TOOL_NAME
 import fr.louissaglio.kimi.android.data.chat.AgentCallDisplay
 import fr.louissaglio.kimi.android.data.chat.BashOutputs
+import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.EditDiffs
 import fr.louissaglio.kimi.android.data.chat.FetchUrlOutputs
 import fr.louissaglio.kimi.android.data.chat.GlobOutputs
 import fr.louissaglio.kimi.android.data.chat.GrepResultParser
 import fr.louissaglio.kimi.android.data.chat.ToolDetailFields
+import fr.louissaglio.kimi.android.data.chat.ToolMedia
 import fr.louissaglio.kimi.android.data.chat.ToolPayload
 import fr.louissaglio.kimi.android.data.chat.ToolPreview
 import fr.louissaglio.kimi.android.data.chat.agentResumeCallOf
@@ -119,6 +122,10 @@ internal fun ToolGroupCard(
     onOpenSwarm: (String) -> Unit = {},
     /** Ticket 158: the spawn row's "Next step" Continue (the composer prefill). */
     onContinueSubagent: (String) -> Unit = {},
+    /** Ticket 184: a tool-result image's thumbnail tap (the full-screen viewer). */
+    onImageClick: (ChatMessage.Part.Image) -> Unit = {},
+    /** Ticket 184: resolves a tool-result image's bytes (the session-media fetch). */
+    loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray? = { null },
 ) {
     val status = when {
         group.tools.any { it.status == ToolStatus.Running } -> ToolStatus.Running
@@ -154,7 +161,10 @@ internal fun ToolGroupCard(
             group.tools.forEachIndexed { index, tool ->
                 // 1dp outlineVariant hairline between rows, like the web's row separators.
                 if (index > 0) HorizontalDivider()
-                ToolRow(tool, onOpenSubagent, onOpenJob, onQuestionRowTapped, onOpenEditDiff, onOpenFileContent, swarmMembers, onOpenSwarm, onContinueSubagent)
+                ToolRow(
+                    tool, onOpenSubagent, onOpenJob, onQuestionRowTapped, onOpenEditDiff, onOpenFileContent, swarmMembers,
+                    onOpenSwarm, onContinueSubagent, onImageClick = onImageClick, loadImageBytes = loadImageBytes,
+                )
             }
         }
     }
@@ -464,6 +474,10 @@ internal fun ToolRow(
     /** Ticket 158: the spawn row's "Next step" Continue — invoked with the
      * composer prefill (the hint's suggested `Agent(resume=…)` call text). */
     onContinueSubagent: (String) -> Unit = {},
+    /** Ticket 184: a result image's thumbnail tap (the full-screen viewer). */
+    onImageClick: (ChatMessage.Part.Image) -> Unit = {},
+    /** Ticket 184: resolves a result image's bytes (the session-media fetch). */
+    loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray? = { null },
 ) {
     val swarmMemberList = swarmMembers[activity.id].orEmpty()
     if (activity.name == AGENT_SWARM_TOOL_NAME && swarmMemberList.isNotEmpty()) {
@@ -562,7 +576,9 @@ internal fun ToolRow(
     }
     val expandable = !isQuestionRow && editPayload == null && filePayload == null && linkedSubagentId == null &&
         linkedJobTaskId == null &&
-        (lookupExpandable || cronCreatePayload != null || (lookupPayload == null &&
+        // Ticket 184: a result carrying media always expands — even with no text,
+        // the images/videos are the row's details.
+        (lookupExpandable || cronCreatePayload != null || activity.media.isNotEmpty() || (lookupPayload == null &&
             (detailFields.isNotEmpty() || activity.input.isNotBlank() || activity.output.isNotBlank())))
     var expanded by rememberSaveable { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth()) {
@@ -785,6 +801,8 @@ internal fun ToolRow(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            // Ticket 184: the collapsed row's only media change — a small indicator.
+            if (activity.media.isNotEmpty()) ToolMediaIndicator(activity.media, tint = detailColor)
             ToolStatusIcon(activity.status, runningDescription = "Tool running", modifier = Modifier.size(12.dp))
             if (expandable) {
                 val chevronRotation by animateFloatAsState(if (expanded) 180f else 0f, label = "chevron")
@@ -970,6 +988,84 @@ internal fun ToolRow(
                             }
                         }
                     }
+                }
+                if (activity.media.isNotEmpty()) {
+                    ToolMediaBlock(activity.media, loadImageBytes = loadImageBytes, onImageClick = onImageClick)
+                }
+            }
+        }
+    }
+}
+
+/** The collapsed row's media indicator (ticket 184): the image glyph, plus the count
+ * when the result carries more than one reference. */
+@Composable
+private fun ToolMediaIndicator(media: List<ToolMedia>, tint: Color) {
+    val images = media.count { it.kind == ToolMedia.Kind.Image }
+    val videos = media.size - images
+    val description = listOfNotNull(
+        images.takeIf { it > 0 }?.let { if (it == 1) "1 image" else "$it images" },
+        videos.takeIf { it > 0 }?.let { if (it == 1) "1 video" else "$it videos" },
+    ).joinToString(", ")
+    Row(
+        modifier = Modifier
+            .semantics(mergeDescendants = true) { contentDescription = description }
+            .testTag("toolMediaIndicator"),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Icon(imageVector = ImageIcon, contentDescription = null, modifier = Modifier.size(12.dp), tint = tint)
+        if (media.size > 1) {
+            Text(text = "${media.size}", style = MaterialTheme.typography.labelSmall, color = tint)
+        }
+    }
+}
+
+/** The expanded row's media (ticket 184 — a 2.5.1 content-part array result): each
+ * image renders through the user bubble's session-media thumbnail
+ * ([HistoryImageThumbnail], the ticket-104 fetch; a tap opens the full-screen viewer),
+ * labelled with its `name` when present; a video is a filename chip (`name`, else
+ * "video") and is never handed to the image decoder — playback is out of scope. */
+@Composable
+private fun ToolMediaBlock(
+    media: List<ToolMedia>,
+    loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray?,
+    onImageClick: (ChatMessage.Part.Image) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        media.forEach { item ->
+            val image = item.toImagePart()
+            if (image != null) {
+                Column(Modifier.testTag("toolMediaImage")) {
+                    HistoryImageThumbnail(
+                        image = image,
+                        loadImageBytes = loadImageBytes,
+                        onClick = { onImageClick(image) },
+                    )
+                    if (item.name != null) {
+                        Text(
+                            text = item.name,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.width(120.dp),
+                        )
+                    }
+                }
+            } else {
+                Surface(
+                    color = MaterialTheme.colorScheme.secondaryContainer,
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.testTag("toolMediaVideoChip"),
+                ) {
+                    Text(
+                        text = "▶ ${item.name ?: "video"}",
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
             }
         }

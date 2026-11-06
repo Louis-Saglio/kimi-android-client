@@ -2,6 +2,7 @@ package fr.louissaglio.kimi.android.ui.chat
 
 import fr.louissaglio.kimi.android.data.chat.AgentCallDisplay
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
+import fr.louissaglio.kimi.android.data.chat.ToolMedia
 import fr.louissaglio.kimi.android.data.chat.ToolPayload
 import java.time.Instant
 import kotlinx.serialization.json.JsonObject
@@ -76,7 +77,12 @@ sealed interface ChatItem {
      * (ticket 097) — the job screen's budget display derives
      * from them (REST never exposes the timeout). All three link/budget fields are
      * derived by the ONE enrichment pass every row path routes through
-     * ([enriched], ticket 098). */
+     * ([enriched], ticket 098).
+     * [media] are the result's `session_media` references (ticket 184 — a 2.5.1
+     * content-part array output): the expanded row renders the images through the
+     * chat's session-media thumbnail path and videos as filename chips, the collapsed
+     * row a small media indicator. They follow [output]'s merge rules (the definitive
+     * result replaces them, history/orphan merges keep the first non-empty). */
     data class ToolActivity(
         override val id: String,
         val name: String,
@@ -94,6 +100,7 @@ sealed interface ChatItem {
         val nextStep: String? = null,
         val timeoutSeconds: Int? = null,
         val timeoutDisabled: Boolean = false,
+        val media: List<ToolMedia> = emptyList(),
     ) : ChatItem
 
     /** A run of consecutive tool calls collapsed into one card (ticket 037), like the

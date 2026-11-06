@@ -7,6 +7,7 @@ import fr.louissaglio.kimi.android.data.chat.ORIGIN_KIND_COMPACTION_SUMMARY
 import fr.louissaglio.kimi.android.data.chat.PromptStatus
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.TODO_LIST_TOOL_NAME
+import fr.louissaglio.kimi.android.data.chat.ToolMedia
 import fr.louissaglio.kimi.android.data.chat.ToolPayloads
 import fr.louissaglio.kimi.android.data.chat.TranscriptFrame
 import fr.louissaglio.kimi.android.data.chat.TranscriptTurn
@@ -163,6 +164,7 @@ class ChatTimeline(
                         preview = call.preview,
                         input = call.input,
                         output = tool.output.ifBlank { call.output },
+                        media = tool.media.ifEmpty { call.media },
                         args = tool.args ?: call.args,
                         payload = tool.payload ?: ToolPayloads.of(call.name, tool.args ?: call.args),
                     ).enriched(name = call.name, input = call.input, output = tool.output)
@@ -255,7 +257,7 @@ class ChatTimeline(
                             upsertTool(
                                 frame.toolCallId, frame.name, frame.toolStatus(), frame.preview,
                                 input = frame.input, output = frame.output, args = frame.args,
-                                agentCall = frame.agentCall,
+                                agentCall = frame.agentCall, media = frame.media,
                             )
                             if (!frame.running) linkFromResult(frame.toolCallId, frame.output)
                         }
@@ -462,6 +464,7 @@ class ChatTimeline(
                         "",
                         if (event.isError) ToolStatus.Error else ToolStatus.Done,
                         output = event.output,
+                        media = event.media,
                         // The definitive result replaces any accumulated progress wholesale.
                         replaceOutput = true,
                     )
@@ -704,6 +707,7 @@ class ChatTimeline(
         replaceOutput: Boolean = false,
         args: JsonObject? = null,
         agentCall: AgentCallDisplay? = null,
+        media: List<ToolMedia> = emptyList(),
     ) {
         var found = false
         healTool(toolCallId) { existing ->
@@ -715,6 +719,8 @@ class ChatTimeline(
                 preview = existing.preview.ifBlank { preview },
                 input = existing.input.ifBlank { input },
                 output = if (replaceOutput) output else existing.output.ifBlank { output },
+                // The result's media (ticket 184) ride the output's rule.
+                media = if (replaceOutput) media else existing.media.ifEmpty { media },
                 args = mergedArgs,
                 // The typed payload (ticket 119) follows the args' first-writer-wins
                 // rule, derived from the row's EFFECTIVE name/args. The spawn row's
@@ -729,6 +735,7 @@ class ChatTimeline(
                 ChatItem.ToolActivity(
                     toolCallId, name, status, preview, input, output,
                     args = args,
+                    media = media,
                     payload = ToolPayloads.of(name, args),
                     agentCall = agentCall,
                 ),
@@ -837,11 +844,14 @@ class ChatTimeline(
                         existing.copy(
                             status = status,
                             output = existing.output.ifBlank { result.output },
+                            media = existing.media.ifEmpty { result.media },
                         ).enriched(output = result.output)
                     }
                     if (!found) {
                         // Result without a matching call (e.g. page boundary): show it anyway.
-                        target.appendTool(ChatItem.ToolActivity(result.toolCallId, "", status, output = result.output))
+                        target.appendTool(
+                            ChatItem.ToolActivity(result.toolCallId, "", status, output = result.output, media = result.media),
+                        )
                     }
                 }
             ChatMessage.Role.Other -> Unit
@@ -904,6 +914,7 @@ class ChatTimeline(
                                     frame.output,
                                     args = frame.args,
                                     payload = ToolPayloads.of(frame.name, frame.args),
+                                    media = frame.media,
                                 ).enriched(),
                             )
                         }

@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.navigation.toRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
+import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.TaskControl
 import fr.louissaglio.kimi.android.data.chat.Todo
@@ -239,6 +240,12 @@ class SubagentViewModel internal constructor(
      * pager fetches the next older page (`before_turn` = oldest loaded turn) and
      * prepends it, deduplicated by turn id in the store's timeline. */
     fun onHistoryTopReached() = historyPager.loadOlder()
+
+    /** Bytes of a tool-result image on this page (ticket 184 — the child's
+     * `ReadMediaFile` results): the chat's own resolution, session media of THIS
+     * session. Pull-based display data, like the chat's `imageBytes`. */
+    suspend fun imageBytes(image: ChatMessage.Part.Image): ByteArray? =
+        resolveImageBytes(chatRepository, settingsRepository, sessionId, image)
 
     /** Retry of the failed initial load (the error state is the whole screen). */
     fun onRetry() {

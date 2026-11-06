@@ -168,7 +168,17 @@
   `permission_mode` (ticket 177, after 165's live variant) follows the same
   guard for the chip — read-only, never written through; the ViewModel shows
   the stored pick on every start, ahead of the frame), `ChatMessageMapper`
-  (DTO→domain; a tool call's raw `args` JsonObject rides the domain/end-to-end
+  (DTO→domain; a tool result's `output` goes through ONE parse, `toolOutput` →
+  `ToolOutput(text, media)` (ticket 184 — server 2.5.1's media results), shared by
+  the history `tool_result` part, the REST transcript tool frame and the live fold:
+  a content-part array (every element a typed object, at least one
+  `text`/`image`/`video`) yields its text parts joined "\n" — a bare
+  `<image …>`/`</image>` wrapper tag dropped when the array carried media — plus one
+  `ToolMedia(fileId, kind, name?)` per `session_media` image/video part (other part
+  types and sources ignored); any other value keeps `formatDetail`'s rendering. The
+  media ride `Part.ToolResult`/`TranscriptFrame.Tool`/`ToolCallResult` to
+  `ChatItem.ToolActivity.media` under the output's merge rules; a tool call's raw
+  `args` JsonObject rides the domain/end-to-end
   models — `tool_use` parts, `ToolCallStarted` events, transcript tool frames,
   `ChatItem.ToolActivity` — and payload-derived display renderings live in
   `data/chat` helpers: `ToolPreview` for the row preview, `ToolDetailFields` for
@@ -367,7 +377,13 @@
   (ticket 124) carry the clock `ui/common/icons/ClockIcon.kt` and a "one-shot"
   badge on `recurring: false`. The ticket-125 meta rows close the 118–125 arc with
   the lean treatment: ReadMediaFile gets the one new glyph
-  (`ui/common/icons/ImageIcon.kt`) and a `crop W×H` badge, ExitPlanMode the fixed
+  (`ui/common/icons/ImageIcon.kt`) and a `crop W×H` badge — and, since ticket 184,
+  any row whose result carries media (`ToolActivity.media`) expands to them: images
+  through the user bubble's `HistoryImageThumbnail` + full-screen viewer, bytes via
+  the shared `resolveImageBytes` (ChatAttachments.kt — the ticket-104 session-media
+  fetch; the chat's `ChatAttachments.imageBytes` and `SubagentViewModel.imageBytes`
+  both call it), labelled with `name`; a video is a "▶ name" chip, never decoded;
+  the collapsed row adds only a small media indicator —, ExitPlanMode the fixed
   "Plan ready for review" label plus option-label chips above the generic args
   table, UpdateGoal a status badge instead of a preview — colored per the
   payload's `badgeColor`, riding the AA-checked container/content pairs (the diff

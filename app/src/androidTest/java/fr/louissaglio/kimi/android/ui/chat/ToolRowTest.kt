@@ -12,6 +12,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import fr.louissaglio.kimi.android.data.chat.AgentCallDisplay
+import fr.louissaglio.kimi.android.data.chat.ToolMedia
 import fr.louissaglio.kimi.android.data.chat.ToolPayload
 import fr.louissaglio.kimi.android.data.chat.ToolPreview
 import fr.louissaglio.kimi.android.ui.theme.KimiTheme
@@ -1875,5 +1876,50 @@ class ToolRowTest {
         composeTestRule.onNodeWithText("explore sub-agent").assertIsDisplayed()
         composeTestRule.onNodeWithText("Reply with the single word: ok").assertIsDisplayed()
         composeTestRule.onNodeWithText("Background").assertDoesNotExist()
+    }
+
+    // --- Ticket 184: tool-result media -------------------------------------------------
+
+    @Test
+    fun mediaOnlyResultShowsTheIndicatorAndExpandsToTheImageAndVideoChip() {
+        val requested = mutableListOf<String?>()
+        composeTestRule.setContent {
+            KimiTheme {
+                ToolRow(
+                    ChatItem.ToolActivity(
+                        "tool_1",
+                        "ReadMediaFile",
+                        ToolStatus.Done,
+                        preview = "/tmp/one.png",
+                        media = listOf(
+                            ToolMedia("f_img", ToolMedia.Kind.Image, name = "one.png"),
+                            ToolMedia("f_vid", ToolMedia.Kind.Video),
+                        ),
+                    ),
+                    loadImageBytes = { image -> requested += image.fileId; null },
+                )
+            }
+        }
+
+        // Collapsed: only the small indicator, no media yet.
+        composeTestRule.onNodeWithTag("toolMediaIndicator").assertContentDescriptionEquals("1 image, 1 video")
+        composeTestRule.onNodeWithTag("toolMediaImage").assertDoesNotExist()
+
+        // Empty text with only media still expands to the media.
+        composeTestRule.onNodeWithContentDescription("Expand tool details").performClick()
+        composeTestRule.onNodeWithTag("toolMediaImage").assertIsDisplayed()
+        composeTestRule.onNodeWithText("one.png").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("toolMediaVideoChip").assertIsDisplayed()
+        composeTestRule.onNodeWithText("▶ video").assertIsDisplayed()
+        composeTestRule.waitForIdle()
+        // The video is never handed to the image loader.
+        assertEquals(listOf<String?>("f_img"), requested)
+    }
+
+    @Test
+    fun resultWithoutMediaShowsNoIndicator() {
+        toolRow(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, preview = "ls", output = "a.txt"))
+
+        composeTestRule.onNodeWithTag("toolMediaIndicator").assertDoesNotExist()
     }
 }

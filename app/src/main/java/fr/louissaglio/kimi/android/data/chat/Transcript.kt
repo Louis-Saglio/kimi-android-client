@@ -135,5 +135,8 @@ sealed interface TranscriptFrame {
         val agentCall: AgentCallDisplay? = null,
         /** Wire state "error" (2.5.0). */
         val failed: Boolean = false,
+        /** The result's `session_media` references (ticket 184 — a content-part
+         * array `output`, ChatMessageMapper.toolOutput); [output] holds its text. */
+        val media: List<ToolMedia> = emptyList(),
     ) : TranscriptFrame
 }

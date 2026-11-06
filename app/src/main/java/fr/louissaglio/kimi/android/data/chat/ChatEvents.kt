@@ -127,12 +127,14 @@ sealed interface SessionEvent {
     ) : SessionEvent, AgentScopedEvent
 
     /** A tool frame reaching `done`/`error` (ticket 175). [output] is the full result
-     * text, shown by the expanded row (ticket 023). */
+     * text, shown by the expanded row (ticket 023); [media] the result's
+     * `session_media` references (ticket 184 — ChatMessageMapper.toolOutput). */
     data class ToolCallResult(
         val toolCallId: String,
         val isError: Boolean,
         val output: String = "",
         override val agentId: String = MAIN_AGENT_ID,
+        val media: List<ToolMedia> = emptyList(),
     ) : SessionEvent, AgentScopedEvent
 
     /** An `undo` marker's splice (docs/server-api.md, Transcript protocol — ticket 175):
