@@ -2,7 +2,6 @@ package fr.louissaglio.kimi.android.ui.search
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
-import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
@@ -122,6 +121,7 @@ class SearchScreenTest {
         composeTestRule.onNodeWithText("Search is disabled on this server").assertIsDisplayed()
         composeTestRule.onNodeWithText("The server operator can enable the search index.").assertIsDisplayed()
         composeTestRule.onNodeWithText("Retry").assertDoesNotExist()
-        composeTestRule.onNode(hasSetTextAction()).assertIsNotEnabled()
+        // A disabled TextField drops its SetText action, so match it by its text.
+        composeTestRule.onNodeWithText("deploy").assertIsNotEnabled()
     }
 }
