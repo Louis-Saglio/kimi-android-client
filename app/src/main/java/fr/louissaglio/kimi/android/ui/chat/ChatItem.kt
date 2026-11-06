@@ -20,8 +20,9 @@ sealed interface ChatItem {
      * [createdAt] is the server timestamp, shown as a caption under the bubble
      * (ticket 039); null on live spliced messages until the turn-end refetch.
      * [queued] is the prompt's queue position while it waits server-side (ticket 154):
-     * set on the optimistic local echo by `prompt.queued`, cleared by `prompt.started`
-     * (or when the splice heals the echo) — the caption shows "Queued #N" while set. */
+     * set on the optimistic local echo by a queued `prompt.upsert`, cleared when the
+     * prompt leaves the queue (or when the splice heals the echo) — the caption shows
+     * "Queued #N" while set. */
     data class UserMessage(
         override val id: String,
         val text: String,
@@ -56,8 +57,7 @@ sealed interface ChatItem {
      * ticket 124).
      * [output] is the result
      * text; either may be blank while the call is still running.
-     * While running, [output] accumulates the volatile tool.progress chunks (ticket 025)
-     * — the definitive tool.result output replaces them wholesale. [subagentId] links an
+     * The definitive result output replaces it wholesale. [subagentId] links an
      * `Agent` row to its sub-agent's page (ticket 045); null rows are not tappable.
      * It stays the single-`Agent` link (ticket 134): an `AgentSwarm` row never carries
      * it — the swarm card navigates by the tool call id the row already holds.

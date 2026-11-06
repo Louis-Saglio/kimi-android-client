@@ -31,8 +31,7 @@ import kotlinx.coroutines.async
  * never releases (the ViewModel stays in the back stack), and process death starts
  * with an empty map by construction.
  *
- * On success the fetch applies the session-scope state itself — the socket resume
- * cursor (the first subscribe stitches gaplessly onto the watermark), the sub-agent
+ * On success the fetch applies the session-scope state itself — the sub-agent
  * roster (identity + phase + summary through the store's precedence funnel), and
  * the snapshot's `Agent`-call mining (the messages page and
  * `in_flight_turn.running_tools` — chat-INDEPENDENT, so the page-on-top cold
@@ -42,7 +41,7 @@ import kotlinx.coroutines.async
  * within-process resume machinery, ticket 048, owns their heal); the sub-agent row
  * links re-drive from the store's registry, which survived.
  *
- * `resync_required` re-runs the fetch ([resync]).
+ * The 40932 SESSION_STALE recovery re-runs the fetch ([resync]).
  *
  * Failure handling: none beyond the ordinary load-error path — a failed fetch is
  * forgotten, so the next [sync] call retries; there is deliberately no fallback to
@@ -73,7 +72,7 @@ class SnapshotSync @Inject constructor(
     private val scope by lazy { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
 
     // sessionId → the cold-start fetch (in-flight or done), valid until the session
-    // is left ([forget]) or a `resync_required` lands ([resync]). The shared
+    // is left ([forget]) or a forced re-fetch lands ([resync]). The shared
     // Deferred lives on [scope]: a caller's cancellation (a socket-gate flip) never
     // cancels the fetch for the others. A FAILED fetch is removed — it never counts
     // as fresh, so the next call retries. All map access is Main-confined.
@@ -103,9 +102,8 @@ class SnapshotSync @Inject constructor(
         coldStarts.remove(sessionId)
     }
 
-    /** The `resync_required` re-fetch (ticket 085): the server refused the resume
-     * cursor, so no replay will come — the missed window heals from a fresh snapshot.
-     * Always fetches and becomes the session's cold-start state. */
+    /** The forced re-fetch (the 40932 SESSION_STALE recovery, ticket 168): always
+     * fetches and becomes the session's cold-start state. */
     suspend fun resync(sessionId: String): Result<SessionSnapshot> {
         val deferred = scope.async { fetchAndApply(sessionId) }
         coldStarts[sessionId] = deferred
@@ -114,15 +112,13 @@ class SnapshotSync @Inject constructor(
         return result
     }
 
-    /** The session-scope apply shared by both fetches: cursor first (the next
-     * subscribe resumes at the watermark), then the roster and the `Agent`-call
+    /** The session-scope apply shared by both fetches: the roster and the `Agent`-call
      * mining (the store records exist before any subscribe, so live frames
      * accumulate from the first one — and the page-on-top cold restore recovers
      * prompts/links without any ChatViewModel, ticket 091). */
     private suspend fun fetchAndApply(sessionId: String): Result<SessionSnapshot> {
         val result = chatRepository.getSnapshot(settingsRepository.current(), sessionId)
         result.onSuccess { snapshot ->
-            chatRepository.seedSessionCursor(sessionId, snapshot.asOfSeq, snapshot.epoch)
             val store = subagentStore.get()
             store.applyRoster(sessionId, snapshot.subagents)
             mineAgentCalls(snapshot).forEach { call ->

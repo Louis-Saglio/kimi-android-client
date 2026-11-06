@@ -6,7 +6,7 @@
   (ticket 152) is the shared stalled-socket detection both WebSockets run: one
   instance per connection, armed at socket open, fed `heartbeat_ms` from each
   connection's `server_hello`; inbound silence past 3× it unwinds the connection
-  as an ordinary failure, so the existing reconnect loop (backoff, cursor resume,
+  as an ordinary failure, so the existing reconnect loop (backoff, re-subscribe,
   the collector's REST resync) treats a silently-stalled socket exactly like a
   dropped one.
 - `data/chat/` — `ChatRepository` is a thin facade over `ChatApi` (REST verbs),
@@ -17,10 +17,34 @@
   `GET .../file-history/content?turn_id=N&path=<p>&phase=start|end` → domain
   `FileContent?` — null when the file did not exist at that phase, the path
   URL-encoded as the query param),
-  `SessionSocket` (WebSocket, reconnect, per-session resume cursor held at
-  instance level so it survives the ON_STOP/ON_START collection restarts —
-  ticket 048; a refused cursor acks as `resync_required` → snapshot re-sync,
-  ticket 085),
+  `SessionSocket` (WebSocket, reconnect, server 2.5.0's session subscription —
+  ticket 175: one `subscribe_v2` frame per connection, grade `delta` for every
+  agent (`{"*":"delta"}`); the subscription does not survive a drop, so each
+  reconnect re-subscribes and emits `SocketEvent.Reconnected` (the collector's
+  REST resync — there is no resume cursor; `transcript_since` is ticket 176);
+  an ack listing the session in `not_found` ends the flow with
+  `SocketEvent.Failed(DataError.SessionNotFound)`, which the chat surfaces like a
+  failed load. `transcript.reset` is accepted and renders nothing — its `items`
+  are always empty, so it never touches REST-rendered history. `transcript.ops`
+  batches go through `TranscriptFold` (data/chat), one per session held at
+  instance level so it survives the ON_STOP/ON_START collection restarts (the
+  048 rationale): the fold turns entity upserts into the existing transition
+  events — text/thinking frames emit only their unseen suffix (`append`
+  offsets dedup, a gap drops), tool frames emit `ToolCallStarted` on first sight
+  and again when `input`/`display` become known (a partial `inputText` renders
+  no args — the row's first-writer-wins preview must not lock onto a fragment;
+  a complete one parses), `ToolCallResult` once on `done`/`error`; turn/step/
+  prompt upserts emit `TurnStarted`/`TurnEnded` (cancelled → `user_cancelled`,
+  failed → `error` + the turn's error text on the footer), `StepStarted`/
+  `StepCompleted` (+ `StepRetrying` from the schema-level `retry` object) and
+  `PromptUpdated` (status + derived queue length, replacing 154's
+  submitted/queued/started); an `undo` marker is the `ContextSpliced` echo
+  (injections dropped). Every event carries the batch's `agent_id`, so
+  sub-agent ops route to the store exactly as before. Since 175 the socket
+  feeds ONLY these transcript events: the legacy frame branches (approval/
+  question/agent-status/task/subagent/compaction families) are deleted, and
+  the domain events documented below for those features have no live feed
+  until tickets 171/172/177–182 re-feed them from the 2.5.0 frames),
   `ModelsRepository` (models/config caches; catalog items map their optional
   `upgrade` retirement guidance — ticket 166 — and its `clientConfigs` fetches
   the two named cloud policies, `model_switch_confirm`/`effort_switch_confirm`,
@@ -38,7 +62,7 @@
   live `agent.status.updated` `permission` variant follows the same guard for
   the chip — read-only, never written through), `ChatMessageMapper`
   (DTO→domain; a tool call's raw `args` JsonObject rides the domain/end-to-end
-  models — `tool_use` parts, `tool.call.started` events, transcript tool frames,
+  models — `tool_use` parts, `ToolCallStarted` events, transcript tool frames,
   `ChatItem.ToolActivity` — and payload-derived display renderings live in
   `data/chat` helpers: `ToolPreview` for the row preview, `ToolDetailFields` for
   the expanded row's generic key/value args table, ticket 118, `ToolPayloads`
@@ -71,8 +95,8 @@
   above the generic args table). Ticket 135 adds `AgentSwarm` — the swarm call's
   `description` label plus its expected member total (the `items` /
   `resume_agent_ids` count), feeding the swarm card's aggregate. Ticket 157 adds
-  the `Agent` spawn row — the one display-driven row (the 0.31.0
-  `tool.call.started` display, kind `agent_call`, carries
+  the `Agent` spawn row — the one display-driven row (the tool frame's
+  `display`, kind `agent_call`, carries
   `agent_name`/`prompt`/`background`; history parts carry no display, so only
   witnessed or snapshot-seeded rows get it): the row titles itself "{agent_name}
   sub-agent", previews the prompt and badges a background spawn; the tap follows
@@ -324,9 +348,9 @@
   entry point — `SnapshotSync` (ui/chat, session-scoped singleton like the store, so
   the page-on-top restore path with no ChatViewModel runs the same rebuild) owns the
   fetch, taken BEFORE the session's first socket subscribe (the chat's gate and the
-  store's keep-alive both await it). It seeds `SessionSocket.seedCursor` with the
-  `as_of_seq`/`epoch` watermark (gapless first subscribe; the matching `Reconnected`
-  skips the redundant 048 resync), applies the roster to the store (`applyRoster`),
+  store's keep-alive both await it). (Server 2.5.0 removed `/snapshot`; ticket 176
+  rebuilds this cold start — since 175 nothing seeds a socket cursor any more.) It
+  applies the roster to the store (`applyRoster`),
   and mines the snapshot's messages page + `in_flight_turn.running_tools` for
   `Agent` calls (`applyAgentCall` — chat-independent, so the page-on-top restore
   recovers prompts/links too), and hands the chat-side bundle (history page,
@@ -344,13 +368,15 @@
   `SubagentStreamStore.release` calls `SnapshotSync.forget`, so the next entry
   re-fetches (one cheap GET per entry — no process-lifetime cache of mutable server
   state) while chat → page → chat costs zero fetches (`AlreadyFresh`).
-  `resync_required` re-runs it (keepLive per the snapshot's `busy`); a failed fetch
-  is the ordinary load-error state, never a legacy-burst fallback. The
-  within-process resume (048's cursor replay + /status resync) is untouched.
+  The 40932 recovery re-runs it (`resync`, keepLive per the snapshot's `busy`); a
+  failed fetch is the ordinary load-error state, never a legacy-burst fallback.
+  The within-process resume is the /status-aware history resync on ON_START and on
+  every `Reconnected` (048; no cursor replay since 175).
   The transcript cold status reads the real turn states (`cancelled`/`failed`
   → Failed, 0.31.1) for the window the roster cannot cover.
 - Sub-agent streams (045, state model reimplemented in 091): `SessionSocket` tags
-  transcript events with the emitting `agentId`; sub-agent-scoped events route to
+  transcript events with the emitting agent (the ops batch's `agent_id` since 175 —
+  the server auto-subscribes children; no second `subscribe_v2` is sent); sub-agent-scoped events route to
   `SubagentStreamStore` (ui/chat, session-scoped singleton keyed by session, one
   `SubagentRecord` per sub-agent — metadata (identity, task prompt, row link,
   status) are first-class FIELDS, never rows in the replaceable timeline, so the
@@ -359,8 +385,8 @@
   one funnel method per source kind, writing only the fields it is authoritative
   for (precedence high→low: live lifecycle pins `status` → fresh roster → result
   text → transcript turn states; identity/prompt/link first-writer-wins): live
-  frames via `apply` (the FIRST turn's first `context.spliced` user message is the
-  task prompt — lifted into `record.prompt`, never a timeline row; later splices
+  frames via `apply` (the FIRST turn's first `ContextSpliced` user message — an
+  `undo` marker splice since 175 — is the task prompt — lifted into `record.prompt`, never a timeline row; later splices
   stay user bubbles), the snapshot roster via `applyRoster` (re-applicable on every
   entry — a fresh roster heals non-live-pinned statuses), `Agent` calls from any
   carrier (history rows, snapshot messages, `running_tools`) via `applyAgentCall`,

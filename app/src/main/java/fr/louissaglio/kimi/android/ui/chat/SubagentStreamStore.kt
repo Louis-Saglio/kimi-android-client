@@ -983,7 +983,7 @@ class SubagentStreamStore @Inject constructor(
         if (changed) publish(sessionId)
     }
 
-    /** The REST `/tasks` list at a cold start / `resync_required` (ticket 135), fed
+    /** The REST `/tasks` list at a cold start (ticket 135), fed
      * by the JobsStore's seed. A main-owned sub-agent task whose `agentId` names a
      * record heals it the two ways the snapshot roster cannot: a BACKGROUND member
      * is excluded from the roster (REST serves it — docs/server-api.md), so the

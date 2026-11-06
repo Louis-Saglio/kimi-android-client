@@ -5,6 +5,7 @@ import fr.louissaglio.kimi.android.data.DataError
 import fr.louissaglio.kimi.android.data.sessions.SessionActivityStore
 import fr.louissaglio.kimi.android.data.settings.ServerSettings
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.testChatRepository
 import fr.louissaglio.kimi.android.testutil.testChatTimeline
@@ -1218,59 +1219,14 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun `agent status usage frame emits the context usage and the session model, phase frame emits the activity phase`() = runBlocking {
-        // Verbatim 0.29.0 shapes (docs/server-api.md, Agent status). The phase frame
-        // leaves the token fields null — nothing clobbers the stored usage — and,
-        // since ticket 148, surfaces the agent's live activity.
-        val emitted = runSocketEvents(
-            """{"type":"agent.status.updated","seq":2,"epoch":"ep_1","volatile":true,""" +
-                """"session_id":"session_1","timestamp":"2026-07-26T00:00:00.000Z",""" +
-                """"payload":{"type":"agent.status.updated","model":"kimi-code/k3",""" +
-                """"thinkingEffort":"high","maxContextTokens":1048576,"usage":{},""" +
-                """"contextTokens":25050,"agentId":"main","sessionId":"session_1"}}""",
-            """{"type":"agent.status.updated","seq":5,"epoch":"ep_1","volatile":true,""" +
-                """"session_id":"session_1","timestamp":"2026-07-26T00:00:01.000Z",""" +
-                """"payload":{"type":"agent.status.updated",""" +
-                """"phase":{"kind":"running","turnId":0,"step":0,"stepId":"",""" +
-                """"since":1784777223312},"agentId":"main","sessionId":"session_1"}}""",
-            eventCount = 3,
-            settleMillis = 200,
-        )
-
-        assertEquals(
-            listOf(
-                SocketEvent.Event(SessionEvent.ContextUsageUpdated(ContextUsage(25050, 1048576))),
-                SocketEvent.Event(SessionEvent.SessionModelUpdated("kimi-code/k3", "high")),
-                SocketEvent.Event(
-                    SessionEvent.AgentStatusUpdated(
-                        AgentPhase(AgentPhase.Kind.Running, Instant.ofEpochMilli(1784777223312)),
-                    ),
-                ),
-            ),
-            emitted.filterIsInstance<SocketEvent.Event>(),
-        )
-    }
-
-    @Test
-    fun `socket subscribes and emits parsed events`() = runBlocking {
+    fun `socket subscribes with subscribe_v2 and emits parsed events`() = runBlocking {
         val clientFrames = CopyOnWriteArrayList<String>()
         server.enqueue(
-            webSocketUpgradeResponse(
-                object : WebSocketListener() {
-                    override fun onOpen(webSocket: WebSocket, response: Response) {
-                        webSocket.send("""{"type":"server_hello","payload":{"protocol_version":2,"heartbeat_ms":30000}}""")
-                        webSocket.send(
-                            """{"type":"assistant.delta","seq":5,"epoch":"ep_1","volatile":true,"offset":0,""" +
-                                """"session_id":"session_1","timestamp":"2026-07-17T04:11:00.603Z",""" +
-                                """"payload":{"type":"assistant.delta","turnId":1,"delta":"ok","agentId":"main","sessionId":"session_1"}}""",
-                        )
-                    }
-
-                    override fun onMessage(webSocket: WebSocket, text: String) {
-                        clientFrames += text
-                    }
-                },
-            ),
+            wsUpgrade(clientFrames) { webSocket ->
+                webSocket.send("""{"type":"server_hello","payload":{"protocol_version":2,"heartbeat_ms":10000}}""")
+                webSocket.send(TranscriptFrames.ackFrame())
+                webSocket.send(TranscriptFrames.opsFrame(TranscriptFrames.textOp("t1.1.f2", "ok")))
+            },
         )
 
         val emitted = CopyOnWriteArrayList<SocketEvent>()
@@ -1286,250 +1242,20 @@ class ChatRepositoryTest {
             SocketEvent.Event(SessionEvent.AssistantDelta("ok")),
             emitted.first { it is SocketEvent.Event },
         )
-        val subscribe = clientFrames.first { "\"subscribe\"" in it }
-        assertTrue(subscribe.contains("session_1"))
+        val subscribe = clientFrames.first()
+        assertTrue(subscribe.contains("\"type\":\"subscribe_v2\""))
+        assertTrue(subscribe.contains("\"session_id\":\"session_1\""))
         Unit
     }
 
     @Test
-    fun `volatile frames do not advance the resume cursor`() = runBlocking {
-        val clientFrames = CopyOnWriteArrayList<String>()
-        server.enqueue(
-            webSocketUpgradeResponse(
-                object : WebSocketListener() {
-                    override fun onOpen(webSocket: WebSocket, response: Response) {
-                        webSocket.send(
-                            """{"type":"turn.started","seq":5,"epoch":"ep_1","session_id":"session_1",""" +
-                                """"timestamp":"2026-07-23T03:28:34.668Z","payload":{"type":"turn.started","turnId":0}}""",
-                        )
-                        // Volatile frames share the seq of the event they piggyback on
-                        // (docs/server-api.md): this one must not move the resume cursor,
-                        // or the replay after a drop could skip the substantive seq-6 event.
-                        webSocket.send(
-                            """{"type":"assistant.delta","seq":6,"epoch":"ep_1","volatile":true,"offset":0,""" +
-                                """"session_id":"session_1","timestamp":"2026-07-23T03:28:34.768Z",""" +
-                                """"payload":{"type":"assistant.delta","turnId":0,"delta":"ok"}}""",
-                        )
-                        webSocket.close(1000, "drop")
-                    }
-
-                    override fun onMessage(webSocket: WebSocket, text: String) {
-                        clientFrames += text
-                    }
-                },
-            ),
-        )
-        server.enqueue(
-            webSocketUpgradeResponse(
-                object : WebSocketListener() {
-                    override fun onMessage(webSocket: WebSocket, text: String) {
-                        clientFrames += text
-                    }
-                },
-            ),
-        )
-
-        val job = launch { repository.observeSession(settings(), "session_1").collect {} }
-        try {
-            // The reconnect goes through the 1 s first backoff step; only the resume
-            // subscribe carries a cursor (the first one may race the server's close and
-            // never reach the MockWebServer listener — it is not what is asserted).
-            awaitCondition(10_000) { clientFrames.any { "\"cursors\"" in it } }
-        } finally {
-            job.cancel()
-        }
-
-        val resubscribe = clientFrames.first { "\"cursors\"" in it }
-        assertTrue(resubscribe, resubscribe.contains("\"seq\":5"))
-        assertTrue(resubscribe, resubscribe.contains("\"epoch\":\"ep_1\""))
-        Unit
-    }
-
-    @Test
-    fun `a fresh collection resumes with the stored cursor and emits Reconnected`() = runBlocking {
-        // The chat screen's ON_STOP/ON_START gate cycle (ticket 048): cancelling one
-        // observe() collection must not lose the resume cursor — the next collection
-        // re-subscribes with it and the missed window replays.
-        val clientFrames = CopyOnWriteArrayList<String>()
-        server.enqueue(
-            wsUpgrade(clientFrames) { ws ->
-                ws.send(
-                    """{"type":"turn.started","seq":5,"epoch":"ep_1","session_id":"session_1",""" +
-                        """"timestamp":"2026-07-29T00:00:00.000Z","payload":{"type":"turn.started","turnId":0}}""",
-                )
-            },
-        )
-        server.enqueue(wsUpgrade(clientFrames))
-
-        val first = CopyOnWriteArrayList<SocketEvent>()
-        val job1 = launch { repository.observeSession(settings(), "session_1").collect { first += it } }
-        awaitCondition { first.any { it is SocketEvent.Event } }
-        job1.cancel()
-
-        val second = CopyOnWriteArrayList<SocketEvent>()
-        val job2 = launch { repository.observeSession(settings(), "session_1").collect { second += it } }
-        try {
-            awaitCondition { second.isNotEmpty() && clientFrames.any { "\"cursors\"" in it } }
-        } finally {
-            job2.cancel()
-        }
-
-        assertEquals(SocketEvent.Connected, first.first())
-        // A subscribe carrying a stored cursor IS a resume, even as the collection's
-        // first connection — the collector heals via the Reconnected path, and the
-        // event carries the cursor the subscribe resumed with (ticket 085).
-        assertEquals(SocketEvent.Reconnected(5, "ep_1"), second.first())
-        val resubscribe = clientFrames.first { "\"cursors\"" in it }
-        assertTrue(resubscribe, resubscribe.contains("\"seq\":5"))
-        assertTrue(resubscribe, resubscribe.contains("\"epoch\":\"ep_1\""))
-        Unit
-    }
-
-    @Test
-    fun `a resync_required ack drops the stored cursor and emits ResyncRequired`() = runBlocking {
-        val clientFrames = CopyOnWriteArrayList<String>()
-        server.enqueue(
-            wsUpgrade(clientFrames) { ws ->
-                // A cursor-worthy frame first, then the ack refusing the resume
-                // (docs/server-api.md, subscribe ack): no replay will come.
-                ws.send(
-                    """{"type":"turn.started","seq":5,"epoch":"ep_1","session_id":"session_1",""" +
-                        """"timestamp":"2026-07-29T00:00:00.000Z","payload":{"type":"turn.started","turnId":0}}""",
-                )
-                ws.send(
-                    """{"type":"ack","id":"c_1","code":0,"msg":"success","payload":{"accepted":[],""" +
-                        """"not_found":[],"resync_required":["session_1"],"cursors":{}}}""",
-                )
-            },
-        )
-        server.enqueue(wsUpgrade(clientFrames))
-
-        val first = CopyOnWriteArrayList<SocketEvent>()
-        val job1 = launch { repository.observeSession(settings(), "session_1").collect { first += it } }
-        try {
-            awaitCondition { first.any { it is SocketEvent.ResyncRequired } }
-        } finally {
-            job1.cancel()
-        }
-
-        assertEquals(
-            listOf(
-                SocketEvent.Connected,
-                SocketEvent.Event(SessionEvent.TurnStarted()),
-                SocketEvent.ResyncRequired,
-            ),
-            first,
-        )
-
-        // The refused cursor is gone: the next collection starts blind again.
-        val second = CopyOnWriteArrayList<SocketEvent>()
-        val job2 = launch { repository.observeSession(settings(), "session_1").collect { second += it } }
-        try {
-            awaitCondition { second.isNotEmpty() && clientFrames.count { "\"subscribe\"" in it } >= 2 }
-        } finally {
-            job2.cancel()
-        }
-
-        assertEquals(SocketEvent.Connected, second.first())
-        assertFalse(clientFrames.last { "\"subscribe\"" in it }.contains("\"cursors\""))
-    }
-
-    @Test
-    fun `tool call started frame emits the server description or args preview`() = runBlocking {
+    fun `an undo marker emits the spliced user message`() = runBlocking {
+        // The captured prompt round (docs/server-api.md, Transcript protocol): the sent
+        // message rides an `undo` marker.
         val emitted = runSocketEvents(
-            // Verbatim tool.call.started shape (docs/server-api.md: args, description
-            // and display on start). The server description is the row preview
-            // (ticket 153); without one it derives from display/args.
-            """{"type":"tool.call.started","seq":9,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-19T15:07:43.000Z","payload":{"type":"tool.call.started",""" +
-                """"turnId":0,"toolCallId":"tool_3oZjtQUGzDwUwQwfkXioAtne","name":"Bash",""" +
-                """"args":{"command":"echo hello-from-spike"},""" +
-                """"description":"Running: echo hello-from-spike",""" +
-                """"display":{"kind":"command","command":"echo hello-from-spike",""" +
-                """"cwd":"/tmp/spike","language":"bash"},"agentId":"main","sessionId":"session_1"}}""",
-            // No description and no display object: the preview is derived from args.
-            """{"type":"tool.call.started","seq":10,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-19T15:07:44.000Z","payload":{"type":"tool.call.started",""" +
-                """"turnId":0,"toolCallId":"tool_2","name":"Read",""" +
-                """"args":{"path":"/tmp/spike/a.txt"},"agentId":"main","sessionId":"session_1"}}""",
-        )
-
-        val events = emitted.filterIsInstance<SocketEvent.Event>().map { it.event }
-        assertEquals(
-            SessionEvent.ToolCallStarted(
-                "tool_3oZjtQUGzDwUwQwfkXioAtne",
-                "Bash",
-                "Running: echo hello-from-spike",
-                input = "{\n    \"command\": \"echo hello-from-spike\"\n}",
-                args = buildJsonObject { put("command", "echo hello-from-spike") },
-                description = "Running: echo hello-from-spike",
+            TranscriptFrames.opsFrame(
+                TranscriptFrames.undoOp("live-m4", TranscriptFrames.userMessage("msg_1", "hello from the phone")),
             ),
-            events[0],
-        )
-        assertEquals(
-            SessionEvent.ToolCallStarted(
-                "tool_2",
-                "Read",
-                "/tmp/spike/a.txt",
-                input = "{\n    \"path\": \"/tmp/spike/a.txt\"\n}",
-                args = buildJsonObject { put("path", "/tmp/spike/a.txt") },
-            ),
-            events[1],
-        )
-    }
-
-    @Test
-    fun `tool result frame emits the full output and the error flag`() = runBlocking {
-        val emitted = runSocketEvents(
-            // tool.result shape (docs/server-api.md): toolCallId + output; the output is
-            // a plain string for shell tools (ticket 023).
-            """{"type":"tool.result","seq":14,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-19T15:07:50.000Z","payload":{"type":"tool.result",""" +
-                """"turnId":0,"toolCallId":"tool_1","output":"ok\n","agentId":"main","sessionId":"session_1"}}""",
-            // Structured tools (AskUserQuestion) carry a JSON object output.
-            """{"type":"tool.result","seq":15,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-19T15:07:51.000Z","payload":{"type":"tool.result",""" +
-                """"turnId":0,"toolCallId":"tool_2","is_error":true,""" +
-                """"output":{"answers":{"Color?":"blue"}},"agentId":"main","sessionId":"session_1"}}""",
-        )
-
-        val events = emitted.filterIsInstance<SocketEvent.Event>().map { it.event }
-        assertEquals(SessionEvent.ToolCallResult("tool_1", false, "ok\n"), events[0])
-        assertEquals(
-            SessionEvent.ToolCallResult("tool_2", true, "{\n    \"answers\": {\n        \"Color?\": \"blue\"\n    }\n}"),
-            events[1],
-        )
-    }
-
-    @Test
-    fun `tool progress frame emits the output chunk`() = runBlocking {
-        // Verbatim tool.progress shape (docs/server-api.md, 0.29.0): a volatile frame
-        // whose update carries one live output chunk.
-        val emitted = runSocketEvents(
-            """{"type":"tool.progress","seq":14,"epoch":"ep_1","volatile":true,""" +
-                """"session_id":"session_1","timestamp":"2026-07-23T03:28:40.000Z",""" +
-                """"payload":{"type":"tool.progress","turnId":0,""" +
-                """"toolCallId":"tool_RMgBIy1asIorg1eV8P3ZhHiL",""" +
-                """"update":{"kind":"stdout","text":"doc-verify-0290\n"},""" +
-                """"agentId":"main","sessionId":"session_1"}}""",
-        )
-
-        val events = emitted.filterIsInstance<SocketEvent.Event>().map { it.event }
-        assertEquals(
-            SessionEvent.ToolCallProgress("tool_RMgBIy1asIorg1eV8P3ZhHiL", "doc-verify-0290\n"),
-            events.first(),
-        )
-    }
-
-    @Test
-    fun `context spliced frame emits the spliced user message`() = runBlocking {
-        // Verbatim 0.27.0 shape (docs/server-api.md, "Core event payloads").
-        val emitted = runSocketEvents(
-            """{"type":"context.spliced","seq":5,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-19T00:00:00.500Z","payload":{"type":"context.spliced",""" +
-                """"start":0,"deleteCount":0,"messages":[{"role":"user",""" +
-                """"content":[{"type":"text","text":"hello from the phone"}],"toolCalls":[],""" +
-                """"origin":{"kind":"user"},"id":"msg_1"}],"agentId":"main","sessionId":"session_1"}}""",
         )
 
         assertEquals(
@@ -1550,15 +1276,14 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun `context spliced frame without a message id emits the steered user message`() = runBlocking {
-        // Steer echo shape (docs/server-api.md, steer round-trip): the spliced steered
-        // message carries no id.
+    fun `an undo marker without a message id emits the id-less user message`() = runBlocking {
         val emitted = runSocketEvents(
-            """{"type":"context.spliced","seq":12,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-20T00:00:01.000Z","payload":{"type":"context.spliced",""" +
-                """"start":1,"deleteCount":0,"messages":[{"role":"user",""" +
-                """"content":[{"type":"text","text":"Stop counting. Reply with exactly: steered-ok"}],""" +
-                """"toolCalls":[],"origin":{"kind":"user"}}],"agentId":"main","sessionId":"session_1"}}""",
+            TranscriptFrames.opsFrame(
+                TranscriptFrames.undoOp(
+                    "live-m9",
+                    TranscriptFrames.userMessage(null, "Stop counting. Reply with exactly: steered-ok"),
+                ),
+            ),
         )
 
         assertEquals(
@@ -1605,109 +1330,21 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun `context spliced filters internal envelopes from the echoed user message`() = runBlocking {
+    fun `an undo marker splice filters internal envelopes from the echoed user message`() = runBlocking {
         val emitted = runSocketEvents(
-            """{"type":"context.spliced","seq":5,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-21T00:00:00.000Z","payload":{"type":"context.spliced",""" +
-                """"start":0,"deleteCount":0,"messages":[{"role":"user",""" +
-                """"content":[{"type":"text","text":"<system-reminder>\ninternal\n</system-reminder>"}],""" +
-                """"toolCalls":[],"origin":{"kind":"injection"},"id":"msg_9"}],""" +
-                """"agentId":"main","sessionId":"session_1"}}""",
+            TranscriptFrames.opsFrame(
+                TranscriptFrames.undoOp(
+                    "live-m5",
+                    """{"role":"user","content":[{"type":"text","text":"<system-reminder>\ninternal\n</system-reminder>"}],""" +
+                        """"origin":{"kind":"user"},"id":"msg_9"}""",
+                ),
+            ),
         )
 
         val timeline = testChatTimeline()
         timeline.apply((emitted.first { it is SocketEvent.Event } as SocketEvent.Event).event)
 
         assertEquals(emptyList<ChatItem>(), timeline.items())
-    }
-
-    @Test
-    fun `question frames emit the requested question then the resolved id`() = runBlocking {
-        // Verbatim 0.27.0 shapes (docs/server-api.md, "Core event payloads").
-        val emitted = runSocketEvents(
-            """{"type":"event.question.requested","seq":9,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-20T06:06:49.808Z","payload":{"type":"event.question.requested",""" +
-                """"question_id":"tool_mU6ITagcpKjwSyiUKLHPZYWw","session_id":"session_1","turn_id":0,""" +
-                """"tool_call_id":"tool_mU6ITagcpKjwSyiUKLHPZYWw",""" +
-                """"questions":[{"id":"q_0","question":"Red or blue?","header":"Color",""" +
-                """"options":[{"id":"opt_0_0","label":"red","description":"warm color"},""" +
-                """{"id":"opt_0_1","label":"blue","description":"cool color"}],"allow_other":true}],""" +
-                """"created_at":"2026-07-20T06:06:49.808Z","agentId":"main","sessionId":"session_1"}}""",
-            """{"type":"event.question.answered","seq":11,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-20T06:08:12.548Z","payload":{"type":"event.question.answered",""" +
-                """"question_id":"tool_mU6ITagcpKjwSyiUKLHPZYWw","answers":{"Red or blue?":"blue"},""" +
-                """"resolved_at":"2026-07-20T06:08:12.548Z","agentId":"main","sessionId":"session_1"}}""",
-            """{"type":"event.question.dismissed","seq":28,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-20T06:12:37.844Z","payload":{"type":"event.question.dismissed",""" +
-                """"question_id":"tool_TThzzORvQB8tHTKyLhIL5bQt","dismissed_at":"2026-07-20T06:12:37.844Z",""" +
-                """"agentId":"main","sessionId":"session_1"}}""",
-        )
-
-        val events = emitted.filterIsInstance<SocketEvent.Event>().map { it.event }
-        assertEquals(
-            SessionEvent.QuestionRequested(
-                PendingQuestion(
-                    questionId = "tool_mU6ITagcpKjwSyiUKLHPZYWw",
-                    toolCallId = "tool_mU6ITagcpKjwSyiUKLHPZYWw",
-                    items = listOf(
-                        PendingQuestion.Item(
-                            id = "q_0",
-                            header = "Color",
-                            text = "Red or blue?",
-                            options = listOf(
-                                PendingQuestion.Option("opt_0_0", "red", "warm color"),
-                                PendingQuestion.Option("opt_0_1", "blue", "cool color"),
-                            ),
-                            allowOther = true,
-                        ),
-                    ),
-                ),
-            ),
-            events[0],
-        )
-        assertEquals(SessionEvent.QuestionResolved("tool_mU6ITagcpKjwSyiUKLHPZYWw"), events[1])
-        assertEquals(SessionEvent.QuestionResolved("tool_TThzzORvQB8tHTKyLhIL5bQt"), events[2])
-    }
-
-    @Test
-    fun `question requested decodes the 0_38_0 split question and tool call ids`() = runBlocking {
-        // Verbatim 0.38.0 capture (docs/server-api.md, "Core event payloads" →
-        // Question requested): question_id is a dedicated question_<uuid> id,
-        // distinct from the tool row's tool_call_id (ticket 106).
-        val emitted = runSocketEvents(
-            """{"type":"event.question.requested","seq":10,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-08-20T19:33:45.150Z","payload":{"type":"event.question.requested",""" +
-                """"question_id":"question_a38aaf28-7dfe-489d-bca3-ea43c93b86fa",""" +
-                """"session_id":"session_1","turn_id":0,""" +
-                """"tool_call_id":"tool_EwFXscDF0HraGfTelCTRdRe9",""" +
-                """"questions":[{"id":"q_0","question":"Pick a color?",""" +
-                """"options":[{"id":"opt_0_0","label":"Red"},{"id":"opt_0_1","label":"Blue"}],""" +
-                """"allow_other":true}],""" +
-                """"created_at":"2026-08-20T19:33:45.150Z","agentId":"main","sessionId":"session_1"}}""",
-        )
-
-        val events = emitted.filterIsInstance<SocketEvent.Event>().map { it.event }
-        assertEquals(
-            SessionEvent.QuestionRequested(
-                PendingQuestion(
-                    questionId = "question_a38aaf28-7dfe-489d-bca3-ea43c93b86fa",
-                    toolCallId = "tool_EwFXscDF0HraGfTelCTRdRe9",
-                    items = listOf(
-                        PendingQuestion.Item(
-                            id = "q_0",
-                            header = "",
-                            text = "Pick a color?",
-                            options = listOf(
-                                PendingQuestion.Option("opt_0_0", "Red", null),
-                                PendingQuestion.Option("opt_0_1", "Blue", null),
-                            ),
-                            allowOther = true,
-                        ),
-                    ),
-                ),
-            ),
-            events.single(),
-        )
     }
 
     @Test
@@ -1784,29 +1421,6 @@ class ChatRepositoryTest {
         val questions = repository.getPendingQuestions(settings(), "session_1").getOrThrow()
 
         assertEquals(listOf("main", "agent-1"), questions.map { it.agentId })
-    }
-
-    @Test
-    fun `question requested frame decodes the 2_0_2 agent_id stamp`() = runBlocking {
-        // The 0.38.0 verbatim frame (docs/server-api.md, "Core event payloads") plus
-        // its documented 2.0.2 drift: the frame's payload gained the optional
-        // snake_case `agent_id` (ticket 156). The trailing camelCase `agentId` is
-        // the envelope mirror every payload carries, NOT the asker — unlike
-        // approvals, the asking member decodes from the snake_case stamp only.
-        val emitted = runSocketEvents(
-            """{"type":"event.question.requested","seq":10,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-08-20T19:33:45.150Z","payload":{"type":"event.question.requested",""" +
-                """"question_id":"question_a38aaf28-7dfe-489d-bca3-ea43c93b86fa","agent_id":"agent-12",""" +
-                """"session_id":"session_1","turn_id":0,""" +
-                """"tool_call_id":"tool_EwFXscDF0HraGfTelCTRdRe9",""" +
-                """"questions":[{"id":"q_0","question":"Pick a color?",""" +
-                """"options":[{"id":"opt_0_0","label":"Red"},{"id":"opt_0_1","label":"Blue"}],""" +
-                """"allow_other":true}],""" +
-                """"created_at":"2026-08-20T19:33:45.150Z","agentId":"main","sessionId":"session_1"}}""",
-        )
-
-        val event = emitted.filterIsInstance<SocketEvent.Event>().single().event
-        assertEquals("agent-12", (event as SessionEvent.QuestionRequested).question.agentId)
     }
 
     @Test
@@ -2041,267 +1655,6 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun `sub-agent transcript frames emit events tagged with their agentId`() = runBlocking {
-        // Sub-agents stream over the same session channel tagged with their own agentId
-        // (docs/server-api.md, Sub-agents; fixtures from the 2026-07-28 0.29.2 capture).
-        // Since ticket 045 every frame emits its event carrying the emitting agentId —
-        // routing, not dropping, is what keeps them out of the main chat. The two main
-        // frames (one with the tag, one without — absent means main) read as "main".
-        val emitted = runSocketEvents(
-            """{"type":"turn.started","seq":20,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:35.493Z","payload":{"type":"turn.started","turnId":0,""" +
-                """"origin":{"kind":"system_trigger","name":"subagent"},"agentId":"agent-12","sessionId":"session_1"}}""",
-            """{"type":"context.spliced","seq":21,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:35.494Z","payload":{"type":"context.spliced","start":0,""" +
-                """"deleteCount":0,"messages":[{"role":"user","content":[{"type":"text","text":"sub task"}],""" +
-                """"toolCalls":[],"origin":{"kind":"system_trigger","name":"subagent"},"id":"msg_sub"}],""" +
-                """"agentId":"agent-12","sessionId":"session_1"}}""",
-            """{"type":"thinking.delta","seq":23,"epoch":"ep_1","volatile":true,"offset":0,""" +
-                """"session_id":"session_1","timestamp":"2026-07-28T03:37:36.000Z",""" +
-                """"payload":{"type":"thinking.delta","turnId":0,"delta":"sub hmm","agentId":"agent-12","sessionId":"session_1"}}""",
-            """{"type":"assistant.delta","seq":23,"epoch":"ep_1","volatile":true,"offset":0,""" +
-                """"session_id":"session_1","timestamp":"2026-07-28T03:37:36.100Z",""" +
-                """"payload":{"type":"assistant.delta","turnId":0,"delta":"sub text","agentId":"agent-12","sessionId":"session_1"}}""",
-            """{"type":"tool.call.delta","seq":23,"epoch":"ep_1","volatile":true,""" +
-                """"session_id":"session_1","timestamp":"2026-07-28T03:37:36.200Z",""" +
-                """"payload":{"type":"tool.call.delta","turnId":0,"toolCallId":"tool_sub","name":"Bash",""" +
-                """"agentId":"agent-12","sessionId":"session_1"}}""",
-            """{"type":"tool.call.started","seq":24,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:36.300Z","payload":{"type":"tool.call.started","turnId":0,""" +
-                """"toolCallId":"tool_sub","name":"Bash","args":{"command":"ls"},"agentId":"agent-12","sessionId":"session_1"}}""",
-            """{"type":"tool.progress","seq":24,"epoch":"ep_1","volatile":true,""" +
-                """"session_id":"session_1","timestamp":"2026-07-28T03:37:36.400Z",""" +
-                """"payload":{"type":"tool.progress","toolCallId":"tool_sub",""" +
-                """"update":{"kind":"stdout","text":"sub out"},"agentId":"agent-12","sessionId":"session_1"}}""",
-            """{"type":"tool.result","seq":25,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:36.500Z","payload":{"type":"tool.result","turnId":0,""" +
-                """"toolCallId":"tool_sub","output":"sub result","agentId":"agent-12","sessionId":"session_1"}}""",
-            """{"type":"agent.status.updated","seq":25,"epoch":"ep_1","volatile":true,""" +
-                """"session_id":"session_1","timestamp":"2026-07-28T03:37:36.600Z",""" +
-                """"payload":{"type":"agent.status.updated","contextTokens":13967,"maxContextTokens":1048576,""" +
-                """"agentId":"agent-12","sessionId":"session_1"}}""",
-            """{"type":"turn.ended","seq":26,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:38.980Z","payload":{"type":"turn.ended","turnId":0,""" +
-                """"reason":"completed","durationMs":3487,"agentId":"agent-12","sessionId":"session_1"}}""",
-            """{"type":"assistant.delta","seq":27,"epoch":"ep_1","volatile":true,"offset":0,""" +
-                """"session_id":"session_1","timestamp":"2026-07-28T03:37:39.000Z",""" +
-                """"payload":{"type":"assistant.delta","turnId":1,"delta":"main text","agentId":"main","sessionId":"session_1"}}""",
-            """{"type":"assistant.delta","seq":27,"epoch":"ep_1","volatile":true,"offset":9,""" +
-                """"session_id":"session_1","timestamp":"2026-07-28T03:37:39.100Z",""" +
-                """"payload":{"type":"assistant.delta","turnId":1,"delta":" more"}}""",
-            eventCount = 12,
-        )
-
-        assertEquals(
-            listOf(
-                SocketEvent.Event(SessionEvent.TurnStarted("agent-12")),
-                SocketEvent.Event(
-                    SessionEvent.ContextSpliced(
-                        listOf(
-                            ChatMessage(
-                                "msg_sub",
-                                ChatMessage.Role.User,
-                                listOf(ChatMessage.Part.Text("sub task")),
-                                originKind = "system_trigger",
-                            ),
-                        ),
-                        "agent-12",
-                    ),
-                ),
-                SocketEvent.Event(SessionEvent.ThinkingDelta("sub hmm", "agent-12")),
-                SocketEvent.Event(SessionEvent.AssistantDelta("sub text", "agent-12")),
-                SocketEvent.Event(SessionEvent.ToolCallDelta("tool_sub", "Bash", "agent-12")),
-                SocketEvent.Event(
-                    SessionEvent.ToolCallStarted(
-                        "tool_sub", "Bash", "ls",
-                        input = "{\n    \"command\": \"ls\"\n}",
-                        args = buildJsonObject { put("command", "ls") },
-                        agentId = "agent-12",
-                    ),
-                ),
-                SocketEvent.Event(SessionEvent.ToolCallProgress("tool_sub", "sub out", "agent-12")),
-                SocketEvent.Event(SessionEvent.ToolCallResult("tool_sub", false, "sub result", "agent-12")),
-                SocketEvent.Event(SessionEvent.ContextUsageUpdated(ContextUsage(13967, 1048576), "agent-12")),
-                SocketEvent.Event(SessionEvent.TurnEnded("completed", "agent-12")),
-                SocketEvent.Event(SessionEvent.AssistantDelta("main text")),
-                SocketEvent.Event(SessionEvent.AssistantDelta(" more")),
-            ),
-            emitted.filterIsInstance<SocketEvent.Event>(),
-        )
-    }
-
-    @Test
-    fun `turn ended interruptReason decodes onto the event`() = runBlocking {
-        // 0.31.1 (docs/server-api.md, turn.started / turn.ended — ticket 155): an early
-        // stop carries interruptReason next to the always-"cancelled" reason. The
-        // user_cancelled payload is the verbatim abort round-trip capture; the other
-        // values share its shape.
-        fun frame(interruptReason: String) =
-            """{"type":"turn.ended","seq":26,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:38.980Z","payload":{"type":"turn.ended","turnId":1,""" +
-                """"reason":"cancelled","durationMs":5030,"interruptReason":"$interruptReason",""" +
-                """"agentId":"main","sessionId":"session_1"}}"""
-
-        val emitted = runSocketEvents(
-            frame("user_cancelled"),
-            frame("aborted"),
-            frame("max_steps"),
-            frame("error"),
-            frame("filtered"),
-            frame("blocked"),
-            eventCount = 6,
-        )
-
-        assertEquals(
-            listOf("user_cancelled", "aborted", "max_steps", "error", "filtered", "blocked").map { reason ->
-                SocketEvent.Event(SessionEvent.TurnEnded("cancelled", "main", reason))
-            },
-            emitted.filterIsInstance<SocketEvent.Event>(),
-        )
-    }
-
-    @Test
-    fun `subagent lifecycle frames decode to their events`() = runBlocking {
-        // Verbatim subagent.spawned/completed payloads from the 2026-07-28 0.29.2
-        // capture (docs/server-api.md, Sub-agents); started/failed/suspended share the
-        // payload minus/plus their own field. All are tagged agentId "main" yet scoped
-        // to the sub-agent by the payload's subagentId.
-        val emitted = runSocketEvents(
-            """{"type":"subagent.spawned","seq":19,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:35.492Z","payload":{"type":"subagent.spawned",""" +
-                """"subagentId":"agent-12","subagentName":"explore",""" +
-                """"parentToolCallId":"tool_mhF8UXcf5QwvZbh5223tiIng","parentAgentId":"main",""" +
-                """"callerAgentId":"main","description":"doc-verify-subagent","runInBackground":false,""" +
-                """"agentId":"main","sessionId":"session_1"}}""",
-            """{"type":"subagent.started","seq":22,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:35.600Z","payload":{"type":"subagent.started",""" +
-                """"subagentId":"agent-12","agentId":"main","sessionId":"session_1"}}""",
-            """{"type":"subagent.completed","seq":33,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:51.951Z","payload":{"type":"subagent.completed",""" +
-                """"subagentId":"agent-12","resultSummary":"the sub-agent's result summary",""" +
-                """"usage":{"inputOther":6462,"output":359,"inputCacheRead":21504,"inputCacheCreation":0},""" +
-                """"contextTokens":14358,"agentId":"main","sessionId":"session_1"}}""",
-            """{"type":"subagent.failed","seq":34,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:52.000Z","payload":{"type":"subagent.failed",""" +
-                """"subagentId":"agent-13","error":"boom","agentId":"main","sessionId":"session_1"}}""",
-            """{"type":"subagent.suspended","seq":35,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:53.000Z","payload":{"type":"subagent.suspended",""" +
-                """"subagentId":"agent-13","reason":"waiting_on_input","agentId":"main","sessionId":"session_1"}}""",
-        )
-
-        assertEquals(
-            listOf(
-                SocketEvent.Event(
-                    SessionEvent.SubagentSpawned(
-                        subagentId = "agent-12",
-                        name = "explore",
-                        parentToolCallId = "tool_mhF8UXcf5QwvZbh5223tiIng",
-                        description = "doc-verify-subagent",
-                        runInBackground = false,
-                    ),
-                ),
-                SocketEvent.Event(SessionEvent.SubagentStarted("agent-12")),
-                SocketEvent.Event(SessionEvent.SubagentCompleted("agent-12", "the sub-agent's result summary")),
-                SocketEvent.Event(SessionEvent.SubagentFailed("agent-13", "boom")),
-                SocketEvent.Event(SessionEvent.SubagentSuspended("agent-13", "waiting_on_input")),
-            ),
-            emitted.filterIsInstance<SocketEvent.Event>(),
-        )
-    }
-
-    @Test
-    fun `a swarm member's spawned frame decodes swarmIndex, taskId and the model pair`() = runBlocking {
-        // The verbatim 0.38.0 capture (docs/server-api.md:3257) with swarmIndex added:
-        // a swarm member's frame carries the member's position and its background-task
-        // registration id next to the shared parentToolCallId (ticket 134), plus the
-        // run's bound model/effort (0.34.0, ticket 135).
-        val emitted = runSocketEvents(
-            """{"type":"subagent.spawned","seq":41,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-08-20T10:00:00.000Z","payload":{"type":"subagent.spawned",""" +
-                """"time":1787254524517,"subagentId":"agent-1","subagentName":"explore",""" +
-                """"parentToolCallId":"tool_ArVyKiUhCDxXT341BmjTba8L","parentAgentId":"main",""" +
-                """"callerAgentId":"main","description":"Ask what is 2+2","runInBackground":false,""" +
-                """"model":"kimi-code/k3","thinkingEffort":"high","swarmIndex":2,""" +
-                """"taskId":"agent-rhh36xem","agentId":"main","sessionId":"session_1"}}""",
-        )
-
-        assertEquals(
-            listOf(
-                SocketEvent.Event(
-                    SessionEvent.SubagentSpawned(
-                        subagentId = "agent-1",
-                        name = "explore",
-                        parentToolCallId = "tool_ArVyKiUhCDxXT341BmjTba8L",
-                        description = "Ask what is 2+2",
-                        runInBackground = false,
-                        swarmIndex = 2,
-                        taskId = "agent-rhh36xem",
-                        model = "kimi-code/k3",
-                        thinkingEffort = "high",
-                    ),
-                ),
-            ),
-            emitted.filterIsInstance<SocketEvent.Event>(),
-        )
-    }
-
-    @Test
-    fun `a subagent cancelled frame decodes to the cancelled event`() = runBlocking {
-        // Schema-level upstream (never captured live — docs/server-api.md): the
-        // started-family payload, subagentId only (ticket 135).
-        val emitted = runSocketEvents(
-            """{"type":"subagent.cancelled","seq":36,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-09-12T09:00:00.000Z","payload":{"type":"subagent.cancelled",""" +
-                """"subagentId":"agent-12","agentId":"main","sessionId":"session_1"}}""",
-        )
-
-        assertEquals(
-            listOf(SocketEvent.Event(SessionEvent.SubagentCancelled("agent-12"))),
-            emitted.filterIsInstance<SocketEvent.Event>(),
-        )
-    }
-
-    @Test
-    fun `sub-agent approval and question frames still emit`() = runBlocking {
-        // Interaction events are actionable whoever raised them (todo/044): a filtered
-        // sub-agent approval would hang the session on an answer nobody can give.
-        val emitted = runSocketEvents(
-            """{"type":"event.approval.requested","seq":30,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:40.000Z","payload":{"type":"event.approval.requested",""" +
-                """"session_id":"session_1","approval_id":"tool_sub_bash","turn_id":0,""" +
-                """"tool_call_id":"tool_sub_bash","tool_name":"Bash","action":"Running: ls",""" +
-                """"tool_input_display":{"kind":"command","command":"ls","cwd":"/tmp/spike","language":"bash"},""" +
-                """"created_at":"2026-07-28T03:37:40.000Z","expires_at":"2026-07-29T03:37:40.000Z",""" +
-                """"agentId":"agent-12","sessionId":"session_1"}}""",
-            """{"type":"event.question.requested","seq":31,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:41.000Z","payload":{"type":"event.question.requested",""" +
-                """"question_id":"tool_sub_q","session_id":"session_1","turn_id":0,"tool_call_id":"tool_sub_q",""" +
-                """"questions":[{"id":"q_0","question":"Red or blue?","options":[],"allow_other":true}],""" +
-                """"created_at":"2026-07-28T03:37:41.000Z","agentId":"agent-12","sessionId":"session_1"}}""",
-        )
-
-        val events = emitted.filterIsInstance<SocketEvent.Event>().map { it.event }
-        // The payload's agentId stamp lands on the event (ticket 139) — presentation
-        // only; the emission this test guards is unchanged.
-        assertEquals(
-            SessionEvent.ApprovalRequested("tool_sub_bash", "Bash", "ls", agentId = "agent-12"),
-            events[0],
-        )
-        assertEquals(
-            SessionEvent.QuestionRequested(
-                PendingQuestion(
-                    questionId = "tool_sub_q",
-                    toolCallId = "tool_sub_q",
-                    items = listOf(
-                        PendingQuestion.Item(id = "q_0", header = "", text = "Red or blue?", options = emptyList(), allowOther = true),
-                    ),
-                ),
-            ),
-            events[1],
-        )
-    }
-
-    @Test
     fun `transcript sends agent_id and page_size and parses turns, frames and has_more`() = runBlocking {
         server.enqueue(MockResponse(body = TRANSCRIPT_FINISHED_BODY))
 
@@ -2466,74 +1819,22 @@ class ChatRepositoryTest {
     }
 
     @Test
-    fun `socket parses the compaction lifecycle frames`() = runBlocking {
-        // Verbatim 0.30.0 shapes (docs/server-api.md, Compact), started with an
-        // instruction, then completed with its result.
+    fun `an undo marker decodes the top-level origin kind`() = runBlocking {
+        // The compaction context rewrite (docs/server-api.md, Compact → WebSocket
+        // sequence): the summary is an id-less user message with origin.kind
+        // "compaction_summary" at the message's TOP level; the continuation injection
+        // is dropped by the fold.
         val emitted = runSocketEvents(
-            """{"type":"compaction.started","seq":25,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-30T05:48:54.194Z","payload":{"type":"compaction.started",""" +
-                """"trigger":"manual","instruction":"Keep the marker verbatim.",""" +
-                """"agentId":"main","sessionId":"session_1"}}""",
-            """{"type":"compaction.completed","seq":37,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-30T05:44:56.676Z","payload":{"type":"compaction.completed",""" +
-                """"result":{"summary":"Completed spike, nothing pending.",""" +
-                """"compactedCount":8,"tokensBefore":850,"tokensAfter":386,"keptUserMessageCount":3},""" +
-                """"agentId":"main","sessionId":"session_1"}}""",
-        )
-
-        assertEquals(
-            listOf(
-                SocketEvent.Event(SessionEvent.CompactionStarted("manual", "Keep the marker verbatim.")),
-                SocketEvent.Event(
-                    SessionEvent.CompactionCompleted(
-                        summary = "Completed spike, nothing pending.",
-                        compactedCount = 8,
-                        tokensBefore = 850,
-                        tokensAfter = 386,
-                        keptUserMessageCount = 3,
-                    ),
+            TranscriptFrames.opsFrame(
+                TranscriptFrames.undoOp(
+                    "live-m6",
+                    TranscriptFrames.userMessage("msg_1", "kept message"),
+                    """{"role":"user","content":[{"type":"text","text":"The conversation so far has been compacted…"}],""" +
+                        """"origin":{"kind":"compaction_summary"},"id":null}""",
+                    """{"role":"user","content":[{"type":"text","text":"Continue."}],""" +
+                        """"origin":{"kind":"injection","variant":"compaction_continuation"}}""",
                 ),
             ),
-            emitted.filterIsInstance<SocketEvent.Event>(),
-        )
-    }
-
-    @Test
-    fun `socket decodes the compaction failure family permissively, payload or not`() = runBlocking {
-        // failed/cancelled/blocked were never observed on this server (protocol-bundle
-        // schemas only): any shape — including no payload at all — must still emit, so
-        // the compacting state always ends (ticket 056).
-        val emitted = runSocketEvents(
-            """{"type":"compaction.failed","seq":40,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-30T05:50:00.000Z","payload":{"type":"compaction.failed",""" +
-                """"message":"summarizer unreachable","agentId":"main","sessionId":"session_1"}}""",
-            """{"type":"compaction.cancelled","seq":41,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-30T05:50:01.000Z"}""",
-        )
-
-        assertEquals(
-            listOf(
-                SocketEvent.Event(SessionEvent.CompactionFailed("compaction.failed", "summarizer unreachable")),
-                SocketEvent.Event(SessionEvent.CompactionFailed("compaction.cancelled", null)),
-            ),
-            emitted.filterIsInstance<SocketEvent.Event>(),
-        )
-    }
-
-    @Test
-    fun `a splice frame decodes the top-level origin kind`() = runBlocking {
-        // The compaction context rewrite (docs/server-api.md, Compact): the summary is
-        // an id-less user message with origin.kind "compaction_summary" at the
-        // message's TOP level (history keeps it under metadata.origin).
-        val emitted = runSocketEvents(
-            """{"type":"context.spliced","seq":36,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-30T05:44:56.600Z","payload":{"type":"context.spliced",""" +
-                """"start":0,"deleteCount":8,"messages":[""" +
-                """{"role":"user","content":[{"type":"text","text":"kept message"}],""" +
-                """"origin":{"kind":"user"},"id":"msg_1"},""" +
-                """{"role":"user","content":[{"type":"text","text":"The conversation so far has been compacted…"}],""" +
-                """"origin":{"kind":"compaction_summary"},"id":null}],""" +
-                """"agentId":"main","sessionId":"session_1"}}""",
         )
 
         val splice = emitted.filterIsInstance<SocketEvent.Event>().single().event as SessionEvent.ContextSpliced

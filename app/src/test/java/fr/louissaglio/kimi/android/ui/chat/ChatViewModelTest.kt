@@ -5,8 +5,10 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import fr.louissaglio.kimi.android.data.chat.BackgroundTask
 import fr.louissaglio.kimi.android.data.chat.ContextUsage
 import fr.louissaglio.kimi.android.data.chat.ServerModel
+import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.sessions.Session
 import fr.louissaglio.kimi.android.navigation.Chat
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.awaitState
 import fr.louissaglio.kimi.android.testutil.testChatRepository
@@ -36,60 +38,6 @@ import org.junit.Test
 class ChatViewModelTest : ChatViewModelTestBase() {
 
     @Test
-    fun `approval request event shows card and resolved event clears it`() = runBlocking {
-        viewModel.onScreenStarted()
-        val socket = awaitServerSocket()
-
-        socket.send(approvalRequestedFrame(id = "ap_1", tool = "Bash", action = "Running: echo hi", command = "echo hi"))
-        awaitState(viewModel.uiState) { it.pendingApprovals.isNotEmpty() }
-        assertEquals(
-            listOf(ChatViewModel.PendingApproval("ap_1", "Bash", "echo hi")),
-            viewModel.uiState.value.pendingApprovals,
-        )
-
-        // Resolved from another client: the card clears without local action.
-        socket.send(approvalResolvedFrame("ap_1"))
-        awaitState(viewModel.uiState) { it.pendingApprovals.isEmpty() }
-        assertEquals(emptyList<ChatViewModel.PendingApproval>(), viewModel.uiState.value.pendingApprovals)
-    }
-
-    @Test
-    fun `a sub-agent's approval request queues with its asking agent and the badge name resolves from the store`() = runBlocking {
-        viewModel.onScreenStarted()
-        val socket = awaitServerSocket()
-
-        // The member's identity lands first (subagent.spawned → the store), then its
-        // request arrives stamped with its id (ticket 139): it queues on the MAIN
-        // queue like any request — the stamp is presentation only.
-        socket.send(subagentSpawnedFrame())
-        socket.send(approvalRequestedFrame(id = "ap_1", tool = "Bash", action = "Running: sleep 300", command = "sleep 300", agentId = "agent-12"))
-        awaitState(viewModel.uiState) { it.pendingApprovals.isNotEmpty() }
-        assertEquals(
-            listOf(ChatViewModel.PendingApproval("ap_1", "Bash", "sleep 300", agentId = "agent-12")),
-            viewModel.uiState.value.pendingApprovals,
-        )
-        // The badge's name is the store record's subagent name.
-        awaitState(viewModel.uiState) { it.subagentNames["agent-12"] == "explore" }
-    }
-
-    @Test
-    fun `a sub-agent approval racing ahead of its record queues without a badge name, which the late spawn heals`() = runBlocking {
-        viewModel.onScreenStarted()
-        val socket = awaitServerSocket()
-
-        // The request can arrive before subagent.spawned (ticket 139): the card must
-        // not wait for the record — no badge name, the plain "Sub-agent" fallback.
-        socket.send(approvalRequestedFrame(id = "ap_1", tool = "Bash", action = "Running: sleep 300", command = "sleep 300", agentId = "agent-1"))
-        awaitState(viewModel.uiState) { it.pendingApprovals.isNotEmpty() }
-        assertEquals("agent-1", viewModel.uiState.value.pendingApprovals.single().agentId)
-        assertNull(viewModel.uiState.value.subagentNames["agent-1"])
-
-        // The late spawned frame lands the record — the badge gains its name live.
-        socket.send(subagentSpawnedFrame(id = "agent-1"))
-        awaitState(viewModel.uiState) { it.subagentNames["agent-1"] == "explore" }
-    }
-
-    @Test
     fun `stream deltas publish the leading edge then coalesce until a substantive event flushes`() = runBlocking {
         val vm = newViewModel(streamCoalesceWindowMillis = 100)
         vm.onScreenStarted()
@@ -105,12 +53,16 @@ class ChatViewModelTest : ChatViewModelTestBase() {
 
             socket.send(assistantDeltaFrame(" world", seq = 6))
             socket.send(assistantDeltaFrame("!", seq = 7))
-            // In-order stream: the approval frame is processed after both deltas, and
-            // pending text flushes before it applies.
-            socket.send(approvalRequestedFrame(id = "ap_1", tool = "Bash", action = "Running: ls", command = "ls"))
-            awaitState(vm.uiState) { it.pendingApprovals.isNotEmpty() }
+            // In-order stream: the tool op is processed after both deltas, and pending
+            // text flushes before it applies.
+            socket.send(
+                TranscriptFrames.opsFrame(TranscriptFrames.toolOp("call_ls", "Bash", "running", turnId = "tx")),
+            )
+            awaitState(vm.uiState) { state ->
+                state.items?.filterIsInstance<ChatItem.ToolGroup>()?.any { g -> g.tools.any { it.id == "call_ls" } } == true
+            }
 
-            // The two trailing deltas became ONE emission, published before the approval.
+            // The two trailing deltas became ONE emission, published before the tool op.
             // Awaited (not read at an arbitrary instant): the recorder's append races the
             // reader thread's queue drain — see assistantTextRecorder (ticket 049).
             awaitCondition { texts == listOf("Hello", "Hello world!") }
@@ -218,100 +170,6 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     }
 
     @Test
-    fun `activity phases reduce to the status line`() = runBlocking {
-        // Ticket 148: the agent.status.updated phase variant drives the line above
-        // the composer — what the bare isWorking signal cannot tell apart.
-        viewModel.onScreenStarted()
-        val socket = awaitServerSocket()
-        awaitState(viewModel.uiState) { it.items != null }
-
-        socket.send(turnStartedFrame())
-        awaitState(viewModel.uiState) { it.isWorking }
-
-        socket.send(agentPhaseFrame("running"))
-        awaitState(viewModel.uiState) { it.activityStatus != null }
-        assertEquals(
-            ChatViewModel.ActivityStatus("Thinking…", Instant.ofEpochMilli(1784777223312)),
-            viewModel.uiState.value.activityStatus,
-        )
-
-        socket.send(agentPhaseFrame("tool_call", name = "Bash"))
-        awaitState(viewModel.uiState) { it.activityStatus?.text == "Running Bash…" }
-
-        // A tool_call without the name falls back to the generic label.
-        socket.send(agentPhaseFrame("tool_call"))
-        awaitState(viewModel.uiState) { it.activityStatus?.text == "Running tool…" }
-
-        socket.send(agentPhaseFrame("retrying"))
-        awaitState(viewModel.uiState) { it.activityStatus?.text == "Retrying…" }
-
-        socket.send(agentPhaseFrame("awaiting_approval"))
-        awaitState(viewModel.uiState) { it.activityStatus?.text == "Waiting for approval" }
-
-        socket.send(agentPhaseFrame("idle"))
-        awaitState(viewModel.uiState) { it.activityStatus == null }
-    }
-
-    @Test
-    fun `interrupted and ended phases clear the status line`() = runBlocking {
-        viewModel.onScreenStarted()
-        val socket = awaitServerSocket()
-        awaitState(viewModel.uiState) { it.items != null }
-
-        socket.send(turnStartedFrame())
-        awaitState(viewModel.uiState) { it.isWorking }
-        socket.send(agentPhaseFrame("tool_call", name = "Bash"))
-        awaitState(viewModel.uiState) { it.activityStatus != null }
-
-        // interrupted → null: the abort UI owns that moment, the line must not linger.
-        socket.send(agentPhaseFrame("interrupted", since = null))
-        awaitState(viewModel.uiState) { it.activityStatus == null }
-
-        socket.send(agentPhaseFrame("running"))
-        awaitState(viewModel.uiState) { it.activityStatus != null }
-
-        // ended → null as well (the terminal kinds carry `at`, no elapsed readout).
-        socket.send(agentPhaseFrame("ended", since = null))
-        awaitState(viewModel.uiState) { it.activityStatus == null }
-
-        // And a turn end clears whatever phase was last shown, however the frames
-        // interleave with the phase stream.
-        socket.send(agentPhaseFrame("running"))
-        awaitState(viewModel.uiState) { it.activityStatus != null }
-        socket.send(turnEndedFrame(reason = "completed"))
-        awaitState(viewModel.uiState) { it.activityStatus == null }
-    }
-
-    @Test
-    fun `an unknown phase kind leaves the status line untouched`() = runBlocking {
-        viewModel.onScreenStarted()
-        val socket = awaitServerSocket()
-        awaitState(viewModel.uiState) { it.items != null }
-
-        socket.send(agentPhaseFrame("tool_call", name = "Bash"))
-        awaitState(viewModel.uiState) { it.activityStatus != null }
-
-        // The historical streaming kind (removed in 0.43.0): the frame drops at the
-        // mapper, so the line keeps showing the last KNOWN phase.
-        socket.send(agentPhaseFrame("streaming"))
-        delay(200)
-        assertEquals("Running Bash…", viewModel.uiState.value.activityStatus?.text)
-    }
-
-    @Test
-    fun `a model and usage frame shows no status line`() = runBlocking {
-        viewModel.onScreenStarted()
-        val socket = awaitServerSocket()
-        awaitState(viewModel.uiState) { it.items != null }
-
-        socket.send(agentStatusUsageFrame(25050, 1048576))
-        // The frame was processed once its context usage lands; the phase-less variant
-        // must leave the status line alone.
-        awaitState(viewModel.uiState) { it.contextUsage == ContextUsage(25050, 1048576) }
-        assertNull(viewModel.uiState.value.activityStatus)
-    }
-
-    @Test
     fun `a turn that ended while the screen was away leaves no ghost live rows`() = runBlocking {
         // Louis's report (ticket 048): the stream is watched, the app backgrounds
         // mid-turn, the agent finishes while away, the app comes back.
@@ -336,14 +194,9 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         serverSocket = null
         viewModel.onScreenStarted()
 
-        // The re-subscribe resumes with the cursor stored before backgrounding
-        // (turnStarted's seq 20 — the volatile delta must not move it): the missed
-        // window replays instead of being lost. (The LAST cursors frame: the cold
-        // start's first subscribe already carried the snapshot watermark, ticket 085.)
-        awaitCondition { clientFrames.any { "\"seq\":20" in it } }
-        val resume = clientFrames.last { "\"cursors\"" in it }
-        assertTrue(resume, resume.contains("\"seq\":20"))
-        assertTrue(resume, resume.contains("\"epoch\":\"ep_1\""))
+        // The re-opened gate subscribes afresh (subscribe_v2 — no replay of the missed
+        // window, ticket 176): the REST resync is what heals it.
+        awaitCondition { clientFrames.count { "\"type\":\"subscribe_v2\"" in it } >= 2 }
 
         // A finished turn can have no live rows: the status-aware resync clears the
         // truncated ghost bubble and the canonical message renders exactly once. The
@@ -482,9 +335,13 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             state.items?.filterIsInstance<ChatItem.AssistantMessage>()?.any { it.id == "msg_1" } == true
         }
         // ...then the next substantive event drives the trailing flush (in-order
-        // stream: the flush runs before the approval applies).
-        socket.send(approvalRequestedFrame(id = "ap_1", tool = "Bash", action = "Running: ls", command = "ls"))
-        awaitState(vm.uiState) { it.pendingApprovals.isNotEmpty() }
+        // stream: the flush runs before the tool row applies).
+        socket.send(
+            TranscriptFrames.opsFrame(TranscriptFrames.toolOp("call_ls", "Bash", "running", ""","input":{"command":"ls"}""", turnId = "tx")),
+        )
+        awaitState(vm.uiState) { state ->
+            state.items?.filterIsInstance<ChatItem.ToolGroup>()?.any { g -> g.tools.any { it.id == "call_ls" } } == true
+        }
 
         // One bubble, full text: the flush-before-replace made the exact-text dedup
         // absorb the live bubble instead of stranding its fragment.
@@ -495,56 +352,33 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     }
 
     @Test
-    fun `a resync_required ack re-syncs from a fresh snapshot`() = runBlocking {
-        viewModel.onScreenStarted()
-        val socket = awaitServerSocket()
-        awaitState(viewModel.uiState) { it.items != null }
-        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
-
-        // The subscribe ack refuses the resume (replay buffer overrun,
-        // docs/server-api.md): the missed window heals from a fresh snapshot fetch
-        // (ticket 085) — the /messages refetch of the 048 path stays out of it.
-        // The snapshot apply's unconditional /status re-read (the 107 model sync)
-        // is not the 048 pair's busy check.
-        socket.send(
-            """{"type":"ack","id":"c_1","code":0,"msg":"success","payload":{"accepted":[],""" +
-                """"not_found":[],"resync_required":["session_1"],"cursors":{}}}""",
-        )
-
-        awaitRequest("/snapshot")
-        awaitRequest("/status")
-        delay(300)
-        val paths = mutableListOf<String>()
-        while (true) {
-            paths += server.takeRequest(100, TimeUnit.MILLISECONDS)?.target?.orEmpty() ?: break
-        }
-        assertTrue(paths.toString(), paths.none { "/messages" in it })
-    }
-
-    @Test
     fun `sub-agent frames route to the store and never touch the main chat`() = runBlocking {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         awaitState(viewModel.uiState) { it.items != null }
         while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
-        // The main agent spawns a sub-agent (verbatim 0.29.2 shapes, docs/server-api.md):
-        // the Agent call row, then the spawned frame that links it to the sub-agent.
-        socket.send(
-            """{"type":"tool.call.started","seq":17,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:35.000Z","payload":{"type":"tool.call.started","turnId":0,""" +
-                """"toolCallId":"tool_agent","name":"Agent","args":{"subagent_type":"explore",""" +
-                """"description":"doc-verify","prompt":"Reply ok"},"agentId":"main","sessionId":"session_1"}}""",
+        // The sub-agent's record exists (its spawn carrier — the `task` frame — is
+        // ticket 182's, so the record is seeded through the store's spawn funnel), and
+        // the main agent's Agent call streams as a tool frame.
+        subagentStore.apply(
+            "session_1",
+            SessionEvent.SubagentSpawned("agent-12", "explore", "tool_agent", "doc-verify", runInBackground = false),
         )
-        socket.send(subagentSpawnedFrame())
+        socket.send(
+            TranscriptFrames.opsFrame(
+                TranscriptFrames.toolOp(
+                    "tool_agent", "Agent", "running",
+                    ""","input":{"subagent_type":"explore","description":"doc-verify","prompt":"Reply ok"}""",
+                    turnId = "tx",
+                ),
+            ),
+        )
         awaitState(viewModel.uiState) { state ->
-            state.items?.filterIsInstance<ChatItem.ToolGroup>()
-                ?.flatMap { it.tools }
-                ?.any { it.id == "tool_agent" && it.subagentId == "agent-12" } == true
+            state.items?.filterIsInstance<ChatItem.ToolGroup>()?.flatMap { it.tools }?.any { it.id == "tool_agent" } == true
         }
 
-        // The sub-agent's whole turn streams tagged with its own agentId.
-        socket.send(subagentStartedFrame())
+        // The sub-agent's whole turn streams tagged with its own agent_id.
         socket.send(subTurnStartedFrame())
         socket.send(subContextSplicedFrame())
         socket.send(subAssistantDeltaFrame("sub reply"))
@@ -553,7 +387,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
                 ?.items?.filterIsInstance<ChatItem.AssistantMessage>()?.singleOrNull()?.text == "sub reply"
         }
 
-        // Main chat: the linked Agent row only — no foreign bubble, no working-state flip.
+        // Main chat: the Agent row only — no foreign bubble, no working-state flip.
         val mainItems = viewModel.uiState.value.items.orEmpty()
         assertEquals(1, mainItems.size)
         assertTrue(mainItems.single() is ChatItem.ToolGroup)
@@ -563,7 +397,6 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         // lifted into the record's prompt field (ticket 091), the deltas stream below.
         val entry = subagentEntry("agent-12")!!
         assertEquals("explore", entry.name)
-        assertEquals(SubagentStatus.Working, entry.status)
         assertEquals(
             listOf(
                 ChatItem.UserMessage("seeded_prompt", "sub task"),
@@ -571,12 +404,160 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             ),
             entry.items,
         )
+    }
 
-        // Completion flips the store status and leaves the main chat untouched.
-        socket.send(subagentCompletedFrame())
-        awaitCondition { subagentEntry("agent-12")?.status == SubagentStatus.Completed }
-        assertEquals("done", subagentEntry("agent-12")!!.resultSummary)
-        assertEquals(1, viewModel.uiState.value.items.orEmpty().size)
+    // --- Ticket 175: the subscribe_v2 transcript stream -------------------------------
+
+    @Test
+    fun `a live prompt streams thinking, text and a tool call without any REST refetch`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
+
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.promptOp("msg_1", "running")))
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.turnOp("t1", "running")))
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.undoOp("live-m1", TranscriptFrames.userMessage("msg_1", "List the files"))))
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.stepOp("t1", "t1.1", "running")))
+        socket.send(
+            TranscriptFrames.opsFrame(
+                TranscriptFrames.textOp("t1.1.f1", "", kind = "thinking"),
+                TranscriptFrames.appendOp("t1.1.f1", 0, "Listing."),
+            ),
+        )
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.textOp("t1.1.f2", ""), TranscriptFrames.appendOp("t1.1.f2", 0, "Here")))
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.appendOp("t1.1.f2", 4, " you go")))
+        socket.send(
+            TranscriptFrames.opsFrame(TranscriptFrames.toolOp("call_ls", "Bash", "running", ""","input":{"command":"ls"}""")),
+        )
+
+        awaitState(viewModel.uiState) { state ->
+            state.items?.filterIsInstance<ChatItem.ToolGroup>()?.any { g -> g.tools.any { it.id == "call_ls" } } == true
+        }
+        val items = viewModel.uiState.value.items!!
+        assertTrue(viewModel.uiState.value.isWorking)
+        assertEquals(listOf("msg_1"), items.filterIsInstance<ChatItem.UserMessage>().map { it.id })
+        val bubble = items.filterIsInstance<ChatItem.AssistantMessage>().single()
+        assertEquals("Listing.", bubble.thinking)
+        assertEquals("Here you go", bubble.text)
+        val tool = items.filterIsInstance<ChatItem.ToolGroup>().single().tools.single()
+        assertEquals(ToolStatus.Running, tool.status)
+        assertEquals("ls", tool.preview)
+        // All of it from the socket alone: no history/status refetch went out.
+        assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun `the subscribe-time reset neither clears nor duplicates the REST history`() = runBlocking {
+        messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
+            """{"id":"msg_2","session_id":"session_1","role":"assistant",""" +
+            """"content":[{"type":"text","text":"Earlier answer"}],"created_at":"2026-11-04T19:00:01.000Z"},""" +
+            """{"id":"msg_1","session_id":"session_1","role":"user",""" +
+            """"content":[{"type":"text","text":"Earlier question"}],"created_at":"2026-11-04T19:00:00.000Z"}""" +
+            """],"has_more":false},"request_id":"r"}"""
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items?.size == 2 }
+        val before = viewModel.uiState.value.items
+
+        socket.send(TranscriptFrames.resetFrame(seq = 18))
+        socket.send(TranscriptFrames.ackFrame())
+        // A later live op proves the reset was processed (in-order stream).
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.promptOp("msg_9", "completed")))
+        delay(300)
+
+        assertEquals(before, viewModel.uiState.value.items)
+        assertEquals(listOf("msg_1", "msg_2"), viewModel.uiState.value.items!!.map { it.id })
+    }
+
+    @Test
+    fun `an unknown sub-agent's ops never render in the main chat`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+
+        socket.send(TranscriptFrames.resetFrame(agentId = "agent-3", seq = 0))
+        socket.send(
+            TranscriptFrames.opsFrame(
+                TranscriptFrames.turnOp("t0", "running"),
+                TranscriptFrames.textOp("t0.1.f1", "child text", turnId = "t0"),
+                TranscriptFrames.toolOp("call_child", "Bash", "running", ""","input":{"command":"pwd"}""", turnId = "t0"),
+                agentId = "agent-3",
+            ),
+        )
+        // A main op after it, so the child batch has certainly been processed.
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.textOp("t1.1.f1", "main text")))
+        awaitState(viewModel.uiState) { state ->
+            state.items?.filterIsInstance<ChatItem.AssistantMessage>()?.any { it.text == "main text" } == true
+        }
+
+        assertEquals(
+            listOf(ChatItem.AssistantMessage("live_0", "main text", "")),
+            viewModel.uiState.value.items,
+        )
+        assertFalse(viewModel.uiState.value.isWorking)
+    }
+
+    @Test
+    fun `an abort ends the running turn from the ops alone`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.promptOp("msg_1", "running"), TranscriptFrames.turnOp("t1", "running")))
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.stepOp("t1", "t1.1", "running")))
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.toolOp("call_sleep", "Bash", "running", ""","input":{"command":"sleep 60"}""")))
+        awaitState(viewModel.uiState) { it.isWorking && it.items.orEmpty().isNotEmpty() }
+
+        // The captured abort: step interrupted, turn cancelled, prompt aborted.
+        socket.send(
+            TranscriptFrames.opsFrame(
+                TranscriptFrames.stepOp("t1", "t1.1", "interrupted"),
+                TranscriptFrames.turnOp("t1", "cancelled"),
+            ),
+        )
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.promptOp("msg_1", "aborted")))
+
+        awaitState(viewModel.uiState) { state ->
+            !state.isWorking && state.items.orEmpty().any { it is ChatItem.TurnEnd && it.label == "Cancelled" }
+        }
+        assertNull(viewModel.uiState.value.stepRetry)
+        // No row still spins: the running call settled (or the refetch replaced it).
+        assertTrue(
+            viewModel.uiState.value.items.orEmpty().filterIsInstance<ChatItem.ToolGroup>()
+                .flatMap { it.tools }.none { it.status == ToolStatus.Running },
+        )
+    }
+
+    @Test
+    fun `a failed turn shows its error text in the footer`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+
+        socket.send(TranscriptFrames.opsFrame(TranscriptFrames.turnOp("t1", "running")))
+        socket.send(
+            TranscriptFrames.opsFrame(
+                TranscriptFrames.stepOp("t1", "t1.1", "interrupted", ""","endReason":"error","endMessage":"[provider.auth_error] no access""""),
+                TranscriptFrames.turnOp("t1", "failed", ""","error":"[provider.auth_error] no access""""),
+            ),
+        )
+
+        awaitState(viewModel.uiState) { state ->
+            state.items.orEmpty().any { it is ChatItem.TurnEnd && it.label == "Stopped: error — [provider.auth_error] no access" }
+        }
+        assertFalse(viewModel.uiState.value.isWorking)
+    }
+
+    @Test
+    fun `a subscribe acked not_found surfaces as a load failure`() = runBlocking {
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+
+        socket.send(TranscriptFrames.ackFrame(accepted = emptyList(), notFound = listOf("session_1")))
+
+        awaitState(viewModel.uiState) { it.error == "This session no longer exists on the server" }
     }
 
     /** Non-suspend read of a store entry, for awaitCondition's plain-lambda condition. */
@@ -614,45 +595,6 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             ),
             entry.items,
         )
-    }
-
-    @Test
-    fun `a live spawn link survives the history replace that first commits the row`() = runBlocking {
-        // The link registry (ticket 091): the spawned frame links the row live; the
-        // turn-end refetch then rebuilds the committed rows from history — where the
-        // running call has no agent_id: marker yet — and the store's registry
-        // re-drives the link onto the rebuilt row.
-        viewModel.onScreenStarted()
-        val socket = awaitServerSocket()
-        awaitState(viewModel.uiState) { it.items != null }
-        socket.send(
-            """{"type":"tool.call.started","seq":17,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:35.000Z","payload":{"type":"tool.call.started","turnId":0,""" +
-                """"toolCallId":"tool_agent","name":"Agent","args":{"subagent_type":"explore",""" +
-                """"description":"doc-verify","prompt":"Reply ok"},"agentId":"main","sessionId":"session_1"}}""",
-        )
-        socket.send(subagentSpawnedFrame())
-        awaitState(viewModel.uiState) { state ->
-            state.items?.filterIsInstance<ChatItem.ToolGroup>()
-                ?.flatMap { it.tools }
-                ?.any { it.id == "tool_agent" && it.subagentId == "agent-12" } == true
-        }
-
-        // The turn ends: history now carries the still-running call (no result, no
-        // marker) — the refetch replaces the committed rows wholesale.
-        messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
-            """{"id":"msg_1","session_id":"session_1","role":"assistant",""" +
-            """"content":[{"type":"tool_use","tool_call_id":"tool_agent","tool_name":"Agent",""" +
-            """"input":{"subagent_type":"explore","description":"doc-verify","prompt":"Reply ok"}}],""" +
-            """"created_at":"2026-07-28T03:37:35.000Z"}""" +
-            """],"has_more":false},"request_id":"r"}"""
-        socket.send(turnEndedFrame("completed"))
-
-        awaitState(viewModel.uiState) { state ->
-            state.items?.filterIsInstance<ChatItem.ToolGroup>()
-                ?.flatMap { it.tools }
-                ?.any { it.id == "tool_agent" && it.subagentId == "agent-12" } == true
-        }
     }
 
     @Test
@@ -886,128 +828,6 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         awaitState(viewModel.uiState) { it.contextUsage == ContextUsage(25050, 1048576) }
         awaitState(viewModel.uiState) { it.sessionModel == "kimi-code/kimi-for-coding" }
         assertEquals("low", viewModel.uiState.value.sessionEffort)
-    }
-
-    @Test
-    fun `a live usage frame overtakes the cold-start status seed`() = runBlocking {
-        // Same guard as the 048 seed: the cold-start /status GET races the
-        // live stream (it is still in flight when the socket subscribes) — a frame
-        // landing first is newer, so the late response is dropped, not applied.
-        statusBody =
-            """{"code":0,"msg":"success","data":{"busy":false,"context_tokens":25050,""" +
-            """"max_context_tokens":1048576,"context_usage":0.0239},"request_id":"r"}"""
-        statusResponseGate = CountDownLatch(1)
-
-        viewModel.onScreenStarted()
-        val socket = awaitServerSocket()
-        socket.send(agentStatusUsageFrame(500, 1000))
-        awaitState(viewModel.uiState) { it.contextUsage == ContextUsage(500, 1000) }
-
-        statusResponseGate!!.countDown()
-        delay(200)
-        assertEquals(ContextUsage(500, 1000), viewModel.uiState.value.contextUsage)
-    }
-
-    @Test
-    fun `usage frames grow the ring live, phase frames leave it untouched`() = runBlocking {
-        viewModel.onScreenStarted()
-        val socket = awaitServerSocket()
-        // The cold-start /status seed plants the baseline (the harness bundle's
-        // usage carries a zero limit — "unknown" — so the first fill rides the seed).
-        awaitState(viewModel.uiState) { it.contextUsage != null }
-        assertEquals(ContextUsage(0, 1048576), viewModel.uiState.value.contextUsage)
-
-        socket.send(agentStatusPhaseFrame())
-        delay(200)
-        assertEquals(ContextUsage(0, 1048576), viewModel.uiState.value.contextUsage)
-
-        socket.send(agentStatusUsageFrame(25050, 1048576))
-        awaitState(viewModel.uiState) { it.contextUsage == ContextUsage(25050, 1048576) }
-
-        socket.send(agentStatusPhaseFrame())
-        delay(200)
-        assertEquals(ContextUsage(25050, 1048576), viewModel.uiState.value.contextUsage)
-    }
-
-    @Test
-    fun `multiple requests queue in arrival order`() = runBlocking {
-        viewModel.onScreenStarted()
-        val socket = awaitServerSocket()
-
-        socket.send(approvalRequestedFrame(id = "ap_1", tool = "Bash", action = "Running: echo one", command = "echo one"))
-        socket.send(approvalRequestedFrame(id = "ap_2", tool = "Write", action = "Writing /tmp/a.txt", command = ""))
-        awaitState(viewModel.uiState) { it.pendingApprovals.size == 2 }
-
-        val queue = viewModel.uiState.value.pendingApprovals
-        assertEquals(listOf("ap_1", "ap_2"), queue.map { it.approvalId })
-        // Without a command display, the human-readable action is the summary.
-        assertEquals("Writing /tmp/a.txt", queue[1].summary)
-
-        socket.send(approvalResolvedFrame("ap_1"))
-        awaitState(viewModel.uiState) { it.pendingApprovals.size == 1 }
-        assertEquals("ap_2", viewModel.uiState.value.pendingApprovals.single().approvalId)
-    }
-
-    @Test
-    fun `allow posts approved decision and card clears on resolved`() = runBlocking {
-        viewModel.onScreenStarted()
-        val socket = awaitServerSocket()
-        socket.send(approvalRequestedFrame(id = "ap_1", tool = "Bash", action = "Running: echo hi", command = "echo hi"))
-        awaitState(viewModel.uiState) { it.pendingApprovals.isNotEmpty() }
-
-        viewModel.onAllow()
-
-        val request = awaitRequest("/approvals/")
-        assertEquals("POST", request.method)
-        assertEquals("/api/v1/sessions/session_1/approvals/ap_1", request.target)
-        assertEquals("""{"decision":"approved"}""", request.body!!.utf8())
-
-        // The ack alone must not clear the card — only the resolved event does.
-        delay(300)
-        assertEquals(1, viewModel.uiState.value.pendingApprovals.size)
-        socket.send(approvalResolvedFrame("ap_1"))
-        awaitState(viewModel.uiState) { it.pendingApprovals.isEmpty() }
-    }
-
-    @Test
-    fun `deny posts rejected decision`() = runBlocking {
-        viewModel.onScreenStarted()
-        val socket = awaitServerSocket()
-        socket.send(approvalRequestedFrame(id = "ap_1", tool = "Bash", action = "Running: rm -rf /", command = "rm -rf /"))
-        awaitState(viewModel.uiState) { it.pendingApprovals.isNotEmpty() }
-
-        viewModel.onDeny()
-
-        val request = awaitRequest("/approvals/")
-        assertEquals("POST", request.method)
-        assertEquals("/api/v1/sessions/session_1/approvals/ap_1", request.target)
-        assertEquals("""{"decision":"rejected"}""", request.body!!.utf8())
-    }
-
-    @Test
-    fun `failed decision post keeps card and emits ApprovalFailed`() = runBlocking {
-        approvalsSucceed = false
-        viewModel.onScreenStarted()
-        val socket = awaitServerSocket()
-        socket.send(approvalRequestedFrame(id = "ap_1", tool = "Bash", action = "Running: echo hi", command = "echo hi"))
-        awaitState(viewModel.uiState) { it.pendingApprovals.isNotEmpty() }
-
-        val effects = CopyOnWriteArrayList<ChatViewModel.Effect>()
-        val effectJob = launch { viewModel.effects.collect { effects += it } }
-        try {
-            viewModel.onAllow()
-            awaitRequest("/approvals/")
-            awaitCondition { effects.isNotEmpty() }
-
-            assertEquals(
-                ChatViewModel.Effect.ApprovalFailed("approval does not exist"),
-                effects.single(),
-            )
-            // No resolved event will come: the card must stay up.
-            assertEquals(1, viewModel.uiState.value.pendingApprovals.size)
-        } finally {
-            effectJob.cancel()
-        }
     }
 
     @Test
@@ -1490,24 +1310,6 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     }
 
     @Test
-    fun `agent status frame syncs the server-reported model and effort`() = runBlocking {
-        viewModel.onScreenStarted()
-        awaitState(viewModel.uiState) { it.modelsAvailable }
-        val socket = awaitServerSocket()
-
-        socket.send(agentStatusUsageFrame(100, 262144, model = "kimi-code/kimi-for-coding", effort = "max"))
-
-        awaitState(viewModel.uiState) { it.sessionModel == "kimi-code/kimi-for-coding" }
-        assertEquals("max", viewModel.uiState.value.sessionEffort)
-        // Written through to the store the send path reads (the edit lands off the
-        // frame's call stack — poll until it commits).
-        withTimeout(5_000) {
-            while (dataStore.data.first()[stringPreferencesKey("model_for_session_session_1")] != "kimi-code/kimi-for-coding") delay(10)
-        }
-        assertEquals("max", dataStore.data.first()[stringPreferencesKey("effort_for_session_session_1")])
-    }
-
-    @Test
     fun `blank status values leave the stored model choice untouched`() = runBlocking {
         dataStore.edit { it[stringPreferencesKey("model_for_session_session_1")] = "kimi-code/kimi-for-coding" }
         // Default statusBody: no model key, no thinking_level — a fresh session's answer
@@ -1726,48 +1528,6 @@ class ChatViewModelTest : ChatViewModelTestBase() {
 
     // --- Cloud switch policies end ------------------------------------------------
 
-    @Test
-    fun `a pending pick is not clobbered by a status frame of the running turn`() = runBlocking {
-        viewModel.onScreenStarted()
-        awaitState(viewModel.uiState) { it.modelsAvailable }
-        val socket = awaitServerSocket()
-
-        viewModel.onModelSelected("kimi-code/kimi-for-coding")
-        awaitState(viewModel.uiState) { it.sessionModel == "kimi-code/kimi-for-coding" }
-
-        // A frame of the still-running turn reports the OLD binding (k3): the unsent
-        // model pick must survive. The effort was not picked, so it does sync.
-        socket.send(agentStatusUsageFrame(100, 1048576, model = "kimi-code/k3", effort = "max"))
-
-        // The frame was processed once its distinct context usage lands.
-        awaitState(viewModel.uiState) { it.contextUsage == ContextUsage(100, 1048576) }
-        assertEquals("kimi-code/kimi-for-coding", viewModel.uiState.value.sessionModel)
-        assertEquals("max", viewModel.uiState.value.sessionEffort)
-    }
-
-    @Test
-    fun `the next status frame syncs again once the prompt carrying the pick was sent`() = runBlocking {
-        viewModel.onScreenStarted()
-        awaitState(viewModel.uiState) { it.modelsAvailable }
-        val socket = awaitServerSocket()
-
-        viewModel.onModelSelected("kimi-code/kimi-for-coding")
-        awaitState(viewModel.uiState) { it.sessionModel == "kimi-code/kimi-for-coding" }
-        viewModel.onInputChange("hi")
-        viewModel.onSend()
-
-        val body = awaitRequest("/prompts").body!!.utf8()
-        assertTrue(""""model":"kimi-code/kimi-for-coding"""" in body)
-        awaitState(viewModel.uiState) { !it.isSending }
-
-        // The prompt bound the session; later frames reflect the server's state again
-        // (here: another client rebound the session to K3 with max effort).
-        socket.send(agentStatusUsageFrame(100, 1048576, model = "kimi-code/k3", effort = "max"))
-
-        awaitState(viewModel.uiState) { it.sessionModel == "kimi-code/k3" }
-        assertEquals("max", viewModel.uiState.value.sessionEffort)
-    }
-
     // --- Permission mode (ticket 141) ---------------------------------------------------
 
     @Test
@@ -1858,37 +1618,6 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         assertEquals("manual", dataStore.data.first()[stringPreferencesKey("permission_for_session_session_1")])
     }
 
-    @Test
-    fun `an agent status permission frame updates the chip when no local pick is stored`() = runBlocking {
-        viewModel.onScreenStarted()
-        awaitState(viewModel.uiState) { it.modelsAvailable }
-        val socket = awaitServerSocket()
-
-        socket.send(agentStatusPermissionFrame(permission = "manual"))
-
-        awaitState(viewModel.uiState) { it.sessionPermission == "manual" }
-        assertEquals(PermissionMode.AlwaysAsk, viewModel.uiState.value.currentPermissionMode)
-        // Read-only sync: the frame never writes the per-session store (the ticket 141
-        // "follow the server" rule) — the next prompt omits the stamp.
-        assertNull(dataStore.data.first()[stringPreferencesKey("permission_for_session_session_1")])
-    }
-
-    @Test
-    fun `an agent status permission frame leaves a stored pick untouched`() = runBlocking {
-        dataStore.edit { it[stringPreferencesKey("permission_for_session_session_1")] = "yolo" }
-        viewModel.onScreenStarted()
-        awaitState(viewModel.uiState) { it.sessionPermission == "yolo" }
-        val socket = awaitServerSocket()
-
-        socket.send(agentStatusPermissionFrame(permission = "auto"))
-
-        // The sticky pick is re-asserted per prompt; showing the server's value would
-        // mislead (ticket 165's carry-over of the 141 design).
-        delay(200)
-        assertEquals("yolo", viewModel.uiState.value.sessionPermission)
-        assertEquals("yolo", dataStore.data.first()[stringPreferencesKey("permission_for_session_session_1")])
-    }
-
     // --- Compact session (ticket 056) ---------------------------------------------------
 
     @Test
@@ -1907,7 +1636,7 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     }
 
     @Test
-    fun `onCompact is a no-op while a turn runs or a compaction is in progress`() = runBlocking {
+    fun `onCompact is a no-op while a turn runs`() = runBlocking {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         awaitState(viewModel.uiState) { it.items != null }
@@ -1919,16 +1648,6 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         viewModel.onCompact()
         assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
         assertFalse(viewModel.uiState.value.isCompacting)
-
-        // A compaction in progress too (a second compact is a silent server no-op).
-        socket.send(turnEndedFrame(reason = "completed"))
-        awaitState(viewModel.uiState) { !it.isWorking }
-        socket.send(compactionStartedFrame())
-        awaitState(viewModel.uiState) { it.isCompacting }
-        // Drain the turn-end refetch so only a compact POST could arrive next.
-        while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
-        viewModel.onCompact()
-        assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
     }
 
     @Test
@@ -1950,92 +1669,6 @@ class ChatViewModelTest : ChatViewModelTestBase() {
                 effects.single(),
             )
             assertFalse(viewModel.uiState.value.isCompacting)
-        } finally {
-            effectJob.cancel()
-        }
-    }
-
-    @Test
-    fun `compaction frames drive the divider, the state and the snackbars`() = runBlocking {
-        messagesBody = """{"code":0,"msg":"success","data":{"items":[""" +
-            """{"id":"msg_1","session_id":"session_1","role":"user",""" +
-            """"content":[{"type":"text","text":"run echo hi"}],""" +
-            """"created_at":"2026-07-30T05:44:56.000Z","metadata":{"origin":{"kind":"user"}}}""" +
-            """],"has_more":false},"request_id":"r"}"""
-        val effects = CopyOnWriteArrayList<ChatViewModel.Effect>()
-        val effectJob = launch { viewModel.effects.collect { effects += it } }
-        try {
-            viewModel.onScreenStarted()
-            val socket = awaitServerSocket()
-            awaitState(viewModel.uiState) { state -> state.items?.singleOrNull() is ChatItem.UserMessage }
-
-            // Triggered from anywhere (the app, the TUI's /compact): the started frame
-            // sets the state and inserts the pending divider at the tail.
-            socket.send(compactionStartedFrame())
-            awaitState(viewModel.uiState) { state ->
-                state.isCompacting &&
-                    state.items?.last() == ChatItem.CompactionDivider(LIVE_COMPACTION_DIVIDER_ID, pending = true)
-            }
-
-            // The context rewrite, then completion. The frames are processed in order,
-            // so once the completion applies, the splice was processed too: the full
-            // row list below proves the summary never became a bubble and the kept
-            // user message did not duplicate.
-            socket.send(compactionSpliceFrame())
-            socket.send(compactionCompletedFrame())
-            awaitState(viewModel.uiState) { state ->
-                !state.isCompacting &&
-                    state.items == listOf(
-                        ChatItem.UserMessage(
-                            "msg_1",
-                            "run echo hi",
-                            createdAt = Instant.parse("2026-07-30T05:44:56.000Z"),
-                        ),
-                        ChatItem.CompactionDivider(
-                            LIVE_COMPACTION_DIVIDER_ID,
-                            pending = false,
-                            tokensBefore = 850,
-                            tokensAfter = 386,
-                            summary = "Completed spike, nothing pending.",
-                        ),
-                    )
-            }
-            // The divider flipped to done with the token delta, the snackbar confirms.
-            awaitCondition { effects.isNotEmpty() }
-            assertEquals(
-                ChatViewModel.Effect.CompactionFinished("Context compacted: 850 → 386 tokens"),
-                effects.single(),
-            )
-        } finally {
-            effectJob.cancel()
-        }
-    }
-
-    @Test
-    fun `a compaction failure removes the pending divider and emits the error snackbar`() = runBlocking {
-        val effects = CopyOnWriteArrayList<ChatViewModel.Effect>()
-        val effectJob = launch { viewModel.effects.collect { effects += it } }
-        try {
-            viewModel.onScreenStarted()
-            val socket = awaitServerSocket()
-            awaitState(viewModel.uiState) { it.items != null }
-
-            socket.send(compactionStartedFrame())
-            awaitState(viewModel.uiState) { it.isCompacting }
-            socket.send(compactionFailedFrame())
-
-            // The handler updates the state before sending the effect: once the
-            // snackbar arrives, the divider removal is necessarily applied too.
-            awaitCondition { effects.isNotEmpty() }
-            assertEquals(
-                ChatViewModel.Effect.CompactionFailed("summarizer unreachable"),
-                effects.single(),
-            )
-            assertFalse(viewModel.uiState.value.isCompacting)
-            assertEquals(
-                emptyList<ChatItem.CompactionDivider>(),
-                viewModel.uiState.value.items.orEmpty().filterIsInstance<ChatItem.CompactionDivider>(),
-            )
         } finally {
             effectJob.cancel()
         }
@@ -2145,123 +1778,6 @@ class ChatViewModelTest : ChatViewModelTestBase() {
         }
     }
 
-    @Test
-    fun `task events feed the jobs list and termination drops the running count`() {
-        runBlocking {
-            viewModel.onScreenStarted()
-            val socket = awaitServerSocket()
-
-            // A background sub-agent and a background bash register in the task store
-            // (docs/server-api.md, Background lifecycle — ticket 092).
-            socket.send(taskStartedFrame(taskId = "agent-7noib8bb", description = "doc-verify-bg"))
-            socket.send(
-                taskStartedFrame(
-                    taskId = "proc-9xk2",
-                    description = "sleep 1000",
-                    kind = "process",
-                    agentId = null,
-                    seq = 53,
-                ),
-            )
-            awaitState(viewModel.uiState) { state -> state.jobs.count { it.isRunning } == 2 }
-
-            // CORE status "killed" maps to the wire "cancelled"; the finished job
-            // lingers for the sheet, the running count drops.
-            socket.send(taskTerminatedFrame(taskId = "agent-7noib8bb", status = "killed"))
-            awaitState(viewModel.uiState) { state -> state.jobs.count { it.isRunning } == 1 }
-
-            val jobs = viewModel.uiState.value.jobs
-            assertEquals(2, jobs.size)
-            val terminated = jobs.first { it.taskId == "agent-7noib8bb" }
-            assertEquals(BackgroundTask.Status.Cancelled, terminated.status)
-            assertEquals(Instant.ofEpochMilli(1785210118804), terminated.endedAt)
-            // info.agentId links the task to its sub-agent page (ticket 092).
-            assertEquals("agent-13", terminated.agentId)
-            val bash = jobs.first { it.taskId == "proc-9xk2" }
-            assertEquals(BackgroundTask.Kind.Bash, bash.kind)
-            assertEquals(BackgroundTask.Status.Running, bash.status)
-            assertNull(bash.agentId)
-        }
-    }
-
-    @Test
-    fun `a sub-agent-owned task frame routes to its store record, never the main jobs list`() {
-        runBlocking {
-            viewModel.onScreenStarted()
-            val socket = awaitServerSocket()
-
-            // The spawn landed, then the sub-agent's own background bash registers —
-            // the frame's agentId stamp names the OWNING agent (docs/server-api.md,
-            // Background lifecycle: REST /tasks serves only the main agent's store,
-            // so a sub-agent's tasks arrive live-only, tagged with its id).
-            socket.send(subagentSpawnedFrame())
-            socket.send(
-                taskStartedFrame(
-                    taskId = "proc-sub1",
-                    description = "nested bg bash",
-                    kind = "process",
-                    agentId = null,
-                    seq = 60,
-                    ownerAgentId = "agent-12",
-                ),
-            )
-
-            awaitCondition { subagentEntry("agent-12")?.jobs?.isNotEmpty() == true }
-            val job = subagentEntry("agent-12")!!.jobs.single()
-            assertEquals("proc-sub1", job.taskId)
-            assertEquals(BackgroundTask.Kind.Bash, job.kind)
-            assertEquals(BackgroundTask.Status.Running, job.status)
-            // The composer pill counts only main-owned tasks.
-            assertTrue(viewModel.uiState.value.jobs.isEmpty())
-
-            // Its termination lands on the same record (core timed_out → the wire
-            // Failed + the live-only timed-out flag, ticket 097).
-            socket.send(
-                taskTerminatedFrame(
-                    taskId = "proc-sub1",
-                    status = "timed_out",
-                    kind = "process",
-                    agentId = null,
-                    seq = 61,
-                    ownerAgentId = "agent-12",
-                ),
-            )
-            awaitCondition { subagentEntry("agent-12")?.jobs?.single()?.isRunning == false }
-            val terminated = subagentEntry("agent-12")!!.jobs.single()
-            assertEquals(BackgroundTask.Status.Failed, terminated.status)
-            assertTrue(terminated.timedOut)
-            assertTrue(viewModel.uiState.value.jobs.isEmpty())
-        }
-    }
-
     // --- Detaching a member to the background (ticket 138) ---
-
-    @Test
-    fun `the detach's task started flips the member record and lists the job`() {
-        runBlocking {
-            viewModel.onScreenStarted()
-            val socket = awaitServerSocket()
-
-            // A foreground spawn lands with no task frames; the detach makes the
-            // core re-register the member's task as MAIN-OWNED — the frame names
-            // the member in info.agentId (docs/server-api.md, Background
-            // lifecycle). JobsStore lists it, the member record flips to
-            // background so the page's "To background" affordance disappears.
-            socket.send(subagentSpawnedFrame())
-            socket.send(
-                taskStartedFrame(
-                    taskId = "agent-t1",
-                    description = "doc-verify",
-                    agentId = "agent-12",
-                ),
-            )
-
-            awaitState(viewModel.uiState) { state -> state.jobs.size == 1 }
-            val job = viewModel.uiState.value.jobs.single()
-            assertEquals("agent-12", job.agentId)
-            assertEquals(BackgroundTask.Kind.Subagent, job.kind)
-            awaitCondition { subagentEntry("agent-12")?.runInBackground == true }
-        }
-    }
 
 }

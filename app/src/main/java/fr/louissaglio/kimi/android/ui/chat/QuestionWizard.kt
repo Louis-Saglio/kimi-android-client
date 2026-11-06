@@ -270,7 +270,7 @@ internal class QuestionWizard(
 
     /**
      * Applies the session snapshot's pending questions (ticket 085) — the cold-start
-     * / `resync_required` queue rebuild, with [seed]'s guarded semantics: a live
+     * / 40932-recovery queue rebuild, with [seed]'s guarded semantics: a live
      * requested/resolved event newer than the fetch ([eventsAtFetch]) wins over the
      * snapshot's queue.
      */

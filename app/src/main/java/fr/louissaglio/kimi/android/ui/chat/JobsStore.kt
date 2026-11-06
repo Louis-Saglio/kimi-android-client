@@ -43,7 +43,7 @@ data class Job(
  * [sendEffect] (the DeltaCoalescer callback pattern).
  *
  * Event-driven, NO polling (a deliberate divergence from the web client's 1 s
- * `useTaskPoller.ts`): fed by (a) the cold-start / `resync_required` REST seed —
+ * `useTaskPoller.ts`): fed by (a) the cold-start REST seed —
  * unfiltered, so already-terminal jobs linger in the sheet — (b) live
  * `task.started`/`task.terminated` events, (c) [cancel]'s optimistic flip. The seed is
  * guarded like the questions seed: a live task event landing while the fetch is in
@@ -70,7 +70,7 @@ internal class JobsStore(
      * task.started/task.terminated has already overtaken. */
     private val seedGuard = SeedGuard()
 
-    /** The cold-start / `resync_required` REST sync (unfiltered — terminal tasks stay
+    /** The cold-start REST sync (unfiltered — terminal tasks stay
      * listed, so recently finished jobs linger in the sheet). REST is authoritative
      * for what it returns; a live event landing mid-fetch makes the whole apply
      * stale (SeedGuard) instead of clobbering the event's upsert. A failure leaves

@@ -43,7 +43,7 @@ fun SessionEvent.isSubagentScoped(): Boolean = when (this) {
     else -> false
 }
 
-/** The `agent_call` rendering of a `tool.call.started` display (0.31.0 —
+/** The `agent_call` rendering of a tool frame's `display` (0.31.0 —
  * docs/server-api.md, Sub-agents — ticket 157): the typed model of an `Agent`
  * spawn's display, carried to the row that titles itself "{[agentName]} sub-agent",
  * previews [prompt] and badges a [background] spawn. History `tool_use` parts carry
@@ -57,37 +57,39 @@ data class AgentCallDisplay(
 
 /** Events of one session, parsed from the WebSocket stream (docs/server-api.md). */
 sealed interface SessionEvent {
-    /** `prompt.submitted` (docs/server-api.md — ticket 154): the submission echo. It
-     * needs no UI of its own — the optimistic local echo already shows the bubble —
-     * so it is parsed for correlation only. Only the main agent's submissions fire
-     * it (a sub-agent's internal prompts never do). */
-    data class PromptSubmitted(val promptId: String) : SessionEvent
-
-    /** `prompt.queued` (ticket 154): the prompt waits server-side while the agent is
-     * busy. [queueLength] is the queue size at submission — the local echo bubble
-     * shows it as "Queued #N" until the prompt starts. */
-    data class PromptQueued(val promptId: String, val queueLength: Int) : SessionEvent
-
-    /** `prompt.started` (0.39.0 — ticket 154): the prompt actually began executing —
-     * its echo bubble flips back to the normal in-flight look. Fires per agent, so a
-     * sub-agent's frame routes to its stream store like its other turn frames
-     * (ticket 045). */
-    data class PromptStarted(val promptId: String, override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
+    /** `prompt.upsert` (docs/server-api.md, Transcript protocol — ticket 175, replacing
+     * 154's `prompt.submitted`/`queued`/`started`): one prompt entity changed status.
+     * [queueLength] is the number of prompts the agent holds queued once this one is
+     * counted — set on [PromptStatus.Queued] only (the echo bubble's "Queued #N"), 0
+     * otherwise. A steered prompt flips to [PromptStatus.Completed]. Agent-scoped like
+     * every transcript event: a sub-agent's prompts route to its stream store. */
+    data class PromptUpdated(
+        val promptId: String,
+        val status: PromptStatus,
+        val queueLength: Int = 0,
+        override val agentId: String = MAIN_AGENT_ID,
+    ) : SessionEvent, AgentScopedEvent
 
     data class TurnStarted(override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
 
-    /** [interruptReason] (0.31.1 — ticket 155) says why the turn stopped early; null on
-     * a completed turn. The chat's turn footer differentiates its copy on it. */
+    /** A terminal `turn.upsert` (ticket 175): [reason] is the turn's terminal state
+     * (`completed`/`cancelled`/`failed`). [interruptReason] says why the turn stopped
+     * early (ticket 155's footer vocabulary — `user_cancelled` for a cancelled turn,
+     * `error` for a failed one); null on a completed turn. [errorMessage] is a failed
+     * turn's `error` text — the footer carries it (the standalone `error` frame is
+     * gone). */
     data class TurnEnded(
         val reason: String,
         override val agentId: String = MAIN_AGENT_ID,
         val interruptReason: String? = null,
+        val errorMessage: String? = null,
     ) : SessionEvent, AgentScopedEvent
 
-    /** `turn.step.retrying` (0.31.0 — ticket 058): the step's LLM call failed and
-     * attempt [nextAttempt] of [maxAttempts] starts after a backoff. Transient status
-     * only — it never creates a timeline row; the replacement [StepStarted] (new
-     * stepId, same [step]) ends it. */
+    /** A running `step.upsert` carrying a `retry` object (ticket 058, re-fed by 175 —
+     * the `retry` shape is schema-level, never captured live): the step's LLM call
+     * failed and attempt [nextAttempt] of [maxAttempts] starts after a backoff.
+     * Transient status only — it never creates a timeline row; the next step's
+     * [StepStarted], the step's end, or the turn's end clears it. */
     data class StepRetrying(
         val step: Int,
         val nextAttempt: Int,
@@ -96,20 +98,20 @@ sealed interface SessionEvent {
         override val agentId: String = MAIN_AGENT_ID,
     ) : SessionEvent, AgentScopedEvent
 
-    /** `turn.step.started`: parsed only to clear the retry status (ticket 058) — the
-     * app renders no per-step rows. */
+    /** A `step.upsert` entering `running`: parsed only to clear the retry status
+     * (ticket 058) — the app renders no per-step rows. */
     data class StepStarted(val step: Int, val stepId: String, override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
 
-    /** `turn.step.completed`: same contract as [StepStarted]. */
+    /** A `step.upsert` reaching `completed` or `interrupted`: same contract as
+     * [StepStarted]. */
     data class StepCompleted(val step: Int, override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
     data class AssistantDelta(val delta: String, override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
     data class ThinkingDelta(val delta: String, override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
-    data class ToolCallDelta(val toolCallId: String, val name: String, override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
 
-    /** [preview] is derived from the started payload's description/display/args
-     * (tickets 153/095, ToolPreview), so the live row shows what the call is doing
-     * from the start, not only after a refetch. [description] is the server-rendered
-     * action the preview prefers (ticket 153). [args] is the raw arguments object
+    /** A tool frame first seen — or seen again with newly known arguments/display —
+     * while not yet settled (ticket 175). [preview] is derived from the frame's
+     * display/args (tickets 095/153, ToolPreview), so the live row shows what the call
+     * is doing from the start, not only after a refetch. [args] is the raw arguments object
      * (ticket 118), rendered by the expanded row as a key/value table
      * (ToolDetailFields); [input] is the same arguments pretty-printed —
      * the expanded row's fallback when no object args exist. [agentCall] is the
@@ -121,12 +123,12 @@ sealed interface SessionEvent {
         val preview: String = "",
         val input: String = "",
         val args: JsonObject? = null,
-        val description: String? = null,
         override val agentId: String = MAIN_AGENT_ID,
         val agentCall: AgentCallDisplay? = null,
     ) : SessionEvent, AgentScopedEvent
 
-    /** [output] is the full result text, shown by the expanded row (ticket 023). */
+    /** A tool frame reaching `done`/`error` (ticket 175). [output] is the full result
+     * text, shown by the expanded row (ticket 023). */
     data class ToolCallResult(
         val toolCallId: String,
         val isError: Boolean,
@@ -134,17 +136,9 @@ sealed interface SessionEvent {
         override val agentId: String = MAIN_AGENT_ID,
     ) : SessionEvent, AgentScopedEvent
 
-    /** One live output chunk of a running tool (tool.progress, volatile — ticket 025).
-     * Never creates a timeline row on its own; the definitive tool.result output
-     * replaces the accumulated chunks wholesale. */
-    data class ToolCallProgress(
-        val toolCallId: String,
-        val chunk: String,
-        override val agentId: String = MAIN_AGENT_ID,
-    ) : SessionEvent, AgentScopedEvent
-
-    /** Messages spliced into the context inline (docs/server-api.md): carries the
-     * just-sent user message — the sent-prompt echo. For a sub-agent
+    /** An `undo` marker's splice (docs/server-api.md, Transcript protocol — ticket 175):
+     * carries the just-sent user message — the sent-prompt echo — with injections
+     * (`origin.kind:"injection"`) already dropped. For a sub-agent
      * ([AgentScopedEvent.agentId]) these are its internal prompts (the task, nudges). */
     data class ContextSpliced(
         val messages: List<ChatMessage>,
@@ -289,6 +283,9 @@ sealed interface SessionEvent {
     data class TaskTerminated(val info: TaskInfo, override val agentId: String = MAIN_AGENT_ID) : SessionEvent, AgentScopedEvent
 }
 
+/** A prompt entity's status (`prompt.upsert`, docs/server-api.md — ticket 175). */
+enum class PromptStatus { Running, Queued, Completed, Aborted, Blocked, Failed }
+
 /** Context window fill of a session: used tokens out of the model's maximum. */
 data class ContextUsage(
     val usedTokens: Long,
@@ -329,21 +326,19 @@ sealed interface SocketEvent {
     /** First connection of this collection. */
     data object Connected : SocketEvent
 
-    /** Re-connected after a drop — or a fresh collection resuming with the stored
-     * cursor (ticket 048); the server replays events newer than the resume cursor.
-     * [seq]/[epoch] are the cursor the subscribe carried — a snapshot-seeded cursor
-     * (ticket 085) lets the collector skip the resync its apply already covered. */
-    data class Reconnected(val seq: Long, val epoch: String) : SocketEvent
-
-    /** The server refused the resume cursor (subscribe ack's `resync_required`,
-     * ticket 048): no replay will come — the collector must re-sync from REST. */
-    data object ResyncRequired : SocketEvent
+    /** Re-connected after a drop within this collection (ticket 175): the subscription
+     * did not survive the drop, so the socket re-subscribed — the server re-sends a
+     * fresh `transcript.reset` and the live ops from now on, never the missed window
+     * (ticket 176 owns gap recovery). The collector re-syncs from REST. */
+    data object Reconnected : SocketEvent
 
     /** Connection lost (or never established); a retry with backoff is scheduled. */
     data object Disconnected : SocketEvent
 
-    /** The stream cannot run at all (e.g. an invalid server URL). Surfaced as an event
-     * instead of thrown so collectors see every failure in one place. */
+    /** The stream cannot run at all — an invalid server URL, or a session the server
+     * does not know (the subscribe ack's `not_found`, [DataError.SessionNotFound]).
+     * Terminal: the flow completes after it. Surfaced as an event instead of thrown so
+     * collectors see every failure in one place. */
     data class Failed(val error: DataError) : SocketEvent
 
     data class Event(val event: SessionEvent) : SocketEvent

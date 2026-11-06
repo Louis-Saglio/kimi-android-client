@@ -5,6 +5,7 @@ import fr.louissaglio.kimi.android.data.chat.AgentCallDisplay
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.InFlightTurn
 import fr.louissaglio.kimi.android.data.chat.ORIGIN_KIND_COMPACTION_SUMMARY
+import fr.louissaglio.kimi.android.data.chat.PromptStatus
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.TodoParser
@@ -410,9 +411,6 @@ class ChatTimeline(
             }
             is SessionEvent.AssistantDelta -> appendDelta(event.delta, thinking = false)
             is SessionEvent.ThinkingDelta -> appendDelta(event.delta, thinking = true)
-            is SessionEvent.ToolCallDelta ->
-                if (isTodoCall(event.toolCallId, event.name)) Unit
-                else upsertTool(event.toolCallId, event.name, ToolStatus.Running)
             is SessionEvent.ToolCallStarted ->
                 if (isTodoCall(event.toolCallId, event.name)) {
                     // The todo state comes from the call's input, not its result.
@@ -436,32 +434,47 @@ class ChatTimeline(
                     )
                     linkFromResult(event.toolCallId, event.output)
                 }
-            is SessionEvent.ToolCallProgress ->
-                if (event.toolCallId !in todoCallIds) appendToolProgress(event.toolCallId, event.chunk)
             is SessionEvent.ContextSpliced -> event.messages.forEach(::appendSpliced)
-            // Prompt lifecycle (ticket 154): the queued mark lands on the optimistic
-            // local echo; started flips it back to the normal in-flight look. Both
-            // no-op when the id names no echo (e.g. a prompt queued from another
-            // client). Submitted is correlation-only — no row effect.
-            is SessionEvent.PromptQueued -> onPromptQueued(event.promptId, event.queueLength)
-            is SessionEvent.PromptStarted -> onPromptStarted(event.promptId)
-            // TurnEnded: the ViewModel refetches history instead; the early-stop footer
-            // arrives through onTurnEnded (ticket 155).
+            // Prompt lifecycle (ticket 154, `prompt.upsert` since 175): the queued mark
+            // lands on the optimistic local echo; any other status (running, steered
+            // into completion, aborted…) flips it back to the normal look. No-op when
+            // the id names no echo (e.g. a prompt queued from another client).
+            is SessionEvent.PromptUpdated ->
+                if (event.status == PromptStatus.Queued) onPromptQueued(event.promptId, event.queueLength)
+                else onPromptLeftQueue(event.promptId)
+            // The ViewModel refetches history on top; the sub-agent store's timelines
+            // get only this.
+            is SessionEvent.TurnEnded -> onTurnEnded(event.interruptReason, event.errorMessage)
             else -> Unit
         }
     }
 
     /**
-     * `turn.ended` (ticket 155): records WHY the turn stopped early — the footer copy
-     * derived from the 0.31.1 `interruptReason` — and shows the footer at once, ahead
-     * of the ViewModel's canonical refetch (which re-appends it via [replaceCommitted]).
-     * A completed turn (no/unknown reason) adds nothing: today's behavior. Main-chat
-     * timeline only — the sub-agent page's terminal states are a separate surface.
+     * A terminal turn (ticket 155; `turn.upsert` since 175): a turn that stopped early
+     * (any [interruptReason]) first settles its still-running live tool rows to Error
+     * — an abort's tool frames may never reach `done`, and the rows must not spin
+     * until the refetch lands (this is the sub-agent page's only settle). Then, on the
+     * main-chat timeline only, it records WHY the turn stopped — the footer copy, a
+     * failed turn's [errorMessage] included — and shows the footer at once, ahead of
+     * the ViewModel's canonical refetch (which re-appends it via [replaceCommitted]).
+     * A completed turn (no/unknown reason) adds nothing.
      */
-    fun onTurnEnded(interruptReason: String?) {
+    fun onTurnEnded(interruptReason: String?, errorMessage: String? = null) {
+        if (interruptReason != null) settleRunningLiveTools()
         if (!historyBacked) return
-        turnEndLabel = turnEndCopy(interruptReason)
+        turnEndLabel = turnEndCopy(interruptReason, errorMessage)
         appendTurnEndRow()
+    }
+
+    /** Running tool rows of the live tail → Error (an interrupted turn's leftovers). */
+    private fun settleRunningLiveTools() {
+        for (index in liveStart until rows.size) {
+            val group = rows[index] as? ChatItem.ToolGroup ?: continue
+            if (group.tools.none { it.status == ToolStatus.Running }) continue
+            rows[index] = group.copy(
+                tools = group.tools.map { if (it.status == ToolStatus.Running) it.copy(status = ToolStatus.Error) else it },
+            )
+        }
     }
 
     /** Upserts the footer row at the tail under one constant id (the compaction
@@ -602,16 +615,16 @@ class ChatTimeline(
         appendCommitted(echo)
     }
 
-    /** `prompt.queued` (ticket 154): the echo shows its queue position ("Queued #N").
-     * Only one frame per prompt is expected; a later frame wins. No-op when the id
-     * names no local echo (a prompt queued from another client has none). */
+    /** A queued prompt (ticket 154): the echo shows its queue position ("Queued #N").
+     * A later frame wins. No-op when the id names no local echo (a prompt queued from
+     * another client has none). */
     private fun onPromptQueued(promptId: String, queueLength: Int) {
         healLocalEcho(promptId) { it.copy(queued = queueLength) }
     }
 
-    /** `prompt.started` (ticket 154): the prompt began executing — its echo flips back
-     * to the normal in-flight look. */
-    private fun onPromptStarted(promptId: String) {
+    /** The prompt left the queue (running, steered, aborted… — ticket 154): its echo
+     * flips back to the normal in-flight look. */
+    private fun onPromptLeftQueue(promptId: String) {
         healLocalEcho(promptId) { it.copy(queued = null) }
     }
 
@@ -639,17 +652,6 @@ class ChatTimeline(
                 text = if (thinking) "" else delta,
                 thinking = if (thinking) delta else "",
             )
-        }
-    }
-
-    /** Live output streaming (ticket 025): chunks append to the matching *running* row
-     * wherever it lives — a reconnect replay can lag the refetch that committed the
-     * call (ticket 055). Progress is volatile — it never creates a row (unknown ids
-     * are dropped), a finished call keeps its definitive result, and a history refetch
-     * replaces the rows wholesale, clearing whatever accumulated. */
-    private fun appendToolProgress(toolCallId: String, chunk: String) {
-        healTool(toolCallId) { existing ->
-            if (existing.status == ToolStatus.Running) existing.copy(output = existing.output + chunk) else existing
         }
     }
 
@@ -994,11 +996,13 @@ private const val AGENT_ID_PREFIX = "agent_id: "
  * early stop wore before the reason existed); the server's own stops say which. Null
  * — absent or unknown, the app's ignore-unknown rule — means no footer: today's
  * behavior for a turn that simply completed. */
-internal fun turnEndCopy(interruptReason: String?): String? = when (interruptReason) {
+internal fun turnEndCopy(interruptReason: String?, errorMessage: String? = null): String? = when (interruptReason) {
     "user_cancelled" -> "Cancelled"
     "aborted" -> "Aborted"
     "max_steps" -> "Stopped: max steps"
-    "error" -> "Stopped: error"
+    // A failed turn's `error` text rides the footer (ticket 175 — the standalone
+    // `error` frame is gone).
+    "error" -> errorMessage?.takeIf { it.isNotBlank() }?.let { "Stopped: error — $it" } ?: "Stopped: error"
     "filtered" -> "Stopped: filtered"
     "blocked" -> "Stopped: blocked"
     else -> null

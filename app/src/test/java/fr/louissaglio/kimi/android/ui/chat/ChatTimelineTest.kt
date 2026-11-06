@@ -2,6 +2,7 @@ package fr.louissaglio.kimi.android.ui.chat
 
 import fr.louissaglio.kimi.android.data.chat.ChatMessage
 import fr.louissaglio.kimi.android.data.chat.ORIGIN_KIND_COMPACTION_SUMMARY
+import fr.louissaglio.kimi.android.data.chat.PromptStatus
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
 import fr.louissaglio.kimi.android.data.chat.Todo
 import fr.louissaglio.kimi.android.data.chat.ToolPayload
@@ -684,11 +685,12 @@ class ChatTimelineTest {
     }
 
     @Test
-    fun `a row created by argument deltas picks up the started preview and keeps it on result`() {
+    fun `a row started without arguments picks up the later preview and keeps it on result`() {
         val timeline = testChatTimeline()
         timeline.apply(SessionEvent.TurnStarted())
-        // tool.call.delta arrives first (argument streaming), then the started frame.
-        timeline.apply(SessionEvent.ToolCallDelta("tool_1", "Bash"))
+        // The fold's contract (ticket 175): a running tool frame first renders with no
+        // arguments yet, then again once its input is known.
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash"))
 
         timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "echo hi"))
         timeline.apply(SessionEvent.ToolCallResult("tool_1", false))
@@ -725,73 +727,13 @@ class ChatTimelineTest {
     }
 
     @Test
-    fun `progress chunks append to the matching running row only`() {
+    fun `mid-turn refetch replaces a live row the server has committed`() {
         val timeline = testChatTimeline()
         timeline.apply(SessionEvent.TurnStarted())
         timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "build"))
-        timeline.apply(SessionEvent.ToolCallStarted("tool_2", "Bash", "test"))
-
-        timeline.apply(SessionEvent.ToolCallProgress("tool_2", "compiling...\n"))
-        timeline.apply(SessionEvent.ToolCallProgress("tool_1", "> Task :app:assemble\n"))
-        timeline.apply(SessionEvent.ToolCallProgress("tool_2", "running tests\n"))
-
-        assertEquals(
-            listOf(
-                ChatItem.ToolGroup(
-                    "tool_1",
-                    listOf(
-                        ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Running, "build", output = "> Task :app:assemble\n"),
-                        ChatItem.ToolActivity("tool_2", "Bash", ToolStatus.Running, "test", output = "compiling...\nrunning tests\n"),
-                    ),
-                ),
-            ),
-            timeline.items(),
-        )
-    }
-
-    @Test
-    fun `progress for unknown or finished calls is ignored`() {
-        val timeline = testChatTimeline()
-        timeline.apply(SessionEvent.TurnStarted())
-        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash"))
-        timeline.apply(SessionEvent.ToolCallResult("tool_1", false, "final\n"))
-
-        // Unknown id: volatile frames must never create a row on their own.
-        timeline.apply(SessionEvent.ToolCallProgress("tool_9", "stray\n"))
-        // Finished call: the definitive result stands.
-        timeline.apply(SessionEvent.ToolCallProgress("tool_1", "late chunk\n"))
-
-        assertEquals(
-            listOf(toolGroup(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, output = "final\n"))),
-            timeline.items(),
-        )
-    }
-
-    @Test
-    fun `tool result replaces the accumulated progress wholesale`() {
-        val timeline = testChatTimeline()
-        timeline.apply(SessionEvent.TurnStarted())
-        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "echo hi"))
-        timeline.apply(SessionEvent.ToolCallProgress("tool_1", "h"))
-        timeline.apply(SessionEvent.ToolCallProgress("tool_1", "i\n"))
-
-        timeline.apply(SessionEvent.ToolCallResult("tool_1", false, "hi\n"))
-
-        assertEquals(
-            listOf(toolGroup(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, "echo hi", output = "hi\n"))),
-            timeline.items(),
-        )
-    }
-
-    @Test
-    fun `mid-turn refetch clears the volatile progress of committed rows`() {
-        val timeline = testChatTimeline()
-        timeline.apply(SessionEvent.TurnStarted())
-        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "build"))
-        timeline.apply(SessionEvent.ToolCallProgress("tool_1", "partial log\n"))
 
         // The server has since committed the finished call: the refetched history is
-        // canonical and the progress-accumulating live row is dropped.
+        // canonical and the running live row is dropped.
         timeline.replaceHistory(
             listOf(
                 ChatMessage(
@@ -987,7 +929,7 @@ class ChatTimelineTest {
 
         timeline.apply(SessionEvent.ContextSpliced(listOf(userMessage("msg_1", "hello"))))
         timeline.appendLocalEcho("msg_1", "hello", emptyList(), emptyList())
-        timeline.apply(SessionEvent.PromptQueued("msg_1", 2))
+        timeline.apply(SessionEvent.PromptUpdated("msg_1", PromptStatus.Queued, queueLength = 2))
 
         assertEquals(
             listOf(ChatItem.UserMessage("msg_1", "hello", queued = 2)),
@@ -1099,11 +1041,10 @@ class ChatTimelineTest {
         val timeline = testChatTimeline()
         timeline.apply(SessionEvent.TurnStarted())
 
-        // Argument deltas carry the name only; the started frame carries the input.
-        timeline.apply(SessionEvent.ToolCallDelta("tool_1", "TodoList"))
+        // The running frame renders without arguments first; the input arrives later.
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "TodoList"))
         timeline.apply(SessionEvent.ToolCallStarted("tool_1", "TodoList", input = todoInput))
         timeline.apply(SessionEvent.ToolCallResult("tool_1", false))
-        timeline.apply(SessionEvent.ToolCallProgress("tool_1", "stray\n"))
 
         assertEquals(emptyList<ChatItem>(), timeline.items())
         assertEquals(expectedTodos, timeline.todos())
@@ -2425,4 +2366,79 @@ class ChatTimelineTest {
 
         assertTrue(timeline.items().isEmpty())
     }
+
+    // --- Ticket 175: the transcript fold's turn/prompt events ---------------------------
+
+    @Test
+    fun `a failed turn's footer carries the turn's error text`() {
+        assertEquals("Stopped: error — [provider.auth_error] no access", turnEndCopy("error", "[provider.auth_error] no access"))
+        assertEquals("Stopped: error", turnEndCopy("error", " "))
+        // The message rides the error reason only.
+        assertEquals("Cancelled", turnEndCopy("user_cancelled", "ignored"))
+    }
+
+    @Test
+    fun `an interrupted turn end settles the still-running live tool rows`() {
+        val timeline = testChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted())
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "build"))
+        timeline.apply(SessionEvent.ToolCallResult("tool_1", false, "ok\n"))
+        timeline.apply(SessionEvent.ToolCallStarted("tool_2", "Bash", "sleep 60"))
+
+        timeline.onTurnEnded("user_cancelled")
+
+        assertEquals(
+            listOf(
+                ChatItem.ToolGroup(
+                    "tool_1",
+                    listOf(
+                        ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Done, "build", output = "ok\n"),
+                        ChatItem.ToolActivity("tool_2", "Bash", ToolStatus.Error, "sleep 60"),
+                    ),
+                ),
+                ChatItem.TurnEnd(TURN_END_ROW_ID, "Cancelled"),
+            ),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `a completed turn end leaves the live tool rows alone`() {
+        val timeline = testChatTimeline()
+        timeline.apply(SessionEvent.TurnStarted())
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "build"))
+
+        timeline.onTurnEnded(null)
+
+        assertEquals(listOf(toolGroup(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Running, "build"))), timeline.items())
+    }
+
+    @Test
+    fun `a sub-agent timeline settles its running tools on an interrupted turn end event`() {
+        // The store's timelines get the TurnEnded event itself (no ViewModel refetch).
+        val timeline = testChatTimeline(historyBacked = false)
+        timeline.apply(SessionEvent.TurnStarted("agent-0"))
+        timeline.apply(SessionEvent.ToolCallStarted("tool_1", "Bash", "sleep 60", agentId = "agent-0"))
+
+        timeline.apply(SessionEvent.TurnEnded("cancelled", "agent-0", interruptReason = "user_cancelled"))
+
+        assertEquals(
+            listOf(toolGroup(ChatItem.ToolActivity("tool_1", "Bash", ToolStatus.Error, "sleep 60"))),
+            timeline.items(),
+        )
+    }
+
+    @Test
+    fun `a prompt leaving the queue clears the echo's queued mark`() {
+        val timeline = testChatTimeline()
+        timeline.appendLocalEcho("msg_1", "hello", emptyList(), emptyList())
+        timeline.apply(SessionEvent.PromptUpdated("msg_1", PromptStatus.Queued, queueLength = 1))
+        assertEquals(listOf(ChatItem.UserMessage("msg_1", "hello", queued = 1)), timeline.items())
+
+        // A steer completes the queued prompt; an abort or a start clears it alike.
+        timeline.apply(SessionEvent.PromptUpdated("msg_1", PromptStatus.Completed))
+
+        assertEquals(listOf(ChatItem.UserMessage("msg_1", "hello")), timeline.items())
+    }
+
 }

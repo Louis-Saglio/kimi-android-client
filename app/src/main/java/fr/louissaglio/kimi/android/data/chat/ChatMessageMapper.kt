@@ -38,17 +38,16 @@ class ChatMessageMapper @Inject constructor(json: Json) {
     fun summary(payload: ApprovalRequestedPayload): String =
         payload.toolInputDisplay?.command?.takeIf { it.isNotBlank() } ?: payload.action
 
-    /** The row preview for a started call: the server-rendered `description` wins
-     * (ticket 153 — every tool gets a readable label), then a Bash call's non-blank
-     * `description` argument (ticket 095), then the server's display command when it
-     * sent one, else derived from the arguments (ToolPreview). */
-    fun preview(payload: ToolCallPayload): String {
-        payload.description?.takeIf { it.isNotBlank() }?.let { return it }
-        if (payload.name == "Bash") {
-            val description = (payload.args?.get("description") as? JsonPrimitive)?.contentOrNull
-            if (!description.isNullOrBlank()) return ToolPreview.of(payload.name, payload.args)
+    /** The row preview for a live call (a transcript tool frame, a snapshot running
+     * tool): a Bash call's non-blank `description` argument wins (ticket 095), then the
+     * server's display command when it sent one, else derived from the arguments
+     * (ToolPreview). */
+    fun preview(name: String, args: JsonObject?, display: ToolInputDisplayDto?): String {
+        if (name == "Bash") {
+            val description = (args?.get("description") as? JsonPrimitive)?.contentOrNull
+            if (!description.isNullOrBlank()) return ToolPreview.of(name, args)
         }
-        return payload.display?.command?.takeIf { it.isNotBlank() } ?: ToolPreview.of(payload.name, payload.args)
+        return display?.command?.takeIf { it.isNotBlank() } ?: ToolPreview.of(name, args)
     }
 
     /** The `agent_call` display's typed model (ticket 157 — 0.31.0, docs/server-api.md,
@@ -232,13 +231,13 @@ class ChatMessageMapper @Inject constructor(json: Json) {
                 assistantText = turn.assistantText,
                 thinkingText = turn.thinkingText,
                 runningTools = turn.runningTools.map { tool ->
-                    // The same renderings a live tool.call.started row gets (ticket
-                    // 144): the seeded row is indistinguishable from a witnessed one.
+                    // The same renderings a live tool frame's row gets (ticket 144):
+                    // the seeded row is indistinguishable from a witnessed one.
                     RunningTool(
                         toolCallId = tool.toolCallId,
                         name = tool.name,
                         args = tool.args,
-                        preview = preview(ToolCallPayload(tool.toolCallId, tool.name, tool.args, tool.display)),
+                        preview = preview(tool.name, tool.args, tool.display),
                         input = formatDetail(tool.args),
                         agentCall = agentCall(tool.display),
                     )
@@ -382,64 +381,6 @@ class ChatMessageMapper @Inject constructor(json: Json) {
             model = dto.model?.takeIf { it.isNotBlank() },
             thinkingEffort = dto.thinkingEffort?.takeIf { it.isNotBlank() },
         )
-    }
-
-    /** WS task `info` → domain (ticket 092): the CORE status/kind vocabulary (the
-     * collector maps it to the REST wire one); times are epoch millis, unlike REST's
-     * ISO strings. Unknown values drop the event with a Log.w, never crash. */
-    fun toDomain(dto: TaskInfoDto): TaskInfo? {
-        val status = when (dto.status) {
-            "running" -> TaskInfo.Status.Running
-            "completed" -> TaskInfo.Status.Completed
-            "failed" -> TaskInfo.Status.Failed
-            "timed_out" -> TaskInfo.Status.TimedOut
-            "killed" -> TaskInfo.Status.Killed
-            "lost" -> TaskInfo.Status.Lost
-            else -> {
-                Log.w(TAG, "Dropping task event '${dto.taskId}' with unknown status '${dto.status}'")
-                return null
-            }
-        }
-        val kind = when (dto.kind) {
-            "agent" -> TaskInfo.Kind.Agent
-            "process" -> TaskInfo.Kind.Process
-            else -> {
-                Log.w(TAG, "Dropping task event '${dto.taskId}' with unknown kind '${dto.kind}'")
-                return null
-            }
-        }
-        return TaskInfo(
-            taskId = dto.taskId,
-            description = dto.description,
-            status = status,
-            startedAt = Instant.ofEpochMilli(dto.startedAt),
-            endedAt = dto.endedAt?.let(Instant::ofEpochMilli),
-            stopReason = dto.stopReason,
-            kind = kind,
-            agentId = dto.agentId,
-            subagentType = dto.subagentType,
-        )
-    }
-
-    /** `agent.status.updated` phase object → domain (ticket 148): the 2.0.2 kind
-     * vocabulary; an unknown kind drops the frame with a Log.w (the ignore-unknown
-     * rule), never crash. `since` is epoch ms on the wire, absent on the terminal
-     * kinds (they carry `at`). */
-    fun toDomain(dto: AgentPhaseDto): AgentPhase? {
-        val kind = when (dto.kind) {
-            "idle" -> AgentPhase.Kind.Idle
-            "running" -> AgentPhase.Kind.Running
-            "tool_call" -> AgentPhase.Kind.ToolCall
-            "retrying" -> AgentPhase.Kind.Retrying
-            "awaiting_approval" -> AgentPhase.Kind.AwaitingApproval
-            "interrupted" -> AgentPhase.Kind.Interrupted
-            "ended" -> AgentPhase.Kind.Ended
-            else -> {
-                Log.w(TAG, "Dropping agent phase with unknown kind '${dto.kind}'")
-                return null
-            }
-        }
-        return AgentPhase(kind, dto.since?.let(Instant::ofEpochMilli), dto.name)
     }
 
     private fun parseInstant(value: String?): Instant? =

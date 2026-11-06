@@ -589,7 +589,7 @@ class ChatViewModel internal constructor(
 
     /**
      * Applies the chat-side snapshot bundle (ticket 085): the cold-start /
-     * `resync_required` rebuild. The live tail survives per the snapshot's busy (the
+     * 40932-recovery rebuild. The live tail survives per the snapshot's busy (the
      * same polarity as ticket 048's status check — a finished turn has no legitimate
      * live rows); a turn event landing mid-fetch forces keep-live (it is newer than
      * the snapshot). The in-flight turn's pre-watermark tail seeds from the bundle
@@ -644,9 +644,6 @@ class ChatViewModel internal constructor(
         // bundle's real usage seeds it directly (ticket 161); the seed's guard
         // drops the late response when a live usage frame overtakes it.
         seedSessionStatus()
-        // The subscribe resuming exactly at this watermark needs no resync — this
-        // apply already healed everything up to it.
-        appliedSnapshotCursor = snapshot.asOfSeq to snapshot.epoch
     }
 
     /** Re-drives the store's session link registry (ticket 091 — spawned / roster /
@@ -676,11 +673,6 @@ class ChatViewModel internal constructor(
     /** Bumped on every approval event, so a snapshot apply (ticket 085) racing the
      * live stream drops its stale queue replace. */
     private val approvalsSeedGuard = SeedGuard()
-
-    /** The watermark of the last applied snapshot (ticket 085): a [SocketEvent.Reconnected]
-     * whose resume cursor matches it needs no resync — the snapshot apply already
-     * healed everything up to that point. */
-    private var appliedSnapshotCursor: Pair<Long, String>? = null
 
     /** Publishes the timeline's current rows+todos — the coalescer's publish point
      * and [applySessionEvent]'s for timeline-bound events. */
@@ -1152,36 +1144,31 @@ class ChatViewModel internal constructor(
                         when (event) {
                             SocketEvent.Connected ->
                                 uiState.update { it.copy(isReconnecting = false) }
-                            is SocketEvent.Reconnected -> {
+                            SocketEvent.Reconnected -> {
                                 uiState.update { it.copy(isReconnecting = false) }
-                                val applied = appliedSnapshotCursor
-                                if (applied != null && applied.first == event.seq && applied.second == event.epoch) {
-                                    // The subscribe resumed exactly at the applied
-                                    // snapshot's watermark (ticket 085): the apply
-                                    // already healed everything up to it — the 048
-                                    // resync would be a redundant burst.
-                                } else {
-                                    // The cursor resume replays missed events; the
-                                    // status-aware resync heals whatever the replay cannot
-                                    // cover (ticket 048). It also runs here — not only on
-                                    // ON_START — so a keep-live refetch can never race and
-                                    // clobber the ON_START resync's clear-live decision.
-                                    resyncHistoryAfterDrop()
-                                    questions.refresh()
-                                }
-                            }
-                            SocketEvent.ResyncRequired -> {
-                                // No replay will come: the missed window (a turn.ended
-                                // above all) heals from a fresh snapshot (ticket 085) —
-                                // the socket connection stays open, subsequent live
-                                // frames carry fresh cursors.
-                                resyncFromSnapshot()
+                                // The re-subscribe streams live ops only — the window
+                                // the drop missed (a turn end above all) heals from
+                                // REST: the status-aware resync (ticket 048) plus the
+                                // pending questions. It also runs here — not only on
+                                // ON_START — so a keep-live refetch can never race and
+                                // clobber the ON_START resync's clear-live decision.
+                                resyncHistoryAfterDrop()
+                                questions.refresh()
                             }
                             SocketEvent.Disconnected ->
                                 uiState.update { it.copy(isReconnecting = true) }
-                            // No-op: the history load validates the URL first and owns the
-                            // user-facing error.
-                            is SocketEvent.Failed -> Unit
+                            // An invalid URL: no-op — the history load validates it first
+                            // and owns the user-facing error. A session the server does
+                            // not know (ticket 175) surfaces like a failed load:
+                            // full-screen while nothing renders, a snackbar otherwise.
+                            is SocketEvent.Failed -> if (event.error is DataError.SessionNotFound) {
+                                uiState.update { it.copy(isReconnecting = false) }
+                                if (uiState.value.items.isNullOrEmpty()) {
+                                    uiState.update { it.copy(error = event.error.toUserMessage()) }
+                                } else {
+                                    _effects.send(Effect.RefreshFailed(event.error.toUserMessage()))
+                                }
+                            }
                             is SocketEvent.Event -> Unit // handled above via the coalescer
                         }
                     }
@@ -1247,7 +1234,7 @@ class ChatViewModel internal constructor(
                 // re-derived from the questions endpoint instead of being cleared here.
                 // The early-stop footer (ticket 155) lands now; the refetch below
                 // re-appends it over the canonical rows.
-                timeline.onTurnEnded(event.interruptReason)
+                timeline.onTurnEnded(event.interruptReason, event.errorMessage)
                 uiState.update {
                     it.copy(
                         isWorking = false,
@@ -1364,12 +1351,12 @@ class ChatViewModel internal constructor(
     }
 
     /**
-     * Re-sync after a connection gap (ON_START gate reopen, [SocketEvent.Reconnected],
-     * [SocketEvent.ResyncRequired] — ticket 048): a turn may have ENDED while the
-     * stream was away, and nothing says so when the replay cannot cover the gap (no
-     * cursor, or a refused one). A finished turn can have no legitimate live rows, so
-     * the history refetch clears them; a running turn keeps the keep-live refetch and
-     * the replay fills the gap. A turn event landing while the /status GET is in
+     * Re-sync after a connection gap (ON_START gate reopen, [SocketEvent.Reconnected] —
+     * ticket 048): a turn may have ENDED while the stream was away, and nothing says so
+     * — the re-subscribe replays nothing (ticket 176 owns `transcript_since`). A
+     * finished turn can have no legitimate live rows, so the history refetch clears
+     * them; a running turn keeps the keep-live refetch and the live ops extend it. A
+     * turn event landing while the /status GET is in
      * flight is newer than its snapshot (the [seedSessionStatus] pattern) and
      * downgrades the clear; a failed /status keeps the live rows too. ON_START and
      * the resumed socket's Reconnected fire together, so resyncs are latest-wins:
@@ -1385,31 +1372,6 @@ class ChatViewModel internal constructor(
             val busy = chatRepository.getSessionStatus(settingsRepository.current(), sessionId).getOrNull()?.busy
             refreshHistory(clearLive = busy == false && !turnSeedGuard.isStale(turnEventsAtStart))
         }
-    }
-
-    /**
-     * The `resync_required` heal (ticket 085): the server refused the resume cursor,
-     * so the missed window is rebuilt from a fresh snapshot — the same apply as the
-     * cold start, keep-live still decided by the snapshot's busy. Latest-wins with
-     * [resyncHistoryAfterDrop] through the shared job lane. A failed fetch surfaces
-     * like a failed history refetch (full-screen while empty, snackbar otherwise).
-     */
-    private fun resyncFromSnapshot() {
-        val guards = captureSeedGuards()
-        resyncJob?.cancel()
-        resyncJob = viewModelScope.launch {
-            snapshotSync.resync(sessionId)
-                .onSuccess { applySnapshot(it, guards) }
-                .onFailure { error ->
-                    if (uiState.value.items.isNullOrEmpty()) {
-                        uiState.update { it.copy(error = error.toUserMessage()) }
-                    } else {
-                        _effects.send(Effect.RefreshFailed(error.toUserMessage()))
-                    }
-                }
-        }
-        // No replay will come: task.* events missed in the gap heal from REST too.
-        jobsStore.seed()
     }
 
     /** Newest-page history refetch (initial load, turn-end commit, resync — ticket

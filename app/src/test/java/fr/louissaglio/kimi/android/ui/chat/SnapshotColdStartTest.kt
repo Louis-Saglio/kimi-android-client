@@ -1,6 +1,8 @@
 package fr.louissaglio.kimi.android.ui.chat
 
 import androidx.lifecycle.viewModelScope
+import fr.louissaglio.kimi.android.data.chat.SessionEvent
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.awaitState
 import java.util.concurrent.TimeUnit
@@ -149,10 +151,13 @@ class SnapshotColdStartTest : ChatViewModelTestBase() {
         }
 
         socket.send(
-            """{"type":"tool.result","seq":43,"epoch":"ep_snap","session_id":"session_1",""" +
-                """"timestamp":"2026-09-16T10:00:05.000Z","payload":{"type":"tool.result","turnId":1,""" +
-                """"toolCallId":"tool_bash","output":"done","is_error":false,""" +
-                """"agentId":"main","sessionId":"session_1"}}""",
+            TranscriptFrames.opsFrame(
+                TranscriptFrames.toolOp(
+                    "tool_bash", "Bash", "done",
+                    ""","input":{"command":"sleep 60","timeout":90},"output":"done"""",
+                    turnId = "tx",
+                ),
+            ),
         )
         socket.send(assistantDeltaFrame(" All set.", 44))
 
@@ -215,23 +220,6 @@ class SnapshotColdStartTest : ChatViewModelTestBase() {
         assertEquals("tool_q1", question.toolCallId)
         assertEquals("agent-1", question.agentId)
         assertEquals("Red or blue?", question.items.single().text)
-    }
-
-    @Test
-    fun `the first subscribe after a cold start resumes at the snapshot watermark`() = runBlocking {
-        // Gapless stitching (ticket 085): the cursor seeded from the snapshot makes the
-        // very first subscribe a resume — the window between the REST fetch and the
-        // subscribe replays instead of being lost.
-        snapshotBody = snapshotBundle()
-
-        viewModel.onScreenStarted()
-        awaitServerSocket()
-
-        awaitCondition { clientFrames.isNotEmpty() }
-        val subscribe = clientFrames.first()
-        assertTrue(subscribe, "\"type\":\"subscribe\"" in subscribe)
-        assertTrue(subscribe, subscribe.contains("\"seq\":42"))
-        assertTrue(subscribe, subscribe.contains("\"epoch\":\"ep_snap\""))
     }
 
     @Test
@@ -310,14 +298,22 @@ class SnapshotColdStartTest : ChatViewModelTestBase() {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()
         awaitState(viewModel.uiState) { it.items != null }
+        // The first visit's live spawn: the Agent call as a tool frame, the record
+        // through the store's lifecycle funnel (the `task` frame carrier is ticket 182's).
         socket.send(
-            """{"type":"tool.call.started","seq":17,"epoch":"ep_1","session_id":"session_1",""" +
-                """"timestamp":"2026-07-28T03:37:35.000Z","payload":{"type":"tool.call.started","turnId":0,""" +
-                """"toolCallId":"tool_agent","name":"Agent","args":{"subagent_type":"explore",""" +
-                """"description":"doc-verify","prompt":"Reply ok"},"agentId":"main","sessionId":"session_1"}}""",
+            TranscriptFrames.opsFrame(
+                TranscriptFrames.toolOp(
+                    "tool_agent", "Agent", "running",
+                    ""","input":{"subagent_type":"explore","description":"doc-verify","prompt":"Reply ok"}""",
+                    turnId = "tx",
+                ),
+            ),
         )
-        socket.send(subagentSpawnedFrame())
-        socket.send(subagentStartedFrame())
+        subagentStore.apply(
+            "session_1",
+            SessionEvent.SubagentSpawned("agent-12", "explore", "tool_agent", "doc-verify", runInBackground = false),
+        )
+        subagentStore.apply("session_1", SessionEvent.SubagentStarted("agent-12"))
         awaitCondition { subagentStoreEntry("agent-12")?.status == SubagentStatus.Working }
 
         // The session is left (the chat ViewModel is cleared — its scope dies — and the

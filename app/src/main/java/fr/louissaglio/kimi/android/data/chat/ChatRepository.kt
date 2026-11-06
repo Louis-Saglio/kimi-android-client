@@ -294,20 +294,13 @@ class ChatRepository @Inject constructor(
     ): Result<FileContent?> =
         fileHistory.getContent(settings, sessionId, turnId, path, phase)
 
-    /** Seeds the socket's resume cursor from a snapshot watermark (ticket 085), so the
-     * session's next subscribe resumes exactly where the bundle was taken. */
-    fun seedSessionCursor(sessionId: String, seq: Long, epoch: String) =
-        socket.seedCursor(sessionId, seq, epoch)
-
     /**
      * Streams [SocketEvent]s for [sessionId]. One collection = one socket owned here
      * (not by the UI); cancelling the collection closes it. On a drop the stream
-     * retries with exponential backoff and re-subscribes with the last seen cursor —
-     * which survives the collection itself (ticket 048), so a later collection
-     * resumes too — and the server replays missed events. The collector is told via
-     * [SocketEvent.Reconnected] (any subscribe carrying a cursor) so it can also
-     * refetch history, and via [SocketEvent.ResyncRequired] when the server refuses
-     * the cursor and no replay will come.
+     * retries with exponential backoff and re-subscribes (`subscribe_v2` — the
+     * subscription does not survive a disconnect); the collector is told via
+     * [SocketEvent.Reconnected] so it can re-sync from REST. A session the server does
+     * not know fails the stream ([SocketEvent.Failed]).
      */
     fun observeSession(settings: ServerSettings, sessionId: String): Flow<SocketEvent> =
         socket.observe(settings, sessionId)

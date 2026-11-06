@@ -20,67 +20,30 @@ class ChatMessageMapperTest {
 
     @Test
     fun `a started bash call's description beats the server display command`() {
-        // ticket 095: the live tool.call.started path prefers display.command — for Bash
-        // a non-blank args.description (the human-written label) must win over it.
-        val payload = ToolCallPayload(
-            toolCallId = "tool_1",
-            name = "Bash",
-            args = buildJsonObject {
-                put("command", "./gradlew test")
-                put("description", "Run the unit tests")
-            },
-            display = ToolInputDisplayDto(kind = "command", command = "./gradlew test"),
-        )
+        // ticket 095: the live tool-frame path prefers display.command — for Bash a
+        // non-blank args.description (the human-written label) must win over it.
+        val args = buildJsonObject {
+            put("command", "./gradlew test")
+            put("description", "Run the unit tests")
+        }
+        val display = ToolInputDisplayDto(kind = "command", command = "./gradlew test")
 
-        assertEquals("Run the unit tests", mapper.preview(payload))
-    }
-
-    // --- Server description precedence (ticket 153) -------------------------------------
-
-    @Test
-    fun `the server description beats the bash description argument and the display command`() {
-        // ticket 153: tool.call.started carries the server-rendered action — it wins
-        // over both of 095's sources.
-        val payload = ToolCallPayload(
-            toolCallId = "tool_1",
-            name = "Bash",
-            args = buildJsonObject {
-                put("command", "./gradlew test")
-                put("description", "Run the unit tests")
-            },
-            display = ToolInputDisplayDto(kind = "command", command = "./gradlew test"),
-            description = "Running: ./gradlew test",
-        )
-
-        assertEquals("Running: ./gradlew test", mapper.preview(payload))
+        assertEquals("Run the unit tests", mapper.preview("Bash", args, display))
     }
 
     @Test
-    fun `a non-bash call previews the server description over its args`() {
-        val payload = ToolCallPayload(
-            toolCallId = "tool_1",
-            name = "Read",
-            args = buildJsonObject { put("path", "/tmp/spike/a.txt") },
-            description = "Reading /tmp/spike/a.txt",
-        )
+    fun `the display command beats the args derivation when no description exists`() {
+        val args = buildJsonObject { put("command", "ls  -la") }
+        val display = ToolInputDisplayDto(kind = "command", command = "ls -la /srv")
 
-        assertEquals("Reading /tmp/spike/a.txt", mapper.preview(payload))
+        assertEquals("ls -la /srv", mapper.preview("Bash", args, display))
     }
 
     @Test
-    fun `a blank server description falls through to the 095 path`() {
-        val payload = ToolCallPayload(
-            toolCallId = "tool_1",
-            name = "Bash",
-            args = buildJsonObject {
-                put("command", "./gradlew test")
-                put("description", "Run the unit tests")
-            },
-            display = ToolInputDisplayDto(kind = "command", command = "./gradlew test"),
-            description = " ",
-        )
+    fun `a call without a display previews its args`() {
+        val args = buildJsonObject { put("path", "/tmp/spike/a.txt") }
 
-        assertEquals("Run the unit tests", mapper.preview(payload))
+        assertEquals(ToolPreview.of("Read", args), mapper.preview("Read", args, null))
     }
 
     // --- Raw args plumbing (ticket 118) ------------------------------------------------

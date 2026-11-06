@@ -6,6 +6,8 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.lifecycle.viewModelScope
 import fr.louissaglio.kimi.android.data.attachments.AttachmentStore
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
+import fr.louissaglio.kimi.android.data.chat.SessionEvent
+import fr.louissaglio.kimi.android.testutil.TranscriptFrames
 import fr.louissaglio.kimi.android.data.sessions.UnreadSessionsStore
 import fr.louissaglio.kimi.android.data.settings.SettingsRepository
 import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
@@ -175,8 +177,7 @@ class SubagentStreamStoreKeepAliveTest {
 
         assertNotNull(store.keepAliveJob(SESSION_ID))
         val socket = awaitServerSocket()
-        socket.send(subagentSpawnedFrame())
-        socket.send(subagentStartedFrame())
+        spawnAgent12()
         socket.send(subAssistantDeltaFrame("live after process death", seq = 23))
 
         awaitCondition { entry("agent-12")?.items?.isNotEmpty() == true }
@@ -198,7 +199,7 @@ class SubagentStreamStoreKeepAliveTest {
         // Restored-on-the-page state: the keep-alive is the feeder.
         store.pageOpened(SESSION_ID)
         val keepAliveSocket = awaitServerSocket()
-        keepAliveSocket.send(subagentSpawnedFrame())
+        spawnAgent12()
         keepAliveSocket.send(subAssistantDeltaFrame("from the keep-alive", seq = 23))
         awaitCondition { entry("agent-12")?.items?.size == 1 }
 
@@ -211,9 +212,9 @@ class SubagentStreamStoreKeepAliveTest {
         // feeds — two concurrent collections would double-apply replayed events.
         awaitCondition { store.keepAliveJob(SESSION_ID) == null }
         val chatSocket = awaitNewServerSocket(after = keepAliveSocket)
-        // The chat's subscribe resumes with the cursor the keep-alive reached (one
-        // shared SessionSocket — the 048 machinery): no replay gap, no overlap.
-        awaitCondition { clientFrames.size == 2 && "\"seq\":19" in clientFrames[1] }
+        // The chat subscribes afresh on the one shared SessionSocket, whose fold
+        // remembers what the keep-alive already emitted.
+        awaitCondition { clientFrames.size == 2 && "\"type\":\"subscribe_v2\"" in clientFrames[1] }
 
         // Consecutive deltas append to the one streaming bubble (live_0) — a
         // double-feed would show up as the text applied twice.
@@ -283,12 +284,10 @@ class SubagentStreamStoreKeepAliveTest {
 
         store.pageOpened(SESSION_ID)
 
-        // The subscribe frame carrying the snapshot watermark proves the sync (cursor
-        // seed AND roster seed) completed before it — gapless stitching.
+        // The record is already seeded when the subscribe goes out: the sync completed
+        // before it.
         awaitCondition { clientFrames.isNotEmpty() }
-        val subscribe = clientFrames.first()
-        assertTrue(subscribe, subscribe.contains("\"seq\":18"))
-        assertTrue(subscribe, subscribe.contains("\"epoch\":\"ep_1\""))
+        assertTrue(clientFrames.first(), clientFrames.first().contains("\"type\":\"subscribe_v2\""))
         val seeded = entry("agent-12")!!
         assertEquals("explore", seeded.name)
         assertEquals("doc-verify", seeded.description)
@@ -364,22 +363,16 @@ class SubagentStreamStoreKeepAliveTest {
         return serverSocket!!
     }
 
-    private fun subagentSpawnedFrame(): String =
-        """{"type":"subagent.spawned","seq":19,"epoch":"ep_1","session_id":"session_1",""" +
-            """"timestamp":"2026-07-28T03:37:35.492Z","payload":{"type":"subagent.spawned",""" +
-            """"subagentId":"agent-12","subagentName":"explore","parentToolCallId":"tool_agent",""" +
-            """"parentAgentId":"main","callerAgentId":"main","description":"doc-verify",""" +
-            """"runInBackground":false,"agentId":"main","sessionId":"session_1"}}"""
+    /** The sub-agent's record and Working status, through the store's lifecycle funnel:
+     * the 2.5.0 spawn carrier (the `task` frame) is ticket 182's. */
+    private suspend fun spawnAgent12() {
+        store.apply(SESSION_ID, SessionEvent.SubagentSpawned("agent-12", "explore", "tool_agent", "doc-verify", runInBackground = false))
+        store.apply(SESSION_ID, SessionEvent.SubagentStarted("agent-12"))
+    }
 
-    private fun subagentStartedFrame(): String =
-        """{"type":"subagent.started","seq":22,"epoch":"ep_1","session_id":"session_1",""" +
-            """"timestamp":"2026-07-28T03:37:35.600Z","payload":{"type":"subagent.started",""" +
-            """"subagentId":"agent-12","agentId":"main","sessionId":"session_1"}}"""
-
+    /** One sub-agent text chunk: a fresh text frame per call, tagged agent-12. */
     private fun subAssistantDeltaFrame(delta: String, seq: Int): String =
-        """{"type":"assistant.delta","seq":$seq,"epoch":"ep_1","volatile":true,"offset":0,""" +
-            """"session_id":"session_1","timestamp":"2026-07-28T03:37:36.100Z",""" +
-            """"payload":{"type":"assistant.delta","turnId":0,"delta":"$delta","agentId":"agent-12","sessionId":"session_1"}}"""
+        TranscriptFrames.opsFrame(TranscriptFrames.textOp("t0.1.f$seq", delta, turnId = "t0"), agentId = "agent-12")
 
     private companion object {
         const val SESSION_ID = "session_1"
