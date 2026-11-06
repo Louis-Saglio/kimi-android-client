@@ -39,6 +39,13 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
     fun summary(display: ToolInputDisplayDto?, action: String): String =
         display?.command?.takeIf { it.isNotBlank() } ?: action
 
+    /** The plan Markdown of a `plan_review` display (ticket 173 — `ExitPlanMode`,
+     * docs/server-api.md, Plan review approvals): the approval card renders it above
+     * Allow/Deny. Null for every other kind, a missing display, or a blank plan — those
+     * cards keep the [summary]-only treatment. */
+    fun planReview(display: ToolInputDisplayDto?): String? =
+        display?.takeIf { it.kind == PLAN_REVIEW_KIND }?.plan?.takeIf { it.isNotBlank() }
+
     /** The row preview for a transcript tool frame (a live op, or a REST transcript
      * page — the cold start's running turn, the sub-agent page): a Bash call's non-blank `description` argument wins (ticket 095), then the
      * server's display command when it sent one, else derived from the arguments
@@ -250,7 +257,7 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
      * The flat `interaction` frame → the approval card's events (ticket 171): `pending`
      * → [SessionEvent.ApprovalRequested] (card id = the interaction id, the one the
      * response route takes; [summary] over the display command, else the action; the
-     * asking agent from the frame), `ended` → [SessionEvent.ApprovalResolved] whatever
+     * `plan_review` display's plan — ticket 173; the asking agent from the frame), `ended` → [SessionEvent.ApprovalResolved] whatever
      * the outcome (`approved`/`rejected`/`cancelled`). A question frame maps to nothing
      * here ([toQuestionEvent]'s), like an unknown status or an undecodable request.
      */
@@ -268,6 +275,7 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
                     toolName = request.toolName,
                     summary = summary(request.toolInputDisplay, request.action),
                     agentId = frame.agentId.takeIf { it.isNotBlank() } ?: MAIN_AGENT_ID,
+                    plan = planReview(request.toolInputDisplay),
                 )
             }
             "ended" -> SessionEvent.ApprovalResolved(frame.interactionId)
@@ -316,6 +324,7 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
             toolName = request.toolName,
             summary = summary(request.display, request.action),
             agentId = request.agentId?.takeIf { it.isNotBlank() } ?: MAIN_AGENT_ID,
+            plan = planReview(request.display),
         )
     }
 
@@ -489,6 +498,7 @@ class ChatMessageMapper @Inject constructor(private val json: Json) {
 
     private companion object {
         const val TAG = "ChatMessageMapper"
+        const val PLAN_REVIEW_KIND = "plan_review"
         val DATA_URL_RE = Regex("""^data:([^;,]+);base64,(.*)$""", RegexOption.DOT_MATCHES_ALL)
 
         // File-store ids come in two shapes: v1 `f_`<26-char ULID> and v2 `f_`<randomUUID>.

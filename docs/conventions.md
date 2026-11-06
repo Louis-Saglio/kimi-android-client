@@ -69,7 +69,11 @@
   `ChatMessageMapper.toInteractionEvent`, which dispatches on `kind` to
   `toApprovalEvent`/`toQuestionEvent`): an approval `pending` →
   `ApprovalRequested` (card id = the interaction id, summary over
-  `tool_input_display`/`action`, the asking `agent_id`), `ended` →
+  `tool_input_display`/`action`, the asking `agent_id`; a `plan_review`
+  display — `ExitPlanMode`, ticket 173 — also carries its plan Markdown,
+  `ChatMessageMapper.planReview`, which the card renders with the chat's
+  `MarkdownBody` in a height-capped scroll area above Allow/Deny; the
+  transcript entity's camelCase `display` maps the same way), `ended` →
   `ApprovalResolved` for every outcome — the card closes on that frame, never
   on the POST response, and a turn end does not clear it (an abort ends its
   approvals with `outcome:"cancelled"`; a background sub-agent's outlives the

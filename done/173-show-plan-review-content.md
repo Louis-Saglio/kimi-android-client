@@ -86,3 +86,38 @@ Relevant code: `data/chat/ChatDtos.kt` (`ToolInputDisplayDto`),
 `data/chat/ChatMessageMapper.kt` (`summary`), the approval card in
 `ui/chat/components/Cards.kt`. Wire reference: `docs/server-api.md` →
 Interactions → Plan review approvals.
+
+## Implementation notes
+
+**2026-11-06 —** `ToolInputDisplayDto` (`ChatDtos.kt`) now decodes the `plan_review`
+kind's `plan` and `path` next to `command` and the `agent_call` fields. The pure
+`ChatMessageMapper.planReview(display)` returns the plan Markdown for kind `plan_review`
+with a non-blank plan, null for every other kind (command, agent call, unknown, missing
+display) — so `summary` and `preview` are untouched and a plan card's compact summary
+stays the action string. Both approval sources thread it through a new optional `plan`
+field: the live `interaction` frame (`toApprovalEvent` → `SessionEvent.ApprovalRequested.plan`)
+and the transcript / reset-snapshot entity (`toPendingApproval` →
+`PendingApprovalRequest.plan`), then `ChatViewModel.PendingApproval.plan` on all three
+queue paths (live request, ack reset, cold start). The id, decision route and clearing
+are ticket 171's, unchanged: Allow still posts `{"kind":"approval","decision":"approved"}`.
+
+- `ApprovalCard` (`ui/chat/components/Cards.kt`) renders a non-null plan with the chat's
+  `MarkdownBody` inside a `surface`-coloured inset capped at 240 dp and scrolled
+  vertically (`APPROVAL_PLAN_TAG`), between the summary and the Allow/Deny row — a long
+  plan scrolls in place and never pushes the buttons out of the bottom dock.
+- The `GET .../transcript/plan` fallback was not wired: every source the app reads (the
+  live frame, the post-ack re-send, the reset snapshot and the REST transcript entity)
+  carries the display, so the route would only be a second rendering path. Revisit if a
+  plan approval is observed without its display.
+- Tests: `ChatMessageMapperTest` (the capture-shaped display decodes `kind`/`plan`/`path`;
+  `planReview` is null for command, agent-call, unknown-kind, blank and missing displays;
+  a plan frame and a camelCase plan entity carry the plan while command, display-less
+  and unknown-kind approvals map exactly as before), `ChatViewModelTest` (a plan frame
+  reaches `PendingApproval.plan` and Allow posts the plain approved body to the
+  interactions route). The instrumented `ApprovalCardTest` gained the plan rendering,
+  a long plan scrolled to its last step with its body ≤ 240 dp and Allow/Deny still
+  displayed, and a command approval with no plan body (compiled, not run here).
+  `TranscriptFrames` gained `PLAN_REVIEW_DISPLAY`/`PLAN_REVIEW_PLAN`/`PLAN_REVIEW_ACTION`
+  and a raw `displayJson` override on `approvalFrame`/`approvalEntity`.
+- Not verified live (no server access from this run): covered by the verbatim 2.4.0
+  display capture in docs/server-api.md only.

@@ -114,12 +114,15 @@ class ChatViewModel internal constructor(
 
     /** One pending permission request, surfaced as the approval card above the input row.
      * [agentId] is the asking agent (ticket 139): "main", or the sub-agent's id — the
-     * card badges itself with the member's name from [UiState.subagentNames]. */
+     * card badges itself with the member's name from [UiState.subagentNames]. [plan] is
+     * the plan Markdown of an `ExitPlanMode` review (ticket 173): the card renders it in
+     * a height-capped scroll area above Allow/Deny; null for every other request. */
     data class PendingApproval(
         val approvalId: String,
         val toolName: String,
         val summary: String,
         val agentId: String = MAIN_AGENT_ID,
+        val plan: String? = null,
     )
 
     /** Transient LLM-retry status of the in-flight step (turn.step.retrying, 0.31.0 —
@@ -663,7 +666,7 @@ class ChatViewModel internal constructor(
                 pendingApprovals =
                     if (!approvalsSeedGuard.isStale(guards.approvals)) {
                         bundle.transcript.pendingApprovals
-                            .map { a -> PendingApproval(a.approvalId, a.toolName, a.summary, a.agentId) }
+                            .map { a -> PendingApproval(a.approvalId, a.toolName, a.summary, a.agentId, a.plan) }
                             .distinctBy { a -> a.approvalId }
                     } else {
                         it.pendingApprovals
@@ -1348,7 +1351,7 @@ class ChatViewModel internal constructor(
             is SessionEvent.TranscriptStale -> rebuildFromTranscript()
             is SessionEvent.ApprovalRequested -> {
                 approvalsSeedGuard.bump()
-                val approval = PendingApproval(event.approvalId, event.toolName, event.summary, event.agentId)
+                val approval = PendingApproval(event.approvalId, event.toolName, event.summary, event.agentId, event.plan)
                 uiState.update {
                     // Deduped by interaction id, in place: the post-ack re-send of a
                     // request the reset already queued must neither double it nor move
@@ -1370,7 +1373,7 @@ class ChatViewModel internal constructor(
                 uiState.update {
                     it.copy(
                         pendingApprovals = event.pending
-                            .map { a -> PendingApproval(a.approvalId, a.toolName, a.summary, a.agentId) }
+                            .map { a -> PendingApproval(a.approvalId, a.toolName, a.summary, a.agentId, a.plan) }
                             .distinctBy { a -> a.approvalId },
                     )
                 }

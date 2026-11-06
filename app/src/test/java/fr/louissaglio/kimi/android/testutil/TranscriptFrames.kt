@@ -60,7 +60,8 @@ object TranscriptFrames {
      * The flat approval `interaction` frame (ticket 171), shaped after the verbatim
      * 2.4.0/2.5.0 captures (docs/server-api.md, Interactions): `pending` carries the
      * snake_case request; `ended` adds [outcome], `ended_at` and the response. A null
-     * [command] omits `tool_input_display` (the card falls back to [action]).
+     * [command] omits `tool_input_display` (the card falls back to [action]); a raw
+     * [displayJson] (e.g. [PLAN_REVIEW_DISPLAY]) replaces the command display.
      */
     fun approvalFrame(
         interactionId: String,
@@ -71,10 +72,11 @@ object TranscriptFrames {
         command: String? = "echo hi",
         agentId: String = "main",
         sessionId: String = "session_1",
+        displayJson: String? = command?.let {
+            """{"kind":"command","command":"$it","cwd":"/path/to/project","language":"bash"}"""
+        },
     ): String {
-        val display = command?.let {
-            ""","tool_input_display":{"kind":"command","command":"$it","cwd":"/path/to/project","language":"bash"}"""
-        } ?: ""
+        val display = displayJson?.let { ""","tool_input_display":$it""" } ?: ""
         val ended = if (status == "ended") {
             """"outcome":"$outcome","ended_at":"2026-11-04T19:27:27.526Z","""
         } else {
@@ -89,17 +91,36 @@ object TranscriptFrames {
     }
 
     /** One approval entity of `transcript.reset.snapshot.interactions` / the REST
-     * transcript (camelCase request — docs/server-api.md, Pending state on REST). */
+     * transcript (camelCase request — docs/server-api.md, Pending state on REST). A raw
+     * [displayJson] replaces the command display ([toolName]/[action] to match). */
     fun approvalEntity(
         interactionId: String,
         state: String = "pending",
         command: String = "echo hi",
         agentId: String = "main",
+        toolName: String = "Bash",
+        action: String = "Running: $command",
+        displayJson: String = """{"kind":"command","command":"$command"}""",
     ): String =
         """{"interactionId":"$interactionId","interactionKind":"approval","toolCallId":"call_$interactionId",""" +
             """"state":"$state","request":{"id":"$interactionId","sessionId":"session_1","agentId":"$agentId",""" +
-            """"turnId":"t1","toolCallId":"call_$interactionId","toolName":"Bash","action":"Running: $command",""" +
-            """"display":{"kind":"command","command":"$command"}}}"""
+            """"turnId":"t1","toolCallId":"call_$interactionId","toolName":"$toolName","action":"$action",""" +
+            """"display":$displayJson}}"""
+
+    /** The plan of [PLAN_REVIEW_DISPLAY], decoded (JSON escapes resolved). */
+    const val PLAN_REVIEW_PLAN: String =
+        "# Add README.md with \"hello\"\n\n## Context\n\nThe repository has no README."
+
+    /** An `ExitPlanMode` approval's `tool_input_display`, shaped after the verbatim
+     * 2.4.0 capture (docs/server-api.md, Plan review approvals); pair it with
+     * `toolName = "ExitPlanMode"` and [PLAN_REVIEW_ACTION]. */
+    const val PLAN_REVIEW_DISPLAY: String =
+        """{"kind":"plan_review",""" +
+            """"plan":"# Add README.md with \"hello\"\n\n## Context\n\nThe repository has no README.",""" +
+            """"path":"/path/to/session/agents/main/plans/plan.md"}"""
+
+    /** The `action` of a plan review approval (docs/server-api.md, Plan review approvals). */
+    const val PLAN_REVIEW_ACTION: String = "Presenting plan and exiting plan mode"
 
     /** The verbatim pending question's single-select item (docs/server-api.md,
      * Interactions → The `interaction` frame). */

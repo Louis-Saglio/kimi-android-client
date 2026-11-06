@@ -53,12 +53,14 @@ data class TranscriptPrompt(
 
 /** One pending approval of the transcript's interactions (2.5.0, the camelCase
  * request): [summary] is the card's compact argument preview (the display command,
- * else the action — ChatMessageMapper.summary); [agentId] is the asking agent. */
+ * else the action — ChatMessageMapper.summary); [agentId] is the asking agent; [plan]
+ * is a `plan_review` display's Markdown (ChatMessageMapper.planReview — ticket 173). */
 data class PendingApprovalRequest(
     val approvalId: String,
     val toolName: String,
     val summary: String,
     val agentId: String = MAIN_AGENT_ID,
+    val plan: String? = null,
 )
 
 /** Turn/step states observed on the wire: "running", "completed", and (real since

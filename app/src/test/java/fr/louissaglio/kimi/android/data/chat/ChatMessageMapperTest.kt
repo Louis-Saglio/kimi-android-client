@@ -497,6 +497,99 @@ class ChatMessageMapperTest {
         assertNull(mapper.agentCall(ToolInputDisplayDto(kind = "agent_call", agentName = " ", prompt = "Reply ok")))
     }
 
+    // --- plan_review display (ticket 173) --------------------------------------------
+
+    @Test
+    fun `a plan review display decodes its plan and path and maps to the card's plan`() {
+        // Shaped after the verbatim 2.4.0 capture (docs/server-api.md, Plan review approvals).
+        val display = wireJson.decodeFromString(
+            ToolInputDisplayDto.serializer(),
+            fr.louissaglio.kimi.android.testutil.TranscriptFrames.PLAN_REVIEW_DISPLAY,
+        )
+
+        assertEquals("plan_review", display.kind)
+        assertEquals(fr.louissaglio.kimi.android.testutil.TranscriptFrames.PLAN_REVIEW_PLAN, display.plan)
+        assertEquals("/path/to/session/agents/main/plans/plan.md", display.path)
+        assertEquals(fr.louissaglio.kimi.android.testutil.TranscriptFrames.PLAN_REVIEW_PLAN, mapper.planReview(display))
+        // The compact summary stays the action string: a plan display has no command.
+        assertEquals("Presenting plan and exiting plan mode", mapper.summary(display, "Presenting plan and exiting plan mode"))
+        assertNull(mapper.agentCall(display))
+    }
+
+    @Test
+    fun `only a plan review display with a non-blank plan yields a plan`() {
+        assertNull(mapper.planReview(ToolInputDisplayDto(kind = "command", command = "ls")))
+        assertNull(mapper.planReview(ToolInputDisplayDto(kind = "agent_call", agentName = "explore", prompt = "ok")))
+        // Unknown kinds keep the summary-only fallback, even when they carry a plan field.
+        assertNull(mapper.planReview(ToolInputDisplayDto(kind = "future_kind", plan = "# Plan")))
+        assertNull(mapper.planReview(ToolInputDisplayDto(kind = "plan_review", plan = " ")))
+        assertNull(mapper.planReview(ToolInputDisplayDto(kind = "plan_review")))
+        assertNull(mapper.planReview(null))
+    }
+
+    @Test
+    fun `a plan review approval frame and transcript entity carry the plan, other approvals none`() {
+        val frames = fr.louissaglio.kimi.android.testutil.TranscriptFrames
+        val planFrame = wireJson.decodeFromString<InteractionFrame>(
+            frames.approvalFrame(
+                "approval_plan",
+                toolName = "ExitPlanMode",
+                action = frames.PLAN_REVIEW_ACTION,
+                displayJson = frames.PLAN_REVIEW_DISPLAY,
+            ),
+        )
+        assertEquals(
+            SessionEvent.ApprovalRequested(
+                "approval_plan", "ExitPlanMode", frames.PLAN_REVIEW_ACTION, plan = frames.PLAN_REVIEW_PLAN,
+            ),
+            mapper.toApprovalEvent(planFrame),
+        )
+        // A command approval and a display-less one look exactly as before.
+        assertEquals(
+            SessionEvent.ApprovalRequested("approval_1", "Bash", "echo hi"),
+            mapper.toApprovalEvent(wireJson.decodeFromString<InteractionFrame>(frames.approvalFrame("approval_1"))),
+        )
+        assertEquals(
+            SessionEvent.ApprovalRequested("approval_2", "Write", "Writing a.txt"),
+            mapper.toApprovalEvent(
+                wireJson.decodeFromString<InteractionFrame>(
+                    frames.approvalFrame("approval_2", toolName = "Write", action = "Writing a.txt", command = null),
+                ),
+            ),
+        )
+        // An unknown display kind falls back to the action, with no plan.
+        assertEquals(
+            SessionEvent.ApprovalRequested("approval_3", "Edit", "Editing a.txt"),
+            mapper.toApprovalEvent(
+                wireJson.decodeFromString<InteractionFrame>(
+                    frames.approvalFrame(
+                        "approval_3", toolName = "Edit", action = "Editing a.txt",
+                        displayJson = """{"kind":"future_kind","plan":"# not a plan"}""",
+                    ),
+                ),
+            ),
+        )
+
+        // The cold read (REST transcript / reset snapshot entity, camelCase request).
+        val entities = wireJson.decodeFromString<List<InteractionEntityDto>>(
+            "[" + frames.approvalEntity(
+                "approval_plan",
+                toolName = "ExitPlanMode",
+                action = frames.PLAN_REVIEW_ACTION,
+                displayJson = frames.PLAN_REVIEW_DISPLAY,
+            ) + "," + frames.approvalEntity("approval_1", command = "ls") + "]",
+        )
+        assertEquals(
+            listOf(
+                PendingApprovalRequest(
+                    "approval_plan", "ExitPlanMode", frames.PLAN_REVIEW_ACTION, plan = frames.PLAN_REVIEW_PLAN,
+                ),
+                PendingApprovalRequest("approval_1", "Bash", "ls"),
+            ),
+            mapper.pendingApprovals(entities),
+        )
+    }
+
     private fun transcript(vararg frames: TranscriptFrameDto): TranscriptData = TranscriptData(
         agentId = "agent-1",
         items = listOf(

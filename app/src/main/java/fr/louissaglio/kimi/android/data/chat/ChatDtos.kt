@@ -275,10 +275,13 @@ data class ServerHelloPayload(
     @SerialName("heartbeat_ms") val heartbeatMs: Long? = null,
 )
 
-/** `tool_input_display` of an approval request; only `command` (kind "command") is consumed.
- * A tool frame's `display` has the same shape, and carries the `agent_call` kind (an
- * `Agent` spawn, 0.31.0 — docs/server-api.md, Sub-agents): [agentName]/[prompt] feed
- * the spawn row (ticket 157), [background] marks a background spawn. */
+/** `tool_input_display` of an approval request: `command` (kind "command") is the
+ * card's summary; kind `plan_review` (`ExitPlanMode`, 2.4.0 — docs/server-api.md,
+ * Plan review approvals) carries the plan Markdown in [plan] and the plan file in
+ * [path] (decoded, not consumed — ticket 173). A tool frame's `display` has the same
+ * shape, and carries the `agent_call` kind (an `Agent` spawn, 0.31.0 —
+ * docs/server-api.md, Sub-agents): [agentName]/[prompt] feed the spawn row (ticket
+ * 157), [background] marks a background spawn. */
 @Serializable
 data class ToolInputDisplayDto(
     val kind: String = "",
@@ -286,6 +289,8 @@ data class ToolInputDisplayDto(
     @SerialName("agent_name") val agentName: String? = null,
     val prompt: String? = null,
     val background: Boolean = false,
+    val plan: String? = null,
+    val path: String? = null,
 )
 
 /**

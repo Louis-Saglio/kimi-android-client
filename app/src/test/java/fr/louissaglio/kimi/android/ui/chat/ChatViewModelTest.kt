@@ -116,6 +116,43 @@ class ChatViewModelTest : ChatViewModelTestBase() {
     }
 
     @Test
+    fun `a plan review approval carries its plan to the card and allow posts the plain approved body`() = runBlocking {
+        // Ticket 173: the ExitPlanMode review's plan reaches the card; the decision is
+        // the same body as any other approval (no selected_label).
+        viewModel.onScreenStarted()
+        val socket = awaitServerSocket()
+        awaitState(viewModel.uiState) { it.items != null }
+        socket.send(
+            TranscriptFrames.approvalFrame(
+                "approval_plan",
+                toolName = "ExitPlanMode",
+                action = TranscriptFrames.PLAN_REVIEW_ACTION,
+                displayJson = TranscriptFrames.PLAN_REVIEW_DISPLAY,
+            ),
+        )
+        awaitState(viewModel.uiState) { it.pendingApprovals.isNotEmpty() }
+        assertEquals(
+            listOf(
+                ChatViewModel.PendingApproval(
+                    "approval_plan",
+                    "ExitPlanMode",
+                    TranscriptFrames.PLAN_REVIEW_ACTION,
+                    plan = TranscriptFrames.PLAN_REVIEW_PLAN,
+                ),
+            ),
+            viewModel.uiState.value.pendingApprovals,
+        )
+
+        viewModel.onAllow()
+
+        val request = awaitRequest("/interactions/")
+        assertEquals("/api/v1/sessions/session_1/interactions/approval_plan", request.target)
+        assertEquals("""{"kind":"approval","decision":"approved"}""", request.body!!.utf8())
+        socket.send(TranscriptFrames.approvalFrame("approval_plan", status = "ended", outcome = "approved"))
+        awaitState(viewModel.uiState) { it.pendingApprovals.isEmpty() }
+    }
+
+    @Test
     fun `deny posts the rejected decision to the interactions route`() = runBlocking {
         viewModel.onScreenStarted()
         val socket = awaitServerSocket()

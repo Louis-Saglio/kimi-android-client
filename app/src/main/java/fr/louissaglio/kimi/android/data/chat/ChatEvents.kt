@@ -198,12 +198,15 @@ sealed interface SessionEvent {
      * action). [agentId] is the ASKING agent (ticket 139) — "main", or the sub-agent's
      * id: presentation only (the card's sub-agent badge), deliberately NOT an
      * [AgentScopedEvent] — the request resolves through the session-level interactions
-     * route whoever asked, so it must stay main-chat-routed. */
+     * route whoever asked, so it must stay main-chat-routed. [plan] is the Markdown
+     * of a `plan_review` display (`ExitPlanMode` — ticket 173), null for any other
+     * request. */
     data class ApprovalRequested(
         val approvalId: String,
         val toolName: String,
         val summary: String,
         val agentId: String = MAIN_AGENT_ID,
+        val plan: String? = null,
     ) : SessionEvent
 
     /** The request ended — decided by this client or another one, or cancelled with
