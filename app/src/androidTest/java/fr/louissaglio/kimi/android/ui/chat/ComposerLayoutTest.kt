@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.assertWidthIsAtLeast
+import androidx.compose.ui.test.assertTouchWidthIsEqualTo
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -87,20 +88,22 @@ class ComposerLayoutTest {
 
     /** Ticket 185 (C1): on a 360dp phone the swarm chip must not starve the model chip
      * when idle, and mid-turn (Stop + Steer pinned) the icon-sized middle-zone controls
-     * keep their 48dp touch targets — only the model chip gives. */
+     * keep their 48dp touch targets — only the model chip gives. The swarm toggle is an
+     * M3 icon button: 40dp visual, 48dp touch target (minimumInteractiveComponentSize),
+     * so it is checked on its touch bounds. */
     @Test
     fun onA360dpPhoneTheModelChipStaysTappableWhenIdle() {
         inputBar(isWorking = false, width = 360.dp)
 
         composeTestRule.onNodeWithContentDescription("Model:", substring = true).assertWidthIsAtLeast(48.dp)
-        composeTestRule.onNodeWithContentDescription("Swarm mode").assertWidthIsAtLeast(48.dp)
+        composeTestRule.onNodeWithContentDescription("Swarm mode").assertTouchWidthIsEqualTo(48.dp)
     }
 
     @Test
     fun onA360dpPhoneMidTurnTheChipsKeepTheirTouchTargets() {
         inputBar(isWorking = true, width = 360.dp)
 
-        composeTestRule.onNodeWithContentDescription("Swarm mode").assertWidthIsAtLeast(48.dp)
+        composeTestRule.onNodeWithContentDescription("Swarm mode").assertTouchWidthIsEqualTo(48.dp)
         composeTestRule.onNodeWithContentDescription("Permission mode:", substring = true).assertWidthIsAtLeast(48.dp)
         composeTestRule.onNodeWithContentDescription("Context usage:", substring = true).assertWidthIsAtLeast(48.dp)
     }
