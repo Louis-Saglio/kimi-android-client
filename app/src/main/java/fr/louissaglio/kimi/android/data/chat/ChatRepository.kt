@@ -263,7 +263,6 @@ class ChatRepository @Inject constructor(
      * `subscribe_v2` sends as `transcript_since`. */
     fun seedTranscript(sessionId: String, page: TranscriptPage) = socket.seedTranscript(sessionId, page)
 
-    /** The agent's resume watermark on the session socket; null when none is known. */
     fun transcriptWatermark(sessionId: String, agentId: String): Long? = socket.watermark(sessionId, agentId)
 
     /** Sends one flat task control (`task.stop`/`task.background` — ticket 179) for
@@ -298,11 +297,11 @@ class ChatRepository @Inject constructor(
         agentId: String = MAIN_AGENT_ID,
     ): Result<TaskState?> = socket.watchTask(sessionId, agentId, taskId, sinceOffset, tailBytes)
 
-    /** Stops a task's output stream (`task.unwatch`), fire-and-forget. */
+    /** Fire-and-forget: no reply is awaited. */
     fun unwatchTaskOutput(sessionId: String, taskId: String, agentId: String = MAIN_AGENT_ID): Boolean =
         socket.unwatchTask(sessionId, agentId, taskId)
 
-    /** A watched task's `task.output` chunks (ticket 180). */
+    /** Replay-less: collect it BEFORE [watchTaskOutput]. */
     fun observeTaskOutput(sessionId: String, taskId: String, agentId: String = MAIN_AGENT_ID): Flow<TaskOutputChunk> =
         socket.observeTaskOutput(sessionId, agentId, taskId)
 

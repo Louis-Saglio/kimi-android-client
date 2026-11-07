@@ -185,9 +185,7 @@ internal fun SubagentContent(
     onRetry: () -> Unit = {},
     onHistoryTopReached: () -> Unit = {},
     snackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
-    /** Ticket 184: a tool-result image's thumbnail tap. */
     onImageClick: (ChatMessage.Part.Image) -> Unit = {},
-    /** Ticket 184: resolves a tool-result image's bytes. */
     loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray? = { null },
 ) {
     Scaffold(

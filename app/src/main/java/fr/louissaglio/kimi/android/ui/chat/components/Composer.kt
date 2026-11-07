@@ -337,7 +337,6 @@ private fun SwarmModeChip(selected: Boolean, onToggle: () -> Unit, modifier: Mod
     }
 }
 
-/** Stable test tag of the composer's swarm chip (ticket 174). */
 internal const val SWARM_MODE_CHIP_TAG = "swarmModeChip"
 
 /** One staged attachment above the input (ticket 033): a bounded thumbnail for images,

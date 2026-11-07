@@ -76,7 +76,8 @@ Tests
 - **A1** (evicting per-session socket state): needs a product decision on
   what the job screen shows for an ended task after the session was left.
 - **A4, C9** (ticket-tagged KDoc that restates names): codebase-wide style;
-  change it everywhere or nowhere.
+  change it everywhere or nowhere. (The review's own sites were cleaned up
+  afterwards, see Follow-up — 5-rest.)
 - **C7** (move the hand-rolled chips to M3 `FilterChip`): the sibling chips are
   hand-rolled too; restyle them together if wanted.
 - Coil adoption, `stringResource`, `runTest` instead of the real-I/O harness:
@@ -419,3 +420,59 @@ plus the media-row test tags in `ToolRows.kt`.
   green (1098 tests, 0 failures, 1 skipped; forced re-run). The instrumented suite
   was not run in this step: the updated `SwarmModeChipTest`, `ComposerLayoutTest` and
   `ToolRowTest` media cases only compile here.
+
+## Follow-up — 5-rest
+
+*2026-11-07.* The 7 points the four fix steps left out (A1, A4, C7, C9, and the
+review's three "Conflicts" items: Coil, `stringResource`, `runTest`). Skill
+loaded: `android-dev`. Only A4 and C9 are fixed; the other five need a decision,
+so they are left as **to be decided by Louis**, with the options.
+
+- **A4 — done for the review's sites.** Deleted the KDoc that only restated the
+  name plus a ticket number: `SessionSocket.watermark`, `CONTROL_TIMEOUT_MILLIS`,
+  `ChatRepository.transcriptWatermark`. Cut the others to their contract:
+  `SessionSocket.observeTaskOutput` and `ChatRepository.observeTaskOutput` now say
+  only "replay-less: collect it BEFORE `watchTask`/`watchTaskOutput`", and
+  `unwatchTaskOutput` only "fire-and-forget".
+- **C9 — done for the review's sites.** Deleted the name-restating KDoc on
+  `APPROVAL_PLAN_TAG`, `SWARM_MODE_CHIP_TAG`, the `onImageClick`/`loadImageBytes`
+  parameters (`SubagentScreen`, both `ToolRows` signatures), the duplicated
+  two-line call-site comment in `MessageList` (both copies) and the
+  `ToolMediaIndicator` call-site comment in `ToolRows`. The why-comments stay (the
+  media-always-expands rule, the hoisting rationale in `SubagentScreen`, the
+  `TOOL_MEDIA_IMAGE_TAG` reason).
+  **To be decided by Louis:** whether to make this a rule. The ticket-tagged,
+  name-restating KDoc style is codebase-wide and neither `AGENTS.md` nor
+  `docs/conventions.md` documents it; nothing outside the review's sites changed.
+  Options: (a) add a "comments earn their place, the ticket number lives in
+  `git log`" rule to `docs/conventions.md` and apply it as files are touched,
+  (b) a one-off sweep, (c) keep the current style.
+- **A1 — not done, to be decided by Louis.** Evicting a session's `tasks`,
+  `taskOutputs` and `openConnections` (and `folds`/`watermarks`) on
+  `SubagentStreamStore.release` is a short change, but it changes what the job
+  screen shows for an ended task opened again after leaving its session: ended
+  tasks are never re-listed, so it would fall back to the route seeds. Options:
+  (a) evict on release and accept the seed fallback, (b) evict only ended tasks
+  older than N, or cap the sessions kept (LRU), (c) keep it as is (the growth is
+  small: a few strings per task).
+- **C7 — modifier part done under C1, M3 part to be decided by Louis.** Since C1
+  the swarm control is icon-only, so `FilterChip` (the review's fix) no longer
+  fits. The M3 equivalent is now `IconToggleButton` with
+  `iconToggleButtonColors(checkedContainerColor = secondaryContainer)`, which
+  gives the 48dp target and toggle semantics. It changes the look (a 40dp circle
+  instead of the 32dp rounded tile) and the role (Checkbox instead of Switch), and
+  the sibling `PermissionModeChip`/`ModelChip` are hand-rolled too, so restyle the
+  row together or not at all.
+- **Coil — not done, to be decided by Louis.** A documented project choice
+  (`HistoryImageThumbnail` + `loadImageBytes`, docs/conventions.md, media rows);
+  C2's `ImageBytesCache` already fixes the re-download. Moving to Coil means a new
+  dependency, a custom `Fetcher`/`Keyer` for session media, and rewritten
+  thumbnail tests.
+- **`stringResource` — not done, to be decided by Louis.** Hard-coded
+  user-facing strings are the codebase-wide practice and the app is English-only;
+  moving to resources is an app-wide change (and the instrumented tests match on
+  text), worth it only if localisation is planned.
+- **`runTest` — not done, to be decided by Louis.** The unit tests keep the
+  real-I/O harness on purpose (real `MockWebServer`/WebSocket, real-clock waits;
+  D1–D8 made it honest, see the Tests bullet in docs/conventions.md). Moving to
+  `runTest` on one scheduler would mean replacing the real sockets with fakes.

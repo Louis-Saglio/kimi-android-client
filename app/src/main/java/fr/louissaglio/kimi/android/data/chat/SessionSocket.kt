@@ -172,7 +172,6 @@ class SessionSocket @Inject constructor(
         if (seq != null) watermarksOf(sessionId)[page.agentId] = seq else watermarksOf(sessionId).remove(page.agentId)
     }
 
-    /** The agent's resume watermark, null when none is known (ticket 176). */
     fun watermark(sessionId: String, agentId: String): Long? = watermarks[sessionId]?.get(agentId)
 
     /** The latest state of [agentId]'s task [taskId] this process has seen (ticket
@@ -229,7 +228,7 @@ class SessionSocket @Inject constructor(
         return connection.webSocket.send(taskControlFrame(UNWATCH, requestId, sessionId, agentId, taskId))
     }
 
-    /** [agentId]'s task [taskId]'s `task.output` chunks while it is watched (ticket 180). */
+    /** Replay-less: collect it BEFORE [watchTask], or the chunk that follows the reply is lost. */
     fun observeTaskOutput(sessionId: String, agentId: String, taskId: String): Flow<TaskOutputChunk> =
         taskOutputsOf(sessionId).filter { it.agentId == agentId && it.taskId == taskId }
 
@@ -689,7 +688,6 @@ class SessionSocket @Inject constructor(
         const val TAG = "SessionSocket"
         const val MAX_BACKOFF_SHIFT = 5 // 1 s << 5 = 32 s, clamped to 30 s below
 
-        /** How long a task control waits for its `response` before failing. */
         const val CONTROL_TIMEOUT_MILLIS = 15_000L
 
         const val WATCH = "task.watch"

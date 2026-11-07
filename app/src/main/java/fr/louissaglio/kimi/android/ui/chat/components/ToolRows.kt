@@ -123,9 +123,7 @@ internal fun ToolGroupCard(
     onOpenSwarm: (String) -> Unit = {},
     /** Ticket 158: the spawn row's "Next step" Continue (the composer prefill). */
     onContinueSubagent: (String) -> Unit = {},
-    /** Ticket 184: a tool-result image's thumbnail tap (the full-screen viewer). */
     onImageClick: (ChatMessage.Part.Image) -> Unit = {},
-    /** Ticket 184: resolves a tool-result image's bytes (the session-media fetch). */
     loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray? = { null },
 ) {
     val status = when {
@@ -475,9 +473,7 @@ internal fun ToolRow(
     /** Ticket 158: the spawn row's "Next step" Continue — invoked with the
      * composer prefill (the hint's suggested `Agent(resume=…)` call text). */
     onContinueSubagent: (String) -> Unit = {},
-    /** Ticket 184: a result image's thumbnail tap (the full-screen viewer). */
     onImageClick: (ChatMessage.Part.Image) -> Unit = {},
-    /** Ticket 184: resolves a result image's bytes (the session-media fetch). */
     loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray? = { null },
 ) {
     val swarmMemberList = swarmMembers[activity.id].orEmpty()
@@ -802,7 +798,6 @@ internal fun ToolRow(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            // Ticket 184: the collapsed row's only media change — a small indicator.
             if (activity.media.isNotEmpty()) ToolMediaIndicator(activity.media, tint = detailColor)
             ToolStatusIcon(activity.status, runningDescription = "Tool running", modifier = Modifier.size(12.dp))
             if (expandable) {

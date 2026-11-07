@@ -40,7 +40,6 @@ import androidx.compose.ui.unit.dp
 import fr.louissaglio.kimi.android.data.chat.MAIN_AGENT_ID
 import fr.louissaglio.kimi.android.data.chat.PendingQuestion
 
-/** Test tag of the approval card's scrollable plan body (ticket 173). */
 internal const val APPROVAL_PLAN_TAG = "approval_plan"
 
 /** The plan body's cap: about a dozen lines of Markdown on a portrait phone. The
