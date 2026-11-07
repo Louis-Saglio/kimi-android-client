@@ -90,7 +90,15 @@
   drops the entry). The socket also keeps the latest state per (agent, task) at
   instance level (`observeTask` — every frame and control reply upserts, a
   `task.list` drops the agent's running entries it no longer names, ended ones
-  stay) and sends the flat task controls (`sendTaskControl` — `task.stop`/
+  stay). That per-session state (tasks, output stream, open-connection id, folds,
+  watermarks) is bounded by an LRU (ticket 185, A1): `SubagentStreamStore.release`
+  → `ChatRepository.releaseSession` → `SessionSocket.release` keeps the
+  `RETAINED_SESSIONS` (5) most recently used left sessions — so a recent session's
+  ended task still shows on its job screen — and evicts older ones whole, closing a
+  connection still open and failing its in-flight controls. A session being
+  collected again leaves the LRU until its next release; a read of a left
+  session's state (`seedTranscript`, `observeTask`) makes it the most recent. The
+  socket also sends the flat task controls (`sendTaskControl` — `task.stop`/
   `task.background`, `{type, request_id, session_id, agent_id, task_id}` on the
   session's open connection): the `{type:"response", request_id, code, msg?,
   task?}` reply is matched by `request_id`, a code-0 reply's task is emitted as
@@ -177,7 +185,9 @@
   guard for the chip — read-only, never written through; the ViewModel shows
   the stored pick on every start, ahead of the frame. The composer's swarm chip
   (ticket 174; icon-only since 185, like the permission chip — "Swarm mode" in the
-  semantics, a Switch role, the fill for on — so the shared middle zone keeps its
+  semantics; an M3 `IconToggleButton` since 185 (C7) — Checkbox role, 48 dp target,
+  `secondaryContainer` fill for on — next to the model and permission selectors,
+  which are borderless M3 `AssistChip`s — so the shared middle zone keeps its
   48 dp targets and the model chip room; the composer's Steer button runs 16 dp
   sides for the same budget) is NOT stored at all: `UiState.swarmMode` seeds from the
   subscribe's first `agent` frame and follows every later one unless an unsent

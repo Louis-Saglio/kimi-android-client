@@ -73,13 +73,15 @@ Tests
 
 ## Out of scope
 
-- **A1** (evicting per-session socket state): needs a product decision on
-  what the job screen shows for an ended task after the session was left.
+- **A1** (evicting per-session socket state): needed a product decision on
+  what the job screen shows for an ended task after the session was left
+  (decided and done, see Follow-up — A1 and C7).
 - **A4, C9** (ticket-tagged KDoc that restates names): codebase-wide style;
   change it everywhere or nowhere. (The review's own sites were cleaned up
   afterwards, see Follow-up — 5-rest.)
 - **C7** (move the hand-rolled chips to M3 `FilterChip`): the sibling chips are
-  hand-rolled too; restyle them together if wanted.
+  hand-rolled too; restyle them together if wanted (decided and done, see
+  Follow-up — A1 and C7).
 - Coil adoption, `stringResource`, `runTest` instead of the real-I/O harness:
   documented project choices (see the review's "Conflicts" sections).
 
@@ -476,3 +478,38 @@ so they are left as **to be decided by Louis**, with the options.
   real-I/O harness on purpose (real `MockWebServer`/WebSocket, real-clock waits;
   D1–D8 made it honest, see the Tests bullet in docs/conventions.md). Moving to
   `runTest` on one scheduler would mean replacing the real sockets with fakes.
+
+## Follow-up — A1 and C7
+
+*2026-11-07.* Louis's decisions: C7 — redo the whole composer control row on M3
+components, not only the swarm control; A1 — option (b), an LRU cap on the left
+sessions whose socket state is kept. Skills loaded: `android-dev`, `compose`,
+`android-ux`, `kotlin-coroutines`, `android-testing`.
+
+- **C7 — done.** The swarm control is an M3 `IconToggleButton`
+  (`iconToggleButtonColors(checkedContainerColor = secondaryContainer,
+  checkedContentColor = onSecondaryContainer)`): 48 dp touch target, a 40 dp
+  container, Checkbox role (was Switch). `ModelChip` and `PermissionModeChip` are
+  M3 `AssistChip`s (they run an action — open the picker sheet — so neither
+  `FilterChip` nor `InputChip` fits): the model chip keeps its ellipsizing label and
+  chevron as trailing icon; the permission chip keeps its icon-only look, the mode
+  glyph in its risk tint as leading icon and the chevron in the label slot. Both
+  chips are borderless, since the composer pill is their boundary, and every glyph
+  in the row is now the chip icon size (18 dp, was 16). The pickers stay the M3
+  bottom sheets they were; content descriptions, `SWARM_MODE_CHIP_TAG` and the
+  behaviour are unchanged. `SwarmModeChipTest` now also asserts the Checkbox role.
+- **A1 — done, option (b).** `SubagentStreamStore.release` now also calls
+  `ChatRepository.releaseSession` → `SessionSocket.release`. The socket keeps a
+  least-recently-used list of left sessions and holds the state (tasks, output
+  stream, open-connection id, folds, watermarks) of the `RETAINED_SESSIONS` = 5 most
+  recent; past that the oldest is evicted whole, and a connection still open for it
+  is closed with its in-flight controls failed (`DataError.Network`). A session
+  collected again (`observe`) leaves the list, so a session in use is never evicted;
+  reading a left session's state (`seedTranscript`, `observeTask`) or leaving it
+  again makes it the most recent. Five because a user rarely goes back further
+  than the last few sessions for an ended task, and the cost per session is small.
+  Tests: `SessionSocketTest` — "release keeps the five most recent left sessions
+  and evicts the oldest whole" and "a left session read again becomes the most
+  recent and outlives older ones".
+- Docs: docs/conventions.md describes the LRU (with the task state) and the
+  composer's M3 controls.
