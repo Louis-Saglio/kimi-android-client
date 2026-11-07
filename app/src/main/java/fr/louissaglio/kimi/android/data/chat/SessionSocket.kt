@@ -151,6 +151,64 @@ class SessionSocket @Inject constructor(
 
     private class PendingControl(val agentId: String, val reply: CompletableDeferred<TaskControlResponse>)
 
+    /**
+     * The left sessions whose state is still held, least recently used first (ticket
+     * 185, A1): [release] keeps the last [RETAINED_SESSIONS] of them — so the job screen
+     * of a recent session's ended task still finds its state (ended tasks are never
+     * re-listed) — and evicts the older ones whole. A session being collected again is
+     * in use and leaves this list until its next [release]; any other read of a listed
+     * session makes it the most recent.
+     */
+    private val released = LinkedHashSet<String>()
+
+    /**
+     * Marks [sessionId] as left for good: its state stays while it is among the
+     * [RETAINED_SESSIONS] most recently used left sessions; past that the oldest is
+     * evicted — its fold, watermarks, tasks and output stream dropped, a connection
+     * still open closed and its in-flight controls failed.
+     */
+    fun release(sessionId: String) {
+        val evicted = synchronized(released) {
+            released.remove(sessionId)
+            released.add(sessionId)
+            buildList {
+                while (released.size > RETAINED_SESSIONS) {
+                    val eldest = released.first()
+                    released.remove(eldest)
+                    add(eldest)
+                }
+            }
+        }
+        evicted.forEach(::evict)
+    }
+
+    private fun evict(sessionId: String) {
+        folds.remove(sessionId)
+        watermarks.remove(sessionId)
+        tasks.remove(sessionId)
+        taskOutputs.remove(sessionId)
+        openConnections.remove(sessionId)
+        connections.remove(sessionId)?.let { connection ->
+            connection.pending.values.forEach {
+                it.reply.completeExceptionally(IOException("The session was evicted before the reply"))
+            }
+            connection.webSocket.close(NORMAL_CLOSURE, "session evicted")
+        }
+    }
+
+    /** True while [sessionId]'s state is held for a left session (tests). */
+    internal fun isRetained(sessionId: String): Boolean = synchronized(released) { sessionId in released }
+
+    /** A read of a left session's state makes it the most recently used one. */
+    private fun touch(sessionId: String) {
+        synchronized(released) { if (released.remove(sessionId)) released.add(sessionId) }
+    }
+
+    /** A collection puts the session back in use: it is never evicted while used. */
+    private fun reuse(sessionId: String) {
+        synchronized(released) { released.remove(sessionId) }
+    }
+
     private fun foldOf(sessionId: String): TranscriptFold =
         folds.getOrPut(sessionId) { TranscriptFold(json, mapper) }
 
@@ -167,6 +225,7 @@ class SessionSocket @Inject constructor(
      * page's capture and this call are forgotten — their frames' final upserts heal.
      */
     fun seedTranscript(sessionId: String, page: TranscriptPage) {
+        touch(sessionId)
         foldOf(sessionId).seed(page.agentId, page)
         val seq = page.seq
         if (seq != null) watermarksOf(sessionId)[page.agentId] = seq else watermarksOf(sessionId).remove(page.agentId)
@@ -177,7 +236,7 @@ class SessionSocket @Inject constructor(
     /** The latest state of [agentId]'s task [taskId] this process has seen (ticket
      * 179): null until a `task.list`/`task` frame or a control reply names it. */
     fun observeTask(sessionId: String, agentId: String, taskId: String): Flow<TaskState?> =
-        tasksOf(sessionId).map { it[TaskKey(agentId, taskId)] }.distinctUntilChanged()
+        tasksOf(sessionId).also { touch(sessionId) }.map { it[TaskKey(agentId, taskId)] }.distinctUntilChanged()
 
     /**
      * Sends one flat task control for [agentId]'s task [taskId] on the session's open
@@ -297,6 +356,7 @@ class SessionSocket @Inject constructor(
             emit(SocketEvent.Failed(DataError.InvalidUrl))
             return@flow
         }
+        reuse(sessionId)
         val fold = foldOf(sessionId)
         val sessionWatermarks = watermarksOf(sessionId)
         val clientId = "android_${UUID.randomUUID()}"
@@ -417,7 +477,8 @@ class SessionSocket @Inject constructor(
             }
         } finally {
             connections.remove(sessionId, connection)
-            openConnectionOf(sessionId).compareAndSet(connection.id, null)
+            // Not openConnectionOf: an evicted session must not get its entry back.
+            openConnections[sessionId]?.compareAndSet(connection.id, null)
             // A control in flight on this socket gets no reply any more: fail it now
             // instead of waiting out the timeout.
             connection.pending.values.forEach {
@@ -689,6 +750,12 @@ class SessionSocket @Inject constructor(
         const val MAX_BACKOFF_SHIFT = 5 // 1 s << 5 = 32 s, clamped to 30 s below
 
         const val CONTROL_TIMEOUT_MILLIS = 15_000L
+
+        /** Left sessions whose state [release] keeps (A1): enough to go back to the
+         * last few sessions' ended tasks, bounded however many sessions are opened. */
+        const val RETAINED_SESSIONS = 5
+
+        const val NORMAL_CLOSURE = 1000
 
         const val WATCH = "task.watch"
         const val UNWATCH = "task.unwatch"

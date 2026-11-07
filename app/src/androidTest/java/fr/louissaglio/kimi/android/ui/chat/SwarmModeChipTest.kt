@@ -4,6 +4,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
@@ -18,8 +22,9 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** The composer's swarm chip (ticket 174): a Switch-role toggle found by its "Swarm
- * mode" content description (icon-only since ticket 185), plus the stable test tag
+/** The composer's swarm chip (ticket 174): an M3 icon toggle button (Checkbox role,
+ * ticket 185) found by its "Swarm mode" content description (icon-only since ticket
+ * 185), plus the stable test tag
  * ticket 174 promised. The chip's state reaching the prompt (`swarm_mode`) is not a
  * Compose concern — `ChatInputBar.onSend` carries no swarm argument — and is covered on
  * the JVM: `ChatViewModelTest` ("…a send carries it as swarm_mode true", "toggling the
@@ -69,6 +74,7 @@ class SwarmModeChipTest {
         inputBar()
 
         chip().assertIsDisplayed()
+        chip().assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Checkbox))
         chip().assertIsOff()
 
         chip().performClick()

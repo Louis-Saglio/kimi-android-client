@@ -265,6 +265,10 @@ class ChatRepository @Inject constructor(
 
     fun transcriptWatermark(sessionId: String, agentId: String): Long? = socket.watermark(sessionId, agentId)
 
+    /** The session was left for good: the socket keeps its state for the most recent
+     * few left sessions only ([SessionSocket.release]). */
+    fun releaseSession(sessionId: String) = socket.release(sessionId)
+
     /** Sends one flat task control (`task.stop`/`task.background` — ticket 179) for
      * [agentId]'s task over the session's live socket and awaits its reply. Success
      * carries the replied task state, which the socket has already emitted as a

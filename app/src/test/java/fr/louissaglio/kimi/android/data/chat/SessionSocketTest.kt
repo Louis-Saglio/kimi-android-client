@@ -1111,6 +1111,45 @@ class SessionSocketTest {
         assertFalse(clientFrames.first(), "transcript_since" in clientFrames.first())
     }
 
+    // --- release (ticket 185, A1) --------------------------------------------------------
+
+    private fun seedAndRelease(vararg sessionIds: String) = sessionIds.forEach {
+        socket.seedTranscript(it, runningPage(seq = 7))
+        socket.release(it)
+    }
+
+    @Test
+    fun `release keeps the five most recent left sessions and evicts the oldest whole`() {
+        seedAndRelease("s0", "s1", "s2", "s3", "s4")
+        assertEquals(7L, socket.watermark("s0", MAIN_AGENT_ID))
+
+        seedAndRelease("s5")
+
+        assertFalse(socket.isRetained("s0"))
+        assertEquals(null, socket.watermark("s0", MAIN_AGENT_ID))
+        for (id in listOf("s1", "s2", "s3", "s4", "s5")) {
+            assertTrue(id, socket.isRetained(id))
+            assertEquals(id, 7L, socket.watermark(id, MAIN_AGENT_ID))
+        }
+    }
+
+    @Test
+    fun `a left session read again becomes the most recent and outlives older ones`() {
+        seedAndRelease("s0", "s1", "s2", "s3", "s4")
+        // The job screen reading an ended task of s0, then s1 left a second time.
+        socket.observeTask("s0", MAIN_AGENT_ID, "task-1")
+        socket.release("s1")
+
+        seedAndRelease("s5")
+        assertEquals(null, socket.watermark("s2", MAIN_AGENT_ID))
+        assertEquals(7L, socket.watermark("s0", MAIN_AGENT_ID))
+        assertEquals(7L, socket.watermark("s1", MAIN_AGENT_ID))
+
+        seedAndRelease("s6")
+        assertEquals(null, socket.watermark("s3", MAIN_AGENT_ID))
+        assertEquals(7L, socket.watermark("s0", MAIN_AGENT_ID))
+    }
+
     // --- heartbeat ---------------------------------------------------------------------
 
     @Test
