@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-11-06
-(server version `2.5.2`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-11-10
+(server version `2.5.3`, `"backend": "v2"`, WS `protocol_version: 2`).
 
 Scope: core loop + user interaction — auth check, sessions, messages, prompts,
 steer, interactions (approvals and questions), abort, WebSocket events, file attachments,
@@ -17,7 +17,8 @@ Every core-loop endpoint below was executed against the live server unless
 its paragraph says **source-derived**. The exact commands are shown with each
 section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `2.5.1`
+**Protocol history:** this document previously described server `2.5.2`
+(verified 2026-11-06; see git history), `2.5.1`
 (verified 2026-11-05; see git history), `2.5.0`
 (verified 2026-11-04; see git history), `2.4.1`
 (verified 2026-10-30; see git history), `2.4.0`
@@ -50,6 +51,102 @@ section. Secrets are redacted (`<token>`).
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
 that, `0.27.0` before that, and `0.23.3` before that.
+
+The drift from 2.5.2 to 2.5.3 is **small and steer-shaped: one new REST route
+(`POST /api/v1/sessions/{id}/steer`), a new steer execution model that
+interrupts the active LLM step instead of waiting for it, append-only steer
+history, and a `reset` transcript op that now reaches the wire — no route,
+frame type or field was removed, and nothing the Android app parses breaks**.
+The nightly job's `pending-changelog.md` covered 2.5.2→2.5.3 (5 commits).
+The protocol-bearing commit is `e1912c80` ("improve same-turn steer
+interactions"): the new direct-steer route in `routes/prompts.ts`, the
+`steerIfActive` path through `agent-core-v2`'s loop, turn and prompt-channel
+state machines, and the projection change in `agent/loop/projection.ts`; the
+API-surface snapshot gains exactly that route. `1b5359d0` ("prune divergent
+live transcript steps") makes the transcript service emit a whole-agent
+`reset` op when the cold history omits live steps or frames. `c50a55bf` is
+Windows-only, `e3c3a120` the web-dist sync and `5af9942e` the release commit.
+Live verification used server `2.5.3`, started `2026-11-10T19:23:55.224Z`.
+
+- **New route `POST /api/v1/sessions/{id}/steer`** (commit `e1912c80`;
+  verified live 2026-11-10 — see Steer → Steer message content): the body is
+  the prompt-submission schema (`content`, `agent_id`, `prompt_id`,
+  `skills`, `model`, `thinking`, `permission_mode`, `disabled_tools`, …) and
+  the success data is the same `{prompt_id, user_message_id, status,
+  content, created_at}`. On an idle session it behaves exactly like the
+  prompt POST (fresh turn, ACK `status:"running"`); on a busy session it
+  queues and steers in the same request, with no separate submit-then-steer
+  round trip. Errors are the prompt POST's (`40401` unknown session with
+  `stack`, `40001` invalid/empty `content`, idempotency `40927`, media
+  `40407`, the `40931`/`40932` session-conflict family). The ACK reads
+  `status:"running"` even when the prompt is actually queued and steered —
+  the transcript's `prompt.upsert` is the truth.
+- **Steer now interrupts the active LLM request** (same commit; verified
+  live). A text/thinking stream is cut at the next drain boundary: the
+  current step's `step.upsert` becomes `state:"interrupted"` with the new
+  **`endReason:"steered"`**, the steered message lands as a user-role text
+  frame in a **new step of the same turn** (`promptIds`, `origin.kind:
+  "user"`), the turn stays `running` and later completes normally. A steer
+  that arrives while a tool call is streaming is held until that tool
+  finishes (the `turn.steer` gate refuses a streaming tool call), then the
+  same same-turn continuation happens. There is no `turn.ended` on this
+  wire, so no `reason:"steered"` frame; the turn header never leaves
+  `running` until its final completion.
+- **Steer history is append-only** (same commit; verified live). The message
+  projection no longer merges an in-turn user message into the preceding
+  user message (`canMergeUserMessage` excludes `origin.inTurn`), so
+  `GET .../messages` lists the steered message as its own `role:"user"`
+  entry with its own id, instead of folding its text into the prompt
+  bubble. The transcript already carried it as a separate frame; only
+  history changes.
+- **`transcript.ops` carries `reset` ops now** (commit `1b5359d0`; verified
+  live). When an ended turn's live transcript has steps or frames the cold
+  history omitted (routinely: a steered step, an empty thinking frame), the
+  transcript service replaces the agent's transcript with one op:
+  `{"op":"reset","agentId":"main","snapshot":{"items":[<full turns with
+  steps and frames>],…}}`, followed by the usual heal ops. The op was
+  already in `packages/transcript`'s union; 2.5.3 is the first release
+  observed emitting it (on every completed turn of this run, plain and
+  steered, main and child agents).
+- **`steerIfActive` no longer requires a tracked prompt** (source-derived
+  from the same commit): the skill-activation and direct-steer paths steer
+  whenever a turn is active (`activeTurnId !== undefined`), so an untracked
+  turn (background continuation, skill activation mid-turn) accepts a steer
+  too. Live, a skill activation during a streaming step produced an
+  internal empty-content prompt entity with `status:"completed"` and
+  `steeredAt` next to the active prompt's `steeredAt`.
+- **App impact: none breaks — one improvement ticket.** The app's
+  two-request steer (`POST /prompts` then `prompts:steer`) still works, but
+  it can lose the steer to a race (the prompt stays queued and runs as a
+  later turn while the UI reports failure) and needs the extra round trip;
+  ticket 185 moves it onto the direct route. The `reset` op is dropped by
+  `TranscriptFold` (unknown op) — harmless because a turn's ops are pruned
+  on `turn.upsert` completion and the chat refetches history on turn end;
+  `endReason:"steered"` is not read by the app (it only maps the
+  `interrupted` state). No breakage ticket.
+
+Everything else re-verified unchanged live on 2.5.3 (see the verification
+log): auth 401s, `/meta` (5 flags, 17 features, same capabilities), config,
+models (12), tools (36 = 27 builtins + 9 MCP), sessions create/get/list/
+profile/fork (`turn_index`)/reload/takeover/archive/restore, the v2 session
+table, messages (newest-first; the image rewrite to `session_media` +
+`name`), the full prompt round-trip, the `prompts:steer` queued flow, abort
+(interrupted step with `endReason:"aborted"`, cancelled turn, the
+`interruption` marker plus the undo reminder, aborted prompt), both
+compaction bodies (the `started` marker echoes `instruction` when one was
+sent; `tokensAfter` matches the following `usage` frame; both `40910`s with
+`stack`), questions (answer → `answered`, re-answer `40902`, dismiss →
+`dismissed`, unknown `40404`, the removed `/questions` route 404s),
+approvals (approve → `approved`, re-answer `40902`), foreground/background
+sub-agents (`task` frames with `kind:"subagent"`, `child_agent_id`,
+`detached` true/false; child `transcript.reset` + `agent` frames; REST
+`/tasks` 404), the `TodoList` write and read contracts
+(`display:{"kind":"todo_list"}`), files (upload/download/`Range` 206/
+delete → `40407`; session media 200 and surviving the upload's delete), the
+`task.watch`/`task.stop`/`task.unwatch` frames, WS
+hello/`subscribe_v2`/ack, unknown-session `not_found`, malformed `code:1`,
+`transcript_since` resume, `unsubscribe_v2`, search (`50001`, still
+disabled) and session rating (`{"appearance":null}`).
 
 The drift from 2.5.1 to 2.5.2 is **engine-internal — no route, WebSocket frame
 type, request field, response shape or enum changed** (verified live
@@ -4471,22 +4568,94 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../promp
 
 ## Steer
 
-Steering injects a queued prompt into the currently running turn. The client
-flow (re-verified 2026-07-23 on 0.29.0): while the session is busy, POST the
-new prompt as usual (response `"status": "queued"`), then steer the returned
-`prompt_id` into the active turn.
+Steering injects a message into the currently running turn. Two shapes are
+live on 2.5.3 (verified 2026-11-10):
 
-**2.5.0:** the REST route is unchanged, but the old
-`prompt.steered`/`turn.steer`/`context.spliced` frames are gone. The steer
-is visible as transcript state: the steered prompt's `prompt.upsert` goes
-`queued` → `completed` with `steeredAt`, the active prompt's entity gains
-`steeredAt`, the steered text appears as a user-role text frame carrying
-`promptIds` in the running turn's next step
-(`{"kind":"text","frameId":"t0.2.f1","role":"user","text":"…",
+- **Direct — `POST /api/v1/sessions/{id}/steer`** (new in 2.5.3): one
+  request carries the same body as a prompt submission. On a busy session
+  it queues and steers the message; on an idle one it behaves exactly like
+  the prompt POST (fresh turn).
+- **Queue-then-steer — `POST .../prompts` + `POST .../prompts:steer`**: post
+  the prompt as usual (`"status":"queued"` while busy), then steer the
+  returned `prompt_id` into the active turn.
+
+**2.5.3 execution model (verified live):** a steer interrupts the active
+LLM request at the next drain boundary instead of waiting for the step to
+finish. The current step is closed as `state:"interrupted"` with the new
+`endReason:"steered"`, and the steered text continues in a new step of the
+**same turn**. A steer that arrives while a tool call is streaming waits
+for that tool to finish first. Steered history is append-only: the message
+is its own `role:"user"` entry in `GET .../messages`.
+
+**2.5.0:** the old `prompt.steered`/`turn.steer`/`context.spliced` frames
+are gone. The steer is visible as transcript state: the steered prompt's
+`prompt.upsert` goes `queued` → `completed` with `steeredAt`, the active
+prompt's entity gains `steeredAt`, the steered text appears as a user-role
+text frame carrying `promptIds` in the running turn's next step
+(`{"kind":"text","frameId":"t2.3.f1","role":"user","text":"…",
 "promptIds":["msg_…"],"origin":{"kind":"user"}}`), and an `undo` marker
 carries the spliced message with `origin:{"kind":"user","inTurn":true}`.
 The turn does not restart; `prompt.completed` no longer exists — the prompt
 entity's `status:"completed"` is the completion signal.
+
+### Steer message content — `POST /api/v1/sessions/{id}/steer`
+
+**New in 2.5.3** (commit `e1912c80`; verified live 2026-11-10). Body: the
+prompt-submission schema — `content` (the same typed part union as the
+prompt POST, attachments included), `agent_id`, `prompt_id`, `skills`,
+`model`, `thinking`, `permission_mode`, `swarm_mode`, `metadata`,
+`disabled_tools`, `profile`. Success data is the prompt ACK shape.
+
+```bash
+curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_6ea83210.../steer \
+  -H "Authorization: Bearer <token>" \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  -d '{"content":[{"type":"text","text":"Stop and reply with exactly: direct-steer-mid-253"}],
+       "model":"deepseek/deepseek-v4-flash"}'
+```
+
+```json
+{"code":0,"msg":"success",
+ "data":{"prompt_id":"msg_01M73ETJGQ6E4M9QSRQ8BYMYRK",
+         "user_message_id":"msg_01M73ETJGQ6E4M9QSRQ8BYMYRK","status":"running",
+         "content":[{"type":"text","text":"Stop and reply with exactly: direct-steer-mid-253"}],
+         "created_at":"2026-11-10T19:26:42.205Z"},
+ "request_id":"01M73ETJGNJPEJB098A0JW2EDK"}
+```
+
+- On an **idle** session the call starts a normal turn (ACK
+  `status:"running"`, `prompt.upsert` running → completed), exactly like
+  `POST .../prompts`.
+- On a **busy** session the ACK also says `status:"running"`, but the
+  transcript logs the prompt as `queued` first, then `completed` with
+  `steeredAt` once the steer is applied. Trust the transcript entity, not
+  the ACK status.
+- Errors: empty or missing `content` → `40001` `content: Invalid input`;
+  unknown session → `40401` with `stack`; the rest match the prompt POST
+  (`40927` prompt-id conflict, `40407` file not found, `40931`/`40932`).
+  A steer against an active turn whose prompt is untracked is accepted
+  (source-derived; the engine now keys on `activeTurnId`, not a tracked
+  prompt).
+
+Mid-stream capture (prompt A streaming its essay, direct steer B posted):
+the current step `t2.2` is interrupted mid-thinking, B's user frame opens
+`t2.3` in the same turn, and the turn completes normally:
+
+```json
+{"op":"prompt.upsert","prompt":{"promptId":"msg_…A","status":"running",
+  "steeredAt":"2026-11-10T19:26:42.213Z",…}}
+{"op":"prompt.upsert","prompt":{"promptId":"msg_…B","status":"completed",
+  "finishedAt":"…","steeredAt":"…","content":[{"type":"text","text":"Stop and reply…"}]}}
+{"op":"step.upsert","turnId":"t2","step":{"stepId":"t2.2","state":"interrupted",
+  "endedAt":"…","endReason":"steered"}}
+{"op":"marker.upsert","item":{"marker":"undo","payload":{"start":14,"deleteCount":0,
+  "messages":[{"role":"user","content":[{"type":"text","text":"Stop and reply…"}],
+               "origin":{"kind":"user","inTurn":true},"id":"msg_…B"}]}}}
+{"op":"step.upsert","turnId":"t2","step":{"stepId":"t2.3","state":"running"}}
+{"op":"frame.upsert","turnId":"t2","stepId":"t2.3",
+ "frame":{"kind":"text","frameId":"t2.3.f1","role":"user","text":"Stop and reply…",
+          "promptIds":["msg_…B"],"origin":{"kind":"user"}}}
+```
 
 ### Steer queued prompts — `POST /api/v1/sessions/{id}/prompts:steer`
 
@@ -4505,9 +4674,15 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../promp
  "request_id":"01KY6GCAT25KYEJKXA3XMM50H6"}
 ```
 
+- **2.5.3:** a routed steer shares the direct route's execution model — it
+  interrupts the current LLM step (`endReason:"steered"`) and continues in a
+  new step of the same turn. Live capture: a queued prompt steered while a
+  Bash tool call was running waited for that tool to finish, then opened the
+  next step with the user frame; a steer against a streaming text/thinking
+  step cuts it at the drain boundary. Idle `40402` is unchanged.
 - **Idle session** (nothing to steer into): HTTP 200 with
   `{"code":40402,"msg":"no active prompt to steer into","data":null,...}`
-  (re-verified 2026-07-23).
+  (re-verified 2026-11-10).
 - Empty `prompt_ids`:
   `{"code":40001,"msg":"prompt_ids: Too small: expected array to have >=1 items",...}`
   (re-verified 2026-07-23).
@@ -4554,12 +4729,16 @@ curl -s -X POST 'http://127.0.0.1:58627/api/v1/sessions/session_b6be6715...:abor
 **2.5.0:** the REST behaviour is unchanged (`{"aborted":true}` mid-turn or
 idle), but the old `turn.step.interrupted` → `turn.ended` → `prompt.aborted`
 frames are gone. Abort is visible in the transcript stream as: the current
-step's `step.upsert` `state:"interrupted"`, the turn's `turn.upsert`
-`state:"cancelled"`, a `prompt.upsert` `status:"aborted"`, an `undo` marker
-carrying the interruption reminder
+step's `step.upsert` `state:"interrupted"` with `endReason:"aborted"`, the
+turn's `turn.upsert` `state:"cancelled"`, a standalone
+`marker:"interruption"` item
+(`{"turnId":<n>,"reason":"user_cancelled"}`), a `prompt.upsert`
+`status:"aborted"`, an `undo` marker carrying the interruption reminder
 (`origin:{"kind":"injection","variant":"interruption"}`), and
 `event.session.work_changed` with `busy:false`, `last_turn_reason:"cancelled"`.
-A killed tool call's `task` frame reports `outcome:"killed"`.
+A killed tool call's `task` frame reports `outcome:"killed"`. (The
+`interruption` marker was present before 2.5.3 too; it was missing from this
+section's earlier itemization, re-verified live 2026-11-10.)
 
 The historical sequence (0.29.0–2.4.1) was verified mid-run on 0.29.0
 (2026-07-23), again on 0.29.2 (2026-07-27), again on 0.31.0 (2026-07-30), and
@@ -4664,7 +4843,10 @@ trimmed):
 {"type":"usage", … "context_tokens":23493,"max_context_tokens":1000000 …}
 ```
 
-- `marker:"compaction"` phases: `started` carries `trigger` (`manual`);
+- `marker:"compaction"` phases: `started` carries `trigger` (`manual`) and
+  the request's **`instruction`** when one was sent (verified live
+  2026-11-10: `{"phase":"started","agentId":"main","trigger":"manual",
+  "instruction":"Keep the marker string verbatim…"}`; absent for `{}`);
   `completed` carries the full `result` block with the same five fields the
   old `compaction.completed` had (`summary`, `compactedCount`, `tokensBefore`,
   `tokensAfter`, `keptUserMessageCount`).
@@ -6339,18 +6521,19 @@ design — history pages in over REST):
 **`transcript.ops`** — one incremental batch: `{type, session_id, timestamp,
 payload:{type:"transcript.ops", agent_id, ops:[…], seq}}`. `seq` is strictly
 increasing per agent (gaps are possible when a grade filters a batch). The op
-union (schema from `packages/transcript`; all but `reset`/`items.remove`/
+union (schema from `packages/transcript`; all but `items.remove`/
 `attachment.upsert` observed live):
 
 | Op | Payload |
 | --- | --- |
 | `prompt.upsert` | `{prompt:{promptId,status,userMessageId,content,createdAt,finishedAt?,steeredAt?}}` |
 | `turn.upsert` | `{turn:{kind:"turn",turnId,ordinal,state,origin,prompt?,startedAt?,endedAt?,durationMs?,usage?,triggerPromptId?,error?}}` (no `steps` in the live header; `state` includes `failed` with an `error` message) |
-| `step.upsert` | `{turnId, step:{kind:"step",stepId,turnId,ordinal,state,startedAt?,endedAt?,usage?,finishReason?,llmTiming?,retry?,endReason?,endMessage?}}` (frames ride `frame.upsert`; `state:"interrupted"` + `endReason:"error"` is a failed provider call) |
+| `step.upsert` | `{turnId, step:{kind:"step",stepId,turnId,ordinal,state,startedAt?,endedAt?,usage?,finishReason?,llmTiming?,retry?,endReason?,endMessage?}}` (frames ride `frame.upsert`; `state:"interrupted"` + `endReason:"error"` is a failed provider call, `endReason:"aborted"` an abort, `endReason:"steered"` a steer cut — 2.5.3) |
 | `frame.upsert` | `{turnId, stepId, frame:{kind:"text"|"thinking"|"tool"|"notice",frameId,…}}` |
 | `append` | `{target:{type:"frame",turnId,stepId,frameId}, offset, text}` |
 | `marker.upsert` | `{item:{kind:"marker",markerId,marker,payload?,at?}, beforeTurn?}` |
 | `interaction.upsert` | `{interaction:{interactionId,interactionKind,toolCallId?,state,request?,response?}}` |
+| `reset` | `{agentId, snapshot:{items:[…],interactions,attachments,prompts,…}}` — whole-agent transcript replacement, emitted at a turn end when the cold history omits live steps/frames (2.5.3; see below) |
 | `attachment.upsert` | `{attachment:{…}}` |
 | `items.remove` | `{ids:[…]}` |
 
@@ -6429,6 +6612,31 @@ session — ids are strings and opaque):
   token-by-token during the call, then `state:"done"` (or `"error"`) with
   `input`, `display` and `output`. There is no `tool.progress` frame; the
   running frame's `progress` object is the schema-level substitute.
+
+**2.5.3 `reset` op.** `{"op":"reset","agentId":"main","snapshot":{…}}`
+replaces the agent's whole transcript (the same snapshot shape as
+`transcript.reset`, but with `items` populated: full turns, each with its
+steps and frames). The server emits it at a turn end when the live
+transcript's steps or frames are not a superset of the cold-folded history —
+in this run every completed turn (plain, steered, question, approval, and
+each child agent's single turn) produced one just before the usual heal
+ops. Verbatim (trimmed; the same batch's
+later ops are ordinary `turn.upsert`/`frame.upsert` heals):
+
+```json
+{"op":"reset","agentId":"main","snapshot":{"items":[
+  {"kind":"turn","turnId":"t0","ordinal":0,"state":"completed","prompt":"…",
+   "startedAt":"…","endedAt":"…","steps":[
+     {"kind":"step","stepId":"t0.1","ordinal":1,"state":"completed",
+      "frames":[{"kind":"text","frameId":"t0.1.f1","role":"assistant",
+                 "text":"I'll run the command as specified."},…]},…]},…],
+  "interactions":[],"attachments":[],"prompts":[…],"hasMoreOlder":false}}
+```
+
+A client that keeps its own live transcript should apply it wholesale, then
+fold the batch's remaining ops; a client that refetches history at turn end
+can ignore it (the Android app does, safely: its turn state is already
+terminal, so the later `frame.upsert`s are dropped too).
 
 **Resume.** `subscribe_v2` with
 `transcript_since:{"*":30}` replays batches with `seq > 30` before the ack
@@ -6660,6 +6868,69 @@ session `40401`. The loopback-only debug xstate stream
 deployment** (verified live — handshake refused).
 
 ## Verification log
+
+- 2026-11-10 re-verification on `2.5.3` (server 2.5.2 → 2.5.3; throwaway
+  sessions created with `metadata.cwd=/home/ubuntu/spike` and deleted after
+  probing; the nightly job's `pending-changelog.md` covered 2.5.2→2.5.3
+  (5 commits), reviewed via the GitHub API — `e1912c80` adds the direct
+  steer route and the interrupt execution model, `1b5359d0` adds the
+  transcript `reset` op, `c50a55bf` is Windows-only, `e3c3a120` the web-dist
+  sync and `5af9942e` the release; live probes over REST + websocat against
+  `127.0.0.1:58627`, server started `2026-11-10T19:23:55.224Z`). Drift
+  found: the new `POST /api/v1/sessions/{id}/steer` route (idle = prompt
+  POST, busy = queue+steer in one request, ACK `status:"running"` even when
+  queued), steer now interrupting the active LLM step with
+  `endReason:"steered"` and continuing in the same turn, append-only steer
+  history in `GET .../messages`, the `reset` op in `transcript.ops` at turn
+  ends with divergent live steps, and the `steerIfActive` relaxation to any
+  active turn. Re-verified unchanged: auth 401s (missing + wrong token),
+  `/meta` (5 flags, 17 features, same capabilities), config
+  (`deepseek/deepseek-v4-flash`, effort `max`, permission `auto`, 3
+  providers), models (12), tools (36 = 27 builtins + 9 MCP), session
+  create/get/list (`page_size` + `has_more`), the v2 table (`view=
+  by_workspace` groups + total), profile, fork with `turn_index`,
+  reload/takeover/archive/restore, goal/warnings, messages (newest-first;
+  the image prompt rewrite to `session_media` + `name` in the ACK and
+  history), the full DeepSeek prompt round-trip (`prompt.upsert` →
+  `turn.upsert` → undo markers → `step.upsert` → `frame.upsert`/`append` →
+  completed step/turn/prompt; synchronous Bash `task` running/ended), the
+  queued `prompts:steer` flow (steered while a Bash call ran: applied at the
+  tool boundary, user frame in a new step of the same turn), direct
+  `/steer` on an idle session, direct `/steer` mid-essay-stream (step
+  `interrupted` `endReason:"steered"`, new step in the same turn), abort
+  (interrupted step `endReason:"aborted"`, cancelled turn, `interruption`
+  marker + undo reminder, aborted prompt, killed shell task; idle
+  `{"aborted":true}`), both compaction bodies (`{}` and an instruction
+  echoed in the `started` marker; `tokensAfter` matched the following
+  `usage` frame — 24223 and 24308; both `40910`s with `stack`), questions
+  (pending/ended `interaction` frames, `interaction.upsert`, answer via
+  `answers.{"q_0":{"kind":"single","option_id":…}}` → `answered`, re-answer
+  `40902`, dismiss → `dismissed`, unknown `40404`, `GET .../questions`
+  404), approvals (manual `rm -rf`, pending/ended `interaction` frames,
+  `approved`, re-answer `40902`), foreground and background sub-agents
+  (`agent-0`/`agent-1` `transcript.reset` + `agent` frames, `task` frames
+  with `kind:"subagent"`, `child_agent_id`, `detached` true/false; REST
+  `/tasks` 404), the `TodoList` write contract and the read-only `input:{}`
+  query (`display:{"kind":"todo_list"}`, `Current todo list:` output),
+  files (upload with sniffed `media_type:"image/png"`, download 200, `Range`
+  206, delete → `{"deleted":true}` then GET 404/`40407`, session media
+  survives), WS hello (`client_hello` ack)/`subscribe_v2`/ack, unknown
+  session `not_found`, malformed `code:1`, `transcript_since` resume (the
+  reset op and heal ops replayed from seq 37), `unsubscribe_v2`,
+  `task.watch`/`task.output`/`task.stop`/`task.unwatch`, `/status` and
+  `/snapshot` and `/tasks` 404, `/transcript` (same key set),
+  `/transcript/ops`, `/transcript/user-messages`, `/transcript/plan`, search
+  (`50001`, disabled) and rating (`{"appearance":null}` on `turn_id:"t0"`).
+  The managed `kimi-code/k3` alias still fails ~1.7 s after the POST with
+  `provider.auth_error` (step `endReason:"error"` + `endMessage`, turn
+  `failed` with the subscription message, a `marker:"notice"` error item);
+  the checks otherwise used `deepseek/deepseek-v4-flash`. **App impact: none
+  breaks; one improvement ticket (185 — direct steer route).** Unit tests:
+  `:app:testDebugUnitTest` — 1083 tests, 0 failures, 1 skipped. The first
+  full run flaked once on `SessionListViewModelTest.show more pages five
+  sessions at a time` (`TimeoutCancellationException`, unrelated to the wire
+  shapes); that class passed in isolation and the full suite passed on
+  rerun.
 
 - 2026-11-06 re-verification on `2.5.2` (server 2.5.1 → 2.5.2; throwaway
   sessions created with `metadata.cwd=/home/ubuntu/spike` and deleted after
