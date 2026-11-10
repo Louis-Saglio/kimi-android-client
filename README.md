@@ -34,8 +34,8 @@ server release. It has been in daily use since July 2026.
 
 ## How it is built
 
-The app is developed agent-first. A coding agent (Kimi Code, running headless
-on a VPS) writes the code; the human side is product direction, the guardrails
+The app is developed agent-first. A coding agent writes the code;
+the human side is product direction, the guardrails
 in this repository, and trying every build on a real phone.
 
 - **Tickets.** Every change starts as a small ticket in [`todo/`](todo/) with
