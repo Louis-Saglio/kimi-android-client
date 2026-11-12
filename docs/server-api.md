@@ -1,10 +1,12 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-11-10
-(server version `2.5.3`, `"backend": "v2"`, WS `protocol_version: 2`).
+by Kimi Code Web. Documented and verified against the live server on 2026-11-12
+(server version `2.6.0`, `"backend": "v2"`; since 2.6.0 the WebSocket has no
+handshake and no protocol-version field).
 
-Scope: core loop + user interaction — auth check, sessions, messages, prompts,
+Scope: core loop + user interaction — auth check, sessions, the conversation
+(turns and items), messages, prompts,
 steer, interactions (approvals and questions), abort, WebSocket events, file attachments,
 tool-result media, sub-agents (foreground lifecycle + background task store),
 todos, the tools catalog, the client-configs proxy and the session-rating
@@ -17,8 +19,8 @@ Every core-loop endpoint below was executed against the live server unless
 its paragraph says **source-derived**. The exact commands are shown with each
 section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `2.5.2`
-(verified 2026-11-06; see git history), `2.5.1`
+**Protocol history:** this document previously described server `2.5.3`
+(verified 2026-11-10; see git history), `2.5.2` (verified 2026-11-06; see git history), `2.5.1`
 (verified 2026-11-05; see git history), `2.5.0`
 (verified 2026-11-04; see git history), `2.4.1`
 (verified 2026-10-30; see git history), `2.4.0`
@@ -51,6 +53,131 @@ section. Secrets are redacted (`<token>`).
 (verified 2026-07-27/28), `0.29.1` before that, `0.29.0`
 before that, `0.28.1` before
 that, `0.27.0` before that, and `0.23.3` before that.
+
+The drift from 2.5.3 to 2.6.0 is **a breaking rewrite of the conversation
+transport: the transcript protocol is gone, the WebSocket handshake and acks are
+gone, and the file-history queries renamed their turn parameter**. The nightly
+job's `pending-changelog.md` covered 2.5.3→2.6.0 (99 commits). The
+protocol-bearing commits are `1dd55786` ("stream agent conversations as turns and
+items" — deletes `packages/transcript` and the transcript service, adds
+`packages/kap-server/src/services/conversation/*`, `protocol/conversation.ts`,
+`routes/conversation.ts` and `GET .../agents/{agent_id}/turns`), `725194d7`
+("drop the WebSocket handshake and acks" — deletes `server_hello`,
+`client_hello`, the `ack` frame and `subscribe_v2`, adds flat
+`subscribe`/`unsubscribe` answered by `response`), `f72dc7e1`/`8fc5e22f` (the
+`wire.version_too_low` reader-version guard, error code `40930`), `961b90f9`
+(file history takes `turn_number`), `13590cde` (drops the `turn_id` alias),
+`1424092e` (tool calls link to their task), `aa125382` (stopped tool calls end
+`interrupted` with their partial output), `881e61b4` (a manual compaction while
+another runs is `40910`), `b9c18978` (auth/Tower error codes; no stack traces),
+`795a214d` (`event.session.restored`), `c87878a7`/`afadca24` (session create
+applies `agent_config` and binds the main agent) and `b263e80f` (the ported
+agent-loop runtime core). Live verification used server `2.6.0`, started
+`2026-11-12T19:23:35.935Z`.
+
+- **The transcript protocol is gone.** No `transcript.reset`, no
+  `transcript.ops`, no op union, no `seq`/`transcript_since` cursor. A session
+  subscription now streams a **conversation of turns and items** (see
+  Conversation and WebSocket → Session frames): `turns`, `turn.started`,
+  `turn.ended`, `turn.updated`, `item.started`, `item.ended`, `item.updated`,
+  `item.delta`, `item.removed`, `turns.removed`, `turns.failed` and `notice`.
+  Turns and items are built from the agent's persisted records, so REST pages,
+  the `turns` frame and a reload after a server restart show the same ids.
+- **New REST read model — `GET /api/v1/sessions/{id}/agents/{agent_id}/turns`**
+  (verified live): `{turns, has_more}`, newest page by default, `before_ordinal`
+  and `page_size` (1–200, default 50) to page older. This replaces
+  `GET .../transcript` for every read. `GET .../transcript`,
+  `.../transcript/ops`, `.../transcript/user-messages` and `.../transcript/plan`
+  are plain Fastify HTTP 404s now (all verified live). `/messages` is unchanged
+  and is still the flattened main-agent history (newest-first, `role` filter,
+  `GET .../messages/{id}`).
+- **No WS handshake, no acks.** `server_hello`, `client_hello` and the `ack`
+  frame are gone (commit `725194d7`; verified live). The socket opens straight
+  into global events; commands are flat frames with a `request_id` and get one
+  `response`:
+  `{"type":"response","request_id":"s1","code":0}`. `subscribe` and
+  `unsubscribe` replace `subscribe_v2`/`unsubscribe_v2`; `subscribe` takes
+  `{request_id, session_id, agent_ids?}` (`agent_ids` defaults to `["main"]`)
+  and has no transcript grade or `transcript_since`. An unknown session now
+  answers the response with `40401` instead of an ack `not_found`; a malformed
+  subscribe answers `40001`; a command without a readable `request_id` closes
+  the socket with `1008` (verified live).
+- **The heartbeat is a bare ping/pong.** The server sends `{"type":"ping"}`
+  every 10 s and expects `{"type":"pong"}` — no `nonce`, no payload. Any
+  well-formed inbound frame resets the timer; 20 s of silence closes with
+  `1001` (`heartbeat timeout`). The Android app currently answers only a ping
+  with a `nonce`, so it will not pong at all.
+- **A subscription now delivers state first, conversation last.** After the
+  `response`, the server sends the session's pending `interaction` frames, then
+  per newly received agent `task.list`, `agent`, `usage`, `goal`, `todo`, and
+  finally `turns` (the latest page, running turn included). The old
+  `transcript.reset.snapshot.interactions` is gone; the pending interactions are
+  now the standalone frames only.
+- **Compaction is a `system` turn.** `:compact` sets `compacting:true` on the
+  `agent` frame; the result arrives as `turn.started` + `item.ended` (type
+  `system`, `kind:"compaction"`) + `turn.ended`, all with `kind:"system"`. The
+  item carries `trigger`, `instruction?`, `summary`, `tokens_before`,
+  `tokens_after` and `compacted_count`. A failed/cancelled compaction pushes a
+  `notice` with `code:"compaction.cancelled"` instead. No `context.spliced`, no
+  `compaction.*` frames (verified live).
+- **Steer cuts the turn and opens a new one.** On 2.6.0 a direct `:steer` or a
+  `prompts:steer` during a running turn interrupts the active step
+  (`outcome:"interrupted"`, `finish_reason:"interrupted"`), ends the turn
+  `completed`, and the steered text opens the next turn as a `user_message`
+  with `placement:"opener"` (three live probes: mid-text, mid-tool, and a queued
+  prompt). No `placement:"steer"` item was observed on 2.6.0. The schema still
+  allows a mid-turn `placement:"steer"` merge; treat both.
+- **File-history queries take `turn_number`.** `GET .../file-history/changes`
+  and `.../content` now require `turn_number` (the turn's engine number, see
+  Turns). The old `turn_id` alias was dropped: `?turn_id=20` answers `40001`
+  `"turn_number: Invalid input"` (verified live where `?turn_number=20` answers
+  `code:0`).
+- **Sub-agents gained structured links.** A `tool_call` item now carries
+  `agent_refs:[{agent_id, role:"child"|"member", swarm_index?, task_id?}]` and
+  `task_id` once the call runs as a task; a sub-agent's own turns are read with
+  `GET .../agents/{agent_id}/turns` and streamed by subscribing with
+  `agent_ids:["main","agent-0"]` (verified live). A stopped tool call now ends
+  `outcome:"interrupted"` with the output produced so far in `error` (commit
+  `aa125382`).
+- **Session create applies `agent_config` and binds the main agent** (commits
+  `c87878a7`/`afadca24`; verified live): `agent_config.model` is bound before
+  the session is returned, `agent_config.profile` picks the profile (fixed
+  afterwards), and the reserved metadata keys `goal`, `parent_session_id`,
+  `child_session_kind` are dropped. The response's `agent_config.model` is the
+  bound model, not `""`.
+- **`event.session.restored` is broadcast** when an archived session is
+  restored (commit `795a214d`; verified live). Archive and delete were already
+  broadcast; restore was silent before.
+- **New error code `40930` `WIRE_VERSION_TOO_LOW`** (commits
+  `f72dc7e1`/`8fc5e22f`): a session journal written by a newer wire reader
+  cannot be read by this binary; the public message says to upgrade Kimi Code.
+  Auth and Tower errors are now mapped to their codes and Error2 envelopes no
+  longer carry `stack` (commit `b9c18978`).
+- **New routes and fields seen live but not consumed by the app:** `:undo`
+  (`{turn_id}` → `{removed_turn_ids}`, plus a `turns.removed` frame),
+  `:btw` (returns `{agent_id}`), `GET .../children`, `GET .../title/generate`
+  (`40923` here), `GET .../environment(s)`, `POST .../export`, and
+  `GET .../messages/{message_id}` with `40403` for an unknown id. `GET
+  .../messages?role=user` filters **after** the page is sliced, so a filtered
+  page can be empty with `has_more:true` (verified live).
+- **Content drift, not shape:** `/meta` still reports 5 flags and 17 features;
+  `GET /api/v1/config` still reads
+  `default_model:"deepseek/deepseek-v4-flash"`, `thinking.effort:"max"`,
+  `default_permission_mode:"auto"`; the models catalog still has **12
+  entries**; the tools catalog reads **36 entries — 27 builtins + 9 MCP**
+  (`ReadMediaFile`, `Skill` present). The managed `kimi-code/k3` alias still
+  fails after the POST with `provider.auth_error` and a turn
+  `outcome:"failed"`/`end_reason:"error"`; `deepseek/deepseek-v4-flash`
+  completes.
+- **App impact: the chat is cut off again.** `SessionSocket` sends
+  `subscribe_v2` (ignored now), reads `server_hello`/`ack`/`transcript.*`
+  (none exist), and pongs only when a `nonce` is present (the server closes
+  after 20 s); `SnapshotSync`/`ColdStart` calls `/transcript` and
+  `/transcript/ops` (404); `TranscriptFold`, `TranscriptSyncApi` and the
+  transcript DTOs decode a protocol that no longer exists; the turn-changes
+  screen sends `turn_id` (40001); `SubagentScreen` and the compaction UI are
+  built on transcript shapes. Tickets 186–193 cover the migration and the
+  file-history parameter; 194–196 cover the new capabilities.
 
 The drift from 2.5.2 to 2.5.3 is **small and steer-shaped: one new REST route
 (`POST /api/v1/sessions/{id}/steer`), a new steer execution model that
@@ -3043,7 +3170,7 @@ brevity — note the absent `last_seq` and the filled `agent_config.model`):
 
 - Runtime state fields: `busy` (bool), `main_turn_active` (bool),
   `pending_interaction` (`"none"` | `"approval"` | `"question"`),
-  `last_turn_reason` (`"completed"` | `"cancelled"`). **`last_turn_reason` is
+  `last_turn_reason` (`"completed"` | `"cancelled"` | `"failed"`). **`last_turn_reason` is
   absent entirely on sessions that have not run a turn yet** (re-verified
   2026-07-23). **0.34.0:** the field gained a **persisted** last-turn
   outcome fallback for *cold* sessions (no live handle) — previously only
@@ -3072,10 +3199,10 @@ brevity — note the absent `last_seq` and the filled `agent_config.model`):
   binding (verified 2026-09-01).
 - `message_count` is still present but observed stuck at `0`
   (re-verified 2026-07-23 after several turns) — do not rely on it.
-  **2.5.0: `last_seq` is gone from every session object** (list, create, get,
-  fork, restore). The op watermark lives at
-  `GET .../transcript.seq` and in `transcript.reset.seq`; the old
-  `as_of_seq`/`epoch` cursor pair no longer exists.
+  **2.5.0 removed `last_seq` from every session object** (list, create, get,
+  fork, restore), and **2.6.0 removed the transcript op watermark entirely**:
+  there is no `seq`, no `epoch` and no resume cursor. A reconnect re-reads the
+  conversation (`turns` plus REST pages).
 - The list envelope carries `has_more` for pagination (verified with
   `page_size=2&before_id=<last id of page>`; re-verified 2026-08-05 on
   0.33.0 after the upstream keyset-cursor rewrite — multi-page
@@ -3114,18 +3241,23 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions \
 
 Returns the session object above. Fresh sessions created without a `title`
 come back with `"title": ""` — clients should fall back to their own
-placeholder. **0.42.0: sessions CAN be deleted now** (commit `fa87d040` —
+placeholder. **2.6.0 applies `agent_config` at create and binds the main
+agent** (commits `c87878a7`/`afadca24`; verified live): `agent_config.model`
+picks the model (default the server's current default), `agent_config.profile`
+picks the profile (fixed afterwards), `agent_config.thinking` is checked
+against that model, and the response's `agent_config.model` is the bound model
+rather than `""`. `environment_id`/`environment_cwd` select the execution
+environment; `agent_config.tower_mode:true` is refused with `40001`. Reserved
+metadata keys (`goal`, `parent_session_id`, `child_session_kind`) are dropped. **0.42.0: sessions CAN be deleted now** (commit `fa87d040` —
 see Delete below); the bare `DELETE /api/v1/sessions/{id}` HTTP method
 still answers plain HTTP 404 (re-verified 2026-09-09) — deletion is a
 `:delete` action.
 
 ### Get one — `GET /api/v1/sessions/{id}`
 
-Returns the same session object as the list. **2.5.0 removed `last_seq`** (and
-`agent_config.model` is now filled on live sessions — see the list notes). The
-old `last_seq`/`epoch` pair is replaced by the transcript op watermark:
-`GET .../transcript.seq` (and `transcript.reset.seq`) is the value to pass as
-`transcript_since`.
+Returns the same session object as the list. `agent_config.model` is filled on
+live sessions (see the list notes). There is no cursor field on 2.6.0: the
+conversation is read page by page with `before_ordinal`.
 
 ### Delete — `POST /api/v1/sessions/{id}:delete`
 
@@ -3360,7 +3492,7 @@ Answers the standard session envelope (same shape as create/get) — verbatim
 capture, trimmed:
 
 ```json
-{"code":0,"msg":"success","data":{"id":"session_ff2d15fc-...","workspace_id":"wd_spike_6baf4c130e63","title":"ticket-143-profile-capture","created_at":"2026-09-15T16:37:19.540Z","updated_at":"2026-09-15T16:37:19.540Z","busy":false,"main_turn_active":false,"pending_interaction":"none","archived":false,"metadata":{"cwd":"/home/ubuntu/spike"},"agent_config":{"model":""},"usage":{…},"permission_rules":[],"message_count":0,"last_seq":0},"request_id":"01M2JYW67APC4C06A2Y9RXEX96"}
+{"code":0,"msg":"success","data":{"id":"session_ff2d15fc-...","workspace_id":"wd_spike_6baf4c130e63","title":"ticket-143-profile-capture","created_at":"2026-09-15T16:37:19.540Z","updated_at":"2026-09-15T16:37:19.540Z","busy":false,"main_turn_active":false,"pending_interaction":"none","archived":false,"metadata":{"cwd":"/path/to/project"},"agent_config":{"model":""},"usage":{…},"permission_rules":[],"message_count":0,"last_seq":0},"request_id":"01M2JYW67APC4C06A2Y9RXEX96"}
 ```
 
 - The write goes through live: **2.5.0** pushes an `agent` frame carrying
@@ -3402,199 +3534,22 @@ existing title and no `force` → **`40923`** (verified live:
 yet, or the backend request failed)"`). Unused by the app (titles are
 generated automatically).
 
-### Live status — `GET .../status` (**removed in 2.5.0**)
+### Removed: `/status` and `/snapshot` (2.5.0)
 
-**2.5.0: this route is gone** — `GET /api/v1/sessions/{id}/status` is a plain
-Fastify HTTP 404. The same state is pushed on the session subscription: the
-`agent` frame carries `status` (`idle`/`running`), `model`, `thinking`,
-`permission_mode`, `plan_mode`/`swarm_mode`/`tower_mode`; the `usage` frame
-carries `context_tokens` + `max_context_tokens`. A cold client seeds the same
-values by subscribing (the frames arrive before the ack). The historical shape
-below is kept for older journals only.
+Both routes are plain Fastify HTTP 404s (re-verified live on 2.6.0). The state
+they served is pushed on the session subscription: `agent` (status, compacting,
+model, thinking, `permission_mode`, plan/swarm/tower mode), `usage` (context
+fill), `goal`, `todo`, and the conversation (`turns` plus `turn.*`/`item.*`
+frames). A cold client seeds all of it by subscribing; the frames arrive after
+the subscribe `response`.
 
-Lightweight runtime state:
-
-```bash
-curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../status
-```
-
-```json
-{
-  "code": 0, "msg": "success",
-  "data": {
-    "busy": false,
-    "model": "kimi-code/k3",
-    "thinking_level": "high",
-    "permission": "manual",
-    "plan_mode": false,
-    "swarm_mode": false,
-    "tower_mode": false,
-    "context_tokens": 25050,
-    "max_context_tokens": 1048576,
-    "context_usage": 0.023889541625976562
-  },
-  "request_id": "01KY6GB8PGD0PV9FGE5XPX55Z3"
-}
-```
-
-`busy: true` ⇔ the session is mid-turn. `model` is omitted entirely when the
-session has no model configured (re-verified 2026-09-01 on a fresh
-never-prompted session: no `model` key, `thinking_level: ""`). A prompt
-carrying `model`/`thinking` binds the session: afterwards `/status` reports
-both (verified 2026-09-01, `kimi-code/k3-256k` + `"low"`). The binding is
-**persisted across the cold/warm boundary**: a session untouched since server
-start reports `agent_config.model: ""` on list/get, yet its first `/status`
-call already serves the real `model`/`thinking_level` and warms the session
-(verified 2026-09-01, ticket 107). `thinking_level` and `permission` reflect
-the session's current config (`"off"`/`"yolo"` observed on a fresh session;
-**0.34.0:** a fresh session now reports `thinking_level: ""`). `permission`
-is the session's effective permission mode (wire enum `manual`/`yolo`/`auto`;
-the CLI label mapping is recorded once at the 0.40.1 drift notes, commit
-`08a2fb00`) — it starts from the server's `default_permission_mode` and is
-overridden per session via `POST .../profile` (see Session profile above).
-The app does not consume it yet; the chat permission-mode picker reads and
-writes it (ticket 141). **0.34.0:**
-`max_context_tokens` is now **omittable when the context limit is unknown**
-(upstream schema change — `0` is the engine's "unknown" marker, never a real
-limit); never observed omitted live — a fresh model-less session reports the
-default model's context (262144 on 0.34.0–0.36.1; 1000000 on 0.37.2–0.39.0,
-the `deepseek/deepseek-v4-pro` default; 1048576 on 0.39.1, the
-`kimi-code/k3` default; **262144 on 0.40.1** — the default model is
-`kimi-code/k3-256k` now; config drift, not protocol) and a k3 session 1048576 (re-verified
-2026-08-18). **0.38.0:** **`context_usage` is now omittable too** (same
-commit `4ff06f17`, same "unknown" rule — upstream schema made it optional;
-still present on this server, `0` on a fresh session, re-verified 2026-08-20).
-Clients should
-still treat an absent/zero limit as "unknown", never render a 0/0 ring.
-**0.39.0:** `tower_mode` (boolean) rides next to `plan_mode`/`swarm_mode` —
-the new tower mode (commits `0f44537c`/`d3b27cc7`, flag `tower`; `false`
-here, verified live 2026-08-27). Additive; the Android app decodes none of
-the mode flags.
-
-### Session snapshot — `GET .../snapshot` (**removed in 2.5.0**)
-
-**2.5.0: this route is gone** — a plain Fastify HTTP 404. There is no single
-replacement bundle. The cold-start surfaces are:
-
-- `GET .../transcript?agent_id=<id>` for the newest turn page plus the
-  unpaginated session state: `interactions`, `pending_interactions`,
-  `attachments`, `prompts`, `agents` (roster) and `seq` (the op watermark for
-  `transcript_since`). A running turn is included with `state:"running"`.
-- `GET .../messages` for the flattened history page (unchanged).
-- The frames that follow an accepted `subscribe_v2`: `agent`, `usage`, `goal`,
-  `todo`, `task.list`, `transcript.reset` (whose `snapshot` carries
-  `items: []`, plus `interactions`, `attachments`, `prompts`, `hasMoreOlder`)
-  and standalone `interaction` re-sends.
-- The `subagents` roster is now the `agents` array on `/transcript`
-  (`{agentId,type:"main"|"sub",parentAgentId?}`) plus `task` frames with
-  `kind:"subagent"`; `in_flight_turn` has no REST replacement — the running
-  turn (steps/frames) comes from `/transcript` and the live op stream.
-
-The historical shape below is kept for older journals only.
-
-The whole session state as one atomic bundle at an event-stream watermark —
-designed as the client's cold-start/resync entry point (adopted by the Android
-app in ticket 085): everything the event stream never replays
-(`subagent.spawned` is never replayed before the resume cursor) or never
-persists into history arrives here, and the watermark seeds the WS resume
-cursor so the first subscribe stitches gaplessly onto the bundle. All shapes
-verified live on 0.31.1 (2026-08-01). Top-level keys of `data`:
-
-- `as_of_seq` (long), `epoch` (string): the watermark the bundle is consistent
-  at — resume the WS subscribe with exactly this cursor.
-- `session`: the rich session object (superset of the list/get one: `busy`,
-  `main_turn_active`, `pending_interaction`, `last_turn_reason`, `usage`, …).
-  When it carries a real fill, the context numbers live at
-  `session.usage.context_tokens` / `session.usage.context_limit` — NOT the
-  `/status` naming (`context_tokens`/`max_context_tokens`). **0.38.0 drift
-  (commit `4ff06f17`): the all-zero placeholder is gone — the snapshot now
-  serves REAL usage** (verified live 2026-08-20: after a turn
-  `input_tokens`/`context_tokens` report actuals and `context_limit` the real
-  window, e.g. 262144; on a fresh session `context_tokens: 0` with
-  `context_limit` already set). In the same commit the usage schema made
-  **`total_cost_usd`, `context_limit`, and `turn_count` optional** — the
-  snapshot's usage omits `total_cost_usd` and `turn_count` entirely (the
-  list/create/get session object still emits all eight fields, zeroed).
-  The snapshot `session` also gained **`agent_config: {model}`** (`""` when
-  unset). Verbatim 0.38.0 snapshot `session` after two completed turns
-  (2026-08-20, k3 session; `title`/`last_prompt` trimmed):
-
-  ```json
-  {"id":"session_59e4fb8e-…","workspace_id":"wd_spike_6baf4c130e63",
-   "busy":false,"main_turn_active":false,"pending_interaction":"none",
-   "last_turn_reason":"completed","archived":false,
-   "metadata":{"cwd":"/home/ubuntu/spike"},
-   "agent_config":{"model":"kimi-code/k3"},
-   "usage":{"input_tokens":6646,"output_tokens":286,"cache_read_tokens":95232,
-            "cache_creation_tokens":0,"context_tokens":25843,"context_limit":1048576},
-   "permission_rules":[],"message_count":0,"last_seq":0}
-  ```
-
-  History: **0.32.0** introduced the all-zero placeholder on every
-  read path (verified live 2026-08-05 on busy AND idle sessions
-  with 48k–121k real context tokens per `/status`); the 0.38.0 real-usage
-  change reverses that. The Android app still takes the live context fill
-  from `/status` and the WS `agent.status.updated` stream and defaults every
-  usage field, so the optional-field omission decodes cleanly.
-- `messages`: the newest history page (~100 items per page) with `has_more` —
-  same item shape as `/messages` but **opposite order: `items` are OLDEST-first**
-  (ascending ids/`created_at`; live-verified on 0.31.1, 2026-08-02 — `/messages`
-  pages are newest-first). Do not reverse them client-side.
-- `in_flight_turn`: `null` when idle; while a turn runs, its live tail —
-  verbatim busy capture (2026-08-01):
-
-  ```json
-  {"turn_id":1,"assistant_text":"","thinking_text":"Simple. Run sleep 60. …",
-   "running_tools":[{"tool_call_id":"tool_eIsX6WQ4HS0YXdIR7yJTtNrQ","name":"Bash",
-     "args":{"command":"sleep 60","timeout":90},"description":"Running: sleep 60",
-     "display":{"kind":"command","command":"sleep 60","cwd":"/home/ubuntu/spike","language":"bash"}}],
-   "current_prompt_id":"msg_01KYYX1AMRSFSE8XAQWGRP8F6N"}
-  ```
-
-- `subagents`: the foreground sub-agent roster at the watermark — see
-  [Session snapshot roster](#session-snapshot-roster) under Sub-agents.
-- `pending_approvals`: the pending permission requests. The snapshot keeps
-  the **pre-2.4.0 REST item shape** (the live event is the flat `interaction`
-  frame now): the old `event.approval.requested` payload minus the camelCase
-  `agentId` stamp (up to 0.38.0 `approval_id` == `tool_call_id`; **0.39.0:**
-  `approval_id` is a dedicated `approval_<uuid>` id distinct from
-  `tool_call_id` — see Interactions). **2.0.2:** the items now carry
-  **`agent_id`** (snake_case, required — `"main"` or the asking sub-agent's
-  id; verified live 2026-09-19), so the asking agent is no longer WS-only
-  (this retro-fills ticket 139's gap). Verbatim 2.0.2 item:
-
-  ```json
-  {"approval_id":"approval_58b631f8-2537-4ed6-bdca-b3f06be56c71","session_id":"session_…",
-   "agent_id":"main","turn_id":2,"tool_call_id":"tool_aTSHHtVv3uhqcac3axTAXWBV",
-   "tool_name":"Bash","action":"Running: rm -rf /home/ubuntu/spike/approval-probe-2",
-   "tool_input_display":{"kind":"command","command":"rm -rf /home/ubuntu/spike/approval-probe-2",
-                         "cwd":"/home/ubuntu/spike","language":"bash"},
-   "created_at":"2026-09-19T19:33:50.309Z","expires_at":"2026-09-20T19:33:50.309Z"}
-  ```
-
-  Pre-2.0.2 capture (no agent field at all — the items were built by
-  kap-server's `toWireApproval`, which had none; verified upstream at
-  0.43.1 — ticket 139):
-
-  ```json
-  {"approval_id":"tool_EYGD…","session_id":"session_…","turn_id":0,
-   "tool_call_id":"tool_EYGD…","tool_name":"Bash","action":"Running: sleep 90",
-   "tool_input_display":{"kind":"command","command":"sleep 90","cwd":"/tmp","language":"bash"},
-   "created_at":"2026-08-01T…","expires_at":"2026-08-01T…"}
-  ```
-
-- `pending_questions`: the pending `AskUserQuestion` requests, in the same
-  item shape the pre-2.4.0 `event.question.requested` frame carried (the
-  per-session poll route is gone; this snapshot and the `interaction` frames
-  are the only surfaces) — verified live with a pending question on 2.4.0,
-  and again on 2.4.1 (2026-10-30, options carried the optional
-  `description`): `question_id`, `session_id`, `questions[]` with
-  `id`/`question`/`options[{id,label,description?}]`/`header`/`allow_other`/`multi_select`,
-  `created_at`, `turn_id`. **0.38.0:** `question_id` is a dedicated
-  `question_<uuid>` interaction id and the item also carries a distinct
-  `tool_call_id` (was: `question_id` == `tool_call_id` — see Interactions).
-  **2.0.2:** the item also carries `agent_id` (snake_case; verified live
-  2026-09-19).
+The old `/snapshot` bundle has no single replacement. Read `GET
+.../agents/{agent_id}/turns` for the conversation, `GET .../messages` for the
+flattened main-agent history, the pending `interaction` frames for approvals
+and questions, `task.list`/`task` for running tasks, and `GET .../prompts` for
+the queue. The historical snapshot shape (`as_of_seq`, `epoch`, `in_flight_turn`,
+`pending_approvals`, `pending_questions`, `subagents`, oldest-first `messages`)
+is kept in git history only; nothing on 2.6.0 emits it.
 
 ### Session table (v2) — `GET /api/v2/sessions`
 
@@ -3845,7 +3800,8 @@ types observed:
    "created_at":"2026-11-05T19:27:50.461Z"}
   ```
 
-  The same array structure rides the transcript tool frames (see Transcript).
+  The conversation's `tool_call` item carries the same media as a structured
+  `media[]` array (`{kind, file_id?, url?, media_type?}`) — see Conversation.
   Only daemon file refs are structured; base64/data URLs, `https` media and
   audio stay on the plain-string path. `name` is present when the ref carries
   one. Fetch the bytes with `GET /api/v1/sessions/{id}/media/{file_id}`.
@@ -3855,6 +3811,13 @@ types observed:
 sequential per-session ids `msg_<session_id>_<NNNNNN>` (zero-padded counter).
 Treat ids as opaque strings — do not parse them. `metadata` is only present on
 user messages (carries `origin`).
+
+`role` (`user` / `assistant` / `tool` / `system`) filters **after** the page is
+sliced: a filtered page can hold fewer than `page_size` items while
+`has_more:true`, so keep paging until it is false (verified live: a `role=user`
+page of 3 returned zero items with `has_more:true`). `GET
+.../messages/{message_id}` returns the same item; an unknown id answers
+`40403` ("message … does not exist in session …").
 
 An aborted turn commits an assistant message with **empty `content`** when the
 abort landed before any assistant text was produced (verified 2026-07-22).
@@ -3910,248 +3873,153 @@ fired on the throwaway session's first turn of the day), persisted in
 history like the others (additive; the same envelope-stripping rule covers
 it).
 
-## Transcript
+## Conversation
 
-### Per-agent transcript — `GET /api/v1/sessions/{id}/transcript`
+An agent's conversation is a list of **turns**; each turn holds an ordered list
+of **items**. Everything the agent does to handle one input forms one turn: the
+user input, replies, reasoning and tool calls are its items. Turns and items
+are generated from the agent's persisted session records, so REST pages, the
+`turns` frame and a reload after a server restart show the same turns with the
+same ids. Only the running step and output a tool is still producing exist
+solely in memory. All times are ISO 8601 strings.
 
-Turn-granular committed history for ONE agent — `"main"` or any sub-agent id —
-which makes it the history backing of the sub-agent page (the `/messages`
-history only ever carries the main agent). **Since 2.5.0 this is also the
-cold-start read model**: it returns the session's pending interactions, the
-prompt entities, the agent roster and the op watermark, replacing the removed
-snapshot. Verified live on 0.29.2 (2026-07-28), including a running sub-agent
-and the cold-session rebuild path; re-verified through 0.31.1 and again on
-2.5.0 (2026-11-04), including a running turn and a pending question.
+This replaced the transcript protocol in 2.6.0. There is no op stream, no
+`seq`, no `transcript_since` and no `transcript.reset`; a subscription sends a
+`turns` page and then incremental `turn.*`/`item.*` frames (see WebSocket).
 
-Query params:
+### Turns
 
-- `agent_id` — **required**; omitted → `40001` ("expected string, received
-  undefined"). Answers for any agent id, finished or running. An UNKNOWN id is
-  not an error: `code:0` with `items: []`, `has_more: false` (an unknown
-  session is `40401` as usual).
-- `page_size` — default 20, min 1, max 100 (`0` or `>100` → `40001`). Counts
-  **turns**; interleaved `marker` items ride along (a 20-turn page shipped 33
-  items: 20 turns + 13 markers).
-- `before_turn` / `after_turn` — turn-id cursors. Paging backwards past the
-  oldest turn answers `items: []` with `has_more: false` (not an error).
+| Field | Description |
+| --- | --- |
+| `turn_id` | Unique within the session and never reused (`t_…`). A turn opened after an undo gets a new id even when it reuses the `ordinal` |
+| `ordinal` | Position in the agent's current history; determines order. Pass it as `before_ordinal` to read older turns |
+| `kind` | `agent`: an ordinary turn. `system`: a turn between turns holding one `system` item (a completed compaction or a fork boundary) |
+| `status` | `running` / `ended` |
+| `outcome` | Ended turns only: `completed` / `interrupted` / `failed` |
+| `end_reason` | For `interrupted`: `user_cancelled` / `aborted`. For `failed`: `error` / `max_steps` / `filtered` / `blocked` |
+| `error` | Failed turns only: `{code, message, name?, status_code?, request_id?, retryable?}` |
+| `retry` | Schema-derived (not observed live). Running turns only, while a failed model request waits to retry: `{attempt, next_attempt, max_attempts, delay_ms, error:{name,message,status_code?}}`. Cleared when the next step starts, a step ends, or the turn ends |
+| `turn_number` | The engine's turn number; the file-history routes key on it |
+| `started_at`, `ended_at?`, `duration_ms?` | Timing |
+| `usage` | Sum of the steps' usage: `{input_other, output, input_cache_read, input_cache_creation}` |
+| `steps` | Ended steps, ordered by `index`: `{index, outcome, started_at, ended_at?, finish_reason?, usage?}`. `outcome` is `completed`/`interrupted`/`failed` |
+| `items` | The turn's items (omitted from `turn.started`/`turn.ended`, which replace the header and keep items) |
 
-Pagination contract (verified with `page_size=1` against a 2-turn sub-agent):
-the cursor-less call returns the **newest** page, `has_more` tells whether
-older turns exist, and `before_turn=<turnId>` returns the next older page.
-**Within a page turns are ascending by `ordinal`** (oldest-first) — the
-opposite of `/messages` intra-page order. `after_turn=t0&page_size=2` pages
-forward (ascending, `has_more` true while newer turns remain).
+### Items
 
-`data` fields beyond `agent_id`/`items`/`has_more` — `interactions`,
-`attachments`, `prompts`, `agents`, `pending_interactions`, `seq` (the 2.5.0
-set) — are the session's **unpaginated global state**, shipped with every page.
-**2.5.0 dropped `tasks`, `todos` and `meta`** from this projection; tasks are
-WS `task` frames, todos are the `todo` frame. The `agents` roster is
-`{agentId, type: "main"|"sub", parentAgentId?}` and now includes every child
-agent. `pending_interactions` is an array of interaction ids; `interactions`
-is the full entity list (see Interactions). `seq` is the agent's op-batch
-watermark for `transcript_since` (live sessions only).
-**0.39.0 (commit `2f124693`): `prompts` is new** — prompt entities
-`{promptId, status, userMessageId, content, createdAt, finishedAt}` for the
-session's turn-opening inputs, including steered-in prompts (status
-`"completed"` once their host turn ends); prompts whose messages were
-compacted away vanish from the list. **0.40.1 (commit `cbe0a77f`, "preserve
-steer provenance"; verified live 2026-09-02):** a prompt that was steered
-into a running turn carries **`steeredAt`**, and the *active* prompt it
-merged into reports the steered text as its `content` (verified: the active
-prompt `msg_…SX` showed the steered `"Also reply with the single word
-steered."` instead of its own submitted text — the turn entity's `prompt`
-still holds the original). Also **0.39.0:** `interactions[]`
-question entries now carry `request` as the full wire question payload
-(stable `q_N`/`opt_N_M` ids, `question_id`, `tool_call_id`, `created_at` —
-commit `b3f08b68`; verified live on a pending question 2026-08-27) instead of
-the raw `AskUserQuestion` tool input, and `tasks[]` entries gained optional
-`model`/`thinkingEffort` (camelCase). **0.39.1 (commit `4e7738b7`; verified
-live):** `attachments[]` entries for prompt **file** attachments are typed
-file records — `{attachmentId, mediaType, name, size}` with **no `source`**
-(media attachments keep `source:{kind:"session_media",fileId}`), so web
-clients render chips without parsing the notice text; attachment ids are
-inconsistent (`att_1` on the turn-0 entry, `t2.att1` later) — opaque. The
-Android app consumes none of them.
+Every item has `item_id`, `type`, `step_index`, `status` (`running`/`ended`),
+`outcome` (`completed` unless noted), `created_at`, and optionally `debug`
+(only with `KIMI_CODE_DEBUG=1`: the last item of an ended step carries
+`{finish_reason?, usage?, timing?}`). For a tool call, `item_id` is the tool
+call id.
 
-`items` has two entry kinds: `turn` and `marker`.
+| Type | Fields |
+| --- | --- |
+| `user_message` | `prompt_ids[]`, `placement` (`opener` / `steer`), `origin`, `text`, `attachments[]`, `skills[]`, `metadata?`. `text` excludes bundled-skill instructions, hook output, file notices and image-compression notes |
+| `assistant_message` | `text` |
+| `reasoning` | `text`, `started_at`, `duration_ms?` (only after it ends). Hidden reasoning is never sent |
+| `tool_call` | `name`, `stage` (`input` / `awaiting_approval` / `executing`), `input`, `input_text` (while `stage:"input"`), `output` (live while running; the result text after), `fields` (handler field snapshot), `media[]` (`{kind, file_id?, url?, media_type?}`), `error` (failed/interrupted result text; no `output` then), `note` (model-facing extra text), `task_id?`, `interaction_id?`, `agent_refs[]` (`{agent_id, role:"child"|"member", swarm_index?, task_id?}`), `display?` (`ExitPlanMode` plan review), `started_at`, `ended_at?` |
+| `notification` | `notification_id`, `title`, `body`, `severity`, `notification_type`, `source`, `task_id`, `agent_id`, `output`, `answer?` |
+| `system` | `kind:"compaction"` with `trigger` (`manual`/`auto`), `instruction?`, `tokens_before?`, `tokens_after?`, `compacted_count?`, `summary?`; or `kind:"fork_boundary"` with `source` and `forked_from` |
 
-Turn → step → frame structure (verbatim keys, running sub-agent capture):
+`user_message.origin` is `{kind:"user"}`, `{kind:"skill",…}`,
+`{kind:"plugin_command",…}`, `{kind:"cron",…}`, `{kind:"hook",…}`,
+`{kind:"goal"}`, `{kind:"retry"}` or `{kind:"system"}`.
+
+Verbatim `item.ended` for a user input (2.6.0):
 
 ```json
-{"kind":"turn","turnId":"t0","ordinal":0,"state":"running",
- "origin":{"kind":"other","payload":{"kind":"system_trigger","name":"subagent"}},
- "startedAt":"2026-07-28T10:03:06.221Z",
- "steps":[
-  {"kind":"step","stepId":"t0.1","turnId":"t0","ordinal":1,"state":"running",
-   "startedAt":"2026-07-28T10:03:06.237Z",
-   "frames":[
-    {"kind":"thinking","frameId":"t0.1.f1","text":"The user wants me to run a sleep 45 command…"},
-    {"kind":"tool","frameId":"t0.1.tool_4eOtxCMTEBHdpOehIhgnYAAe","toolCallId":"tool_4eOtxCMTEBHdpOehIhgnYAAe",
-     "name":"Bash","state":"running",
-     "input":{"command":"sleep 45 && echo awake","timeout":60},
-     "inputText":"{\"command\":\"sleep 45 && echo awake\",\"timeout\":60}",
-     "display":{"kind":"command","command":"sleep 45 && echo awake","cwd":"/home/ubuntu/kimi-android-client","language":"bash"}}]}]}
+{"type":"item.ended","turn_id":"t_aa4ac2c61c19",
+ "item":{"type":"user_message","item_id":"msg_01M78KHX9K7JP8QRCESWT12R0S",
+  "status":"ended","outcome":"completed","created_at":"2026-11-12T19:25:33.380Z",
+  "prompt_ids":["msg_01M78KHX9K7JP8QRCESWT12R0S"],"placement":"opener",
+  "origin":{"kind":"user"},"text":"Use the TodoList tool…","attachments":[],"skills":[]},
+ "session_id":"session_…","agent_id":"main","event_created_at":"2026-11-12T19:25:33.38xZ"}
 ```
 
-- Turn: `turnId` (`"t0"`, `"t1"`, …), `ordinal`, `state` (`"running"` /
-  `"completed"` / `"cancelled"` / `"failed"` — the terminal two are real since
-  0.31.1, see below), `origin`, `steps`. **0.40.1 (additive, commit
-  `58b74cfe` "preserve turn prompt identity"; verified live 2026-09-02 on
-  main and sub-agent turns alike):** every turn carries
-  **`triggerPromptId`** — the prompt record id (`msg_…`) that opened it.
-  **0.41.0 regression (verified live 2026-09-04):** sub-agent internal turns
-  (origin `system_trigger/subagent`) **no longer carry `triggerPromptId`** —
-  main-agent user turns still do. The app decodes the field nowhere.
-  `origin` is `{"kind":"user"}`
-  for user-prompted turns — those additionally carry a top-level **`prompt`**
-  field with the prompt text (seen on main-agent turns) — or
-  `{"kind":"other","payload":{"kind":"system_trigger","name":"subagent"}}` for
-  a sub-agent's internal turns (the task turn and the forced result-summary
-  turn; **0.39.0:** these now carry the orchestrator's **`prompt`** too —
-  the `git-context` prefix + the task text, commit `f143130c`, verified live
-  2026-08-27; up to 0.38.0 the task text was not in the transcript turns)
-  — or a **`task` origin** on a background-task completion-notification turn
-  (see the verification below).
-- Step: `stepId` (`"t0.1"`), `turnId`, `ordinal`, `state`, `frames`.
-- Frames: `thinking` (`frameId`, `text`), `text` (`frameId`, `role` —
-  `"assistant"`/`"user"` — `text`, optional `promptIds` on a steered-in
-  frame), `tool` (`frameId`, `toolCallId`, `name`, `state`
-  `"running"`/`"done"`/`"error"` (2.5.0 added `"error"`), `input` (args
-  object), `output`, optional `approvalId`/`taskId`/`display`/`progress`),
-  and `notice` (2.5.0: `level`/`message`, used when a tool result has no
-  displayable content — commit `b4da9215`). **2.5.1 (commit `6dad2c8d`;
-  verified live 2026-11-05): a daemon-media tool result's `output` is an
-  array of parts**, not a string —
-  `[{"type":"text","text":"<image path=\"…\">"}, {"type":"image",
-  "source":{"kind":"session_media","file_id":"f_…"}}, {"type":"text",
-  "text":"</image>"}]` — on the live ops stream and the warm transcript (the
-  history `tool_result.output` carries the same array; the same projection is
-  applied in the cold fold per the commit's `groupTurns.ts` change —
-  source-derived, not probed cold here).
-  Non-daemon media and audio stay on the text path, and no `notice` frame
-  accompanied the media result in the 2.5.1 capture.
-  A step can hold several frames of the same kind (two `text` frames seen).
-  **0.40.1 (additive, commit `cbe0a77f`; verified live 2026-09-02):**
-  user-role text frames carry an optional **`origin`** — `{"kind":"user"}`
-  observed on a steered-in frame; the schema also allows
-  `skillActivations` provenance there (not triggered live).
-  **0.39.0 (commit `5634cb55`): steered-in prompts project as mid-turn
-  `{"kind":"text","role":"user","text":…}` frames** in the running turn's
-  next step, carrying the new optional **`promptIds`** array (verified live
-  2026-08-27:
-  `{"kind":"text","frameId":"t7.2.f1","role":"user","text":"Also reply with exactly: steered-ok","promptIds":["msg_01M12C2W0M9YBYF3QQHPYWRK6P"]}`);
-  up to 0.38.0 the steered text never appeared in the transcript. Only the
-  main agent's transcript is affected — steer targets the active main turn.
-- **Warm vs cold rebuild:** answers computed from the live session add
-  `startedAt`/`endedAt` on turns and steps, `finishReason`/`usage`/timing on
-  steps, and `inputText`/`display`/`progress` on tool frames; the cold-session
-  rebuild from persisted wire records ships only `turnId`/`ordinal`/`state`/
-  `origin`/`steps` on turns and the core frame fields (`input`+`output` on
-  finished tool frames). Treat every field outside the core set as optional.
-  **2.1.1 (commit `b428bfd0`; verified live 2026-09-24 on the warm path):**
-  the step timing field is renamed **`timing` → `llmTiming`**
-  (`{llmFirstTokenLatencyMs, llmStreamDurationMs}`, same inner shape) and
-  steps carry **`usage`** (`{inputOther, output, inputCacheRead,
-  inputCacheCreation}`) — and the **cold fold now projects both** from the
-  journaled records (2.1.1-written journals only; older journals still ship
-  neither). The app parses neither field.
-  **0.31.1:** the engine now persists `turn.ended` records, so the cold
-  rebuild also reports a turn's real terminal `state` (`"cancelled"` /
-  `"failed"`; `"blocked"` folds into `"failed"`) plus `endedAt` / `durationMs`
-  / `error` (message only) — previously every cold turn read `"completed"`.
-  Journals written before 0.31.1 lack the records and keep the old default.
-
-**`task` turn origin — verified live on 0.34.0 (2026-08-07, ticket 099):**
-the background-task completion-notification turn ships its origin on the REST
-transcript too (owning agent's transcript — here a sub-agent's,
-`GET .../transcript?agent_id=agent-0`, session with two completed
-sub-agent-owned background bash tasks; verbatim turn, steps trimmed):
+Verbatim finished tool call (TodoList; `display` and `input` trimmed):
 
 ```json
-{"kind":"turn","turnId":"t1","ordinal":1,"state":"completed",
- "origin":{"kind":"task","taskId":"bash-xhlawxzk",
-           "payload":{"kind":"task","taskId":"bash-xhlawxzk","status":"completed",
-                      "notificationId":"task:bash-xhlawxzk:completed"}},
- "prompt":"<notification id=\"task:bash-xhlawxzk:completed\" category=\"task\" type=\"task.completed\" source_kind=\"background_task\" source_id=\"bash-xhlawxzk\">\nTitle: Background process completed\n…\n</notification>"}
+{"type":"item.ended","turn_id":"t_aa4ac2c61c19",
+ "item":{"type":"tool_call","item_id":"call_00_ET_JYvO9HUSkxqi7GtZCk3r0686",
+  "step_index":2,"status":"ended","created_at":"2026-11-12T19:25:36.826Z",
+  "name":"TodoList","input":{"todos":[{"status":"done","title":"Set up probe todos"}]},
+  "display":{"kind":"todo_list","items":[{"title":"Set up probe todos","status":"done"}]},
+  "started_at":"2026-11-12T19:25:36.826Z","outcome":"completed",
+  "output":"Todo list updated.\nCurrent todo list:\n  [done] Set up probe todos",
+  "ended_at":"2026-11-12T19:25:36.831Z"},
+ "session_id":"session_…","agent_id":"main","event_created_at":"2026-11-12T19:25:36.833Z"}
 ```
 
-Two differences from the WS `turn.started` origin (Background lifecycle): the
-transcript shape wraps the origin in a **`payload`** object (the WS one is
-flat) and additionally flattens `taskId` at the origin's top level; `status`
-and `notificationId` live only inside `payload`. Only `"completed"` is
-verified for `status` (the `notificationId` embeds it:
-`task:<taskId>:<status>`) — a killed task whose notification turn never
-landed ships no such turn at all. Note the turn carries a top-level `prompt`
-(the `<notification …>` XML body) even though its origin is not `user` —
-`prompt` is not user-origin-only.
+While a tool call runs, the item changes in three shapes:
 
-Markers are interleaved between turns and must be tolerated, not rendered:
+- `item.started` with `stage:"input"`, `input_text:""`, then `item.delta`
+  chunks appending to `input_text` (`field:"input_text"`);
+- `item.updated` with `set:{stage:"executing", input:{…}, display:{…},
+  started_at:"…"}` once the arguments parse;
+- `item.updated` with `set:{fields:{…}}` / `set:{task_id:…}` /
+  `set:{agent_refs:[…]}` / `set:{interaction_id:…}` as those become known;
+- `item.ended` with the final `input`, `output`/`error`, `display` and
+  `outcome`.
+
+A streaming reply starts with `item.started` (already carrying the first
+text), continues with `item.delta` (`field:"text"`, or `field:"output"` for a
+tool's live output), and ends with one `item.ended` carrying the persisted
+text. Only the last block of a step is still streaming; earlier items do not
+end early. Non-streamed items (`user_message`) only get `item.ended`.
+
+### Read turns — `GET /api/v1/sessions/{id}/agents/{agent_id}/turns`
+
+Returns one page of an agent's turns, oldest first, at most 1 MiB. Query
+params: `before_ordinal` (only turns with a lower ordinal; the value need not
+exist, e.g. after an undo) and `page_size` (1–200, default 50). The latest page
+holds the running turn, if any, with its content so far.
+
+```bash
+curl -s -H "Authorization: Bearer <token>" \
+  'http://127.0.0.1:58627/api/v1/sessions/<session>/agents/main/turns?page_size=2'
+```
 
 ```json
-{"kind":"marker","markerId":"m1","marker":"swarm.enter","payload":{"trigger":"tool"},"at":"2026-07-28T06:17:58.498Z"}
-{"kind":"marker","markerId":"live-m1","marker":"undo",
- "payload":{"start":0,"deleteCount":0,"messages":[{"role":"user","content":[{"type":"text","text":"…"}],"id":"msg_01KYM2V437…","origin":{"kind":"system_trigger","name":"subagent"}}]}}
-{"kind":"marker","markerId":"m1","marker":"interruption","payload":{"turnId":0,"target":"active","reason":"user_cancelled"},"at":"2026-07-31T19:29:25.032Z"}
+{"code":0,"msg":"success",
+ "data":{"turns":[
+   {"turn_id":"t_13a3e579e524","ordinal":0,"kind":"agent","status":"ended",
+    "turn_number":0,"started_at":"2026-11-12T19:25:20.887Z",
+    "steps":[{"index":1,"outcome":"failed","started_at":"…","ended_at":"…","finish_reason":"error"}],
+    "items":[{"type":"user_message","item_id":"msg_…","status":"ended",
+              "outcome":"completed","created_at":"…","prompt_ids":["msg_…"],
+              "placement":"opener","origin":{"kind":"user"},"text":"…",
+              "attachments":[],"skills":[]}],
+    "outcome":"failed","end_reason":"error",
+    "error":{"code":"provider.auth_error","message":"…","name":"APIStatusError",
+             "status_code":403,"retryable":false},
+    "ended_at":"…","duration_ms":1076}],
+  "has_more":false},
+ "request_id":"…"}
 ```
 
-**2.5.0:** `marker:"compaction"` brackets a manual compaction
-(`payload:{phase:"started",agentId,trigger}` then
-`payload:{phase:"completed",agentId,result:{…}}`), and the compaction's
-wholesale splice is an `undo` marker whose messages include the summary
-(`origin.kind:"compaction_summary"`) and the continuation injection
-(`origin.kind:"injection", variant:"compaction_continuation"`). See Compact.
+Reading a finished sub-agent's turns loads it; an unknown agent answers
+`40401` (session or agent not found). `GET .../messages` is unchanged and
+remains the flattened main-agent history (newest-first, `role` filter); the
+turns route is the per-agent, per-turn read.
 
-`swarm.enter`/`swarm.exit` bracket AgentSwarm runs on the main transcript;
-`undo` markers carry context splices (the sub-agent's task prompt message —
-git-context envelope included — shows up here, full `MessageDto` shape) and
-persist after completion on the warm path. They vanish on the cold rebuild.
-**0.39.0 (commit `c4885860`):** the live projection also drops the **undone
-turns themselves** after an `undo` — previously they stayed visible until the
-cold rebuild (schema-level; undo is TUI-only, not triggered live this run).
-**0.31.1 adds `interruption` markers** — one per user-cancelled turn, on both
-the warm and the cold path (verified live 2026-07-31 after two `:abort`s; the
-`turnId` in the payload is the engine turn id, the cold path maps it to the
-same numbering the turn items use).
+### Live conversation frames
 
-Finished sub-agent, cold-rebuild path (throwaway session left from 045,
-`agent_id=agent-15`, `page_size=3`, trimmed): two turns, both
-`state:"completed"`, origin `system_trigger/subagent`, frames limited to
-`thinking`/`text`/`tool` with `input`+`output`; `has_more:false`.
+| Frame | Content | Client rule |
+| --- | --- | --- |
+| `turns` | `turns[]`, `has_more` | Replace the local conversation for that agent. Sent on every (re)subscribe and whenever the session is closed and reopened |
+| `turn.started`, `turn.ended` | `turn` without `items` | Replace the local turn header, keep its items. `turn.ended` repeats when an ended turn is corrected |
+| `turn.updated` | `turn_id`, `step` (once per ended step) or `retry` | Write `step` into `steps` by `index`; replace/clear `retry` |
+| `item.started`, `item.ended` | `turn_id`, full `item` | Replace the item by `item_id`, or append it to the turn |
+| `item.updated` | `turn_id`, `item_id`, `set` | Merge `set` shallowly into the item |
+| `item.delta` | `turn_id`, `item_id`, `field`, `delta` | Append `delta` to `text`, `input_text` or `output` |
+| `item.removed` | `turn_id`, `item_id` | Remove the item (a retried step's failed attempt; schema-derived, not observed live) |
+| `turns.removed` | `turn_ids[]` | Remove the turns (undo, context clear); ascending ordinal order |
+| `turns.failed` | `code`, `msg` | The conversation could not be loaded; the agent stays subscribed (schema-derived, not observed live) |
+| `notice` | `level`, `title`, `detail?`, `code?` | A live warning/error, not part of a turn (e.g. `compaction.cancelled`) |
 
-### Transcript catch-up — `GET /api/v1/sessions/{id}/transcript/ops`
-
-The REST counterpart of `transcript_since`: `?agent_id=<id>&since_seq=<n>`
-returns `{agent_id, batches:[{seq, ops}], latest_seq, complete}`. `complete:
-true` means every batch up to `latest_seq` is present; `false` means the
-journal cannot reach back to `since_seq` (or the session is not live) and the
-client must do a full `GET .../transcript` refresh. Verified live: since 30
-returned seq 31+ in order; since 0 returned seq 1+.
-
-### Turn-opening inputs — `GET .../transcript/user-messages`
-
-`?agent_id=<id>` (optional; default every rostered agent) returns
-`{agents:[{agent_id, messages, attachments}]}` with every turn-opening input,
-unpaginated. Each message is `{turn_id, ordinal, state, origin, prompt,
-attachment_ids?, started_at?}`; `state` is `queued`/`running`/`completed`/
-`failed`/`cancelled`. Verified live: the two turns of a throwaway session
-listed in order with `origin:{kind:"user",payload:{kind:"user"}}`.
-
-### Plan content — `GET .../transcript/plan`
-
-`?agent_id=<id>` (required) and optional `tool_call_id` returns
-`{agent_id, plans:[{tool_call_id, turn_id, source, plan, path?, options?,
-review?}]}` in timeline order. `source` is `interaction`/`display`/`output`
-(where the content was recovered from); `review` is
-`{state:"pending"|"approved"|"rejected"|"cancelled", selected_option?,
-feedback?}`; `options` are `{label, description?}`. Verified live: an empty
-`plans:[]` on a session with no `ExitPlanMode` call. `40416` if a
-`tool_call_id` names no `ExitPlanMode` call.
-
-### Read one message — `GET /api/v1/sessions/{id}/messages/{message_id}`
-
-Returns the same message object as the history page; `40403` when the id is
-not in the session. Additive and unused by the app.
+The frames may repeat content the `turns` page already holds; applying them as
+replacements keeps the result correct.
 
 ## Search
 
@@ -4328,37 +4196,40 @@ serves it (verified live: both returned the same 70 bytes for a 1×1 png); the
 session-media route is the canonical path and the only one that works for media
 that never passed through the daemon upload store.
 
-### Turn file history (new in 0.40.1; live since 0.41.0)
+### Turn file history
 
-Two routes that serve per-turn file-change snapshots. Introduced in 0.40.1
-behind the `file_history` experimental flag (commit `650d12f6` — source-derived
-only then, flag off); **0.41.0 dropped the gate** (commit `eba23edb`, "drop the
-experimental gate from turn-level file history" — the flag is gone from
-`/meta`), so they answer on this server now (verified live 2026-09-04):
+Two routes serve per-turn file snapshots (0.41.0; live). Both now take
+**`turn_number`**, the conversation turn's engine number (see Conversation →
+Turns), not the old `turn_id`: on 2.6.0 `?turn_id=20` answers `40001`
+`"turn_number: Invalid input"` while `?turn_number=20` answers `code:0`
+(verified live; commit `961b90f9` added `turn_number`, `13590cde` dropped the
+alias).
 
-- `GET /api/v1/sessions/{id}/file-history/changes?turn_id=N` →
+- `GET /api/v1/sessions/{id}/file-history/changes?turn_number=N` →
   `{"changes":[{"path","status":"added"|"modified"|"deleted","additions",
-  "deletions","binary"?,"oversize"?}],"recorded":<bool>}` — a turn with
-  nothing recorded answers `{"changes":[],"recorded":false}` (verified).
-  **The 0.40.1 source-derived shape also carried `enabled` — the shipped
-  schema (`packages/kap-server/src/protocol/rest-file-history.ts` at
-  0.41.0) has only `changes` and `recorded`.**
-- `GET /api/v1/sessions/{id}/file-history/content?turn_id=N&path=<p>[&phase=
-  "start"|"end"]` → `{"content":{"version":<n>,"content"?,"binary"?} | null}`
-  (schema-verified at 0.41.0; not exercised live).
+  "deletions","binary"?,"oversize"?}],"recorded":<bool>}`. A turn with nothing
+  recorded (or not retained) answers `{"changes":[],"recorded":false}`; a
+  `recorded:false` page may be partial.
+- `GET /api/v1/sessions/{id}/file-history/content?turn_number=N&path=<p>
+  [&phase="start"|"end"]` → `{"content":{"version":<n>,"content"?,"binary"?}
+  | null}`. `phase` defaults to `start`; a file the turn did not change returns
+  its start content for `phase=end`. A null `content` means the file did not
+  exist at that phase (or was too large / its stored copy was cleaned up).
 
-The only declared error is `SESSION_NOT_FOUND` (`40401`). The Android app
-never calls these.
+Errors: `40001` missing/invalid `turn_number` (or a missing `path`), `40401`
+unknown session. The Android app's turn-changes screen still sends `turn_id`
+and therefore sees `40001` (ticket 191).
 
 ## Prompts
 
 ### Queue snapshot — `GET /api/v1/sessions/{id}/prompts`
 
-**New in 2.5.0** (verified live 2026-11-04). Returns the main agent's prompt
-queue: `{"active": <prompt>|null, "queued": [<prompt>…]}`. A prompt is
-`{prompt_id, user_message_id, status, content, created_at}` with `status`
-`running`/`queued`/`blocked` (live also shows `completed`/`aborted` on the
-transcript entities but not in this queue view). Verbatim mid-turn:
+Returns the main agent's prompt queue:
+`{"active": <prompt>|null, "queued": [<prompt>…]}`. A prompt object is
+`{prompt_id, user_message_id, status, content, created_at, metadata?}` with
+`status` `running`/`queued`/`blocked`/`failed`. `active` is the running
+prompt, `queued` the waiting ones in order. A prompt that has ended
+(completed/aborted) is no longer in this view. Verbatim mid-turn:
 
 ```json
 {"code":0,"msg":"success","data":{
@@ -4370,10 +4241,13 @@ transcript entities but not in this queue view). Verbatim mid-turn:
              "created_at":"…"}]},"request_id":"…"}
 ```
 
+Queue changes are not pushed over the WebSocket; read again when a client
+needs the current queue.
+
 ### Send — `POST /api/v1/sessions/{id}/prompts`
 
 ```bash
-curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../prompts \
+curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/<session>/prompts \
   -H "Authorization: Bearer <token>" \
   -H 'Content-Type: application/json; charset=utf-8' \
   -d '{"content":[{"type":"text","text":"Run exactly this one command, then reply done: echo doc-verify-0290"}],
@@ -4381,288 +4255,149 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../promp
 ```
 
 ```json
-{
-  "code": 0, "msg": "success",
-  "data": {
-    "prompt_id": "msg_01KY6G6B4A1EM8X8XRA02KJ3ZR",
-    "user_message_id": "msg_01KY6G6B4A1EM8X8XRA02KJ3ZR",
-    "status": "running",
-    "content": [{"type": "text", "text": "Run exactly this one command, then reply done: echo doc-verify-0290"}],
-    "created_at": "2026-07-23T03:27:03.306Z"
-  },
-  "request_id": "01KY6G6B2FE6494T12W5FR7Q2E"
-}
+{"code":0,"msg":"success","data":{
+  "prompt_id":"msg_01KY6G6B4A1EM8X8XRA02KJ3ZR",
+  "user_message_id":"msg_01KY6G6B4A1EM8X8XRA02KJ3ZR",
+  "status":"running",
+  "content":[{"type":"text","text":"Run exactly this one command, then reply done: echo doc-verify-0290"}],
+  "created_at":"2026-07-23T03:27:03.306Z"},
+ "request_id":"01KY6G6B2FE6494T12W5FR7Q2E"}
 ```
 
-- `prompt_id` equals `user_message_id` (the ULID `msg_...` id of the user
-  message).
-- `content` is a typed union, not just text. For user prompts the client may
-  send (text/image/file items verified live 2026-07-24; the schema lived in
-  `packages/protocol/src/message.ts` up to 0.41.0 — **0.42.0 deleted the
-  `packages/protocol` package** (commit `9188d03c) and relocated its wire
-  types into `packages/agent-core-v2`, which is the ground-truth reference
-  from 0.42.0 onward):
+- The server handles a submission in this order: validate media references,
+  apply the overrides to the target agent (`model`, `thinking`,
+  `permission_mode`, `swarm_mode`, `disabled_tools`), then open a turn or
+  queue the prompt. Overrides persist after the prompt. `permission_mode`
+  changes only the target agent; `plan_mode`, `goal_objective` and
+  `goal_control` are accepted but not applied on this route (use the profile
+  route).
+- The verdict is `status:"running"` when the turn starts immediately, and
+  `status:"queued"` when the agent is busy, the queue is non-empty, or an
+  undo/compaction/fork is in progress. A prompt that fails before starting a
+  turn answers `blocked` (a hook rejected it) or `failed`.
+- `prompt_id` equals `user_message_id` — the ULID `msg_...` id of the user
+  message when the client did not choose one.
+- **`prompt_id` makes the submission idempotent (2.6.0).** Resend the same
+  request with the same id after a timeout: the server returns the first
+  result without submitting again, waits for an in-flight first request, and
+  answers `40927` ("prompt_id '…' is already used by a different request") if
+  the same id arrives with a different body. The fingerprint covers the
+  endpoint plus the full body (field order does not matter). `/prompts`,
+  `/steer` and skill activation share one table per session, kept in memory
+  (256 records, oldest ended evicted; cleared on restart or session delete).
+  Verified live: an identical resend returned the same `prompt_id` and
+  `created_at`; a changed body answered `40927`. Requests without `prompt_id`
+  have no idempotency protection.
+- `content` is a typed union. For user prompts the client may send:
   - `{"type":"text","text":"…"}`
-  - `{"type":"image","source":{"kind":"file","file_id":"f_…"}}` — for uploaded
-    `image/*` files. (`url` and `base64` source kinds also exist in the
-    schema.)
-  - `{"type":"video","source":{"kind":"file","file_id":"f_…"}}` — uploaded
-    `video/*`.
-  - `{"type":"file","file_id":"f_…","name":"…","media_type":"…","size":123}` —
-    any other uploaded file. The web client picks the kind purely by MIME
-    prefix (`image/*` → image, `video/*` → video, else file).
-  - **0.39.1 — server-local path attachments** (commit `4e7738b7`; verified
-    live 2026-08-28): image/video sources accept a 5th kind
-    `{"kind":"path","path":"<absolute server-local path>"}`, and a `file`
-    part may replace `file_id`+metadata with just `"path"` (`name`/
-    `media_type`/`size` then optional — basename, `application/octet-stream`
-    and stat fill the gaps). Exactly one of `file_id`/`path` must be present
-    (`40001` otherwise). Paths must be absolute (`40001` "attachment path
-    must be absolute: …", an Error2 envelope **with `stack`**), must exist
-    (**`40407`** "file not found: …" — a new code on this route, distinct
-    from the file store's `40406`), and are realpath-resolved; a
-    sensitive-file filter exists but did NOT reject
-    `/home/ubuntu/.kimi-code/server.token` live — do not rely on it. Local
-    runtime only (the daemon rejects path refs on non-local runtimes).
-  - The server **validates the referenced file's sniffed `media_type`** against
-    the part type (verified live): a `video` part whose file was uploaded as
-    `application/octet-stream` is rejected up front with envelope code `40001`
-    (`file f_… is application/octet-stream, not a video`) and the prompt does
-    not run. Since the upload sniffer never returns `video/*` on 0.29.0 (see
-    Files above), the video path is effectively unreachable in this version.
-- The server **rewrites attachment parts** before enqueueing, so history
-  (`GET .../messages`) does not contain the original items (verified live
-  2026-07-24 except where noted):
-  - `file` parts become a **text part**, exact wording verified:
-    `Attached file "<name>" (<mime>, <size> bytes): <abs path> — open it with
-    the Read tool`. The bytes are materialized under
-    `<sessionDir>/attachments/<fileId>-<sanitized name>` (sessionDir is
-    `~/.kimi-code/sessions/<workspace_id>/<session_id>`) — the agent reads them
-    from disk; the web client parses this notice back into a chip with a regex,
-    so its wording is a client contract.
-  - **0.37.2 change (verified live):** uploaded images now project to
-    `{"type":"image","source":{"kind":"session_media","file_id":"f_…"}}` in
-    BOTH the prompt ACK echo and `GET .../messages` — the transient `file`
-    upload is promoted to a Session-owned canonical copy at intake, and the
-    ACK/history no longer carry base64 or `url:data:…`. Fetch the bytes via
-    `GET /api/v1/sessions/{id}/media/{file_id}` (see Files). The pre-0.37.2
-    shapes — ACK `{"kind":"base64","media_type","data"}`, history
-    `{"kind":"url","url":"data:<mime>;base64,…"}` — no longer occur.
-    **0.42.0 (additive, commit `baf17a8f`; verified live 2026-09-09):** the
-    projected part carries the original file's **`name`** —
-    `{"type":"image","source":{"kind":"session_media","file_id":"f_…"},"name":"one.png"}`
-    verbatim on BOTH the ACK echo and history (`video` parts alike).
-  - Large images are compressed before enqueueing (verified: a 14.1 MB
-    2600×1900 png was downscaled to 1000×731; a 3.2 MB one passed through
-    untouched). A compression then prepends a separate **text part** wrapped in
-    `<system>…</system>`: `Image compressed to fit model limits: original
-    <W>x<H> <mime> (<orig>) -> sent <W>x<H> <mime> (<new>). Fine detail may be
-    lost. The uncompressed original is saved at
-    "<sessionDir>/media-originals/<hash>.<ext>"; if you need fine detail (e.g.
-    small text), call ReadMediaFile on that path …`. Formats the model rejects
-    degrade to the "Attached file" notice above (source-derived, not verified).
-  - Videos project the same `session_media` source kind as images since 0.37.2
-    (`{type:"video", source:{kind:"session_media", file_id}}`); the earlier
-    `file`-kind video shape was source-derived and unreachable live (the 0.29.0
-    upload sniffer never returned `video/*`).
-  - **0.39.1 — attachments recorded on the prompt origin** (verified live):
-    every file attachment (uploaded `file_id` or server-local `path`) adds an
-    `attachments` array to the user-message origin — history carries it at
-    `metadata.origin.attachments`, the `context.spliced` echo at the
-    message's `origin.attachments`, and `turn.started` at
-    `origin.attachments` — `[{"name","mediaType","size","path"}]`,
-    camelCase; `path` is the original path for `path` parts and the
-    materialized `<sessionDir>/attachments/…` copy for uploads. A `path`
-    image projects as `session_media` (the file is saved into the
-    session-media store at intake), a `path` file as the usual
-    `Attached file "…"` notice naming the original path in place.
-    `turn.started.promptAttachments` is still never emitted live (the schema
-    gained a `kind:"file"` variant in 0.39.1; unobserved). The app decodes
-    only `origin.kind` — additive, ignored.
-- **`swarm_mode` in the prompt body is LIVE since 2.4.0** (commit `78b72fe4`,
-  "apply swarm mode from prompt submissions"; verified live 2026-10-28):
-  a prompt posted with `"swarm_mode": true` enters swarm mode before the
-  prompt is enqueued and `/status` reads `swarm_mode:true`; posting `false`
-  exits it (`true`→`false` across two probes on the same session). Up to
-  2.3.3 the field parsed but was never consumed, while
-  `POST /api/v1/sessions/{id}/profile {"agent_config":{"swarm_mode":true}}`
-  already worked through `applySessionAgentConfig` → `swarm.enter('manual')`
-  (both routes verified again on 2.4.0). `plan_mode`, `goal_objective` and
-  `goal_control` on the prompt body remain parsed-but-unapplied
-  (source-derived; `plan_mode` through the profile route is live, see
-  Interactions).
-- Optional body fields (per-prompt overrides): `permission_mode`
-  (`manual`/`auto`/`yolo` — `manual` verified live), `model` (verified: a
-  session with empty `agent_config.model` runs when the prompt carries one),
-  `thinking`, `plan_mode`, `swarm_mode` (**applied since 2.4.0** — see
-  above), `agent_id`, `metadata`,
-  `goal_objective`, `goal_control`, `disabled_tools`, `prompt_id` (**0.37.2**:
-  a client-chosen prompt record id echoed on the ACK `prompt_id`/
-  `user_message_id`, the history message id, and `turn.started.promptId`;
-  reusing one already in the agent's history answers `40927`
-  `prompt.id_conflict`), and `skills` (**0.37.2**:
-  `[{"name":"…","args":"…"}]` bundled skill activations — the app sends none;
-  skills stay out of scope).
-- **`metadata` — live since 2.0.0** (commit `41eac5d2`; verified live
-  2026-09-17): an arbitrary client JSON object in the prompt POST body. It is
-  echoed on the HTTP ACK as `data.metadata`, and rides the wire as
-  `clientMetadata:[<metadata>]` (array-wrapped) on `prompt.submitted` /
-  `prompt.queued`, on the `context.spliced` user message's
-  `origin.clientMetadata`, on `turn.started`'s `origin.clientMetadata`, in
-  history at `metadata.origin.clientMetadata`, and in the transcript
-  prompts[] / user-turn origin payloads. Absent everywhere when not sent.
-  Verbatim `prompt.submitted` for a prompt posted with
-  `"metadata":{"client":"doc-verify-200","index":1}`:
-
-  ```json
-  {"type":"prompt.submitted","seq":22,
-   "payload":{"type":"prompt.submitted","time":1789673445307,"agentId":"main",
-              "promptId":"msg_01M2RDK5XQN21NFQPNV3D3W14X",
-              "userMessageId":"msg_01M2RDK5XQN21NFQPNV3D3W14X","status":"running",
-              "content":[{"type":"text","text":"Reply with exactly: meta-ok"}],
-              "clientMetadata":[{"client":"doc-verify-200","index":1}],
-              "createdAt":"2026-09-17T19:30:45.307Z","sessionId":"session_..."}}
-  ```
-
-  The app sends no `metadata` and ignores the field (`ignoreUnknownKeys`).
-- `thinking` (verified live 2026-07-24, ticket 032) is a **plain effort
-  string**, not an object: `"thinking": "low"`. Values come from the model's
-  `support_efforts` (`GET /api/v1/models`; K3 on 0.29.0: `low`/`high`/`max`,
-  plus `off` per the error message below). The honored level reads back via
-  `GET /api/v1/sessions/{id}/status` (`data.thinking_level`, e.g. `"low"` after
-  a `"low"` prompt) and live via the `agent.status.updated` model/usage
-  variant's `thinkingEffort`. Error behavior:
-  - An object shape (`{"enabled":true,"effort":"low"}` or `{"effort":"low"}`)
-    is rejected up front: envelope code `40001`
-    (`thinking: Invalid input: expected string, received object`); the prompt
-    does not run.
-  - An unknown effort (`"banana"`) is rejected up front: envelope code `50001`
-    (`Thinking effort "banana" is not supported by model "kimi-code/k3".
-    Supported efforts: off, low, high, max.`); the prompt does not run.
-  - An effort sent with a model that has no `support_efforts` (e.g.
-    `"thinking":"low"` with `kimi-code/kimi-for-coding`) is **accepted**: the
-    turn runs and `thinking_level` reads back as `"on"` — the server degrades
-    the effort to plain thinking-on instead of erroring. Clients should still
-    only send efforts from the model's `support_efforts`.
+  - `{"type":"image","source":{"kind":"file","file_id":"f_…"}}` (also `video`)
+  - `{"type":"file","file_id":"f_…","name":"…","media_type":"…","size":123}`
+  - `source` kinds: `url` (`{url,id?}`), `base64` (`{media_type,data}`),
+    `file` (`{file_id}`), `session_media` (`{file_id}`).
+  The server validates that the upload's sniffed media type matches the part
+  kind and rejects a mismatch with `40001` before the prompt runs.
+- The server rewrites attachment parts before enqueueing. A `file` part becomes
+  a text notice:
+  `Attached file "<name>" (<mime>, <size> bytes): <abs path> — open it with
+  the Read tool`. An uploaded image projects to
+  `{"type":"image","source":{"kind":"session_media","file_id":"f_…"},"name":"one.png"}`
+  on both the ACK echo and `GET .../messages` (0.37.2/0.42.0). Fetch the bytes
+  with `GET /api/v1/sessions/{id}/media/{file_id}`. Large images are
+  compressed and gain a `<system>Image compressed…</system>` text part.
+- Optional body fields: `agent_id`, `prompt_id`, `model`, `thinking`,
+  `permission_mode`, `swarm_mode` (**applied since 2.4.0**), `metadata`,
+  `disabled_tools`, `skills` (bundled skill activations; out of scope here).
+  `thinking` is a plain effort string (`"low"`/`"high"`/`"max"`, plus `off`).
+  An unknown effort answers `50001` with the supported list; an object shape
+  answers `40001`; a model without `support_efforts` accepts an effort and
+  degrades it to thinking-on.
+- `metadata` is an arbitrary client JSON object, echoed on the ACK and
+  attached to the user message.
 - The server is asynchronous: the HTTP response only acknowledges the prompt;
   results arrive over the WebSocket.
-- While the session is busy, a posted prompt is accepted but queued: the
-  response comes back with `"status": "queued"` instead of `"running"`
-  (re-verified 2026-07-23). A queued prompt can be steered into the running
-  turn — see the next section.
-- **2.5.0 — per-prompt actions** (upstream-documented, not probed live).
-  `POST .../prompts/{prompt_id}:abort` aborts that running prompt
-  (`{aborted:true}`; an already-completed prompt answers `40903` with
-  `{aborted:false}`) and `POST .../prompts/{prompt_id}:steer` steers one
-  queued prompt (the single-id form of `:steer`). Both dispatch through the
-  same `{prompt_id}:{action}` tail route; an unknown action or prompt
-  answers `40001`/`40402`.
-- **2.5.0 — prompt entities.** The transcript (`prompt.upsert` ops,
-  `transcript.reset.snapshot.prompts`, and `GET .../transcript.prompts`)
-  carry `{promptId, status, userMessageId, content, createdAt, finishedAt?,
-  steeredAt?}` with `status` `running`/`queued`/`completed`/`aborted`/
-  `blocked`/`failed`. A steered prompt flips to `completed` with `steeredAt`; its text
-  also lands as a user-role transcript frame with `promptIds`. These entities
-  replace the old `prompt.submitted`/`queued`/`started`/`completed`/`aborted`
-  events.
+- **Per-prompt actions.** `POST .../prompts/{prompt_id}:abort` aborts that
+  running prompt (equivalent to `:abort`) or withdraws a queued one (no turn,
+  no frame); a missing/ended prompt answers `40402`. `POST
+  .../prompts/{prompt_id}:steer` steers one queued prompt. Both use the
+  `{prompt_id}:{action}` tail route; an unknown action answers `40001`.
+  Verified live: aborting the running prompt returned `{aborted:true}` and the
+  turn ended `interrupted`/`user_cancelled`.
+- **Prompt entities are gone.** The transcript's `prompt.upsert` and
+  `prompts[]` arrays do not exist on 2.6.0. A prompt's fate is visible from
+  the conversation: its `user_message` item carries the `prompt_id` in
+  `prompt_ids`, and the turn's `outcome` says how it ended. The queue snapshot
+  above is the only REST prompt list.
 
 ## Steer
 
-Steering injects a message into the currently running turn. Two shapes are
-live on 2.5.3 (verified 2026-11-10):
+Steering injects a message into the running turn. Two shapes are live on
+2.6.0:
 
-- **Direct — `POST /api/v1/sessions/{id}/steer`** (new in 2.5.3): one
-  request carries the same body as a prompt submission. On a busy session
-  it queues and steers the message; on an idle one it behaves exactly like
-  the prompt POST (fresh turn).
+- **Direct — `POST /api/v1/sessions/{id}/steer`**: one request carries the
+  same body as a prompt submission. On a busy session it queues and steers the
+  message; on an idle one it behaves exactly like the prompt POST.
 - **Queue-then-steer — `POST .../prompts` + `POST .../prompts:steer`**: post
   the prompt as usual (`"status":"queued"` while busy), then steer the
   returned `prompt_id` into the active turn.
 
-**2.5.3 execution model (verified live):** a steer interrupts the active
-LLM request at the next drain boundary instead of waiting for the step to
-finish. The current step is closed as `state:"interrupted"` with the new
-`endReason:"steered"`, and the steered text continues in a new step of the
-**same turn**. A steer that arrives while a tool call is streaming waits
-for that tool to finish first. Steered history is append-only: the message
-is its own `role:"user"` entry in `GET .../messages`.
+**2.6.0 execution model (verified live, three probes):** a steer applied while
+a step is active interrupts that step — its `turn.updated` carries
+`outcome:"interrupted"`, `finish_reason:"interrupted"` — ends the turn
+`completed`, and the steered text opens the **next turn** as a
+`user_message` with `placement:"opener"`. This holds for a steer during
+streaming text, during a running tool call (the steer waits for the tool), and
+for a queued prompt steered by id. The wire schema still allows an in-turn
+merge (`placement:"steer"`, several steering inputs merged into one
+`user_message` with all their `prompt_ids`); no such item was observed on
+2.6.0, so clients must handle both placements.
 
-**2.5.0:** the old `prompt.steered`/`turn.steer`/`context.spliced` frames
-are gone. The steer is visible as transcript state: the steered prompt's
-`prompt.upsert` goes `queued` → `completed` with `steeredAt`, the active
-prompt's entity gains `steeredAt`, the steered text appears as a user-role
-text frame carrying `promptIds` in the running turn's next step
-(`{"kind":"text","frameId":"t2.3.f1","role":"user","text":"…",
-"promptIds":["msg_…"],"origin":{"kind":"user"}}`), and an `undo` marker
-carries the spliced message with `origin:{"kind":"user","inTurn":true}`.
-The turn does not restart; `prompt.completed` no longer exists — the prompt
-entity's `status:"completed"` is the completion signal.
+The turn does not restart. There is no `prompt.steered`/`turn.steer`/
+`context.spliced`: the steered input is the next turn's opener item, and the
+previous turn's `turn.ended` is the boundary.
 
 ### Steer message content — `POST /api/v1/sessions/{id}/steer`
 
-**New in 2.5.3** (commit `e1912c80`; verified live 2026-11-10). Body: the
-prompt-submission schema — `content` (the same typed part union as the
-prompt POST, attachments included), `agent_id`, `prompt_id`, `skills`,
-`model`, `thinking`, `permission_mode`, `swarm_mode`, `metadata`,
-`disabled_tools`, `profile`. Success data is the prompt ACK shape.
+Body: the prompt-submission schema — `content` (the same typed part union,
+attachments included), `agent_id`, `prompt_id`, `skills`, `model`, `thinking`,
+`permission_mode`, `swarm_mode`, `metadata`, `disabled_tools`. Success data is
+the prompt ACK shape.
 
 ```bash
-curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_6ea83210.../steer \
+curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/<session>/steer \
   -H "Authorization: Bearer <token>" \
   -H 'Content-Type: application/json; charset=utf-8' \
-  -d '{"content":[{"type":"text","text":"Stop and reply with exactly: direct-steer-mid-253"}],
+  -d '{"content":[{"type":"text","text":"Stop and reply with exactly: direct-steer"}],
        "model":"deepseek/deepseek-v4-flash"}'
 ```
 
 ```json
 {"code":0,"msg":"success",
- "data":{"prompt_id":"msg_01M73ETJGQ6E4M9QSRQ8BYMYRK",
-         "user_message_id":"msg_01M73ETJGQ6E4M9QSRQ8BYMYRK","status":"running",
-         "content":[{"type":"text","text":"Stop and reply with exactly: direct-steer-mid-253"}],
-         "created_at":"2026-11-10T19:26:42.205Z"},
- "request_id":"01M73ETJGNJPEJB098A0JW2EDK"}
+ "data":{"prompt_id":"msg_01M78KVEJGKHCWPE8SMFS7W93X",
+         "user_message_id":"msg_01M78KVEJGKHCWPE8SMFS7W93X","status":"running",
+         "content":[{"type":"text","text":"Stop and reply with exactly: direct-steer"}],
+         "created_at":"2026-11-12T19:30:45.979Z"},
+ "request_id":"01M78KVEJFZ3SZ9SNYKY7NXRK5"}
 ```
 
-- On an **idle** session the call starts a normal turn (ACK
-  `status:"running"`, `prompt.upsert` running → completed), exactly like
+- On an **idle** session the call starts a normal turn, exactly like
   `POST .../prompts`.
-- On a **busy** session the ACK also says `status:"running"`, but the
-  transcript logs the prompt as `queued` first, then `completed` with
-  `steeredAt` once the steer is applied. Trust the transcript entity, not
-  the ACK status.
-- Errors: empty or missing `content` → `40001` `content: Invalid input`;
-  unknown session → `40401` with `stack`; the rest match the prompt POST
-  (`40927` prompt-id conflict, `40407` file not found, `40931`/`40932`).
-  A steer against an active turn whose prompt is untracked is accepted
-  (source-derived; the engine now keys on `activeTurnId`, not a tracked
-  prompt).
-
-Mid-stream capture (prompt A streaming its essay, direct steer B posted):
-the current step `t2.2` is interrupted mid-thinking, B's user frame opens
-`t2.3` in the same turn, and the turn completes normally:
-
-```json
-{"op":"prompt.upsert","prompt":{"promptId":"msg_…A","status":"running",
-  "steeredAt":"2026-11-10T19:26:42.213Z",…}}
-{"op":"prompt.upsert","prompt":{"promptId":"msg_…B","status":"completed",
-  "finishedAt":"…","steeredAt":"…","content":[{"type":"text","text":"Stop and reply…"}]}}
-{"op":"step.upsert","turnId":"t2","step":{"stepId":"t2.2","state":"interrupted",
-  "endedAt":"…","endReason":"steered"}}
-{"op":"marker.upsert","item":{"marker":"undo","payload":{"start":14,"deleteCount":0,
-  "messages":[{"role":"user","content":[{"type":"text","text":"Stop and reply…"}],
-               "origin":{"kind":"user","inTurn":true},"id":"msg_…B"}]}}}
-{"op":"step.upsert","turnId":"t2","step":{"stepId":"t2.3","state":"running"}}
-{"op":"frame.upsert","turnId":"t2","stepId":"t2.3",
- "frame":{"kind":"text","frameId":"t2.3.f1","role":"user","text":"Stop and reply…",
-          "promptIds":["msg_…B"],"origin":{"kind":"user"}}}
-```
+- On a **busy** session the ACK also says `status:"running"`, even while the
+  steer is held until the current step/tool reaches an insertion point. Trust
+  the conversation, not the ACK status.
+- Errors: empty or missing `content` → `40001`; unknown session → `40401`;
+  the rest match the prompt POST (`40927`, `40407`, `40931`/`40932`).
+- Live mid-stream capture (prompt A streaming its essay, direct steer B
+  posted): A's step ends `interrupted` (`finish_reason:"interrupted"`), A's
+  turn ends `completed`, B's `item.ended` opens the next turn with
+  `placement:"opener"`. A queued steer while a `sleep` tool ran waited for the
+  tool and opened the next turn the same way.
 
 ### Steer queued prompts — `POST /api/v1/sessions/{id}/prompts:steer`
 
 Body: `{"prompt_ids": ["<prompt id>", ...]}` — at least one id.
 
 ```bash
-curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../prompts:steer \
+curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/<session>/prompts:steer \
   -H "Authorization: Bearer <token>" \
   -H 'Content-Type: application/json; charset=utf-8' \
   -d '{"prompt_ids":["msg_01KY6GCAQF1655KB27NSFBGWZ2"]}'
@@ -4674,348 +4409,138 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions/session_b6be6715.../promp
  "request_id":"01KY6GCAT25KYEJKXA3XMM50H6"}
 ```
 
-- **2.5.3:** a routed steer shares the direct route's execution model — it
-  interrupts the current LLM step (`endReason:"steered"`) and continues in a
-  new step of the same turn. Live capture: a queued prompt steered while a
-  Bash tool call was running waited for that tool to finish, then opened the
-  next step with the user frame; a steer against a streaming text/thinking
-  step cuts it at the drain boundary. Idle `40402` is unchanged.
-- **Idle session** (nothing to steer into): HTTP 200 with
-  `{"code":40402,"msg":"no active prompt to steer into","data":null,...}`
-  (re-verified 2026-11-10).
-- Empty `prompt_ids`:
-  `{"code":40001,"msg":"prompt_ids: Too small: expected array to have >=1 items",...}`
-  (re-verified 2026-07-23).
-- WS sequence when the steer lands mid-turn (verbatim capture in the WS
-  section): `prompt.steered` → **`turn.steer`** (engine-side steer
-  application, carrying `{input: [<the steered prompt's content parts>],
-  origin: {"kind":"user"}}` — first captured live 2026-09-14 on 0.43.0)
-  → the current step runs to `turn.step.completed` → the steered user
-  message arrives via `context.spliced` → a new
-  `turn.step.started` **in the same turn** (no new `turn.started`) →
-  `turn.ended` `"completed"` → a single `prompt.completed` carrying the
-  **original** active prompt id. The agent then follows the steered
-  instruction. Re-verified 2026-07-27 on 0.29.2. **Event order flipped in
-  2.0.0** (commit `2bb6e12c`; verified live 2026-09-17): `prompt.steered`
-  now fires **before** `turn.steer` (observed seq 42 then 43) — from 0.43.0
-  through 0.43.1 `turn.steer` came first. **2.0.1, additive (commits
-  `53e5e3fc`/`60f2a632`/`73ebe9ab`; verified live 2026-09-18):** the steer
-  frames gained a message-identity set — `prompt.steered` carries
-  **`messageId`**, `turn.steer` carries **`messageId`**, **`promptIds`** and
-  **`turnId`** with origin `{"kind":"user","inTurn":true}`, and the spliced
-  steered message (plus its history entry) carries that same `messageId` as
-  its `id` with the `inTurn:true` origin. **A single steer reuses the queued
-  prompt's own id** as `messageId`; **a multi-prompt steer mints a fresh
-  ULID** for the merged message (verbatim frames in WebSocket → Core event
-  payloads). **2.4.1 re-verification (2026-10-30):** the engine-side
-  `turn.steer` was observed *after* the steered-message `context.spliced`
-  (spliced seq 18, `turn.steer` seq 19) and immediately before the new
-  `turn.step.started`; the payload set is unchanged, so clients must not
-  require `turn.steer` ahead of the splice.
+- Available only while the main agent has a running turn; without one it
+  answers `40402` (`"no active prompt to steer into"`).
+- Several ids are validated as a whole: any id not in the queue, or repeated,
+  fails the request with `40402` and nothing is steered.
+- Empty `prompt_ids` → `40001`
+  (`"prompt_ids: Too small: expected array to have >=1 items"`).
+- The single form is `POST .../prompts/{prompt_id}:steer`, with the same
+  result (`prompt_ids:[prompt_id]`).
 
 ## Abort
 
 ### Abort current prompt — `POST /api/v1/sessions/{id}:abort`
 
-Body: `{}`. Aborts the currently running prompt/turn of the session.
+Body: `{}`. Stops the main agent's current turn. It answers
+`{"aborted":true}` whether or not a turn is running, so it is safe to retry;
+only the turn's `turn.ended` proves it stopped (verified live mid-turn and
+idle).
 
 ```bash
-curl -s -X POST 'http://127.0.0.1:58627/api/v1/sessions/session_b6be6715...:abort' \
+curl -s -X POST 'http://127.0.0.1:58627/api/v1/sessions/<session>:abort' \
   -H "Authorization: Bearer <token>" \
   -H 'Content-Type: application/json; charset=utf-8' -d '{}'
 # {"code":0,"msg":"success","data":{"aborted":true},"request_id":"01KY6GFG4S5FPPXCFMP60X0FVH"}
 ```
 
-**2.5.0:** the REST behaviour is unchanged (`{"aborted":true}` mid-turn or
-idle), but the old `turn.step.interrupted` → `turn.ended` → `prompt.aborted`
-frames are gone. Abort is visible in the transcript stream as: the current
-step's `step.upsert` `state:"interrupted"` with `endReason:"aborted"`, the
-turn's `turn.upsert` `state:"cancelled"`, a standalone
-`marker:"interruption"` item
-(`{"turnId":<n>,"reason":"user_cancelled"}`), a `prompt.upsert`
-`status:"aborted"`, an `undo` marker carrying the interruption reminder
-(`origin:{"kind":"injection","variant":"interruption"}`), and
-`event.session.work_changed` with `busy:false`, `last_turn_reason:"cancelled"`.
-A killed tool call's `task` frame reports `outcome:"killed"`. (The
-`interruption` marker was present before 2.5.3 too; it was missing from this
-section's earlier itemization, re-verified live 2026-11-10.)
+**2.6.0 sequence (verified live):** the active step's `turn.updated` carries
+`outcome:"interrupted"`, `finish_reason:"interrupted"`; `turn.ended` reports
+`outcome:"interrupted"`, `end_reason:"user_cancelled"`; `event.session.work_changed`
+goes idle with `last_turn_reason:"cancelled"`; and the next queued prompt
+starts a new turn immediately (`work_changed` busy again). A shell task killed
+with the turn sends a `task` frame with `status:"ended"`, `outcome:"killed"`.
+History gains the interruption reminder as a user message with
+`metadata.origin:{"kind":"injection","variant":"interruption","ownerPromptId":"…"}`
+(it is not pushed as a frame on 2.6.0).
 
-The historical sequence (0.29.0–2.4.1) was verified mid-run on 0.29.0
-(2026-07-23), again on 0.29.2 (2026-07-27), again on 0.31.0 (2026-07-30), and
-again on 0.31.1 (2026-07-31): the WS then emitted `turn.step.interrupted`
-(`reason: "aborted"`) → `turn.ended` (`reason: "cancelled"`) →
-`event.session.work_changed` (idle, `last_turn_reason: "cancelled"`) →
-`prompt.aborted`. It is kept below for older journals. **0.31.1 additions to that sequence (verified live):**
-`turn.ended` carries `interruptReason: "user_cancelled"`, and a
-`context.spliced` echo of the interruption-reminder `<system-reminder>`
-injection (origin `{"kind":"injection","variant":"interruption"}` — see
-Messages) lands between `turn.ended` and the idle `work_changed`. Verbatim
-0.31.1 `turn.ended` payload:
-
-```json
-{"type":"turn.ended","turnId":1,"reason":"cancelled","durationMs":5030,
- "interruptReason":"user_cancelled","agentId":"main","sessionId":"session_..."}
-```
-
-**0.43.0 (verified live 2026-09-14):** an idle `:abort` (nothing running,
-or the prompt already completed) no longer errors — it answers
-`{"code":0,"data":{"aborted":true}}`. The `40903`
-`prompt.already_completed` rejection was removed (commit `46233953`); the
-abort sequence above is unchanged when a turn IS running.
+Stopping a turn does not clear the queue: queued user prompts and uninserted
+steering stay and start after the stopped turn; queued skill activations are
+cancelled. `POST .../prompts/{prompt_id}:abort` withdraws one queued prompt
+(no turn, no frame) or stops the running one.
 
 ## Compact
 
-Compacting summarizes a session's history to free up context window (the wire
-equivalent of the TUI's `/compact`). Documented and verified live on server
-`0.30.0` (2026-07-30, ticket 054); **re-verified on 2.5.0 (2026-11-04), where
-the result moved from the `compaction.*` event family to transcript markers**
-— see WebSocket sequence (2.5.0) below. The web bundle's
-`event.session.history_compacted` event (`before_seq` / `reason` /
-`summary_message_id`) is still never emitted by this server.
+Compacting summarizes a session's history to free context window (the wire
+equivalent of the TUI's `/compact`). Verified live on 2.6.0 (2026-11-12),
+including both bodies and both `40910`s.
 
 ### Compact a session — `POST /api/v1/sessions/{id}:compact`
 
-Body: `{}` or `{"instruction": "..."}` (the body may also be omitted
-entirely — same as `{}`, but only when no `Content-Type` header is set;
-posting a truly empty body **with** `Content-Type: application/json` fails
-with `50001 "Body cannot be empty when content-type is set to
-'application/json'"`, a Fastify parser error — verified 2026-08-05 on
-0.33.0). The endpoint is **fire-and-forget**: it ACKs in
-milliseconds with an empty data object and the compaction runs in the
-background (a summarization model call — observed ~8–46 s depending on
-history size).
+Body: `{}` or `{"instruction": "..."}` (sending a truly empty body with
+`Content-Type: application/json` still fails with the Fastify parser error
+`50001`). The endpoint is fire-and-forget: it ACKs in milliseconds with an
+empty data object and the compaction runs in the background.
 
 ```bash
-curl -s -X POST 'http://127.0.0.1:58627/api/v1/sessions/session_647d8a6d-...:compact' \
+curl -s -X POST 'http://127.0.0.1:58627/api/v1/sessions/<session>:compact' \
   -H "Authorization: Bearer <token>" \
   -H 'Content-Type: application/json; charset=utf-8' -d '{}'
 # {"code":0,"msg":"success","data":{},"request_id":"01KYRRVG0A03KKCRD4K27R2E73"}
 
-curl -s -X POST 'http://127.0.0.1:58627/api/v1/sessions/session_abf63a9c-...:compact' \
+curl -s -X POST 'http://127.0.0.1:58627/api/v1/sessions/<session>:compact' \
   -H "Authorization: Bearer <token>" \
   -H 'Content-Type: application/json; charset=utf-8' \
   -d '{"instruction":"Keep the echoed marker string verbatim in the summary."}'
 # {"code":0,"msg":"success","data":{},"request_id":"01KYRS33HGG01FKRGKM3GXNXG8"}
 ```
 
-- `instruction` is a free-text hint for the summarizer; it is echoed back in
-  the `compaction.started` WS event.
-- Posting a second compact while a compaction is already running is a
-  **silent no-op** (verified live): same instant `{"code":0,...,"data":{}}`
-  ACK, but no second `compaction.started` fires — one compaction per
-  session at a time.
+`instruction` is a free-text hint for the summarizer; it is echoed on the
+resulting `system` item (not on a separate start frame). A manual compaction
+while another compaction is running answers `40910` (commit `881e61b4`; also
+when a turn is running, prompts are queued, or another history operation holds
+the session).
 
-### WebSocket sequence (2.5.0)
+### WebSocket sequence (2.6.0)
 
-Compaction no longer has an event family. It is a pair of
-`marker:"compaction"` items in the subscribed agent's transcript stream, with
-the whole-context rewrite carried by one `undo` marker. Captured live on
-2.5.0 (2026-11-04, `{}` body, a session with two completed turns; payloads
+Compaction is a **`system` turn** with one `system` item. Captured live on
+2.6.0 with `{"instruction":"Keep only the drift probe facts."}` (payloads
 trimmed):
 
 ```json
-{"type":"transcript.ops","session_id":"session_…","timestamp":"…",
- "payload":{"type":"transcript.ops","agent_id":"main","ops":[
-   {"op":"marker.upsert","item":{"kind":"marker","markerId":"live-m5",
-    "marker":"compaction","payload":{"phase":"started","agentId":"main",
-    "trigger":"manual"},"at":"…"}}],"seq":32}}
-{"type":"event.session.work_changed","session_id":"session_…","timestamp":"…",
- "payload":{"type":"event.session.work_changed","busy":true,
-  "main_turn_active":false,"pending_interaction":"none",
-  "last_turn_reason":"completed","agentId":"main","sessionId":"session_…"}}
-{"type":"transcript.ops","session_id":"session_…","timestamp":"…",
- "payload":{"type":"transcript.ops","agent_id":"main","ops":[
-   {"op":"marker.upsert","item":{"kind":"marker","markerId":"live-m6",
-    "marker":"undo","payload":{"agentId":"main","start":0,"deleteCount":6,
-     "messages":[<kept user messages>,
-                 <summary message, origin.kind:"compaction_summary">,
-                 <continuation injection, origin.kind:"injection",
-                  variant:"compaction_continuation">],
-     "tokens":23493},"at":"…"}}],"seq":33}}
-{"type":"transcript.ops","session_id":"session_…","timestamp":"…",
- "payload":{"type":"transcript.ops","agent_id":"main","ops":[
-   {"op":"marker.upsert","item":{"kind":"marker","markerId":"live-m7",
-    "marker":"compaction","payload":{"phase":"completed","agentId":"main",
-     "result":{"summary":"…","compactedCount":6,"tokensBefore":22745,
-               "tokensAfter":23493,"keptUserMessageCount":2}},"at":"…"}}],
-  "seq":34}}
-{"type":"event.session.work_changed", … busy:false, last_turn_reason:"completed" …}
-{"type":"usage", … "context_tokens":23493,"max_context_tokens":1000000 …}
+{"type":"agent","session_id":"session_…","agent_id":"main","event_created_at":"…",
+ "status":"idle","compacting":true,"model":"deepseek/deepseek-v4-flash",
+ "thinking":"max","permission_mode":"auto","plan_mode":false,"swarm_mode":false,
+ "tower_mode":false}
+{"type":"turn.started","turn":{"turn_id":"t_e9fd8aee32b9","ordinal":17,
+ "kind":"system","status":"ended","started_at":"…","steps":[],
+ "outcome":"completed","ended_at":"…","duration_ms":0}, …}
+{"type":"item.ended","turn_id":"t_e9fd8aee32b9",
+ "item":{"type":"system","kind":"compaction","item_id":"t_e9fd8aee32b9#0",
+  "status":"ended","outcome":"completed","created_at":"…",
+  "trigger":"manual","instruction":"Keep only the drift probe facts.",
+  "summary":"This session has been a series of drift/steering probes…",
+  "tokens_before":25744,"tokens_after":24922,"compacted_count":54}, …}
+{"type":"turn.ended","turn":{"turn_id":"t_e9fd8aee32b9", …}, …}
+{"type":"agent","…","status":"idle","compacting":false, …}
 ```
 
-- `marker:"compaction"` phases: `started` carries `trigger` (`manual`) and
-  the request's **`instruction`** when one was sent (verified live
-  2026-11-10: `{"phase":"started","agentId":"main","trigger":"manual",
-  "instruction":"Keep the marker string verbatim…"}`; absent for `{}`);
-  `completed` carries the full `result` block with the same five fields the
-  old `compaction.completed` had (`summary`, `compactedCount`, `tokensBefore`,
-  `tokensAfter`, `keptUserMessageCount`).
-- The wholesale splice is an `undo` marker: `start:0`,
-  `deleteCount:<previous context size>`, `messages` = kept user messages
-  (verbatim, original ids) + the summary (`origin.kind:"compaction_summary"`)
-  + the continuation injection
-  (`{"kind":"injection","variant":"compaction_continuation"}`), and a
-  `tokens` count.
-- `compaction.started` / `compaction.completed` / `compaction.failed` no
-  longer exist on the wire. A client that subscribed after the compaction
-  sees its result only through the marker history and `GET .../transcript`
-  (the marker is journaled); the `usage` frame carries the post-compaction
-  fill.
-- The REST behaviour is unchanged: instant `{}` ACK, one compaction at a
-  time, both `40910`s below.
+- During the run `compacting:true` rides the main agent's `agent` frame; it
+  returns to `false` at the end. `busy` is true for the whole compaction while
+  `main_turn_active` stays false (see `event.session.work_changed`).
+- The result item has no `result` object: its fields sit directly on the item
+  (`summary`, `tokens_before`, `tokens_after`, `compacted_count`,
+  `instruction?`, `trigger`). There is no `kept_user_message_count` and no
+  `context.spliced` frame on 2.6.0.
+- A cancelled or failed compaction leaves nothing in the conversation and
+  pushes a `notice` frame with `code:"compaction.cancelled"` (example in
+  WebSocket → Session frames). No `compaction.started`/`.completed`/`.failed`
+  events exist.
+- A compaction that completes in the middle of a running turn is placed inside
+  that turn as a system turn; an idle-session compaction is a turn of its own.
 
-#### Historical sequence (0.30.0–2.4.1)
+### Effect on history
 
-Captured 2026-07-30 on 0.30.0 (session with 8 messages / 3 completed turns,
-compacted with an empty body); re-verified verbatim on 0.31.0 the same day:
-
-```
-seq 34  compaction.started         {"trigger":"manual"} — plus "instruction" when one was sent
-seq 35  event.session.work_changed busy=true (main_turn_active stays false)
-seq 35  agent.status.updated       usage variant; a second one drops contextTokens to the compacted size
-seq 36  context.spliced            start=0, deleteCount=<whole context>, messages = kept user
-                                   messages + the summary (see below)
-seq 37  compaction.completed       {"result":{summary, compactedCount, tokensBefore, tokensAfter,
-                                   keptUserMessageCount}}
-seq 38  event.session.work_changed busy=false
-```
-
-`agent.status.updated` frames piggyback on the same seqs as usual. The
-session reads `busy: true` for the whole compaction (`GET .../status`
-verified mid-run), but **no turn events fire** (`turn.started`, `prompt.*`)
-— compaction is not a turn.
-
-Verbatim `compaction.started` (the instruction variant, session
-`session_abf63a9c-...`):
-
-```json
-{"type":"compaction.started","seq":25,"session_id":"session_abf63a9c-...","timestamp":"2026-07-30T05:48:54.194Z",
- "payload":{"type":"compaction.started","trigger":"manual",
-            "instruction":"Keep the echoed marker string verbatim in the summary.",
-            "agentId":"main","sessionId":"session_abf63a9c-..."},
- "epoch":"ep_01KYRS1R9FV9PCACAS87ZMN54Q"}
-```
-
-Verbatim `compaction.completed` (summary trimmed):
-
-```json
-{"type":"compaction.completed","seq":37,"session_id":"session_647d8a6d-...","timestamp":"2026-07-30T05:44:56.676Z",
- "payload":{"type":"compaction.completed",
-  "result":{"summary":"Nothing is actually pending — this conversation is a completed spike ...",
-            "compactedCount":8,"tokensBefore":850,"tokensAfter":386,"keptUserMessageCount":3},
-  "agentId":"main","sessionId":"session_647d8a6d-..."},
- "epoch":"ep_01KYRRQHYHCXDT5NY3Z9VERZR4"}
-```
-
-- `result.summary` — the generated summary text; also persisted in history
-  (see below).
-- `result.compactedCount` — how many history messages were folded into the
-  summary (all 8 in this run).
-- `result.tokensBefore` / `result.tokensAfter` — token estimates of the
-  compacted span before/after. `tokensBefore` covers the history span only
-  (850 here), not the full context — `GET .../status` `context_tokens` was
-  26518 before the same run. `tokensAfter` equalled the post-compaction
-  `context_tokens` in both observed runs (386 and 275).
-- `result.keptUserMessageCount` — how many real user messages survive
-  verbatim in the compacted context.
-
-The `context.spliced` frame rewrites the model context wholesale:
-`start: 0`, `deleteCount: <previous context size>` (8 in the capture), and
-`messages` is the new context: the kept user messages (verbatim, original
-`msg_...` ids, `origin.kind: "user"`) followed by the summary as a user
-message with `origin.kind: "compaction_summary"`. **0.31.0 drift:** the
-summary message no longer carries `id: null` — the **`id` key is absent
-entirely**, while kept user messages still carry their `msg_…` ids (key lists
-from the 0.31.0 capture):
-
-```
-['content','id','origin','role','toolCalls']        origin user
-['content','origin','role','toolCalls']             origin compaction_summary
-```
-
-**Observed 2026-09-15 on 0.43.1 (first live itemization; the emitting code
-has existed since the agent-core-v2 landing):** the splice may carry a third
-message kind after the summary — a whole-message `<system-reminder>`
-injection with `origin: {"kind":"injection","variant":"compaction_continuation"}`
-and no `id`, reading "Context compaction is complete — continue the work
-that was in progress when it began." It is context-only (not persisted in
-`GET .../messages`); clients that strip reminder envelopes (the app does)
-need no change.
-
-The spliced summary text is prefixed with model-facing instructions that are
-**not** persisted — history stores the bare summary (verified, see below).
-The prefix (refreshed 2026-10-30 on 2.4.1; the text is identical on 2.4.0,
-so it replaces the earlier 0.42.0-era quote):
-
-> The conversation so far has been compacted to free up context. What
-> follows is your own working summary of this task — use it to continue
-> your train of thought rather than starting over. Do not redo work it
-> reports as done or re-run checks it reports as passed; check anything it
-> marks as unverified before relying on it. Any user messages earlier in
-> this context are preserved verbatim from the compacted conversation;
-> where a system-reminder note among them marks an omitted middle section,
-> the user messages it replaced are covered by this summary. The summary
-> records which earlier requests were already addressed.
-
-The same 0.42.0 commit reworded the summarizer instruction file (handoff
-"note" → "summary", the first-person framing dropped) and anchored
-compaction resumption on the latest user message (behavioral) — the
-`result` block, the WS sequence, and the persisted `compaction_summary`
-shape are all unchanged (verified live 2026-09-09, both `{}` and
-`{"instruction":…}` bodies).
-
-**0.41.0 content drift (not shape):** the summarizer now works from a new
-instruction file (commit `b199e332`), so the generated summary typically
-opens with "Handoff note to myself:" — the `result.summary` and the persisted
-`compaction_summary` message both carry the new style (verified live
-2026-09-04). All shapes above are unchanged.
-
-### Effect on history and status
-
-- `GET .../messages` still returns the **full pre-compaction transcript** —
-  nothing is deleted. Compaction **appends one message** at the end:
-  `role: "user"`, a single text part with the bare summary (no prefix),
-  `metadata.origin.kind: "compaction_summary"`, under a normal sequential
-  id (verified):
-
-  ```json
-  {"id":"msg_session_647d8a6d-..._000008","session_id":"session_647d8a6d-...","role":"user",
-   "content":[{"type":"text","text":"Nothing is actually pending — this conversation is a completed spike ..."}],
-   "created_at":"2026-07-30T05:44:56.660Z","metadata":{"origin":{"kind":"compaction_summary"}}}
-  ```
-
-  So after compaction, history ≠ model context: history keeps every message
-  plus the summary; the context is only the kept user messages + summary
-  (per the splice). Pagination and the `role` filter behave as before —
-  summaries match `role=user` (a session compacted twice shows two
-  `compaction_summary` user messages in the normal order; `before_id`
-  paging walks past them unchanged — both verified).
-- **2.5.0:** `GET .../status` is gone. `event.session.work_changed` reports
-  `busy:true` / `main_turn_active:false` for the whole compaction, and the
-  `usage` frame's `context_tokens` / `max_context_tokens` drop to the
-  compacted size when it completes (observed 22745 → 23493 in the 2.5.0
-  capture — the summary prefix can make `tokensAfter` slightly larger than
-  `tokensBefore`). The historical `/status` reads were 26518 → 386 and
-  25851 → 275.
+`GET .../messages` still returns the full pre-compaction transcript — nothing
+is deleted. Compaction appends one `role:"user"` message with the bare summary
+text and `metadata.origin.kind:"compaction_summary"` (verified live:
+`msg_…_000054` at the compaction's timestamp). History therefore keeps every
+message plus the summary; the model context is only the kept user messages
+plus the summary. Pagination and the `role` filter behave as before.
 
 ### Errors
 
-All verified live 2026-07-30 on 0.30.0, re-verified verbatim on 0.31.0 the
-same day and again on 0.32.0 (2026-08-05; HTTP 200 envelopes — since 0.32.0
-the Error2 ones carry a server-side `stack` string, shown omitted here):
-
-- Empty/fresh session (also when the body is omitted entirely):
+- Empty/fresh session:
   `{"code":40910,"msg":"No messages to compact in current history.","data":null,...}`
-- Turn running (`busy: true`):
+  (verified live).
+- Turn running:
   `{"code":40910,"msg":"Cannot compact while a turn is active. Wait for it to finish, then retry.","data":null,...}`
-- Approval pending (`permission_mode: "manual"`, tool call awaiting a
-  decision): the same `40910` — a pending interaction means the turn is
-  still active.
-- Unknown session:
-  `{"code":40401,"msg":"session session_... does not exist","data":null,...}`.
-- Wrong `instruction` type (`{"instruction":123}`):
-  `{"code":40001,"msg":"instruction: Invalid input: expected string, received number","data":null,...}`
-  with a `details` array.
+  (verified live).
+- Another compaction running, prompts queued, or a history operation in
+  progress: the same `40910` family.
+- Unknown session: `40401`.
+- Wrong `instruction` type (`{"instruction":123}`): `40001` with a `details`
+  array.
 
 ## Session rating
 
@@ -5044,25 +4569,19 @@ product feedback channel, surfaced by the TUI/web only.
 
 ## Interactions
 
-Approvals and questions are the session's two pending-interaction kinds. Since
-2.4.0 they share one live WebSocket frame and one REST response route; the
-`event.approval.*` / `event.question.*` event families and the
-`/approvals` + `/questions` routes are gone. **2.5.0 keeps the frame and the
-route unchanged but delivers the frame only to `subscribe_v2` subscribers**
-(the old raw `subscribe` no longer exists), adds an `interaction.upsert`
-transcript op, and re-sends the full interaction entity list inside
-`transcript.reset.snapshot.interactions` plus the pending ones as standalone
-frames. Everything below was re-verified live on 2.5.0 (2026-11-04, approval
-and question) and again on 2.5.1 (2026-11-05); the captures are the 2.4.0
-shapes, which the 2.5.x frames match byte-for-byte except for the delivery
-rule.
+Approvals and questions are the session's two pending-interaction kinds. They
+share one live WebSocket frame and one REST response route; the
+`event.approval.*` / `event.question.*` families and the `/approvals` +
+`/questions` routes are gone (2.4.0; still 404 on 2.6.0). **2.6.0 keeps the
+frame and the route unchanged but delivers the frame on a `subscribe`
+subscription and re-sends every pending interaction right after the subscribe
+`response`** (verified live, approval and question).
 
 ### The `interaction` frame
 
 Approvals and questions from every agent in the session, sub-agents included,
-arrive as the flat `interaction` frame. Unlike every other session event it has
-**no `seq`, `timestamp`, or `payload` wrapper**, it is never journaled and never
-replayed, and it is not tied to a cursor. Fields:
+arrive as the flat `interaction` frame. It has no `payload` wrapper and is
+never journaled or replayed. Fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -5073,108 +4592,94 @@ replayed, and it is not tied to a cursor. Fields:
 | `interaction_id` | string | `approval_<uuid>` or `question_<uuid>`; the id the response route takes |
 | `status` | string | `pending` / `ended` |
 | `outcome` | string | Only on `ended`: `approved`/`rejected`/`cancelled` (approval) or `answered`/`dismissed`/`cancelled` (question) |
-| `ended_at` | string | Only on `ended`, ISO 8601 |
-| `tool_call_id` | string | Optional; the transcript row's tool-call id (the provider's id, e.g. `call_00_…` or `tool_…`) |
+| `ended_at` | string | Only on `ended` |
+| `tool_call_id` | string | The waiting tool call's id; its `tool_call` item carries the same `interaction_id` |
 | `kind` | string | `approval` / `question` |
 | `request` | object | Approval: `{tool_name, action, tool_input_display?, expires_at}`. Question: `{questions[]}` |
-| `response` | object | Only on `ended`: approval `{decision, scope?, feedback?, selected_label?}`; question `{answers?}` (only when `answered`) |
+| `response` | object | On `ended`: approval `{decision, scope?, feedback?, selected_label?}` (always); question `{answers, method?}` only when `answered` |
 
-Verbatim pending approval (manual Bash, 2026-10-28):
+Verbatim pending approval (manual Bash, 2026-11-12):
 
 ```json
-{"type":"interaction","session_id":"session_0b0a0493-7384-4d51-ba07-5badf36e8c9e",
- "agent_id":"main","event_created_at":"2026-10-28T19:27:19.813Z",
- "interaction_id":"approval_3c06aff8-3e53-4ecf-8e78-a841b579f4ec","status":"pending",
- "tool_call_id":"call_00_KIfpS3Zd2Ch9FwjlUnG20665","kind":"approval",
- "request":{"tool_name":"Bash","action":"Running: rm -rf /home/ubuntu/spike/drift-24/approval-target",
-            "tool_input_display":{"kind":"command","command":"rm -rf /home/ubuntu/spike/drift-24/approval-target",
-                                  "cwd":"/home/ubuntu/spike","language":"bash"},
-            "expires_at":"2026-10-29T19:27:19.811Z"}}
+{"type":"interaction","session_id":"session_05fbe3cc-3299-4b6b-a68a-3027e987dda7",
+ "agent_id":"main","event_created_at":"2026-11-12T19:27:31.118Z",
+ "interaction_id":"approval_77ebb2f6-e4b4-4d86-9ecf-7b97e73ea96b","status":"pending",
+ "tool_call_id":"call_00_BlBndJikxLcwoR6orTBQ4720","kind":"approval",
+ "request":{"tool_name":"Bash","action":"Running: rm -rf /path/to/project/approval-probe-2",
+            "tool_input_display":{"kind":"command","command":"rm -rf /path/to/project/approval-probe-2",
+                                  "cwd":"/path/to/project","language":"bash"},
+            "expires_at":"2026-11-13T19:27:31.116Z"}}
 ```
 
 The same interaction after `{"kind":"approval","decision":"approved"}`:
 
 ```json
-{"type":"interaction","session_id":"session_0b0a0493-7384-4d51-ba07-5badf36e8c9e",
- "agent_id":"main","event_created_at":"2026-10-28T19:27:20.145Z",
- "interaction_id":"approval_3c06aff8-3e53-4ecf-8e78-a841b579f4ec","status":"ended",
- "outcome":"approved","ended_at":"2026-10-28T19:27:20.145Z",
- "tool_call_id":"call_00_KIfpS3Zd2Ch9FwjlUnG20665","kind":"approval",
- "request":{"tool_name":"Bash","action":"Running: rm -rf /home/ubuntu/spike/drift-24/approval-target",
-            "tool_input_display":{"kind":"command","command":"rm -rf /home/ubuntu/spike/drift-24/approval-target",
-                                  "cwd":"/home/ubuntu/spike","language":"bash"},
-            "expires_at":"2026-10-29T19:27:19.811Z"},
- "response":{"decision":"approved"}}
+{"type":"interaction","session_id":"session_…","agent_id":"main",
+ "event_created_at":"2026-11-12T19:27:58.993Z",
+ "interaction_id":"approval_77ebb2f6-e4b4-4d86-9ecf-7b97e73ea96b","status":"ended",
+ "outcome":"approved","ended_at":"2026-11-12T19:27:58.993Z",
+ "tool_call_id":"call_00_BlBndJikxLcwoR6orTBQ4720","kind":"approval",
+ "request":{…},"response":{"decision":"approved"}}
 ```
 
-Verbatim pending question (manual `AskUserQuestion`, 2026-10-28):
+Verbatim pending question (manual `AskUserQuestion`, 2026-11-12):
 
 ```json
-{"type":"interaction","session_id":"session_0b0a0493-7384-4d51-ba07-5badf36e8c9e",
- "agent_id":"main","event_created_at":"2026-10-28T19:28:18.527Z",
- "interaction_id":"question_10025aea-b245-4d2e-a290-11461cf10422","status":"pending",
- "tool_call_id":"call_00_IMrajNNAe1wdV1kRD3Zq6099","kind":"question",
- "request":{"questions":[{"id":"q_0","question":"Cake or pie?",
-                         "options":[{"id":"opt_0_0","label":"Cake"},{"id":"opt_0_1","label":"Pie"}],
-                         "header":"Dessert","allow_other":true}]}}
+{"type":"interaction","session_id":"session_…","agent_id":"main",
+ "event_created_at":"2026-11-12T19:26:47.855Z",
+ "interaction_id":"question_0fd0bd1a-ba69-41d8-b4e5-63152a4644c3","status":"pending",
+ "tool_call_id":"call_00_nU5PVmlYEBBSS5j7UxFS1406","kind":"question",
+ "request":{"questions":[{"id":"q_0","question":"Do you prefer cake or pie?",
+                          "options":[{"id":"opt_0_0","label":"Cake","description":"Cake over pie."},
+                                     {"id":"opt_0_1","label":"Pie","description":"Pie over cake."}],
+                          "header":"Dessert","allow_other":true}]}}
 ```
 
 After `{"kind":"question","answers":{"q_0":{"kind":"single","option_id":"opt_0_0"}}}`:
 
 ```json
-{"type":"interaction","session_id":"session_0b0a0493-7384-4d51-ba07-5badf36e8c9e",
- "agent_id":"main","event_created_at":"2026-10-28T19:28:18.858Z",
- "interaction_id":"question_10025aea-b245-4d2e-a290-11461cf10422","status":"ended",
- "outcome":"answered","ended_at":"2026-10-28T19:28:18.858Z",
- "tool_call_id":"call_00_IMrajNNAe1wdV1kRD3Zq6099","kind":"question",
- "request":{"questions":[{"id":"q_0","question":"Cake or pie?",
-                         "options":[{"id":"opt_0_0","label":"Cake"},{"id":"opt_0_1","label":"Pie"}],
-                         "header":"Dessert","allow_other":true}]},
- "response":{"answers":{"Cake or pie?":"Cake"}}}
+{"type":"interaction","session_id":"session_…","agent_id":"main",
+ "event_created_at":"2026-11-12T19:27:08.823Z",
+ "interaction_id":"question_0fd0bd1a-ba69-41d8-b4e5-63152a4644c3","status":"ended",
+ "outcome":"answered","ended_at":"2026-11-12T19:27:08.823Z",
+ "tool_call_id":"call_00_nU5PVmlYEBBSS5j7UxFS1406","kind":"question",
+ "request":{…},"response":{"answers":{"Do you prefer cake or pie?":"Cake"}}}
 ```
 
 Notes:
 
-- **Pending re-send after subscribe (2.5.0; re-verified on 2.5.1).** After an
-  accepted `subscribe_v2`, `transcript.reset.snapshot.interactions` carries
-  the **full interaction entity list for the session — ended ones included,
-  not only pending** — and the still-pending ones are additionally sent as
-  standalone `interaction` frames after the ack (verified live 2026-11-05: a
-  fresh subscribe while a question waited delivered a reset whose
-  `interactions` held one answered and one pending entity, the ack, then one
-  pending frame). Clients should rebuild the pending list from the reset by
-  filtering `state:"pending"` (or from the frames that follow), not assume
-  the snapshot array is pending-only. Dedupe by `interaction_id`. A resolved
-  interaction is never re-sent as a standalone frame. `GET .../transcript`
-  also returns the current `interactions` and `pending_interactions` for a
-  cold read.
+- **Pending re-send after subscribe.** After an accepted `subscribe`, every
+  still-pending interaction of the session is sent to that connection as an
+  `interaction` frame, before the agent state frames. There is no reset
+  snapshot: the frames are the only seed, and a second `subscribe` for the same
+  session re-sends them all. Dedupe by `interaction_id`; a resolved
+  interaction is never re-sent.
 - **Ended frames reach every subscriber.** Close the card on the `ended`
-  frame, not on the REST response, so every client watching the session
-  converges — including the one that answered.
+  frame, not on the REST response.
+- **Retention.** The server remembers ended interactions for 60 s, at most 256
+  of them; answering one after that answers `40404`. Clients treat `40404` and
+  `40902` as "the interaction has ended".
 - **Abort semantics.** Aborting a turn with a pending approval ends it with
-  `outcome:"cancelled"` and `response:{"decision":"cancelled"}`; aborting with
-  a pending question was observed ending it with `outcome:"dismissed"` and no
-  `response` (the REST transcript maps true engine cancellations to
-  `cancelled`; the live frame's question path reports dismissal).
-- An approval's `expires_at` is `event_created_at` + 24 h; `tool_input_display`
-  is the same discriminated object tool calls carry — `kind:"command"`, or
-  `kind:"plan_review"` with `{plan, path}` for `ExitPlanMode` (see below).
-- `permission.approval.requested` / `.resolved` (camelCase, with `id`,
-  `toolCallId`, `display`, `toolInput`) still ride the durable stream next to
-  these frames, sharing their `seq` with the surrounding events. They carry
-  the same `approval_<uuid>` id. Questions have no such duplicate.
+  `outcome:"cancelled"` and `response:{"decision":"cancelled"}`; a question
+  cut short by a stop ends `cancelled` (the live frame's question path was
+  observed as `dismissed` on older versions; both are terminal).
+- An approval's `expires_at` is `event_created_at` + 24 h;
+  `tool_input_display` is the same discriminated object tool calls carry —
+  `kind:"command"`, or `kind:"plan_review"` with `{plan, path, options?, review?}`
+  for `ExitPlanMode`.
+- The old `permission.approval.requested` / `.resolved` duplicates are gone on
+  2.6.0.
 
 ### Respond — `POST /api/v1/sessions/{id}/interactions/{interaction_id}`
 
 One route for both kinds; the body's `kind` must match the interaction's kind.
-The decision is routed back to the asking agent, so no `agent_id` is needed.
 
 With `kind:"approval"`:
 
 | Parameter | Type | Description |
 | --- | --- | --- |
 | `decision` | string | **Required.** `approved` / `rejected` / `cancelled` |
-| `scope` | string | With `approved`, `session` (the only value) remembers the rule for the session |
+| `scope` | string | With `approved`, `session` remembers the rule for the session |
 | `feedback` | string | Free-form feedback handed to the agent |
 | `selected_label` | string | The chosen label when the request offered labeled choices (plan review) |
 
@@ -5185,82 +4690,66 @@ With `kind:"question"`, send exactly one of `answers` and `dismissed`:
 | `answers` | object | Map of question item id (`q_0`, …) to an answer object |
 | `dismissed` | `true` | Dismiss without answering |
 | `method` | string | `enter` / `space` / `number_key` / `click` |
-| `note` | string | Free-form note |
 
 Each answer is discriminated by `kind`: `single` (`option_id`), `multi`
 (`option_ids`, at least 1), `other` (`text`), `multi_with_other`
-(`option_ids`, `other_text`), `skipped` (no fields; the item is omitted from
-the flattened answers).
+(`option_ids`, `other_text`), `skipped`.
 
-Success is the standard envelope with `data:{outcome, ended_at}` — for
-example:
+Success is the standard envelope with `data:{outcome, ended_at}`:
 
 ```json
-{"code":0,"msg":"success","data":{"outcome":"approved","ended_at":"2026-10-28T19:27:20.145Z"},"request_id":"01M61ZPCJB0ET579WG3TPXC3DP"}
+{"code":0,"msg":"success","data":{"outcome":"answered","ended_at":"2026-11-12T19:27:08.824Z"},"request_id":"01M78KMTG85S1H9KKEHED3YHMP"}
 ```
 
-A dismissal answers `data:{"outcome":"dismissed","ended_at":…}` — there is no
-special non-zero success code anymore (`40909` is gone).
-
-Errors (all with the standard envelope, no `stack`):
+Errors (standard envelope):
 
 ```json
-{"code":40902,"msg":"interaction question_0c93eb23-8bf4-4a83-9139-f7566628115b has ended","data":null,"request_id":"…"}
-{"code":40404,"msg":"interaction question_00000000-0000-0000-0000-000000000000 not found","data":null,"request_id":"…"}
+{"code":40902,"msg":"interaction question_… has ended","data":null,"request_id":"…"}
+{"code":40404,"msg":"interaction question_… not found","data":null,"request_id":"…"}
 {"code":40001,"msg":"kind: Invalid input","data":null,"request_id":"…","details":[{"path":"kind","message":"Invalid input"}]}
 ```
 
-- `40401`: unknown session.
-- `40404`: no interaction with that id in the session (including an
-  `approval_…` id posted under the wrong session).
-- `40902`: the interaction already ended — answered elsewhere, or cancelled
-  because its turn ended or its agent closed.
-- `40001`: validation failure, including `kind` missing or mismatching the
-  interaction (checked before the resolve attempt; a mismatched body against
-  an already-ended interaction reports `40902` first).
+- `40401`: unknown session; `40404`: no interaction with that id in the
+  session; `40902`: the interaction already ended; `40001`: validation failure
+  or a `kind` mismatch.
 
 ### Approval flow, end to end
 
-A prompt submitted with `permission_mode:"manual"` that needs a tool (2.5.0):
+A prompt submitted with `permission_mode:"manual"` that needs a tool (2.6.0):
 
 ```
-transcript.ops  frame.upsert   tool "Bash", state "running"
-event.session.work_changed     pending_interaction "approval" (busy true)
-interaction                    status "pending", kind "approval"
-transcript.ops  interaction.upsert  state "pending"
+item.started        tool_call "Bash", stage "input"
+item.updated        set {stage:"executing", display:{…}}
+item.updated        set {interaction_id:"approval_…"}   (pending)
+interaction         status "pending", kind "approval"
+task                kind "other"? (no shell task yet)
+event.session.work_changed  busy true, pending_interaction "approval"
 -- POST interactions/{id} {"kind":"approval","decision":"approved"} --
-interaction                    status "ended", outcome "approved"
-transcript.ops  interaction.upsert  state "approved"
-transcript.ops  frame.upsert   tool gains approvalId
-task                           shell "running" → "ended" (completed)
-transcript.ops  frame.upsert   tool state "done", output
-event.session.work_changed     pending_interaction "none"
+interaction         status "ended", outcome "approved", response {decision:"approved"}
+item.updated        set {stage:"executing"} / the call resumes
+item.ended          tool_call outcome "completed", output, interaction_id
+event.session.work_changed  pending_interaction "none"
 ```
 
-`tool_call_id` is the provider's tool-call id and is only the transcript row's
-id; every REST action keys on `interaction_id`. Posting a previously used
-`approval_<uuid>` answers `40902`; posting an unknown id `40404`. A rejected
-decision ends the same way with `outcome:"rejected"`; the tool does not run.
+`tool_call_id` is the provider's tool-call id and is only the conversation
+row's id; every REST action keys on `interaction_id`. Posting a previously
+used `approval_<uuid>` answers `40902`; posting an unknown id `40404`. A
+rejected decision ends the same way with `outcome:"rejected"`; the tool does
+not run.
 
 ### Question flow, end to end
 
 ```
-transcript.ops  frame.upsert   tool "AskUserQuestion", state "running"
-event.session.work_changed     pending_interaction "question"
-interaction                    status "pending", kind "question", questions[]
-transcript.ops  interaction.upsert  state "pending"
+item.started        tool_call "AskUserQuestion", stage "input"
+item.updated        set {input:{questions:[…]}, display/task fields}
+item.updated        set {interaction_id:"question_…"}
+interaction         status "pending", kind "question", request.questions[]
+task                kind "other", description = question text (background questions only)
 -- POST interactions/{id} {"kind":"question","answers":{…}} --
-event.session.work_changed     pending_interaction "none"
-interaction                    status "ended", outcome "answered"
-transcript.ops  interaction.upsert  state "answered"
-transcript.ops  frame.upsert   tool state "done",
-                               output {"answers":{"<question text>":"<flattened>"}}
+interaction         status "ended", outcome "answered", response {answers:{"<question text>":"<flattened>"}}
+item.ended          tool_call outcome "completed", output {"answers":{…}}
 turn continues
 ```
-
-The 2.5.0 question capture confirmed the exact `interaction` shapes unchanged
-and `request.questions[].options[].description` present (empty string when
-the model gave none).
 
 Flattening: `single` → option label; `other` → raw text; `multi` → selected
 labels joined with `", "`; `multi_with_other` → labels then free text, same
@@ -5268,62 +4757,38 @@ join; `skipped` → item omitted. The `ended` frame's `response.answers` uses
 the **question text** as the key. Option ids are not validated against the
 item's options (a bogus id flattens verbatim), so clients must validate their
 own selections. A `multi` answer with an empty `option_ids` array fails
-`40001` and leaves the interaction pending.
-
-Dismissal posts `{"kind":"question","dismissed":true}` and produces
-`outcome:"dismissed"`; the question's `response` is omitted. On the wire the
-turn continues and the result carries
-`{"answers":{},"note":"User dismissed the question without answering."}`.
+`40001` and leaves the interaction pending. A dismissal posts
+`{"kind":"question","dismissed":true}` and produces `outcome:"dismissed"`;
+the `response` is omitted.
 
 **Multi-select rule:** each question item carries an optional
 `multi_select` boolean; absence means `false`. The server echoes the model's
-input verbatim when it passes the field explicitly, so both `true` and
-`false` forms occur; decoders must accept both. The history
-(`GET .../messages`) `tool_use` input for `AskUserQuestion` carries
-`multi_select` per question but its options are label-only (no ids). The
-`skipped` answer kind and the optional `method`/`note` body fields are
-schema-verified but never observed live.
+input verbatim when it passes the field explicitly, so both `true` and `false`
+forms occur; decoders must accept both.
 
-**Auto-mode caveat (verified live 2026-10-14 on 2.2.0, unchanged):** a
-session running `auto` permission mode gets a model-facing reminder not to
-call `AskUserQuestion` at all — under `auto` the tool call never happens and
-no question surfaces. The flow above was therefore re-verified with the
-session switched to `manual`.
+**Auto-mode caveat:** a session running `auto` permission mode gets a
+model-facing reminder not to call `AskUserQuestion` at all. Switch the session
+to `manual` to exercise the flow (verified live on 2.6.0).
 
-### Pending state on REST (2.5.0)
+### Pending state on REST
 
-The snapshot route is gone. Pending interactions now come from two places:
+There is no per-session pending list route: `GET .../approvals` and
+`GET .../questions` are plain HTTP 404s (a POST to those words hits the
+session `:{action}` catch-all and answers `40001 "unsupported action: …"`).
+Pending interactions are read from:
 
-- `GET /api/v1/sessions/{id}/transcript?agent_id=main` returns
-  `interactions` — full entities
-  `{interactionId, interactionKind, toolCallId?, state, request?, response?}`
-  — and `pending_interactions` — the ids of the still-pending ones. The
-  `request` shape differs by kind (re-verified live on 2.5.1, 2026-11-05):
-  an **approval** uses camelCase
-  `{id, sessionId, agentId, turnId, toolCallId, toolName, action, display}`
-  (no `expires_at`), while a **question** keeps
-  `{question_id, questions[], created_at, turn_id, tool_call_id}`. The WS
-  `interaction` frame's own `request` stays snake_case for approvals — only
-  the transcript entity is camelCase. `state` observed: `pending`,
-  `approved`, `answered`.
-- After an accepted `subscribe_v2`,
-  `transcript.reset.snapshot.interactions` carries the full interaction
-  entity list (ended ones included); the pending ones are also sent as
-  standalone `interaction` frames. The transcript `interaction.upsert` op
-  carries the same entity on every state change.
-
-There is still no per-session pending list route:
-`GET .../approvals` and `GET .../questions` are plain HTTP 404s (a POST to
-those words hits the session `:{action}` catch-all and answers `40001
-"unsupported action: approvals"`). While an interaction waits, the session
-object reads `pending_interaction:"approval"|"question"` and `busy:true` (a
-background question can keep `busy:true` with `main_turn_active:false`).
+- the `interaction` frames sent after a subscribe;
+- the conversation: a waiting tool call's `tool_call` item carries
+  `interaction_id` and `stage:"awaiting_approval"`; `GET
+  .../agents/{agent_id}/turns` returns it with the running turn;
+- the session object: `pending_interaction:"approval"|"question"` and
+  `busy:true` while it waits (a background question can keep `busy:true` with
+  `main_turn_active:false`).
 
 ### Plan review approvals
 
 `ExitPlanMode` asks for approval with a plan body. Verbatim
-`tool_input_display` (live 2026-10-28, after entering plan mode through
-`POST .../profile {"agent_config":{"plan_mode":true}}`):
+`tool_input_display` (live 2026-10-28, still the shape on 2.6.0):
 
 ```json
 {"kind":"plan_review",
@@ -5331,12 +4796,13 @@ background question can keep `busy:true` with `main_turn_active:false`).
  "path":"/path/to/session/agents/main/plans/plan.md"}
 ```
 
-`action` reads "Presenting plan and exiting plan mode". The approval can be
-answered `approved` (with optional `selected_label`, e.g. "Approve plan") or
-`rejected`. Since 2.4.0 every plan waits for this review: the agent can no
-longer enter plan mode itself and `auto` no longer approves plans silently.
-Style note: `tool_input_display` can also be absent; clients should fall back
-to `action`.
+The tool-call item's `display` carries `{kind:"plan_review", plan, path?,
+options:[{label, description}], review:{state, selected_option?, feedback?}}`
+(2.6.0). `action` reads "Presenting plan and exiting plan mode". Answer
+`approved` (with optional `selected_label`) or `rejected`. Every plan waits for
+this review: the agent cannot enter plan mode itself and `auto` does not
+approve plans silently. `tool_input_display` can be absent; fall back to
+`action`.
 
 ### Background questions (`background: true`)
 
@@ -5344,19 +4810,12 @@ A background `AskUserQuestion` call does not die with its turn:
 
 - The question surfaces as an `interaction` frame with
   `pending_interaction:"question"`, then the turn can end **without**
-  resolving it. While it waits the session reads `busy:true` with
-  `main_turn_active:false` and `pending_interaction:"question"`.
-- **2.5.0:** the question is a task of the main agent — a `task` frame with
-  `kind:"other"` (the old REST wire kind `tool` is gone), `detached:true`,
-  and `description` = the question text. Answering ends it with the ordinary
-  `task` ended frame; a later transcript turn is opened by the task
-  notification (`origin.kind:"task"`), and the answer text is in the tool
-  result. There is no `task.notified`/`background.task.*` frame.
-- The background tool result text is `task_id:` / `status:` / `next_step:` —
-  tool prose, not wire shape.
-
-
-
+  resolving it. The session reads `busy:true` with `main_turn_active:false`.
+- The question is a task of the main agent: a `task` frame with
+  `kind:"other"`, `detached:true`, and `description` = the question text
+  (verified live: `task_id:"askuserquestion-…"`). Answering ends it with the
+  ordinary `task` ended frame; a later turn carries the answer (a
+  `notification` item).
 
 ## Todos
 
@@ -5375,17 +4834,17 @@ prompt drove the list):
 `items` is always the full list; `[]` clears the widget. The `todo` frame is
 the authoritative read — deriving from `TodoList` tool calls is the old
 2.4.x rule and misses undo/restore. The `TodoList` tool contract itself is
-unchanged and still visible in the transcript as a `tool` frame (the
+unchanged and still visible as a `tool_call` item in the conversation (the
 tool-call history is authoritative for what the model asked at a point in
 time).
 
 ### The `TodoList` tool (unchanged)
 
 The derivation-era text below is kept as history, and the tool contract is
-still what the transcript renders:
+still what the conversation renders:
 
 - **Tool name:** `TodoList` (upstream `TODO_LIST_TOOL_NAME`). It appears as a
-  `tool` frame in the transcript (`"name":"TodoList"`, `input.todos`, and a
+  `tool_call` item (`"name":"TodoList"`, `input.todos`, and a
   `display:{"kind":"todo_list","items":[…]}` object).
 - **Input schema:** `{"todos": [{"title": string, "status": "pending" |
   "in_progress" | "done"}]}`. Every *write* carries the **full** list.
@@ -5393,10 +4852,11 @@ still what the transcript renders:
   The list is unchanged; skip it and keep looking back. An empty `todos`
   array clears the list.
 - **Result prose:** a write result starts `Todo list updated.` followed by
-  `Current todo list:` and may end with the next-step nudge (verified live
-  2026-10-28 on 2.3.3). A read-only query carries `args:{}` and its result
-  starts `Current todo list:` (verified 2026-10-22 on 2.3.0; not re-probed on
-  2.3.3). The app ignores this prose and derives state from the input args.
+  `Current todo list:` and may end with the next-step nudge. A read-only query
+  carries `input:{}` and its result starts `Current todo list:` (re-verified
+  live on 2.6.0: `input:{}` → `"Current todo list:\n  [done] …"`, with the
+  same `display:{"kind":"todo_list","items":[…]}`). The app ignores this prose;
+  the `todo` frame is authoritative.
 - **Derivation rule:** scan the messages backwards for the newest `TodoList`
   call whose input carries a `todos` array — that is the current state.
 - **Not on this wire:** upstream also persists the list as
@@ -5629,1246 +5089,548 @@ multi-record prose, drift-prone).
 ## Sub-agents
 
 How the server exposes the sub-agents the main agent spawns with its `Agent`
-(or `AgentSwarm`) tool. **2.5.0 rewrote this surface**: the `subagent.*`
-lifecycle events, `task.started`/`task.terminated`, `background.task.*`,
-`task.notified`, the `context.spliced` notification turn and the snapshot
-roster are all gone. A sub-agent is now (a) a `task` frame with
-`kind:"subagent"` in the owning agent's task stream and (b) an
-automatically-subscribed child agent whose transcript frames arrive on the
-same connection. Verified live 2026-11-04 (one foreground and one
-`run_in_background:true` explore spawn).
+(or `AgentSwarm`) tool. A sub-agent is (a) a `task` frame with
+`kind:"subagent"` in the owning agent's task stream, (b) an agent the client
+can receive by naming it in `subscribe`'s `agent_ids`, and (c) a set of
+`agent_refs` links on the spawning tool call. Verified live on 2.6.0 (one
+foreground and one `run_in_background:true` spawn), same task-frame shapes as
+2.5.0.
 
 - **Spawn** — the main agent gets a `task` frame (verbatim, trimmed):
 
   ```json
   {"type":"task","session_id":"session_…","agent_id":"main","event_created_at":"…",
-   "task_id":"agent-fe31xobl","kind":"subagent","status":"running","phase":"working",
-   "detached":false,"description":"Reply fg-ok","child_agent_id":"agent-0",
-   "parent_tool_call_id":"call_00_M5xWP2WYjLLcCuNBij6J8641",
+   "task_id":"agent-3zsgazyz","kind":"subagent","status":"running","phase":"working",
+   "detached":false,"description":"Foreground probe","child_agent_id":"agent-0",
+   "parent_tool_call_id":"call_00_sI5ElDGx1UOpDg4DXmG10434",
    "started_at":"…","model":"deepseek/deepseek-v4-flash","thinking":"max"}
   ```
 
   `detached:false` is a foreground spawn (its tool call waits);
   `detached:true` is `run_in_background:true`. `description` is the spawn
-  description, not the prompt.
-- **Child announcement** — the child agent joins the same connection with
-  `transcript.reset` (`agent_id:"agent-0"`, `snapshot.items:[]`, `seq:0`),
-  then `agent` (and the other state frames when applicable). No
-  `subagent.spawned` carries its type; the spawning tool call's input has
-  `subagent_type`, and `GET .../transcript?agent_id=main`'s `agents` array
-  lists every child (`{agentId:"agent-0",type:"sub",parentAgentId:"main"}`).
-  The child's own turns are still `GET .../transcript?agent_id=agent-0`.
-- **Completion** — the last `task` frame is `status:"ended"` with
-  `outcome` (`completed`/`failed`/`timed_out`/`killed`/`lost`),
-  `ended_at`, and optional `result_summary`/`error`/`state_reason`:
-
-  ```json
-  {"type":"task","session_id":"session_…","agent_id":"main","event_created_at":"…",
-   "task_id":"agent-fe31xobl","kind":"subagent","status":"ended","outcome":"completed",
-   "detached":false,"description":"Reply fg-ok","child_agent_id":"agent-0",
-   "parent_tool_call_id":"call_00_…","started_at":"…","ended_at":"…",
-   "model":"deepseek/deepseek-v4-flash","thinking":"max"}
-  ```
+  description, not the prompt. The spawning `tool_call` item gains
+  `agent_refs:[{"agent_id":"agent-0","role":"child","task_id":"agent-3zsgazyz"}]`
+  (and `task_id` once the call runs as a task; a foreground call has no
+  `task_id`, look up the task by `parent_tool_call_id`). `role` is `"child"`
+  for an `Agent` spawn and `"member"` for an `AgentSwarm` member (with
+  `swarm_index`).
+- **Child conversation** — the child's own conversation is read with
+  `GET .../agents/{agent_id}/turns` and streamed by subscribing with
+  `agent_ids:["main","agent-0"]` (a `subscribe` for a new agent sends its
+  `task.list`, `agent`, `usage` and `turns`; re-subscribing for an already
+  received agent does not re-send `turns`). The child's `user_message` has
+  `origin:{kind:"system"}` and its turns are ordinary `agent` turns. There is
+  no `subagent.*` event and no roster array any more.
+- **Completion** — the last `task` frame is `status:"ended"` with `outcome`
+  (`completed`/`failed`/`timed_out`/`killed`/`lost`), `ended_at`, and optional
+  `result_summary`/`error`/`state_reason`. A stopped foreground call's
+  `tool_call` item ends `outcome:"interrupted"` with the output produced so
+  far in `error` (commit `aa125382`); a call still without a result when its
+  turn ends is `interrupted` with no `error`.
 - **Cancel / detach** — `task.stop` replaces REST `:cancel`; the ended frame
   follows with `outcome:"killed"`. `task.background` replaces `:detach` and
-  flips `detached:true` while `status` stays `running`. Both are flat control
-  frames; see WebSocket → Task controls.
-- **Swarm members** — each member is registered as a foreground subagent task
-  of the caller with `swarm_index`; the same task lifecycle applies.
-- **Two id namespaces** — `task_id` is `agent-…`; `child_agent_id` /
-  the frame's `agent_id` is the child's agent id (`agent-0`, …). The child's
-  own frames are stamped `agent_id:"agent-0"`, not `"main"`.
+  flips `detached:true` while `status` stays `running`; a task its caller
+  cannot detach answers `40933`. Both are flat control frames; see WebSocket →
+  Task commands.
+- **Swarm members** — each member is a foreground subagent task of the caller
+  with `swarm_index` and `role:"member"` in `agent_refs`; the same task
+  lifecycle applies.
+- **Two id namespaces** — `task_id` is `agent-…`; `child_agent_id` is the
+  child's agent id (`agent-0`, …). The child's own frames are stamped
+  `agent_id:"agent-0"`, not `"main"`.
+- **Background completion** — a killed/completed background task delivers its
+  notification as a `notification` item in a new main-agent turn (verbatim
+  from a `task.stop` on 2.6.0: `{"type":"notification",
+  "notification_id":"task:agent-2aebrc0f:killed","title":"Background agent
+  killed","body":"Wall time: 37.021 seconds\\nBackground probe was stopped by
+  user.…","severity":"warning","notification_type":"task.killed",
+  "source":{"kind":"background_task","id":"agent-2aebrc0f"},
+  "task_id":"agent-2aebrc0f","agent_id":"agent-1"}`).
 
-The spawning tool call and its result prose are unchanged; the historical
-`subagent.*` lifecycle text below is kept as history.
+### The spawning tool call
 
-### The spawning tool call in the main transcript
-
-The spawn is an ordinary tool call named `Agent` (verbatim history part):
+The spawn is an ordinary tool call named `Agent`:
 
 ```json
-{"type":"tool_use","tool_call_id":"tool_mhF8UXcf5QwvZbh5223tiIng","tool_name":"Agent",
- "input":{"subagent_type":"explore","description":"doc-verify-subagent",
+{"type":"tool_use","tool_call_id":"tool_…","tool_name":"Agent",
+ "input":{"subagent_type":"coder","description":"doc-verify-subagent",
           "prompt":"Reply with the single word: ok"}}
 ```
 
-The live `tool.call.started` for the `Agent` tool carries a dedicated
-**`display`** (new in 0.31.0):
-`"display":{"kind":"agent_call","agent_name":"explore","prompt":"..."}`
-(a background spawn adds `"background":true`). The Agent tool also gained a
-**`resume`** parameter (see the background result text below). Upstream note:
-the `TaskOutput` tool lost its `block`/`timeout` input params and is now
-always non-blocking — tool input schemas are not observable on this wire
-(`GET /api/v1/tools` returns `input_schema: null`; see the Tools section).
+The live `tool_call` item's `display` is
+`{"kind":"agent_call","agent_name":"coder","prompt":"…"}` (a background spawn
+adds `"background":true`). The Agent tool also accepts `resume` (the
+sub-agent's `agent_id`). `subagent_type` is restricted by the server's agent
+catalog; on this deployment the allowed values are `coder`, `explore` and
+`plan` (an unknown value fails the call and the model retries).
 
-The tool result is plain text. Foreground (waits for completion) —
-**0.43.0 (verified live 2026-09-14) adds the `stop_reason:` line and the
-trailing `resume_hint:` block** (pre-0.43.0 the foreground result stopped
-after the `[summary]` block):
+The tool result is plain text. Foreground:
 
 ```
-agent_id: agent-71
-actual_subagent_type: explore
+agent_id: agent-0
+actual_subagent_type: coder
 status: completed
 stop_reason: completed
 
 [summary]
 <the sub-agent's result summary>
 
-resume_hint: Continue with Agent(resume="agent-71", prompt="..."). Use agent_id only; do not set subagent_type. The subagent retains its prior context; redo any unfinished tool call if its result was lost.
+resume_hint: Continue with Agent(resume="agent-0", prompt="..."). Use agent_id only; do not set subagent_type. …
 ```
 
-Background (returns immediately). The head of the contract
-(`task_id:`/`status:`/`agent_id:`/`actual_subagent_type:`) is unchanged;
-**0.31.0 appends `next_step:`/`resume_hint:` blocks** after the description:
+Background (returns immediately):
 
 ```
-task_id: agent-7noib8bb
+task_id: agent-2aebrc0f
 status: running
-agent_id: agent-13
-actual_subagent_type: explore
+agent_id: agent-1
+actual_subagent_type: coder
 automatic_notification: true
 
-description: doc-verify-bg
+description: Background probe
 
-next_step: The completion arrives automatically in a later turn — do NOT wait, poll, or call TaskOutput on it; ...
-
-resume_hint: To continue or recover this same subagent later, call Agent(resume="agent-1", prompt="..."). The parameter is agent_id ("agent-1"), NOT task_id ...
+next_step: The completion arrives automatically in a later turn — do NOT wait, poll, or call TaskOutput on it; …
+resume_hint: To continue or recover this same subagent later, call Agent(resume="agent-1", prompt="..."). …
 ```
 
-The killed-task notification body carries the same resume hint.
-
-The `AgentSwarm` call's result is an **XML document** instead —
-upstream-schema-only (never captured live; pinned from `renderSwarmResults`,
-`packages/agent-core-v2/src/features/swarm/tools/agent-swarm/agentSwarmTool.ts`
-at tag 0.43.1, and its tests). One `<subagent>` element per planned member,
-attribute order `mode agent_id item state outcome stop_reason` (every one
-optional but `outcome`; `agent_id` absent when the member never spawned,
-`state="not_started"` marks those; `stop_reason` rides completed runs that
-stopped on their own condition). Attribute values are XML-escaped; member
-bodies are NOT (a member's raw output can nest the tag family):
-
-```
-<agent_swarm_result>
-<summary>completed: 1, aborted: 2</summary>
-<resume_hint>Call AgentSwarm with resume_agent_ids using the agent_id values in this result to continue unfinished work.</resume_hint>
-<subagent agent_id="agent-coder-1" item="src/a.ts" outcome="completed">imports are stable</subagent>
-<subagent agent_id="agent-coder-2" item="src/b.ts" state="started" outcome="aborted">The user manually interrupted this subagent batch before this subagent finished.</subagent>
-<subagent item="src/c.ts" state="not_started" outcome="aborted">The user manually interrupted this subagent batch before this subagent was started.</subagent>
-</agent_swarm_result>
-```
-
-The `<summary>` counts show only when > 0; `<resume_hint>` is present when any
-member is unfinished or carries a stop reason and any member has an agent id.
-
-`GET .../messages` history carries only the main agent's messages — the
-`Agent` tool_use/tool_result pair is the **only** trace of a sub-agent there
-(verified 2026-07-28).
-
-### Foreground lifecycle — historical `subagent.*` sequence (removed in 2.5.0)
-
-**2.5.0: these frames no longer exist.** Use the `task` frames above. The
-capture is kept for older journals.
-
-```
-seq 17  tool.call.started   name "Agent", args {subagent_type, description, prompt} (main)
-seq 18  agent.created       payload {"agentId": "agent-12", "sessionId": ...}
-seq 19  subagent.spawned    identity metadata (payload.agentId "main")
-seq 19  agent.status.updated  0.31.0: republication for the sub-agent, same seq,
-                            volatile — see below
-seq 20  turn.started        agentId "agent-12"; origin {"kind":"system_trigger","name":"subagent"}
-seq 21  context.spliced     the sub-agent's first internal user message
-seq 22  subagent.started    {subagentId}
-seq 23+ turn.step.*, thinking/assistant deltas, ...   all agentId "agent-12"
-seq 25  turn.ended + prompt.completed   one pair per internal turn (the task
-                            turn, then a forced result-summary turn)
-seq 33  subagent.completed  resultSummary + usage + contextTokens
-seq 34  tool.result         the Agent call's result; the main turn resumes
-```
-
-`subagent.spawned` (verbatim; carries all the identity metadata — later
-`subagent.*` events carry only `subagentId`). A 0.38.0 frame (2026-08-20,
-foreground spawn — note `taskId` and `time`):
-
-```json
-{"type":"subagent.spawned","seq":41,"payload":{"type":"subagent.spawned","time":1787254524517,"subagentId":"agent-1","subagentName":"explore","parentToolCallId":"tool_ArVyKiUhCDxXT341BmjTba8L","parentAgentId":"main","callerAgentId":"main","description":"Ask what is 2+2","runInBackground":false,"model":"kimi-code/k3","thinkingEffort":"high","taskId":"agent-rhh36xem","agentId":"main","sessionId":"session_59e4fb8e-..."}}
-```
-
-**0.31.0:** immediately after
-`subagent.spawned` (same seq, volatile) the server **republishes the
-sub-agent's `agent.status.updated`** — a duplicate of the one that follows
-`agent.created`. **0.34.0 (additive):** the payload gained **`model`** and
-**`thinkingEffort`** (camelCase; the spawned child inherits the session's
-bound model — `"kimi-code/k3"`/`"high"` observed on both foreground and
-background spawns; **0.36.0:** `"low"` observed — the effort follows the
-session's thinking config, re-verified 2026-08-13). **0.38.0 (additive,
-verified live 2026-08-20 on both foreground and background spawns):**
-the payload carries **`taskId`** — the background-task id the run registered
-under in the caller's task store (e.g. `"agent-rhh36xem"`, present even for
-foreground runs, though foreground runs still emit no `task.*` frames) — and
-the event now fires **after** task registration (commit `be8e0175`: clients
-can bind cancel/status actions without waiting for `task.started`); the
-duplicate launch-time `subagent.spawned` emission was removed (commit
-`3b69765c`). Also observed on 0.38.0: `subagent.*` / `task.*` / `tool.call.*`
-payloads all carry the top-level **`time`** (epoch ms) field, like
-`turn.started` since 0.37.2. The pair, verbatim (0.34.0):
-
-```json
-{"type":"subagent.spawned","seq":33,"payload":{"type":"subagent.spawned","subagentId":"agent-2","subagentName":"agent","parentToolCallId":"tool_jaW1ZPJgetZxZ4ZgLQmQM4wP","parentAgentId":"main","callerAgentId":"main","description":"Reply OK","runInBackground":false,"model":"kimi-code/k3","thinkingEffort":"high","agentId":"main","sessionId":"session_1143a947-..."}}
-{"type":"agent.status.updated","seq":27,"volatile":true,"payload":{"type":"agent.status.updated","model":"kimi-code/k3","thinkingEffort":"high","maxContextTokens":1048576,"usage":{},"contextTokens":0,"agentId":"agent-0","sessionId":"session_7f33a76c-..."}}
-```
-
-(0.29.2 capture for comparison:)
-
-```json
-{"type":"subagent.spawned","seq":19,
- "payload":{"type":"subagent.spawned","subagentId":"agent-12","subagentName":"explore",
-            "parentToolCallId":"tool_mhF8UXcf5QwvZbh5223tiIng","parentAgentId":"main",
-            "callerAgentId":"main","description":"doc-verify-subagent",
-            "runInBackground":false,"agentId":"main","sessionId":"session_..."}}
-```
-
-Also new in 0.31.0: the sub-agent's first internal user message (the
-`context.spliced` after its `turn.started`) embeds a
-**`<git-context status="unavailable" reason="not-a-repo"/>`** prefix when the
-session cwd is not a git repository. **Gone again in 0.34.0** (verified
-2026-08-06 with a non-repo cwd: zero `git-context` occurrences in the full
-stream — the first spliced text is the raw prompt verbatim).
-
-`subagent.completed` (verbatim, `resultSummary` elided):
-
-```json
-{"type":"subagent.completed","seq":33,
- "payload":{"type":"subagent.completed","subagentId":"agent-12",
-            "resultSummary":"<full result summary>",
-            "usage":{"inputOther":6462,"output":359,"inputCacheRead":21504,"inputCacheCreation":0},
-            "contextTokens":14358,"agentId":"main","sessionId":"session_..."}}
-```
-
-Upstream schema only (not captured live): `subagent.spawned` may also carry
-`parentToolCallUuid` and `swarmIndex` (the `AgentSwarm` member index);
-`subagent.started` re-fires when a suspended sub-agent resumes;
-`subagent.suspended` is `{subagentId, reason}` (not terminal);
-`subagent.failed` is `{subagentId, error}`.
-
-`subagent.cancelled` — **captured live since 2.0.0** (commit `7d174ac9`;
-verified live 2026-09-17): `{type, time, subagentId, agentId:"main",
-sessionId}` — terminal, a deliberate stop. It fires on REST `:cancel` of a
-running foreground AND background sub-agent; on earlier versions cancels
-produced no terminal `subagent.*` event at all (the live stream carried only
-the same truth as `task.terminated` with `status:"killed"`). Verbatim frame:
-
-```json
-{"type":"subagent.cancelled","seq":25,
- "payload":{"type":"subagent.cancelled","time":1789673862080,
-            "subagentId":"agent-0","agentId":"main","sessionId":"session_..."}}
-```
-
-Observed sequences (2026-09-17): **foreground cancel** → `prompt.aborted`
-(the running prompt's id, `abortedAt`) → `subagent.cancelled` → the spawning
-Agent `tool.result` with `isError:true` and output
-`agent_id: agent-0\nactual_subagent_type: explore\nstatus: failed\nstop_reason: cancelled\n\nsubagent error: The subagent was stopped before it finished by user.\nnext_step: …`.
-**Background cancel** → the sub-agent's internal `prompt.aborted`
-(`agentId:"<subagentId>"`) → `subagent.cancelled` → `task.terminated`
-(`info.status:"killed"`, `stopReason:"Aborted by the user"`) →
-`background.task.terminated` (same `info`) → a task-origin notification turn
-(`turn.started` origin `{"kind":"task","taskId":"agent-1wjam2nz","status":"killed","notificationId":"task:agent-1wjam2nz:killed"}`)
-+ `task.notified` (`notificationType:"task.killed"`). After a cancel the
-snapshot roster entry reads `"status":"cancelled","subagent_phase":"cancelled"`
-(see the snapshot roster) and REST `/tasks/{id}` shows `status:"cancelled"`.
-
-### Sub-agent turn frames share the session channel (now transcript ops)
-
-**2.5.0:** a sub-agent's turn content arrives as `transcript.reset`/
-`transcript.ops` frames stamped with its own `agent_id`; there are no
-`turn.*`/`assistant.delta` frames to route by payload stamp any more.
-Historical note follows.
-
-Everything the sub-agent does streams over the **same** session
-subscription, tagged with `agentId:"<subagentId>"`: `turn.started` /
-`turn.step.*` / `context.spliced` / `thinking.delta` / `assistant.delta` /
-`tool.call.*` / `tool.result` / `prompt.completed`. Turn ids are per-agent
-(main and sub-agent both number from 0), and `prompt.completed` fires for
-the sub-agent's internal turns with internal prompt ids. **A client that
-renders only the main transcript must filter on `payload.agentId ==
-"main"`** — otherwise sub-agent deltas leak into the main chat. (The Android
-app tags these frames' events with the emitting agentId in `SessionSocket`
-and routes sub-agent events into a per-sub-agent stream store backing the
-sub-agent page — tickets 044/045; sub-agent approvals/questions deliberately
-still surface in the main chat — they are actionable.)
-
-### Background lifecycle — historical `task.*` sequence (removed in 2.5.0)
-
-**2.5.0: `task.started`/`task.terminated`/`background.task.*`/`task.notified`
-are gone.** Background work is a `task` frame with `detached:true`; its
-completion is the ended frame plus the ordinary task-origin turn in the
-transcript. Historical capture follows.
-
-Spawn half (0.29.2 capture, unchanged on 0.31.0; **ordering drift since
-0.38.0** — registration now precedes the spawn events: the 0.40.1 capture
-(2026-09-02) reads `task.started` → `background.task.started` →
-`subagent.spawned` → `subagent.started`, matching the "spawned fires after
-task registration" note in the foreground section):
-
-```
-seq 46  tool.call.started   name "Agent", args {..., "run_in_background":true}
-seq 48  subagent.spawned    "runInBackground":true
-seq 49+ sub-agent turn frames (agentId "agent-13"), as in the foreground path
-seq 51  subagent.started
-seq 52  task.started        task-store registration (REST-visible from here)
-seq 53  background.task.started     legacy alias — same payload as task.started
-seq 55  tool.result         "task_id: ... status: running ..." (immediate)
-```
-
-**Completion half — restructured in 0.31.0.** The completion is no longer just
-spliced into the running context: it is delivered inside a **NEW main turn**
-(0.31.0 capture, verbatim seqs):
-
-```
-seq 83  subagent.completed
-seq 84  task.terminated     info.status "completed"
-seq 85  background.task.terminated  legacy alias
-seq 86  event.session.work_changed  busy=false, last_turn_reason "completed"
-seq 87  turn.started        MAIN agent — origin {"kind":"task",...}, see below
-seq 88  event.session.work_changed  busy=true
-seq 89  task.notified       notificationType "task.completed"
-seq 90  context.spliced     a `<notification ...>` user message spliced into the
-                            MAIN agent — how the main agent learns of it
-```
-
-- New `turn.started` origin kind **`task`** (verbatim):
-  `{"kind":"task","taskId":"agent-a7fxomh0","status":"completed","notificationId":"task:agent-a7fxomh0:completed"}`.
-- The notification splice message's origin is `{"kind":"task",...}` (not
-  `user`) and it has **no `id` field** (keep treating spliced-message ids as
-  optional). The `<notification>` element gained attributes (`id`, `category`,
-  `type`, `source_kind`, `source_id`, `agent_id`) plus an
-  `<output-file path=".../agents/main/tasks/<taskId>/output.log" bytes="1532">`
-  child telling the agent to Read the output file. The `task.notified`
-  payload itself is unchanged.
-- The background Agent tool **result text** now ends with `next_step:` /
-  `resume_hint:` blocks (see the spawning tool call subsection); the Agent
-  tool gained a `resume` parameter.
-
-`task.started` / `task.terminated` payload (verbatim, from the cancel run):
-
-```json
-{"type":"task.terminated","seq":109,
- "payload":{"type":"task.terminated",
-            "info":{"taskId":"agent-lftjyr4o","description":"doc-verify-cancel",
-                    "status":"killed","detached":true,
-                    "startedAt":1785210101939,"endedAt":1785210118804,
-                    "stopReason":"Aborted by the user","timeoutMs":7200000,
-                    "kind":"agent","agentId":"agent-14","subagentType":"agent"},
-            "agentId":"main","sessionId":"session_..."}}
-```
-
-**0.34.0 (additive):** agent-kind `info` gained **`model`** and
-**`thinkingEffort`** (camelCase) on `task.started`/`task.terminated` and
-their `background.task.*` legacy aliases alike (verbatim 0.34.0
-`task.started`):
-
-```json
-{"type":"task.started","seq":103,
- "payload":{"type":"task.started",
-            "info":{"taskId":"agent-bpy0kylc","description":"Sleep 240 then reply OK",
-                    "status":"running","detached":true,"startedAt":1786044903637,
-                    "endedAt":null,"timeoutMs":7200000,
-                    "kind":"agent","agentId":"agent-4","subagentType":"agent",
-                    "model":"kimi-code/k3","thinkingEffort":"high"},
-            "agentId":"main","sessionId":"session_..."}}
-```
-
-`info.status` uses the **core** vocabulary (`running` | `completed` |
-`failed` | `timed_out` | `killed` | `lost`), not the REST wire one (mapping
-below); `kind:"agent"` marks a sub-agent (`process` = background bash).
-**0.41.0 (commit `b6b9b374`; schema-level, not triggered live):** a sub-agent
-stopped by the repeat breaker now settles `completed` **with** a
-`stopReason` on this `info` ("stopped by the repeat breaker after issuing the
-same tool call repeatedly; its output is a handoff, not a finished result") —
-before, `stopReason` appeared only on failed/killed tasks. The engine also
-tracks a per-task `stopCode`, but **no kap-server projection serves it** (the
-0.41.0 REST/snapshot/task sources never reference it — engine-internal only),
-and the upstream wire manifest gained an optional **`stopReason` on
-`turn.ended`** (forced stops; every live `turn.ended` captured on 0.41.0 —
-completed and cancelled alike — omits it). The Android app already decodes
-the optional `stopReason` on task `info`.
-`task.notified` (verbatim shape): `{"notificationType":"task.completed" |
-"task.killed","title":"...","body":"...","severity":"info" | "warning",
-"sourceKind":"background_task","sourceId":"<taskId>"}`.
-**2.1.1 (commit `0dc4d4fb`; verified live 2026-09-24):** the `body` — and the
-`<notification>` history XML alike — now opens with a
-`Wall time: N.NNN seconds` line (the task tools' output text prepends the
-same header). Prose, not shape; the app never parses either.
-
-Two **different** agent ids ride these frames: the payload-level `agentId`
-(`"main"` above) is the envelope stamp naming the **owning** agent — the one
-whose task store holds the task — while `info.agentId` links a
-sub-agent-kind task to the spawned sub-agent's page id. A background task
-spawned BY a sub-agent is stamped with the sub-agent's id (verified from the
-kap-server source on 0.33.0: every agent's event bus — main and dynamically
-created sub-agents alike — feeds the session broadcaster, which stamps
-`agentId`/`sessionId` onto each payload). Those sub-agent-owned tasks are
-**live-only**: REST `/tasks` resolves only the main agent's task service, so
-they never appear in list/get, and `:cancel` answers `40406` for them.
-
-### Task frames and controls (2.5.0)
-
-There is no REST task API any more. Every `/api/v1/sessions/{id}/tasks…`
-route is a plain Fastify 404 (GET and POST verified live); `GET .../status`
-and `GET .../snapshot` are gone too. Tasks arrive on the session
-subscription:
-
-- **`task.list`** — sent when a connection starts receiving an agent:
-  `{"type":"task.list","session_id":"…","agent_id":"main","tasks":[<task>,…]}`.
-  It replaces the client list and contains only currently running tasks.
-- **`task`** — sent on every change, carrying the **full** state:
-  `{task_id,kind:"shell"|"subagent"|"other",status:"running"|"ended",
-  outcome?,phase?,detached,description?,child_agent_id?,
-  parent_tool_call_id?,swarm_index?,command?,started_at?,ended_at?,
-  result_summary?,error?,state_reason?,model?,thinking?}`. The ended frame
-  (`status:"ended"`, `outcome` one of `completed`/`failed`/`timed_out`/
-  `killed`/`lost`) is the last one; ended tasks are not in a later
-  `task.list`, and the history carries their outcome.
-- **`task.output`** — only to a connection that sent `task.watch`:
-  `{type:"task.output",session_id,agent_id,task_id,offset,text}`, where
-  `offset` is the UTF-8 byte offset of `text` in the task's output.
-- **Flat controls** — fields sit beside `type`, `request_id` replaces `id`,
-  and the reply is `{type:"response",request_id,code,msg?,task?}` (not an
-  ack). All four verified live:
-
-  | Frame | payload | reply |
-  | --- | --- | --- |
-  | `task.watch` | `{request_id,session_id,agent_id,task_id,since_offset?,tail_bytes?}` | `code:0`, the task state, then one `task.output` (last `tail_bytes`/32 KiB default, at most 1 MiB) and live chunks |
-  | `task.unwatch` | `{request_id,session_id,agent_id,task_id}` | `code:0` |
-  | `task.stop` | same | `code:0`, the ended task state; an already-ended task just replies with its state |
-  | `task.background` | same | `code:0`, the task state with `detached:true`; a foreground-only task (e.g. a swarm member) fails `40933` with the state |
-
-  Errors: `40001` malformed frame, `40401` unknown session, `40406` the
-  agent has no such task, `40933` not movable to the background, `50001`
-  internal, `50003` output unreadable. A frame without a readable
-  `request_id` closes the socket with code 1008.
-
-Verbatim task frames from the 2.5.0 run (a shell task and a background
-sub-agent), trimmed:
-
-```json
-{"type":"task.list","session_id":"session_…","agent_id":"main","tasks":[]}
-{"type":"task","session_id":"session_…","agent_id":"main","event_created_at":"…",
- "task_id":"bash-s9yny87s","kind":"shell","status":"running","detached":false,
- "description":"Bash: sleep 30 && echo watched-ok",
- "parent_tool_call_id":"call_00_…","command":"sleep 30 && echo watched-ok",
- "started_at":"…"}
-{"type":"task","session_id":"session_…","agent_id":"main","event_created_at":"…",
- "task_id":"agent-v93x0tjv","kind":"subagent","status":"running","phase":"working",
- "detached":true,"description":"Sleep then reply bg-ok","child_agent_id":"agent-1",
- "parent_tool_call_id":"call_00_…","started_at":"…",
- "model":"deepseek/deepseek-v4-flash","thinking":"max"}
-{"type":"response","request_id":"w1","code":0,
- "task":{"task_id":"bash-s9yny87s","kind":"shell","status":"running","detached":false,
-         "description":"Bash: sleep 30 && echo watched-ok",
-         "parent_tool_call_id":"call_00_…","command":"sleep 30 && echo watched-ok",
-         "started_at":"…"}}
-{"type":"task.output","session_id":"session_…","agent_id":"main",
- "task_id":"bash-s9yny87s","offset":0,"text":""}
-```
-
-The historical REST shape below is kept for older servers/journals:
-
-All envelope-over-HTTP-200 (verified 2026-07-28, re-verified unchanged
-2026-07-30 on 0.31.0):
-
-```bash
-curl -s -H "Authorization: Bearer <token>" \
-  'http://127.0.0.1:58627/api/v1/sessions/<sid>/tasks?status=completed'
-curl -s -H "Authorization: Bearer <token>" \
-  'http://127.0.0.1:58627/api/v1/sessions/<sid>/tasks/<task_id>?with_output=true&output_bytes=4096'
-curl -s -X POST -H "Authorization: Bearer <token>" \
-  'http://127.0.0.1:58627/api/v1/sessions/<sid>/tasks/<task_id>:cancel'
-curl -s -X POST -H "Authorization: Bearer <token>" \
-  'http://127.0.0.1:58627/api/v1/sessions/<sid>/tasks/<task_id>:detach'
-```
-
-- **List** — `GET .../tasks` → `{"items":[...]}`; optional
-  `?status=running|completed|failed|cancelled` (other values → `40001`).
-  Serves the main agent's background-task store: background sub-agents
-  (`kind:"subagent"`), background bash (`kind:"bash"`), question flows
-  (`kind:"tool"`). Terminal tasks stay listed. Core→wire mappings: kind
-  `agent`→`subagent`, `process`→`bash`, `question`→`tool`; status
-  `killed`→`cancelled`, `timed_out`/`lost`→`failed`. **Main-agent only** —
-  a sub-agent's own background tasks are never listed, fetched, or
-  cancellable here (their only channel is the live `task.*` frames, see the
-  owning-agent stamp above). **0.34.0:** a **running foreground sub-agent**
-  is listed too (`kind:"subagent"`, `status:"running"`, with
-  `model`/`thinking_effort`) and dropped from the list once terminal — see
-  the foreground bullet at the top of this section.
-- **Get** — `GET .../tasks/{task_id}`; `with_output=true` adds
-  `output_preview` (tail of the stored result, default cap 32768 bytes —
-  override with `output_bytes`) and `output_bytes` (byte length of the
-  returned preview). Unknown task → `40406`; unknown session → `40401`.
-  For background **bash** tasks this works **while still `running`** —
-  `output_preview` returns the live partial stdout/stderr and grows
-  between polls (verified 2026-08-05 on 0.32.0: a 120-tick loop polled
-  every 4 s returned 67, 71, 75, … 96 ticks with `completed_at` absent).
-  This REST poll is the only way to watch a background command's output:
-  **no `tool.progress` frames are emitted for background bash** (zero
-  observed across two full runs on 0.32.0, 2026-08-05 — the WS stream
-  only carries `task.started`/`task.terminated` lifecycle events).
-- **Cancel** — `POST .../tasks/{task_id}:cancel` → `{"cancelled":true}` on a
-  running task; a terminal task answers `40904` with
-  `data:{"cancelled":false}` + `details.current_status`. Cancelling a
-  running background sub-agent (re-verified unchanged on 0.31.0, 2026-07-30)
-  emits `turn.step.interrupted` → `turn.ended` → `prompt.aborted` →
-  `task.terminated` with
-  `status:"killed"` + `stopReason:"Aborted by the user"` — **no**
-  `subagent.failed`/`subagent.completed` — then the `background.task.terminated`
-  legacy alias, `task.notified`
-  (`notificationType:"task.killed"`, severity warning) and the notification
-  splice; REST reads
-  `"cancelled"` afterwards. **0.34.0:** `:cancel` also works on a **running
-  foreground** sub-agent (verified 2026-08-06): the Agent tool returns
-  `status: failed` ("subagent error: The subagent was stopped before it
-  finished"), the sub-agent's WS shows `tool.result` "Interrupted by user" →
-  `turn.step.interrupted` → `turn.ended` `reason:"cancelled"` →
-  `prompt.aborted` — still **no `task.*` frames** and no
-  `subagent.failed`/`subagent.completed` for it.
-
-Task object (verbatim, 0.39.0 — subagent-kind objects carry `model`/
-`thinking_effort` (snake_case, since 0.34.0), `agent_id`, `subagent_type` and
-`parent_tool_call_id` (since 0.36.1), and, **new in 0.39.0** (commit
-`6595955b`), **`run_in_background`** on every task, list and get, running and
-terminal; 2026-08-27 capture of a completed background sub-agent):
-
-```json
-{"id":"agent-ptkje5ey","session_id":"session_...","kind":"subagent",
- "description":"Compute 2+2","status":"completed",
- "created_at":"2026-08-27T19:39:16.435Z","started_at":"2026-08-27T19:39:16.435Z",
- "run_in_background":true,
- "completed_at":"2026-08-27T19:39:35.940Z",
- "model":"kimi-code/k3","thinking_effort":"high",
- "agent_id":"agent-1","subagent_type":"coder",
- "parent_tool_call_id":"tool_JBuc3yrESF5aEiDPXUy025NK"}
-```
-
-A **running foreground** sub-agent lists with `"run_in_background":false`
-(verified live 2026-08-27). Since 0.39.0 (commit `692bb0a4`)
-`parent_tool_call_id` is also emitted on `kind:"bash"` (process) tasks when
-set — it was subagent-only before. `agent_id` is the sub-agent registry id
-the WS `subagent.*` events and the snapshot roster already use, so REST tasks
-can be joined to the roster without matching on `description`. With
-`with_output=true` the object additionally carries `output_preview` (tail of
-the stored result) + `output_bytes`. `created_at` == `started_at` still
-holds.
-
-- **Detach** — **new in 0.39.0** (commit `692bb0a4`; verified live
-  2026-08-27): `POST .../tasks/{task_id}:detach` (empty body) moves a running
-  **foreground** task to the background →
-  `{"code":0,...,"data":{"detached":true,"status":"running"}}`. An
-  already-background or terminal task answers
-  `{"detached":false,"status":<current>}`; unknown task → `40406`. Effects:
-  the foreground `Agent` tool call resolves immediately with a stub result
-  ("note: The user moved this subagent to the background. …"), the task
-  flips to `run_in_background: true` on REST, the WS emits `task.started` +
-  `background.task.started` for it (a foreground task has no `task.*` frames
-  until detached), and completion then follows the background lifecycle
-  (`subagent.completed` + `task.terminated` + the task-origin notification
-  turn). The Android app detaches from the sub-agent page's overflow ("To
-  background" → `:detach`, ticket 138); the conversion's `task.started`
-  flips the member record to background.
-
-Background **bash** tasks live in their own id namespace (`bash-…`, vs
-`agent-…` for sub-agents) and carry the shell **`command`** on the wire
-(0.32.0, verified 2026-08-05):
-
-```json
-{"id":"bash-xbje00tt","session_id":"session_...","kind":"bash",
- "description":"tick counter loop","status":"completed",
- "created_at":"…","started_at":"…","completed_at":"…",
- "command":"for i in …"}
-```
-
-plus `output_preview`/`output_bytes` with `with_output=true`.
-
-The background Bash tool **result** is an immediate plain-text stub — the
-command's real output lives in the task store (the get-with-output poll
-above); history carries the same text in the `tool_result` part, so the
-`task_id:` link works for live and re-entered sessions alike (verbatim,
-0.32.0, 2026-08-05):
-
-```
-task_id: bash-2q5gu61e
-pid: 502439
-description: tick counter loop (120)
-status: running
-automatic_notification: true
-next_step: …
-```
-
-Background **Agent** results also start with `task_id:` but an `agent-…` id
-(see the spawning tool call subsection) — the `bash-` prefix is what
-distinguishes the two.
-
-Timeout facts (spiked live on 0.32.0, 2026-08-05 — two throwaway background
-commands, one completing, one with `timeout: 5`):
-
-- **REST never exposes the timeout** — not even when the call set it
-  explicitly (`bash-mm1xr92b`, `timeout: 120`, completed: no timeout field).
-  The only wire location is the **tool call input** (`timeout`, seconds;
-  `disable_timeout`, boolean), present in live args and history `tool_use`
-  parts alike.
-- **A timed-out job collapses to `status:"failed"` on REST** —
-  indistinguishable from a crash (`bash-w662jmuf`, `timeout: 5`: `failed`,
-  `completed_at - started_at` = 5.003 s — the server enforced the budget
-  exactly). Only the live WS path keeps the truth: `task.terminated` core
-  status `timed_out`, plus a `task.notified` with
-  `notificationType:"task.timed_out"` (severity warning).
-- **The 600 s background default and `disable_timeout` semantics are the
-  harness/tool-schema contract** (unset `timeout` ⇒ 600 s for background
-  commands; `disable_timeout: true` ⇒ no kill) — NOT observable on this
-  wire. The app hardcodes the default for its budget display; if the tool
-  schema changes it, this note is the drift flag.
-
-### Session snapshot roster — **removed in 2.5.0**
-
-**2.5.0: the snapshot route is gone.** The roster's data now comes from
-`GET .../transcript?agent_id=main`'s `agents` array
-(`{agentId,type:"main"|"sub",parentAgentId?}`) and from `task` frames with
-`kind:"subagent"` (`child_agent_id`, `parent_tool_call_id`, `detached`,
-`phase`, `model`, `thinking`, `result_summary`). Historical shape follows.
-
-`GET /api/v1/sessions/{sid}/snapshot` (see Sessions → Session snapshot) carries
-an optional `subagents` array: the **foreground** roster at the watermark, so a
-reconnecting client can rebuild the identity metadata (cursor-resume replays
-nothing earlier than the cursor, and `subagent.spawned` is never replayed).
-Verified 2026-07-28 right after the foreground run, re-verified 2026-07-30 on
-0.31.0 (including the reset-to-`[]` behavior described below); running vs
-terminal entries captured on 0.31.1, 2026-08-01.
-
-While running — `status`/`subagent_phase` read `running`/`working`, and
-`completed_at`/`output_preview` are absent (**0.34.0, additive:** entries
-gained **`model`**/**`thinking_effort`**, snake_case, running and terminal
-alike — verbatim 0.34.0 running entry):
-
-```json
-{"id":"agent-5","session_id":"session_...","kind":"subagent",
- "description":"Sleep 20 then reply OK","status":"running",
- "subagent_phase":"working","subagent_type":"agent",
- "parent_tool_call_id":"tool_zBY7RxT22gFKxyvchCt15jya","run_in_background":false,
- "model":"kimi-code/k3","thinking_effort":"high",
- "created_at":"2026-08-06T19:38:08.384Z","started_at":"2026-08-06T19:38:08.390Z"}
-```
-
-Terminal — both state fields flip and the run's result-summary tail arrives
-(0.31.1 capture; on 0.34.0 it additionally carries the same
-`model`/`thinking_effort` pair):
-
-```json
-{"id":"agent-3","session_id":"session_...","kind":"subagent",
- "description":"Sleep then answer ok","status":"completed",
- "subagent_phase":"completed","subagent_type":"explore",
- "parent_tool_call_id":"tool_GgLCPjSW9Vo2oN0x5SOrB0x9","run_in_background":false,
- "created_at":"2026-08-01T14:50:09.024Z","started_at":"2026-08-01T14:50:09.026Z",
- "completed_at":"2026-08-01T14:52:38.040Z","output_preview":"## Summary\n\n**Task received:** …"}
-```
-
-- `subagent_phase`: `queued` | `working` | `suspended` | `completed` |
-  `failed` | `cancelled` — **`cancelled` observed live since 2.0.0**
-  (verified live 2026-09-17: a REST `:cancel` of a running foreground
-  sub-agent leaves the roster entry reading
-  `"status":"cancelled","subagent_phase":"cancelled"`; REST `/tasks/{id}`
-  shows `status:"cancelled"`; was schema-level only before — the same truth
-  as `task.terminated` with `status:"killed"`); `suspended_reason`
-  and `swarm_index` optional. The flatter
-  `status` mirrors it with the `/tasks` vocabulary (`working` → `running`
-  there); `subagent_phase` is the precise one.
-- Background sub-agents are excluded (REST serves them). The roster survives
-  the turn's end but is dropped when the main agent starts its **next** turn
-  (verified: `[]` after a follow-up prompt).
+`GET .../messages` carries only the main agent's messages — the
+`Agent` `tool_use`/`tool_result` pair is the only trace of a sub-agent there.
 
 ## WebSocket
 
-### URL & handshake
+### URL & connection
 
 ```
 ws://127.0.0.1:58627/api/v1/ws?client_id=<unique client id>
 ```
 
-(`wss://` when the base is https; remotely, the handshake goes through Caddy
-and needs the same Bearer token header as REST.)
+(`wss://` when the base is https; remotely the upgrade goes through Caddy and
+needs the same Bearer token as REST, as a header or the subprotocol
+`kimi-code.bearer.<token>`.)
 
-websocat (installed at `~/tools/websocat-bin/websocat`; note websocat 1.14's
-`-H` eats multiple arguments — pass the header as `-H="Authorization: Bearer <token>"`
-or put it last):
+**There is no handshake (2.6.0, commit `725194d7`).** The connection opens
+straight into global events; a client can send commands immediately. There is
+no `server_hello`, no `client_hello`, no `protocol_version`, no `heartbeat_ms`
+and no `ack` frame. `subscribe_v2`, `unsubscribe_v2` and the old raw
+`subscribe` are gone; a `subscribe_v2` frame is now an unknown type and is
+ignored without a reply.
 
 ```bash
 ~/tools/websocat-bin/websocat -H="Authorization: Bearer <token>" \
-  'ws://127.0.0.1:58627/api/v1/ws?client_id=doc_verify_250'
+  'ws://127.0.0.1:58627/api/v1/ws?client_id=doc_verify_260'
 ```
-
-First server frame is `server_hello`; 2.5.0 dropped
-`max_event_buffer_size` (the old `1000`) but kept the rest (verbatim, 2.5.0):
-
-```json
-{"type":"server_hello","timestamp":"2026-11-04T19:24:58.463Z",
- "payload":{"ws_connection_id":"conn_01M6M0B36YD4JZXR37DH7HR7MJ",
-            "protocol_version":2,"heartbeat_ms":10000,
-            "capabilities":{"event_batching":false,"compression":false}}}
-```
-
-There is no `client_hello` requirement: `client_hello` is still accepted and
-acknowledged (`{"type":"ack","id":"…","code":0,"msg":"success","payload":{}}`),
-but a connection can go straight to `subscribe_v2` (verified live). Global
-events arrive even on a socket that sent nothing but `pong`.
 
 ### Heartbeat
 
-The heartbeat is unchanged: `heartbeat_ms` is **10000**, the server sends an
-app-level `ping` every interval with a fresh ULID `nonce`, and a client answers
-`{"type":"pong","payload":{"nonce":<echo>}}`. **Any inbound frame resets the
-liveness timer.** A silent connection gets a ping at +10 s and is closed at
-+20 s (the server's miss limit is 2; observed live as one ping then no further
-pings at +20/+30 — websocat does not surface the close frame). The Android app
-must keep answering pings.
+The server sends a **bare** `{"type":"ping"}` every 10 seconds and expects a
+bare `{"type":"pong"}`. Any well-formed inbound frame resets the liveness
+timer, including frame types the server does not know. Frames that are not
+valid JSON or have no string `type` are dropped and do not count. A connection
+that sends nothing for 20 seconds is closed with code `1001` (`heartbeat
+timeout`), so a healthy client sees a ping every 10 s and never gets close to
+the limit. The server times this on a monotonic clock, restarts the clock after
+its own stall (sending a fresh ping and giving another 20 s) and drains
+already-arrived frames before closing. A client that receives nothing for 25 s
+should treat the connection as dead and reconnect. Unlike earlier versions,
+there is no `nonce` to echo: answering `{"type":"pong","payload":{"nonce":…}}`
+is accepted as activity but the server no longer sends a nonce.
 
-### Control frames
+### Commands and responses
 
-Client frames are JSON `{ "type", "id"?, "payload" }`; every non-task request
-gets `{"type":"ack","id","code","msg","payload"}` (`code:0` = success). The
-only session subscription is `subscribe_v2`; **the old
-`{"type":"subscribe","payload":{"session_ids":[…]},"cursors":…}` frame is
-silently ignored — no ack, no error, no events.**
-
-| Frame | payload | Description |
-| --- | --- | --- |
-| `subscribe_v2` | `{ session_id, transcript, transcript_since? }` | The only session subscription: transcript streams + interactions for ONE session |
-| `unsubscribe_v2` | `{ session_id, agent_ids? }` | Detach; omitting `agent_ids`, or detaching the last agent, drops the whole session subscription |
-| `client_hello` | `{ client_id }` | Optional handshake |
-| `task.watch` | flat: `{ request_id, session_id, agent_id, task_id, since_offset?, tail_bytes? }` | Stream one task's output; works without a session subscription |
-| `task.unwatch` | flat: same minus offsets | Stop streaming that task's output |
-| `task.stop` | flat: same | Stop a task; an ended task just replies with its state |
-| `task.background` | flat: same | Detach the waiting tool call; a foreground-only task fails `40933` |
-
-`subscribe_v2`'s `transcript` is a per-agent grade map:
-`{"*": "off" | "turn" | "block" | "delta"}` (an exact agent id may override
-`"*"`). `transcript_since` is the matching map of op-batch `seq` values to
-resume from. The ack (verbatim) is:
+Every client command is a flat JSON frame: its fields sit next to `type`, and
+it carries a `request_id`. The server answers each command with exactly one
+`response`:
 
 ```json
-{"type":"ack","id":"c1","code":0,"msg":"success",
- "payload":{"accepted":["session_150fe8fe-…"],"not_found":[]}}
+{"type":"response","request_id":"s1","code":0}
 ```
 
-An unknown session answers `code:0` with the id in `not_found`; a malformed
-payload answers `code:1` `"invalid subscribe_v2 payload"` (not `40001`). There
-is no multi-session subscribe — send one frame per session. `unsubscribe_v2`
-acks with the session id in `accepted` (verbatim:
-`{"type":"ack","id":"u1","code":0,"msg":"success","payload":{"accepted":["session_…"],"not_found":[]}}`).
+`code` `0` is success; `msg` and `task` appear when needed. A command without
+a readable `request_id` closes the connection with code `1008` (`invalid
+message`). Unknown frame types are ignored. `subscribe`/`unsubscribe` on the
+same connection are processed one at a time in send order (including opening
+the session), and their responses come back in send order. Task commands use a
+separate queue and never wait for a subscription.
 
-Task frames are **flat** — their fields sit next to `type` instead of under
-`payload`, `request_id` replaces `id`, and the reply is
-`{ "type": "response", "request_id", "code", "msg"?, "task"? }` instead of an
-ack. A frame without a readable `request_id` closes the socket with code 1008.
-Requests for the same task are handled in arrival order; different tasks never
-wait on each other. Tasks watched are dropped on disconnect.
+| Command | Fields | Purpose |
+| --- | --- | --- |
+| `subscribe` | `request_id`, `session_id`, `agent_ids?` | Receive one session; `agent_ids` defaults to `["main"]`. Sending it again for the same session adds agents; agents already received do not get `turns` again |
+| `unsubscribe` | `request_id`, `session_id`, `agent_ids?` | Stop receiving the listed agents; omitting `agent_ids`, or removing the last agent, drops the whole session |
+| `task.watch` | `request_id`, `session_id`, `agent_id`, `task_id`, `since_offset?`, `tail_bytes?` | Stream one task's output; no session subscription needed |
+| `task.unwatch` | `request_id`, `session_id`, `agent_id`, `task_id` | Stop the output stream |
+| `task.stop` | `request_id`, `session_id`, `agent_id`, `task_id` | Stop the task; an already-ended task just replies with its state |
+| `task.background` | `request_id`, `session_id`, `agent_id`, `task_id` | Detach the waiting tool call; a foreground-only task answers `40933` |
+
+### Subscribing to a session
+
+```json
+{"type":"subscribe","request_id":"s1","session_id":"session_…","agent_ids":["main"]}
+```
+
+After a successful subscribe the client receives, in order:
+
+1. the `response` (`code:0`);
+2. every still-pending interaction of the session as an `interaction` frame;
+3. for each agent it starts receiving: `task.list`, `agent`, `usage` (when the
+   agent has a model context), `goal` (main agent only) and `todo`;
+4. one `turns` frame with the latest page of that agent's conversation.
+
+A session that cannot be opened answers the response with `40401` (unknown
+session) or another code (`40930` wire version too low, `40931` occupied) and
+nothing is subscribed. A malformed `subscribe` answers `40001` (`"invalid
+subscribe message"`). When the main agent does not exist yet at subscribe time,
+the server creates it first, so the main agent's state frames always follow a
+subscription.
+
+`turns` loads asynchronously and may arrive after live `task`/`agent`/`usage`
+frames. Conversation frames produced while it loads are buffered and sent in
+order after `turns`, so nothing is lost. An agent listed in `agent_ids` that
+has not joined yet announces itself with `task` and state frames when it joins.
+A `subscribe` for a session already subscribed only sends `task.list`, state
+frames and `turns` for the newly added agents, but re-sends **all** pending
+interactions every time.
+
+### When the server closes and reopens a session
+
+The server closes a session inactive for 30 minutes (configurable with
+`KIMI_CODE_SESSION_IDLE_RECLAIM_MS`); busy sessions, pending interactions and
+scheduled tasks keep it open. `:reload` also closes and reopens it.
+Subscriptions stay valid; when the session reopens the server re-sends
+`task.list`, `agent`, `usage`, `goal`, `todo` and `turns` for every subscribed
+agent. Later `turns` frames also replace an agent's latest page after a
+reconnect. Archiving or deleting a session removes every subscription to it and
+emits only the global event; after a restore, subscribe again.
+
+### Frame ordering
+
+All frames of one session share one send queue and are sent in production
+order, in batches every 16 ms or 64 frames. `response` and `interaction` are
+sent immediately but never overtake already-queued frames. Global events use a
+separate queue. When a turn ends, `turn.ended` arrives before the idle `agent`
+frame (except while `turns` is still loading). REST and WS travel on different
+channels: after submitting a prompt, `turn.started` and the `user_message` item
+may arrive before the HTTP response. Match them by `prompt_id`; never rely on
+arrival order.
 
 ### Session frames
 
-After an accepted `subscribe_v2` the server sends, in this order (verified
-live): per-agent state frames, `transcript.reset`, then the ack. For a fresh
-subscription with grade `delta` on a session with an existing turn:
+All session frames are flat and carry `{type, session_id, agent_id,
+event_created_at, …}`. The frames delivered to a subscriber are:
 
-```
-task.list              all running tasks of the agent (empty when idle)
-agent                  status/model/thinking/permission/modes
-usage                  context fill
-goal                   goal or null
-todo                   full todo list
-transcript.reset       baseline snapshot (items: [])
-ack
-```
+| Frame | Sent to | Content |
+| --- | --- | --- |
+| `turns`, `turns.removed`, `turns.failed`, `turn.*`, `item.*`, `notice` | subscribers receiving that agent | the conversation (see Conversation) |
+| `task.list`, `task` | subscribers receiving that agent | task state |
+| `agent`, `usage`, `goal`, `todo` | subscribers receiving that agent | agent state |
+| `interaction` | every subscriber of the session | approvals/questions |
+| `task.output` | connections watching the task | output chunks |
 
-All state frames carry `{type, session_id, agent_id, event_created_at, …}` and
-replace the client copy wholesale. They are never replayed; a reconnect
-re-sends them. If the subscribe's grade is `off`, the agent is not "received"
-and only the ack (plus pending interactions, if any) arrives.
-
-**`agent`** — `status` (`idle`/`running`), optional `model`, optional
-`thinking`, `permission_mode` (`manual`/`yolo`/`auto`), and the booleans
-`plan_mode`/`swarm_mode`/`tower_mode`. Verbatim:
+**`agent`** — `status` (`idle`/`running`), `compacting` (bool), optional
+`model`/`thinking`, `permission_mode` (`manual`/`yolo`/`auto`), and the
+booleans `plan_mode`/`swarm_mode`/`tower_mode`. Verbatim:
 
 ```json
 {"type":"agent","session_id":"session_…","agent_id":"main",
- "event_created_at":"2026-11-04T19:25:52.678Z","status":"idle",
+ "event_created_at":"2026-11-12T19:25:14.913Z","status":"idle","compacting":false,
  "model":"deepseek/deepseek-v4-flash","thinking":"max","permission_mode":"auto",
  "plan_mode":false,"swarm_mode":false,"tower_mode":false}
 ```
 
-The frame for a turn's start or end follows the transcript ops of that turn
-change. A fresh model-less session omits `model`/`thinking`; `status` is
-`running` while a turn or background work keeps the agent busy.
+A model-less session omits `model`/`thinking`. `compacting` is true for the
+whole of a context compaction, inside or outside a turn. The running turn and
+the retry state come with the conversation frames, not here. `agent` is sent
+when a connection starts receiving an agent and on every change.
 
 **`usage`** — `context_tokens` (required) and `max_context_tokens`
-(optional), coalesced to at most a few frames per second:
+(optional), coalesced over 250 ms (only the latest value is sent):
 
 ```json
 {"type":"usage","session_id":"session_…","agent_id":"main",
- "event_created_at":"2026-11-04T19:25:52.679Z","context_tokens":22433,
+ "event_created_at":"2026-11-12T19:25:14.913Z","context_tokens":0,
  "max_context_tokens":1000000}
 ```
 
-**`goal`** — the main agent's goal, or the key `goal` omitted when none.
-Shape: `{objective, status:"active"|"paused"|"blocked"|"complete",
-completion_criterion?, turns_used, tokens_used, wall_clock_ms}`. Verbatim
-empty frame:
+**`goal`** — the main agent's goal, or the key `goal` omitted when none:
+`{objective, status:"active"|"paused"|"blocked"|"complete",
+completion_criterion?, turns_used, tokens_used, wall_clock_ms}`.
 
 ```json
-{"type":"goal","session_id":"session_…","agent_id":"main","event_created_at":"2026-11-04T19:25:52.679Z"}
+{"type":"goal","session_id":"session_…","agent_id":"main","event_created_at":"2026-11-12T19:25:14.913Z"}
 ```
 
 **`todo`** — the full list, `items:[{title,status}]` with status
 `pending`/`in_progress`/`done`; `[]` clears it. See Todos.
 
-**`task.list` / `task`** — see Sub-agents → Task frames and controls.
-Verbatim:
+**`task.list` / `task`** — see Sub-agents. Verbatim:
 
 ```json
 {"type":"task.list","session_id":"session_…","agent_id":"main","tasks":[]}
 {"type":"task","session_id":"session_…","agent_id":"main","event_created_at":"…",
- "task_id":"bash-s9yny87s","kind":"shell","status":"running","detached":false,
- "description":"Bash: sleep 30 && echo watched-ok",
- "parent_tool_call_id":"call_00_…","command":"sleep 30 && echo watched-ok",
- "started_at":"…"}
+ "task_id":"agent-2aebrc0f","kind":"subagent","status":"ended","outcome":"killed",
+ "detached":true,"description":"Background probe","child_agent_id":"agent-1",
+ "parent_tool_call_id":"call_01_…","started_at":"…","ended_at":"…",
+ "model":"deepseek/deepseek-v4-flash","thinking":"max"}
 ```
 
 **`task.output`** — only to a `task.watch`ing connection:
 `{type, session_id, agent_id, task_id, offset, text}`, `offset` a UTF-8 byte
-offset. The first chunk is the tail (32 KiB default) after `since_offset`.
+offset. The first chunk is the tail (32 KiB default) after `since_offset`;
+`task.watch`'s code-0 response carries the task's state.
 
-**`interaction`** — the flat approval/question frame (unchanged from 2.4.0):
-no `seq`/`timestamp`/`payload` wrapper, never journaled, delivered only to
-subscribed connections. Pending interactions are re-sent **twice** after the
-ack — once inside `transcript.reset.snapshot.interactions`, once as standalone
-frames. Verbatim pending approval:
+**`notice`** — a live warning or error not tied to a turn:
+`{level:"info"|"warning"|"error", title, detail?, code?}`. Source-derived
+shape (not triggered this run): a failed compaction sends
+`{"type":"notice","level":"error","title":"…","code":"compaction.cancelled"}`.
+Notices are not replayed on subscribe.
 
-```json
-{"type":"interaction","session_id":"session_…","agent_id":"main",
- "event_created_at":"2026-11-04T19:27:26.728Z",
- "interaction_id":"approval_6d1ef26e-b18f-46e3-9d1e-1374d2b9febf",
- "status":"pending","tool_call_id":"call_00_GpDmwYxmNPexNQPjpMHl3844",
- "kind":"approval",
- "request":{"tool_name":"Bash","action":"Running: rm -rf /path/to/project/target",
-            "tool_input_display":{"kind":"command",
-                                  "command":"rm -rf /path/to/project/target",
-                                  "cwd":"/path/to/project","language":"bash"},
-            "expires_at":"2026-11-05T19:27:26.727Z"}}
-```
-
-After `{"kind":"approval","decision":"approved"}`:
+**`turns` / `turns.removed` / `turns.failed`** — the conversation page and its
+removals. Verbatim `turns.removed` after an undo:
 
 ```json
-{"type":"interaction","session_id":"session_…","agent_id":"main",
- "event_created_at":"2026-11-04T19:27:27.526Z",
- "interaction_id":"approval_6d1ef26e-b18f-46e3-9d1e-1374d2b9febf",
- "status":"ended","outcome":"approved","ended_at":"2026-11-04T19:27:27.526Z",
- "tool_call_id":"call_00_GpDmwYxmNPexNQPjpMHl3844","kind":"approval",
- "request":{…},"response":{"decision":"approved"}}
+{"type":"turns.removed","turn_ids":["t_c099ceb941e0"],"session_id":"session_…",
+ "agent_id":"main","event_created_at":"2026-11-12T19:37:48.143Z"}
 ```
 
-The transcript also carries an `interaction.upsert` op with the full entity
-(see transcript protocol); `GET .../transcript` returns `interactions` +
-`pending_interactions`.
-
-### Transcript protocol
-
-`subscribe_v2`'s `transcript` grades select how much detail the agent's
-transcript stream carries (verified live on one short turn):
-
-- **`off`** — no transcript and no per-agent state frames; only interactions.
-- **`turn`** — prompt/turn/marker changes only (no steps or frames). The op
-  `seq` may skip numbers when a lower grade filters a batch.
-- **`block`** — adds `step.upsert` and `frame.upsert` with full text values,
-  no `append` deltas.
-- **`delta`** — adds `append` chunks for streaming text/thinking.
-
-A non-`off` agent receives two frame types:
-
-**`transcript.reset`** — the baseline at subscribe. Verbatim (fresh session
-with completed turns and a pending question; `items` is always empty by
-design — history pages in over REST):
+**Conversation frames** (`turn.started`/`turn.ended`/`turn.updated`,
+`item.started`/`item.ended`/`item.updated`/`item.delta`/`item.removed`) are
+described in Conversation → Live conversation frames. Verbatim one-turn
+skeleton from 2.6.0:
 
 ```json
-{"type":"transcript.reset","session_id":"session_…","timestamp":"…",
- "payload":{"type":"transcript.reset","agent_id":"main",
-  "snapshot":{"items":[],"interactions":[{"interactionId":"question_…",
-              "interactionKind":"question","toolCallId":"call_…",
-              "state":"pending","request":{…}}],
-              "attachments":[],
-              "prompts":[{"promptId":"msg_…","status":"running",
-                          "userMessageId":"msg_…","content":[{"type":"text","text":"…"}],
-                          "createdAt":"…"}],
-              "hasMoreOlder":true},
-  "has_more_older":true,"seq":1}}
+{"type":"turn.started","turn":{"turn_id":"t_aa4ac2c61c19","ordinal":1,"kind":"agent",
+  "status":"running","turn_number":1,"started_at":"…","steps":[]}, …}
+{"type":"item.ended","turn_id":"t_aa4ac2c61c19",
+ "item":{"type":"user_message","item_id":"msg_…","status":"ended",
+  "outcome":"completed","created_at":"…","prompt_ids":["msg_…"],
+  "placement":"opener","origin":{"kind":"user"},"text":"…",
+  "attachments":[],"skills":[]}, …}
+{"type":"item.started","turn_id":"t_aa4ac2c61c19",
+ "item":{"type":"tool_call","item_id":"call_00_…","step_index":2,
+  "status":"running","created_at":"…","name":"TodoList","stage":"input",
+  "input_text":"","started_at":"…"}, …}
+{"type":"item.delta","turn_id":"t_aa4ac2c61c19","item_id":"call_00_…",
+ "field":"input_text","delta":"{\"","session_id":"…","agent_id":"main",
+ "event_created_at":"…"}
+{"type":"item.updated","turn_id":"t_aa4ac2c61c19","item_id":"call_00_…",
+ "set":{"stage":"executing","input":{"todos":[…]},
+        "display":{"kind":"todo_list","items":[…]}}, …}
+{"type":"item.ended","turn_id":"t_aa4ac2c61c19",
+ "item":{"type":"tool_call","item_id":"call_00_…","step_index":2,"status":"ended",
+  "name":"TodoList","input":{"todos":[…]},"display":{…},"started_at":"…",
+  "outcome":"completed","output":"Todo list updated.…","ended_at":"…"}, …}
+{"type":"turn.updated","turn_id":"t_aa4ac2c61c19",
+ "step":{"index":2,"outcome":"completed","started_at":"…","ended_at":"…",
+         "finish_reason":"tool_use",
+         "usage":{"input_other":237,"output":71,"input_cache_read":19072,
+                  "input_cache_creation":0}}, …}
+{"type":"item.started","turn_id":"t_aa4ac2c61c19",
+ "item":{"type":"assistant_message","item_id":"190d…:1","step_index":3,
+  "status":"running","created_at":"…","text":"D"}, …}
+{"type":"item.delta","turn_id":"t_aa4ac2c61c19","item_id":"190d…:1",
+ "field":"text","delta":"ONE", …}
+{"type":"item.ended","turn_id":"t_aa4ac2c61c19",
+ "item":{"type":"assistant_message","item_id":"190d…:1","step_index":3,
+  "status":"ended","outcome":"completed","created_at":"…","text":"DONE"}, …}
+{"type":"turn.ended","turn":{"turn_id":"t_aa4ac2c61c19","ordinal":1,"kind":"agent",
+  "status":"ended","turn_number":1,"started_at":"…","steps":[…],
+  "usage":{"input_other":16832,"output":346,"input_cache_read":40832,
+           "input_cache_creation":0},"outcome":"completed","ended_at":"…",
+  "duration_ms":4666}, …}
 ```
 
-- `snapshot.prompts` are the prompt entities (all statuses, `steeredAt` when
-  steered) — the cold-open replacement for the old prompt-queue bookkeeping.
-- `snapshot.interactions` are the pending interactions in full entity form
-  (see Interactions); `pending_interactions` on the REST transcript is the
-  id-only view.
-- `seq` is the agent's op-batch watermark; pass it back as
-  `transcript_since:{"main":<seq>}` to resume.
-- `hasMoreOlder`/`has_more_older` says older turns exist in REST history.
+### Reconnecting
 
-**`transcript.ops`** — one incremental batch: `{type, session_id, timestamp,
-payload:{type:"transcript.ops", agent_id, ops:[…], seq}}`. `seq` is strictly
-increasing per agent (gaps are possible when a grade filters a batch). The op
-union (schema from `packages/transcript`; all but `items.remove`/
-`attachment.upsert` observed live):
+Subscriptions do not survive a disconnect. After reconnecting:
 
-| Op | Payload |
-| --- | --- |
-| `prompt.upsert` | `{prompt:{promptId,status,userMessageId,content,createdAt,finishedAt?,steeredAt?}}` |
-| `turn.upsert` | `{turn:{kind:"turn",turnId,ordinal,state,origin,prompt?,startedAt?,endedAt?,durationMs?,usage?,triggerPromptId?,error?}}` (no `steps` in the live header; `state` includes `failed` with an `error` message) |
-| `step.upsert` | `{turnId, step:{kind:"step",stepId,turnId,ordinal,state,startedAt?,endedAt?,usage?,finishReason?,llmTiming?,retry?,endReason?,endMessage?}}` (frames ride `frame.upsert`; `state:"interrupted"` + `endReason:"error"` is a failed provider call, `endReason:"aborted"` an abort, `endReason:"steered"` a steer cut — 2.5.3) |
-| `frame.upsert` | `{turnId, stepId, frame:{kind:"text"|"thinking"|"tool"|"notice",frameId,…}}` |
-| `append` | `{target:{type:"frame",turnId,stepId,frameId}, offset, text}` |
-| `marker.upsert` | `{item:{kind:"marker",markerId,marker,payload?,at?}, beforeTurn?}` |
-| `interaction.upsert` | `{interaction:{interactionId,interactionKind,toolCallId?,state,request?,response?}}` |
-| `reset` | `{agentId, snapshot:{items:[…],interactions,attachments,prompts,…}}` — whole-agent transcript replacement, emitted at a turn end when the cold history omits live steps/frames (2.5.3; see below) |
-| `attachment.upsert` | `{attachment:{…}}` |
-| `items.remove` | `{ids:[…]}` |
-
-Frame kinds (schema in `packages/transcript/src/contract/schema.ts`):
-`text` (`role:"assistant"|"user"`, `text`, optional `origin`, `promptIds`,
-`attachmentIds`, `taskId`), `thinking` (`text`), `tool` (`toolCallId`, `name`,
-`state:"running"|"done"|"error"`, optional `input`, `output`, `inputText`,
-`display`, `progress`, `taskId`, `approvalId`, `agentRefs`), and `notice`
-(`level:"error"|"warning"|"info"`, `message`, optional `source`/`detail`; not
-observed live). Assistant text/tool frames are the transcript's own content;
-the tool `display` object is the same discriminated object the old
-`tool.call.started` carried (`kind:"command"`, `kind:"agent_call"`,
-`kind:"todo_list"`, plan display, …).
-
-Verbatim `transcript.ops` from a one-turn round (grade `delta`; a fresh
-session, so the turn id is `t1` because an earlier turn exists in that
-session — ids are strings and opaque):
-
-```json
-{"type":"transcript.ops","session_id":"session_…","timestamp":"…",
- "payload":{"type":"transcript.ops","agent_id":"main","ops":[
-   {"op":"prompt.upsert","prompt":{"promptId":"msg_…","status":"running",
-    "userMessageId":"msg_…","content":[{"type":"text","text":"Reply with exactly: delta-probe"}],
-    "createdAt":"…"}}],"seq":19}}
-{"type":"transcript.ops","session_id":"session_…","timestamp":"…",
- "payload":{"type":"transcript.ops","agent_id":"main","ops":[
-   {"op":"turn.upsert","turn":{"kind":"turn","turnId":"t1",
-    "triggerPromptId":"msg_…","ordinal":1,"state":"running",
-    "origin":{"kind":"user","payload":{"kind":"user"}},
-    "prompt":"Reply with exactly: delta-probe","startedAt":"…"}}],"seq":20}}
-{"type":"transcript.ops","session_id":"session_…","timestamp":"…",
- "payload":{"type":"transcript.ops","agent_id":"main","ops":[
-   {"op":"marker.upsert","item":{"kind":"marker","markerId":"live-m4",
-    "marker":"undo","payload":{"agentId":"main","start":4,"deleteCount":0,
-     "messages":[{"role":"user","content":[{"type":"text","text":"Reply with exactly: delta-probe"}],
-                  "id":"msg_…","origin":{"kind":"user"}}]},"at":"…"}}],"seq":21}}
-{"type":"transcript.ops",…,"ops":[
-   {"op":"step.upsert","turnId":"t1","step":{"kind":"step","stepId":"t1.1",
-    "turnId":"t1","ordinal":1,"state":"running","startedAt":"…"}}],"seq":23}
-{"type":"transcript.ops",…,"ops":[
-   {"op":"frame.upsert","turnId":"t1","stepId":"t1.1",
-    "frame":{"kind":"text","frameId":"t1.1.f2","role":"assistant","text":""}},
-   {"op":"append","target":{"type":"frame","turnId":"t1","stepId":"t1.1",
-    "frameId":"t1.1.f2"},"offset":0,"text":"delta"}],"seq":25}
-{"type":"transcript.ops",…,"ops":[
-   {"op":"append","target":{"type":"frame","turnId":"t1","stepId":"t1.1",
-    "frameId":"t1.1.f2"},"offset":5,"text":"-pro"}],"seq":26}
-{"type":"transcript.ops",…,"ops":[
-   {"op":"frame.upsert","turnId":"t1","stepId":"t1.1",
-    "frame":{"kind":"text","frameId":"t1.1.f2","role":"assistant","text":"delta-probe"}},
-   {"op":"step.upsert","turnId":"t1","step":{"kind":"step","stepId":"t1.1",
-    "turnId":"t1","ordinal":1,"state":"completed","startedAt":"…","endedAt":"…",
-    "usage":{"inputOther":172,"output":4,"inputCacheRead":22272,"inputCacheCreation":0},
-    "finishReason":"end_turn","llmTiming":{"llmFirstTokenLatencyMs":527,"llmStreamDurationMs":951}}}],
-  "seq":28}
-{"type":"transcript.ops",…,"ops":[
-   {"op":"turn.upsert","turn":{"kind":"turn","turnId":"t1","ordinal":1,
-    "state":"completed","triggerPromptId":"msg_…",
-    "origin":{"kind":"user","payload":{"kind":"user"}},"prompt":"…",
-    "startedAt":"…","endedAt":"…","durationMs":1545,
-    "usage":{"inputTokens":172,"cachedTokens":22272,"outputTokens":4}}}],"seq":29}
-{"type":"transcript.ops",…,"ops":[
-   {"op":"prompt.upsert","prompt":{"promptId":"msg_…","status":"completed",
-    "userMessageId":"msg_…","content":[…],"createdAt":"…","finishedAt":"…"}}],
-  "seq":30}
-```
-
-- A `text` frame can be emitted twice by the engine (two `text` frames with
-  the same text in one step were observed in the REST transcript); treat
-  frame ids as the identity.
-- `append` offsets are character offsets in the accumulated text. A duplicate
-  (below local length) is a duplicate frame; a gap needs a REST refresh.
-- `step.upsert` carries `usage`, `finishReason` and `llmTiming` at
-  completion; `turn.upsert` carries `usage`/`durationMs`.
-- Tool calls are `tool` frames: `state:"running"` with `inputText` growing
-  token-by-token during the call, then `state:"done"` (or `"error"`) with
-  `input`, `display` and `output`. There is no `tool.progress` frame; the
-  running frame's `progress` object is the schema-level substitute.
-
-**2.5.3 `reset` op.** `{"op":"reset","agentId":"main","snapshot":{…}}`
-replaces the agent's whole transcript (the same snapshot shape as
-`transcript.reset`, but with `items` populated: full turns, each with its
-steps and frames). The server emits it at a turn end when the live
-transcript's steps or frames are not a superset of the cold-folded history —
-in this run every completed turn (plain, steered, question, approval, and
-each child agent's single turn) produced one just before the usual heal
-ops. Verbatim (trimmed; the same batch's
-later ops are ordinary `turn.upsert`/`frame.upsert` heals):
-
-```json
-{"op":"reset","agentId":"main","snapshot":{"items":[
-  {"kind":"turn","turnId":"t0","ordinal":0,"state":"completed","prompt":"…",
-   "startedAt":"…","endedAt":"…","steps":[
-     {"kind":"step","stepId":"t0.1","ordinal":1,"state":"completed",
-      "frames":[{"kind":"text","frameId":"t0.1.f1","role":"assistant",
-                 "text":"I'll run the command as specified."},…]},…]},…],
-  "interactions":[],"attachments":[],"prompts":[…],"hasMoreOlder":false}}
-```
-
-A client that keeps its own live transcript should apply it wholesale, then
-fold the batch's remaining ops; a client that refetches history at turn end
-can ignore it (the Android app does, safely: its turn state is already
-terminal, so the later `frame.upsert`s are dropped too).
-
-**Resume.** `subscribe_v2` with
-`transcript_since:{"*":30}` replays batches with `seq > 30` before the ack
-(verified live: seq 31–36 in order, ack last). A `transcript_since` above the
-journal's latest (e.g. 9999) produces no reset and no ops, only the ack — a
-future cursor is not an error. When the journal cannot cover the gap, the
-REST counterpart `GET .../transcript/ops?agent_id=…&since_seq=…` returns
-`complete:false`; the client then does a full `GET .../transcript` refresh.
-Omitted `transcript_since` always yields a fresh `transcript.reset`.
-
-**Reconnect.** Subscriptions do not survive a disconnect. Re-subscribe each
-session; the server re-sends `task.list`, `agent`, `usage`, `goal`, `todo`,
-a fresh `transcript.reset` (or the replay ops), and the pending interactions.
-Global events missed while disconnected are not replayed; refresh the lists
-you keep over REST. Task watches are dropped — send `task.watch` again with
-`since_offset` set to the end of the output you already have.
-
-**The legacy event family is not coming back.** There are no `turn.*`,
-`assistant.delta`, `thinking.delta`, `tool.*`, `context.spliced`,
-`prompt.*`, `subagent.*`, `task.started`/`terminated`, `compaction.*`,
-`event.approval.*`, `event.question.*`, `permission.approval.*`,
-`agent.status.updated`, `agent.created` or `agent.disposed` frames on 2.5.0.
+1. Send `subscribe` again for each session. On success, **discard all local
+   turns** for that session (including REST pages loaded earlier) and any
+   in-flight page requests. `turns.removed` frames from the disconnect are not
+   resent, and ordinals may be reused after an undo, so old local turns cannot
+   be kept.
+2. After the response, the server re-sends pending interactions. Any local
+   card not in this batch has ended; close it.
+3. Re-receive each agent's `task.list`, `agent`, `usage`, `goal`, `todo` and
+   finally `turns` (the latest page). Read older turns with
+   `GET .../agents/{agent_id}/turns?before_ordinal=…`.
+4. Task output watches are lost too; send `task.watch` again with
+   `since_offset` set to the end of the output already held.
+5. Global events missed while disconnected are not replayed; refresh the lists
+   kept locally over REST (e.g. `GET /api/v1/sessions`).
 
 ### Global events
 
-Global events are sent to every established connection, with or without any
-subscription or `client_hello` (verified live: a silent socket received
-`session.meta.updated` and `event.session.work_changed` while a session it
-never subscribed to ran a turn). The envelope is
+Global events are sent to every established connection, with or without a
+subscription. The envelope is
 
 ```json
 {"type":"<event type>","session_id":"<id or __global__>","timestamp":"…","payload":{…}}
 ```
 
-— **no `seq`, no `epoch`, no `volatile`**. `session_id` is `__global__` for
-most events, the created session's id for `event.session.created`, and the
-session's own id for `session.meta.updated`/`event.session.work_changed`.
+— no `seq`, no `epoch`, no `volatile`. `session_id` is `__global__` for most
+events, the created session's id for `event.session.created`, and the session's
+own id for `session.meta.updated` and `event.session.work_changed`.
 
-The delivered types are: `session.meta.updated`,
-`event.session.work_changed`, `event.session.created`, `event.session.archived`,
-`event.session.deleted`, `event.workspace.created`/`updated`/`deleted`,
-`event.config.changed`, `event.config.warning`,
-`event.model_catalog.changed`, `event.di.unit_changed`,
-`event.plugin.changed` and `event.capability.changed` (the last four are
-schema-level; not triggered this run). **`session.meta.updated` and
-`event.session.work_changed` are no longer per-subscription** — they are the
-app-level pushes the session list consumes.
+| Event | Frame `session_id` | Payload |
+| --- | --- | --- |
+| `session.meta.updated` | session id | `{title?, patch?}`; the title also rides the payload top level when set |
+| `event.session.created` | new session id | `{session: <session object>}` — also on a fork |
+| `event.session.work_changed` | session id | `{busy, main_turn_active?, pending_interaction?, last_turn_reason?}` |
+| `event.session.archived` | `__global__` | `{workspace_id, sessionId}` |
+| `event.session.restored` | `__global__` | `{workspace_id, sessionId}` (new in 2.6.0) |
+| `event.session.deleted` | `__global__` | `{workspace_id, sessionId}` |
+| `event.workspace.created`, `event.workspace.updated` | `__global__` | `{workspace: <workspace object>}` |
+| `event.workspace.deleted` | `__global__` | `{workspace_id, root}` |
+| `event.config.changed` | `__global__` | `{changedFields, config}` |
+| `event.config.warning` | `__global__` | `{warnings:[{domain?, message}]}` |
+| `event.model_catalog.changed` | `__global__` | `{changed, unchanged, failed, retired_default?}` |
+| `event.plugin.changed`, `event.capability.changed` | `__global__` | plugin/capability change |
 
-Verbatim global frames from 2.5.0:
+Verbatim global frames from 2.6.0:
 
 ```json
 {"type":"session.meta.updated","session_id":"session_…","timestamp":"…",
- "payload":{"type":"session.meta.updated","title":"Reply with exactly: probe",
-  "patch":{"title":"Reply with exactly: probe","isCustomTitle":false,
-           "lastPrompt":"Reply with exactly: probe"},
+ "payload":{"type":"session.meta.updated","title":"drift retitled",
+  "patch":{"title":"drift retitled","isCustomTitle":true},
   "agentId":"main","sessionId":"session_…"}}
 {"type":"event.session.work_changed","session_id":"session_…","timestamp":"…",
- "payload":{"type":"event.session.work_changed","busy":true,
-  "main_turn_active":true,"pending_interaction":"none",
+ "payload":{"type":"event.session.work_changed","busy":true,"main_turn_active":true,
+  "pending_interaction":"none","last_turn_reason":"completed",
   "agentId":"main","sessionId":"session_…"}}
-{"type":"event.session.created","session_id":"session_created_…","timestamp":"…",
+{"type":"event.session.created","session_id":"session_a71b…","timestamp":"…",
  "payload":{"type":"event.session.created",
-  "session":{"id":"session_created_…","workspace_id":"wd_…","title":"…",
-             "created_at":"…","updated_at":"…","busy":false,
-             "main_turn_active":false,"pending_interaction":"none",
-             "archived":false,"metadata":{"cwd":"/path/to/project"},
-             "agent_config":{"model":""},"usage":{…},
-             "permission_rules":[],"message_count":0},
-  "agentId":"main","sessionId":"session_created_…"}}
+  "session":{"id":"session_a71b…","workspace_id":"wd_spike_…","title":"created probe",
+   "created_at":"…","updated_at":"…","busy":false,"main_turn_active":false,
+   "pending_interaction":"none","archived":false,"metadata":{"cwd":"/home/ubuntu/spike"},
+   "agent_config":{"model":"deepseek/deepseek-v4-flash"},"usage":{…},
+   "permission_rules":[],"message_count":0},
+  "agentId":"main","sessionId":"session_a71b…"}}
 {"type":"event.session.archived","session_id":"__global__","timestamp":"…",
- "payload":{"type":"event.session.archived","workspace_id":"wd_…",
-  "agentId":"main","sessionId":"session_…"}}
-{"type":"event.session.deleted","session_id":"__global__","timestamp":"…",
- "payload":{"type":"event.session.deleted","workspace_id":"wd_…",
-  "agentId":"main","sessionId":"session_…"}}
-{"type":"event.workspace.updated","session_id":"__global__","timestamp":"…",
- "payload":{"type":"event.workspace.updated",
-  "workspace":{"id":"wd_…","root":"/path/to/project","name":"project",
-               "kind":"implicit","additional_dirs":[],
-               "created_at":"…","last_opened_at":"…","session_count":93},
-  "agentId":"main","sessionId":"__global__"}}
+ "payload":{"type":"event.session.archived","workspace_id":"wd_spike_…",
+  "agentId":"main","sessionId":"session_a71b…"}}
+{"type":"event.session.restored","session_id":"__global__","timestamp":"…",
+ "payload":{"type":"event.session.restored","workspace_id":"wd_spike_…",
+  "agentId":"main","sessionId":"session_a71b…"}}
 ```
 
-- **Create** (`POST /api/v1/sessions`) broadcasts `event.session.created` on
-  the new session's own envelope id, carrying the full snake_case session
-  object. **2.5.0: `:fork` now broadcasts it too** — a fork made by another
-  client appears live in the session list (the old server dropped the fork's
-  frame because the session was not loaded).
-- **Archive** broadcasts `event.session.archived`; **restore still fires
-  nothing**.
+- **Create** broadcasts `event.session.created` on the new session's own
+  envelope id with the full snake_case session object; `:fork` and `:btw`'s
+  child do the same.
+- **Archive** broadcasts `event.session.archived`; **restore** now broadcasts
+  `event.session.restored` (2.6.0).
 - **Delete** broadcasts `event.session.deleted`; the row leaves the list.
 - **Session creation also fires `event.workspace.updated`** for the target
-  workspace (observed live on 2.5.0; new to this run's captures).
-- `event.config.changed` / `event.model_catalog.changed` keep their old
-  payloads: `{type:"event.config.changed", changedFields:[…], config:{…}}`
-  (`changedFields` camelCase domain names, credentials redacted to
-  `has_api_key`), and the model event may carry `retired_default`. Only the
-  envelope lost `seq`/`epoch`. `event.config.warning` keeps its
-  `{type, warnings:[{domain?,message}]}` payload; an empty array clears the
-  warning set.
-- `event.workspace.created` / `updated` carry the full workspace object
-  (`{id,root,name,kind,additional_dirs,created_at,last_opened_at,
-  session_count}`); `event.workspace.deleted` carries
-  `{workspace_id,root}`. `updated` also fires when a session creation
-  touches the workspace (observed live on 2.5.0).
-- `event.di.unit_changed`, `event.plugin.changed` and
-  `event.capability.changed` are in the server's schema but were not
-  triggered this run.
+  workspace.
+- `session.meta.updated` fires on a title change (profile route or generated
+  title) and on new prompts (`patch.lastPrompt`); the title rides both the
+  payload top level and `patch.title` when it changed.
 
-### Captured round-trips (2.5.0)
+### Captured round-trips (2.6.0)
 
-A plain prompt on a grade-`delta` subscription (session with one earlier
-turn) produced, in order: `session.meta.updated` (global) → `prompt.upsert`
-(running) → `turn.upsert` (running) → `marker.upsert` (undo splice of the
-user message) → `prompt.upsert` (running again) → `agent` (running) →
-`event.session.work_changed` (busy) → `step.upsert` (running) →
-`frame.upsert`+`append` (thinking, then assistant text) → `step.upsert`
-(completed, with usage/finishReason/llmTiming) → `turn.upsert` (completed) →
-`agent` (idle) → `prompt.upsert` (completed) → `event.session.work_changed`
-(idle, `last_turn_reason:"completed"`) → `usage`. The exact op batches are in
-Transcript protocol above; `prompt.completed`/`turn.ended` do not exist.
+A plain prompt on a subscribed session (one tool-calling turn) produced, in
+order: `session.meta.updated` (`patch.lastPrompt`) → `turn.started` →
+`item.ended` (`user_message`) → `agent` (running) → `event.session.work_changed`
+(busy) → `usage` → `item.started`/`item.delta`/`item.updated`/`item.ended` for
+the tool call → `turn.updated` (step completed) → `item.started`/`item.delta`/
+`item.ended` for the reply → `turn.updated` (last step) → `turn.ended` →
+`agent` (idle) → `event.session.work_changed` (idle,
+`last_turn_reason:"completed"`) → `usage`. The exact item captures are in
+Conversation.
 
-**Steer** (prompt A running, prompt B queued, then `:steer` B): B's
-`prompt.upsert` is `queued` (twice) and then flips to `completed` with
-`steeredAt`; A's entity gains `steeredAt`; the steered text is a user-role
-text frame with `promptIds` in A's running turn; A's turn later completes
-normally. The queued prompt snapshot is also available at any time from
-`GET .../prompts` (`{active, queued}`).
+**Steer** (prompt A running, direct steer B): A's step ends `interrupted`
+(`finish_reason:"interrupted"`), A's turn ends `completed`, B's `item.ended`
+opens the next turn with `placement:"opener"`, then the normal reply items.
+A queued `prompts:steer` produced the same shape.
 
-**Abort** (mid-turn `:abort`): the running step's `step.upsert` is
-`state:"interrupted"`, the turn's `turn.upsert` is `state:"cancelled"`, the
-prompt's `prompt.upsert` is `status:"aborted"`, an `undo` marker carries the
-interruption reminder (`origin:{"kind":"injection","variant":"interruption"}`),
-a killed shell task sends `task` `status:"ended"`/`outcome:"killed"`, the
-`agent` frame goes idle, and `event.session.work_changed` reports
-`busy:false`, `last_turn_reason:"cancelled"`. Idle `:abort` still answers
+**Abort** (mid-turn `:abort`): the active step's `turn.updated` is
+`outcome:"interrupted"`, `finish_reason:"interrupted"`; the turn's
+`turn.ended` is `outcome:"interrupted"`, `end_reason:"user_cancelled"`; a
+killed shell task sends a `task` frame `status:"ended"`/`outcome:"killed"`;
+the `agent` frame goes idle; `event.session.work_changed` reports
+`busy:false`/`last_turn_reason:"cancelled"`; the interruption reminder lands
+in history with `origin.variant:"interruption"`. Idle `:abort` still answers
 `{"aborted":true}`.
 
-**Approval** (manual Bash): the tool `frame.upsert` reaches `state:"running"`;
-`interaction` pending + `interaction.upsert`; after the POST, `interaction`
-ended (`outcome:"approved"`) + `interaction.upsert` (`state:"approved"`); the
-tool frame gains `approvalId`, then `task` shell running/ended, then the tool
-frame `state:"done"` with `output`. No `permission.approval.*` frames.
+**Approval** (manual Bash): the tool item reaches `stage:"executing"` and
+`interaction_id`; `interaction` pending; after the POST, `interaction` ended
+(`outcome:"approved"`, `response.decision:"approved"`); the tool item ends
+`outcome:"completed"` with `output`. No `permission.approval.*` frames.
 
-**Question** (manual `AskUserQuestion`): tool frame running; `interaction`
-pending + `interaction.upsert`; after the POST, `interaction` ended
-(`outcome:"answered"`, `response.answers` keyed by question text) +
-`interaction.upsert` (`state:"answered"`); the tool frame reaches
-`state:"done"` with `output` `{"answers":{"Cake or pie?":"Pie"}}`; the turn
-continues.
+**Question** (manual `AskUserQuestion`): the tool item reaches
+`interaction_id`; `interaction` pending; after the POST, `interaction` ended
+(`outcome:"answered"`, `response.answers` keyed by question text); the tool
+item ends with `output`; the turn continues.
 
-**Compaction**: see Compact → WebSocket sequence (2.5.0).
+**Compaction**: see Compact → WebSocket sequence (2.6.0).
 
-**Sub-agents**: a foreground and a `run_in_background:true` spawn produced
-two `task` frames (`kind:"subagent"`, `detached:false`/`true`,
-`child_agent_id:"agent-0"`/`"agent-1"`), each child announced itself with
-`transcript.reset` (`agent_id:"agent-0"`, `seq:0`) and `agent`; completion was
-the ended `task` frame with `outcome:"completed"`. No `subagent.*` frames.
+**Sub-agents**: a foreground and a `run_in_background:true` spawn produced two
+`task` frames (`kind:"subagent"`, `detached:false`/`true`,
+`child_agent_id:"agent-0"`/`"agent-1"`); the spawning tool item gained
+`agent_refs`; the child's conversation came from a follow-up `subscribe` with
+`agent_ids:["main","agent-0"]` as `task.list`/`agent`/`usage`/`todo`/`turns`;
+completion was the ended `task` frame. No `subagent.*` frames.
 
-### The v3 protocol (added 0.43.0, **removed in 2.0.2** — never used by the app)
+### Removed in 2.6.0
 
-**Removed in 2.0.2** (commit `2502d215`, a revert of the 0.43.0 addition;
-verified live 2026-09-19: `WS /api/v3/ws` refuses the handshake and
-`GET /api/v1/sessions/{id}/history` answers a plain Fastify 404 — the v2
-endpoint this document describes is byte-untouched). The notes below are
-kept for history only.
-
-0.43.0 (commit `64505e36`) adds a **second, opt-in wire protocol** next to
-the v2 one this document describes. The client picks the protocol by
-picking the URL — there is no version negotiation, and **the v2 endpoint
-is byte-for-byte untouched** (`transport/ws/v1/*` identical between the
-tags; `server_hello` still numeric `protocol_version: 2`, subscribe/ack/
-cursor-resume re-verified live 2026-09-14). The Android app uses none of
-this; it is documented here once as a potential future migration target
-(its flat entities match the app's consumption style better than v2's
-nested events). Verified live 2026-09-14.
-
-**WS endpoint — `WS /api/v3/ws`** (same bearer-token subprotocol auth as
-v2). On connect the server immediately sends a `hello` frame (note the
-frame type and the **string** protocol version):
-
-```json
-{"type":"hello","protocol_version":"3","server_id":"01M2GP2YK8BQKH1QAEPCRWG0KJ","capabilities":["step_replay_v1"]}
-```
-
-Client → server frames are only `subscribe` / `unsubscribe`:
-
-```json
-{"type":"subscribe","id":1,"session_id":"...","agent_ids":["..."],"omit":["thinking.delta"]}
-{"type":"unsubscribe","id":2,"session_id":"..."}
-```
-
-**No `since_seq` / cursor** — catch-up is done over REST (`after_step`,
-below), not over the socket. Server control frames:
-`{"type":"ack","id":1,"code":0,"msg?":"..."}` and
-`{"type":"error","code":N,"msg":"..."}`; new error code
-`WS_SLOW_CONSUMER: 42903` (closes with 1008 on outbound overflow).
-Heartbeat is WS-level ping/pong (10 s interval, terminated after 2
-misses). On subscribe the server sends `ack`, then **recovery messages**
-(a replay of the session's current projection state), then live traffic.
-
-Server → client traffic is **flat entity messages** — no envelope; each
-carries `session_id` / `agent_id` / `timestamp` (epoch ms) plus its own
-fields. Families: `turn`, `step`, `user`, `assistant` (+ `assistant.delta`),
-`thinking` (+ `thinking.delta`), `tool_call` (+ `tool_call.delta` +
-`tool.progress`), `system` (compaction/undo/clear/plan/swarm/hook/
-interruption markers), `interaction` (approvals and questions in one
-shape, with `status` lifecycle), `task`, `todo`, `agent.state`,
-`session.state`, and session-less globals (`session`/`workspace`/`config`/
-`config.warning`/`model_catalog`/`plugin`/`capability`).
-
-**History route — `GET /api/v1/sessions/{id}/history`** (mounted under
-the existing v1 prefix, standard envelope) serves the same flat entities
-cold-rebuilt from persisted wire records. Query params: `before_turn`
-(page older) / `after_step` (catch up newer; mutually exclusive),
-`page_size` (default 200, max 500), `agent_id` (defaults to the main
-agent). Response data:
-
-```json
-{"messages":[<entity messages>],"has_more":false,"in_flight":{"turn_id":"...","step_id":"..."}}
-```
-
-(`in_flight` present only while a turn is running; observed live 2026-09-14
-on the throwaway session: `has_more: true`, 37 entity messages on the
-first page, entities `turn`/`user`/`step`/… with `turn_id: "t7"`,
-`step_id: "t7.1"` string ids.) Errors: schema-validation `40001`s, unknown
-session `40401`. The loopback-only debug xstate stream
-`WS /api/v1/debug/ws` (`6299cfda`) is **not registered on this
-deployment** (verified live — handshake refused).
+`server_hello`, `client_hello`, `ack`, `subscribe_v2`, `unsubscribe_v2`,
+`transcript.reset`, `transcript.ops`, the op union (`prompt.upsert`,
+`turn.upsert`, `step.upsert`, `frame.upsert`, `append`, `marker.upsert`,
+`interaction.upsert`, `attachment.upsert`, `items.remove`, `reset`), the
+per-agent transcript grade map and the `transcript_since` cursor are all gone.
+There are no `seq`, `epoch` or `resync_required` fields on 2.6.0. The old v3
+protocol (0.43.0, removed in 2.0.2) remains gone.
 
 ## Verification log
 
+- 2026-11-12 re-verification on `2.6.0` (server 2.5.3 → 2.6.0; throwaway
+  throwaway sessions created with `metadata.cwd=/path/to/project` and deleted
+  after probing; the nightly job's `pending-changelog.md` covered 2.5.3→2.6.0
+  (99 commits), reviewed via the GitHub API — `1dd55786` replaces the
+  transcript service with conversation turns/items, `725194d7` drops the WS
+  handshake and acks, `961b90f9`/`13590cde` rename the file-history turn
+  parameter, `1424092e` adds `task_id`/`agent_refs` to tool calls, `aa125382`
+  ends stopped tool calls `interrupted`, `881e61b4` adds the
+  compaction-in-progress `40910`, `b9c18978` maps auth/Tower errors and drops
+  stack traces, `795a214d` broadcasts `event.session.restored`,
+  `c87878a7`/`afadca24` apply `agent_config` and bind the main agent at
+  create, `f72dc7e1`/`8fc5e22f` add the `40930` reader-version guard, and
+  `b263e80f` ports the agent-loop runtime; live probes over REST + a Node WS
+  client against `127.0.0.1:58627`, server started
+  `2026-11-12T19:23:35.935Z`). Drift found: the WS now has no handshake or
+  ack (`subscribe`/`unsubscribe` with `request_id` → `response`; missing
+  `request_id` closes 1008; malformed subscribe 40001); the transcript
+  protocol is replaced by `turns`/`turn.*`/`item.*` (REST `/transcript`,
+  `/transcript/ops`, `/transcript/user-messages` and `/transcript/plan` 404;
+  `GET .../agents/{agent_id}/turns` is new); compaction is a `system` turn
+  with `compacting` on the `agent` frame; a steer interrupts the active step,
+  ends the turn and opens a new one with `placement:"opener"` (three probes);
+  file-history requires `turn_number` and `turn_id` answers 40001; `prompt_id`
+  submissions are idempotent; `event.session.restored` is broadcast; the
+  session create binds `agent_config`; tool calls carry `task_id` and
+  `agent_refs`; `notice` frames and `turns.removed`/`turns.failed` exist.
+  Re-verified unchanged: auth 401s, `/meta` (5 flags, 17 features), config
+  (`deepseek/deepseek-v4-flash`, `max`, `auto`), models (12), tools (36 =
+  27 builtins + 9 MCP), sessions create/get/list/profile, v2 session table,
+  archive/restore/delete, `:reload`, `:takeover`, messages (newest-first;
+  `role` filter after paging; `messages/{id}` 40403; image `session_media` +
+  `name` rewrite), prompt POST + queue snapshot + `prompts:steer` (40402 idle),
+  abort (step interrupted, turn `outcome:"interrupted"`/`user_cancelled`),
+  compact both bodies (`40910` empty, `40910` busy and another compaction,
+  instruction echoed on the system item, `tokens_before`/`tokens_after`,
+  `compacted_count`, history `compaction_summary`), questions (pending/ended
+  interaction, answer → `answered`, re-answer `40902`, dismissal, removed
+  `/questions` 404), approvals (manual Bash, pending/ended, `40902`), todo
+  write and read (`input:{}` → `Current todo list:`, `display.todo_list`),
+  foreground/background sub-agents (task frames, `agent_refs`,
+  `detached` true/false, child `turns`, `task.watch` tail, `task.stop` →
+  killed + notification turn), files (upload/download/delete → `40407`,
+  prompt image rewrite, `Range`), interactions pending re-send after
+  subscribe, WS heartbeat (bare ping/pong, close 1001 after 20 s silence),
+  `unsubscribe`, global events (`session.meta.updated`, work_changed,
+  created, archived, restored), `:undo` (`removed_turn_ids` +
+  `turns.removed`), `:btw` (`{agent_id}`), `title/generate` (`40923`), and
+  the managed `kimi-code/k3` alias failing with `provider.auth_error`
+  (turn `failed`, `end_reason:"error"`; `deepseek/deepseek-v4-flash`
+  completed). Search was not re-probed (out of scope; `50001` unchanged).
 - 2026-11-10 re-verification on `2.5.3` (server 2.5.2 → 2.5.3; throwaway
   sessions created with `metadata.cwd=/home/ubuntu/spike` and deleted after
   probing; the nightly job's `pending-changelog.md` covered 2.5.2→2.5.3
