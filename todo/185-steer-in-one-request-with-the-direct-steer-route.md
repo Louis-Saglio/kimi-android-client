@@ -26,8 +26,15 @@ answers `40402 "no active prompt to steer into"` while the prompt the first
 call queued stays on the server and later runs as its own turn. The
 composer reports a send failure and keeps the text, so the user's retry
 duplicates the message. The new route also accepts a steer into a turn
-whose prompt is untracked (`steerIfActive` now keys on `activeTurnId`),
-which the queue-then-steer flow cannot reach.
+whose prompt is untracked, which the queue-then-steer flow cannot reach.
+
+The 2.6.3 drift run (2026-11-17) re-verified the route. Its execution model
+changed with the conversation rewrite: a steer interrupts the active step
+(`outcome:"interrupted"`, `finish_reason:"interrupted"`), ends the turn
+`completed`, and opens the next turn with the steered text as a
+`user_message` whose `placement` is `opener` and whose `prompt_ids` carry the
+steer's id. There is no same-turn continuation and no `prompt.upsert` on
+2.6.3.
 
 The alternative — keep both calls and treat `40402` as success — still
 leaves two round trips and silently degrades the steer into a queued turn.
@@ -74,8 +81,8 @@ so the race has one benign outcome rather than a spurious failure.
 - [ ] Sending while idle still issues exactly one POST to
       `/api/v1/sessions/session_1/prompts`. Existing test unchanged.
 - [ ] The steer ACK's `prompt_id` keys the optimistic echo and heals from the
-      `prompt.upsert`/undo marker like today (the existing steered-echo test
-      passes against the one-request flow).
+      next turn's `user_message` item (`prompt_ids` contains it, `placement`
+      is `opener`) like today.
 - [ ] An attached image and an attached file are included as the same content
       parts the prompt POST sends; the upload happens before the steer.
 - [ ] A failed steer (`40402`, `40902`, network) surfaces as
@@ -98,4 +105,5 @@ Relevant code: `data/chat/ChatApi.kt` (`postPrompt` body builder,
 ChatViewModel.kt` (`onSend` busy branch), `test/.../ChatRepositoryTest.kt`,
 `test/.../ChatViewModelTest.kt`, `test/.../ChatViewModelTestBase.kt`.
 Wire reference: `docs/server-api.md` → Steer → Steer message content, with
-the ACK capture and the mid-stream step sequence.
+the ACK capture and the mid-stream step sequence (2.6.3: interrupted step,
+then a new turn with an opener item).

@@ -6,22 +6,18 @@
 
 ## Context
 
-Server 2.5.3 (re-verified live by the nightly drift run on 2026-11-13; the
-route dates from 2.5.0) has `POST
-/api/v1/sessions/{id}/prompts/{prompt_id}:abort`. Live today: a prompt queued
-behind a running turn answered `{"aborted":true}` and left the queue
+Server 2.6.3 (nightly drift run, 2026-11-17, after the 2.6.x line was reinstated
+from the 2026-11-13 withdrawal; the route dates from 2.5.0) has `POST
+/api/v1/sessions/{id}/prompts/{prompt_id}:abort`. Live on 2.6.3: a prompt
+queued behind a running turn answered `{"aborted":true}` and left the queue
 immediately; a second call for the same id, and an unknown id, answer `40402`
-(`prompt … not found`, with `stack`). Withdrawing a queued prompt produces no
-WebSocket frame — the queue snapshot simply drops it. On the running prompt
+(`prompt … not found`, no `stack`). Withdrawing a queued prompt produces no
+WebSocket frame; the queue snapshot simply drops it. On the running prompt
 the route aborts it like `:abort`.
 
 The app renders a queued bubble with its position ("Queued #N") but offers no
 way to withdraw it: on a phone, a prompt queued by mistake can only be waited
 out.
-
-The 2.6.0-era version of this ticket depended on the turns migration (ticket
-188); that protocol was withdrawn with the 2.6.x release, but the route itself
-is unchanged on 2.5.3, so the work stands on its own.
 
 ## Description
 
@@ -44,7 +40,7 @@ is unchanged on 2.5.3, so the work stands on its own.
 - [ ] A `40402` response closes the bubble as ended with no error snackbar.
 - [ ] The running bubble still uses the existing session `:abort` path.
 - [ ] A MockWebServer test covers both the success and `40402` branches.
-- [ ] Live against 2.5.3: queue a prompt behind a slow turn, cancel it, and
+- [ ] Live against 2.6.3: queue a prompt behind a slow turn, cancel it, and
       `GET .../prompts` no longer lists it while the running turn continues.
 
 ## Out of scope
