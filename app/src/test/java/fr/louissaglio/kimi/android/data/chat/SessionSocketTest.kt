@@ -35,6 +35,7 @@ import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.concurrent.thread
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -555,9 +556,12 @@ class SessionSocketTest {
             }
             try {
                 val chunks = CopyOnWriteArrayList<TaskOutputChunk>()
-                val watcher = launch { socket.observeTaskOutput("session_1", "main", "bash-1").collect { chunks += it } }
+                // UNDISPATCHED: the collector subscribes to the replay-less chunk flow
+                // before launch returns, so no chunk can arrive ahead of it.
+                val watcher = launch(start = CoroutineStart.UNDISPATCHED) {
+                    socket.observeTaskOutput("session_1", "main", "bash-1").collect { chunks += it }
+                }
                 awaitCondition { socket.observeConnection("session_1").value != null }
-                delay(50) // let the watcher subscribe
 
                 val result = socket.watchTask("session_1", "main", "bash-1", sinceOffset = 42, tailBytes = 32768)
 
@@ -1105,6 +1109,45 @@ class SessionSocketTest {
         runSocketEvents(opsFrame(appendOp("t1.1.f1", 3, "lo"), seq = 1), eventCount = 1, clientFrames = clientFrames)
 
         assertFalse(clientFrames.first(), "transcript_since" in clientFrames.first())
+    }
+
+    // --- release (ticket 185, A1) --------------------------------------------------------
+
+    private fun seedAndRelease(vararg sessionIds: String) = sessionIds.forEach {
+        socket.seedTranscript(it, runningPage(seq = 7))
+        socket.release(it)
+    }
+
+    @Test
+    fun `release keeps the five most recent left sessions and evicts the oldest whole`() {
+        seedAndRelease("s0", "s1", "s2", "s3", "s4")
+        assertEquals(7L, socket.watermark("s0", MAIN_AGENT_ID))
+
+        seedAndRelease("s5")
+
+        assertFalse(socket.isRetained("s0"))
+        assertEquals(null, socket.watermark("s0", MAIN_AGENT_ID))
+        for (id in listOf("s1", "s2", "s3", "s4", "s5")) {
+            assertTrue(id, socket.isRetained(id))
+            assertEquals(id, 7L, socket.watermark(id, MAIN_AGENT_ID))
+        }
+    }
+
+    @Test
+    fun `a left session read again becomes the most recent and outlives older ones`() {
+        seedAndRelease("s0", "s1", "s2", "s3", "s4")
+        // The job screen reading an ended task of s0, then s1 left a second time.
+        socket.observeTask("s0", MAIN_AGENT_ID, "task-1")
+        socket.release("s1")
+
+        seedAndRelease("s5")
+        assertEquals(null, socket.watermark("s2", MAIN_AGENT_ID))
+        assertEquals(7L, socket.watermark("s0", MAIN_AGENT_ID))
+        assertEquals(7L, socket.watermark("s1", MAIN_AGENT_ID))
+
+        seedAndRelease("s6")
+        assertEquals(null, socket.watermark("s3", MAIN_AGENT_ID))
+        assertEquals(7L, socket.watermark("s0", MAIN_AGENT_ID))
     }
 
     // --- heartbeat ---------------------------------------------------------------------

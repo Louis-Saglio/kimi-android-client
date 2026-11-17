@@ -10,7 +10,6 @@ import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.awaitState
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.async
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
@@ -184,11 +183,13 @@ class ChatJobsTest : ChatViewModelTestBase() {
         val state = reply.await().getOrThrow()
         assertEquals(true, state?.detached)
         awaitState(viewModel.uiState) { it.jobs.any { job -> job.taskId == "agent-fg" } }
-        // The server's own frame for the same change keeps ONE row.
+        // The server's own frame for the same change keeps ONE row. A trailing sentinel
+        // proves that frame was applied before the assertion.
         socket.send(taskFrame(detached))
-        delay(150)
-        assertEquals(listOf("bash-sentinel", "agent-fg"), viewModel.uiState.value.jobs.map { it.taskId })
-        assertEquals("agent-0", viewModel.uiState.value.jobs.last().agentId)
+        socket.send(taskFrame(taskState("bash-sentinel-2")))
+        awaitState(viewModel.uiState) { it.jobs.any { job -> job.taskId == "bash-sentinel-2" } }
+        assertEquals(listOf("bash-sentinel", "agent-fg", "bash-sentinel-2"), viewModel.uiState.value.jobs.map { it.taskId })
+        assertEquals("agent-0", viewModel.uiState.value.jobs.single { it.taskId == "agent-fg" }.agentId)
     }
 
     @Test
@@ -223,8 +224,8 @@ class ChatJobsTest : ChatViewModelTestBase() {
         socket.send(taskFrame(taskState("question-2", kind = "other", description = "Pick another")))
         socket.send(taskFrame(taskState("bash-sentinel")))
 
+        // The sentinel follows the question frames: once it shows, they were applied.
         awaitState(viewModel.uiState) { it.jobs.isNotEmpty() }
-        delay(100)
         assertEquals(listOf("bash-sentinel"), viewModel.uiState.value.jobs.map { it.taskId })
     }
 }

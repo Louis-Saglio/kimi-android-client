@@ -1944,8 +1944,6 @@ class ChatViewModelTest : ChatViewModelTestBase() {
             awaitState(viewModel.uiState) { it.items != null }
             while (server.takeRequest(50, TimeUnit.MILLISECONDS) != null) Unit
 
-            val compacting = CopyOnWriteArrayList<Boolean>()
-            val stateJob = launch { viewModel.uiState.collect { compacting += it.isCompacting } }
             viewModel.onCompact()
 
             awaitCondition { effects.isNotEmpty() }
@@ -1953,10 +1951,10 @@ class ChatViewModelTest : ChatViewModelTestBase() {
                 ChatViewModel.Effect.CompactionFailed("No messages to compact in current history."),
                 effects.single(),
             )
-            // Never entered the compacting state (ticket 181), and no divider shows.
-            Thread.sleep(100)
-            stateJob.cancel()
-            assertFalse(compacting.any { it })
+            // The end state once the failure is reported (ticket 181): not compacting,
+            // and no divider. This proves the end state only — a conflated StateFlow
+            // collector could not prove a true→false flip never happened.
+            assertFalse(viewModel.uiState.value.isCompacting)
             assertTrue(viewModel.uiState.value.items!!.none { it is ChatItem.CompactionDivider })
         } finally {
             effectJob.cancel()

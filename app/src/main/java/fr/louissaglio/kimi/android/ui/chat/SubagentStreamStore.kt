@@ -610,7 +610,10 @@ class SubagentStreamStore @Inject constructor(
     /** Releases the session's records when the whole session is left (the chat
      * ViewModel is cleared), cancelling any open coalescing bursts and the keep-alive
      * collection — and forgetting the session's cold start (ticket 091): the next
-     * entry rebuilds from a FRESH transcript cold start, not a process-lifetime cache. */
+     * entry rebuilds from a FRESH transcript cold start, not a process-lifetime cache.
+     * The socket-level state (tasks, folds, watermarks) is kept for the last few left
+     * sessions only, so a recent session's ended task still shows on its job screen
+     * ([ChatRepository.releaseSession]). */
     fun release(sessionId: String) {
         records.remove(sessionId)?.values?.forEach { it.coalescer.cancel() }
         links.remove(sessionId)
@@ -620,6 +623,7 @@ class SubagentStreamStore @Inject constructor(
         openPages.update { it - sessionId }
         chatCollecting.update { it - sessionId }
         coldStart.forget(sessionId)
+        chatRepository.releaseSession(sessionId)
     }
 
     /**

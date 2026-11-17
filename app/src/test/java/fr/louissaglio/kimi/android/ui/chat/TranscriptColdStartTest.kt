@@ -5,7 +5,6 @@ import fr.louissaglio.kimi.android.testutil.TranscriptFrames
 import fr.louissaglio.kimi.android.testutil.awaitCondition
 import fr.louissaglio.kimi.android.testutil.awaitState
 import java.util.concurrent.TimeUnit
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -278,7 +277,10 @@ class TranscriptColdStartTest : ChatViewModelTestBase() {
         socket.send(TranscriptFrames.ackFrame())
         socket.send(TranscriptFrames.approvalFrame("approval_1", command = "rm -rf target"))
         socket.send(TranscriptFrames.opsFrame(TranscriptFrames.promptOp("msg_9", "completed"), seq = 3))
-        delay(300)
+        // A trailing sentinel on the same socket: once its job shows, every frame above
+        // was applied.
+        socket.send(TranscriptFrames.taskFrame(TranscriptFrames.taskState("bash-sentinel")))
+        awaitState(viewModel.uiState) { it.jobs.isNotEmpty() }
 
         assertEquals(
             listOf(ChatViewModel.PendingApproval("approval_1", "Bash", "rm -rf target", MAIN_AGENT_ID)),

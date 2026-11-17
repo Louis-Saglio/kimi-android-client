@@ -12,6 +12,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 
 /** Full-screen error with a Retry button, shared by the chat and sessions screens.
@@ -41,14 +42,23 @@ internal fun LoadingState(modifier: Modifier = Modifier) {
     }
 }
 
-/** Full-screen centered placeholder for an empty list. */
+/** Full-screen centered placeholder for an empty list. [supportingText] adds a muted
+ * second line under the message (the search screen's disabled-index state). */
 @Composable
-internal fun EmptyState(message: String, modifier: Modifier = Modifier) {
+internal fun EmptyState(message: String, modifier: Modifier = Modifier, supportingText: String? = null) {
     Column(
         modifier = Modifier.fillMaxSize().then(modifier).padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
+        verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
     ) {
         Text(text = message, style = MaterialTheme.typography.bodyLarge)
+        if (supportingText != null) {
+            Text(
+                text = supportingText,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+        }
     }
 }

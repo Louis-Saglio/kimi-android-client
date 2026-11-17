@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -16,18 +17,20 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.IconToggleButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -44,7 +47,6 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -199,6 +201,10 @@ internal fun ChatInputBar(
                                 // M3 Buttons default to 40dp tall; the composer row
                                 // keeps every touch target at 48dp.
                                 modifier = Modifier.heightIn(min = 48.dp),
+                                // 16dp instead of M3's 24dp sides (ticket 185): on a
+                                // 360dp phone the default left the middle zone short
+                                // of the ring + permission + swarm chips' 48dp each.
+                                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                             ) {
                                 Text("Steer")
                             }
@@ -218,129 +224,106 @@ internal fun ChatInputBar(
     }
 }
 
-/** Model/effort selector inside the composer (ticket 038): a low-key row with a
+/** Model/effort selector inside the composer (ticket 038): an M3 assist chip with a
  * chevron, opening the ModelPickerSheet. The label carries the effective effort next
  * to the model name (ticket 108 — revisiting 032's sheet-only call), so a glance tells
  * both. The caller caps the chip's width in the composer's weighted middle zone: under
  * pressure the label ellipsizes so the pinned turn controls keep their space. The
- * whole row keeps the ≥ 48dp M3 touch target the web's compact hit area lacks. */
+ * composer's chips go borderless: the composer pill is their boundary (ticket 185). */
 @Composable
 private fun ModelChip(model: String, effort: String?, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    Row(
+    AssistChip(
+        onClick = onClick,
+        label = {
+            Text(
+                text = if (effort != null) "$model · $effort" else model,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        },
         modifier = modifier
             .padding(start = 4.dp)
-            .heightIn(min = 48.dp)
-            .clip(MaterialTheme.shapes.large)
-            .clickable(onClick = onClick)
             .semantics {
                 contentDescription = if (effort != null) "Model: $model, effort $effort" else "Model: $model"
-            }
-            .padding(horizontal = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        Text(
-            text = if (effort != null) "$model · $effort" else model,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f, fill = false),
-        )
-        Icon(
-            imageVector = Icons.Filled.KeyboardArrowDown,
-            contentDescription = null,
-            modifier = Modifier.size(16.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
+            },
+        trailingIcon = {
+            Icon(
+                imageVector = Icons.Filled.KeyboardArrowDown,
+                contentDescription = null,
+                modifier = Modifier.size(AssistChipDefaults.IconSize),
+            )
+        },
+        colors = AssistChipDefaults.assistChipColors(
+            labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            trailingIconContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        ),
+        border = null,
+    )
 }
 
-/** Permission-mode selector after the context ring (ticket 141): icon-only, the mode's
- * own glyph (Hand/Shield/Bolt) in the mode's risk tint plus a chevron, opening the
- * PermissionPickerSheet. The mode changes rarely, so the chip's resting job is the
- * risk signal, which the glyph and tint carry alone; the label lives in the
- * contentDescription and the sheet. Dropping the text keeps the composer row from
- * overflowing with all five elements present. Same 48dp touch-target idiom as the
- * model chip. */
+/** Permission-mode selector after the context ring (ticket 141): an icon-only M3
+ * assist chip, the mode's own glyph (Hand/Shield/Bolt) in the mode's risk tint plus a
+ * chevron, opening the PermissionPickerSheet. The mode changes rarely, so the chip's
+ * resting job is the risk signal, which the glyph and tint carry alone; the label
+ * lives in the contentDescription and the sheet. Dropping the text keeps the composer
+ * row from overflowing with all five elements present. */
 @Composable
 private fun PermissionModeChip(mode: PermissionMode, onClick: () -> Unit) {
     val tint = mode.tint
-    Row(
-        modifier = Modifier
-            .heightIn(min = 48.dp)
-            .clip(MaterialTheme.shapes.large)
-            .clickable(onClick = onClick)
-            .semantics { contentDescription = "Permission mode: ${mode.label}" }
-            .padding(horizontal = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        Icon(
-            imageVector = mode.icon,
-            contentDescription = null,
-            modifier = Modifier.size(16.dp),
-            tint = tint,
-        )
-        Icon(
-            imageVector = Icons.Filled.KeyboardArrowDown,
-            contentDescription = null,
-            modifier = Modifier.size(16.dp),
-            tint = tint,
-        )
-    }
+    AssistChip(
+        onClick = onClick,
+        // The chevron sits in the label slot: an icon-only chip has no text, and the
+        // label slot keeps it at the chip's standard icon spacing.
+        label = {
+            Icon(
+                imageVector = Icons.Filled.KeyboardArrowDown,
+                contentDescription = null,
+                modifier = Modifier.size(AssistChipDefaults.IconSize),
+                tint = tint,
+            )
+        },
+        modifier = Modifier.semantics { contentDescription = "Permission mode: ${mode.label}" },
+        leadingIcon = {
+            Icon(
+                imageVector = mode.icon,
+                contentDescription = null,
+                modifier = Modifier.size(AssistChipDefaults.IconSize),
+            )
+        },
+        colors = AssistChipDefaults.assistChipColors(leadingIconContentColor = tint),
+        border = null,
+    )
 }
 
 /** Swarm-mode toggle after the permission chip (ticket 174, the web's composer
- * "Swarm" chip): the sparkles glyph plus a "Swarm" label, on the selected
- * (secondaryContainer) fill when on, transparent when off. Its state rides every
- * prompt as `swarm_mode`. The label ellipsizes rather than clipping when the
- * middle zone runs short (a running turn's Stop + Steer); 48dp touch target like
- * the other chips. */
+ * "Swarm" chip): an M3 icon toggle button, the sparkles glyph on the selected
+ * (secondaryContainer) fill when on, bare when off. Its state rides every prompt as
+ * `swarm_mode`. Icon-only like the permission chip, for the same reason (ticket 185):
+ * a "Swarm" label took ~75dp of the middle zone, measured before the weighted model
+ * chip, so it starved that chip and was itself squeezed under 48dp mid-turn. The
+ * label lives in the semantics; the toggle's Checkbox role announces on/off. */
 @Composable
-private fun SwarmModeChip(selected: Boolean, onToggle: () -> Unit) {
-    val container = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent
-    val content = if (selected) {
-        MaterialTheme.colorScheme.onSecondaryContainer
-    } else {
-        MaterialTheme.colorScheme.onSurfaceVariant
-    }
-    Box(
-        modifier = Modifier
-            .heightIn(min = 48.dp)
-            .clip(MaterialTheme.shapes.large)
-            .toggleable(value = selected, role = Role.Switch, onValueChange = { onToggle() })
-            .semantics { contentDescription = "Toggle swarm mode" }
+private fun SwarmModeChip(selected: Boolean, onToggle: () -> Unit, modifier: Modifier = Modifier) {
+    IconToggleButton(
+        checked = selected,
+        onCheckedChange = { onToggle() },
+        modifier = modifier
+            .semantics { contentDescription = "Swarm mode" }
             .testTag(SWARM_MODE_CHIP_TAG),
-        contentAlignment = Alignment.Center,
+        colors = IconButtonDefaults.iconToggleButtonColors(
+            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            checkedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
+            checkedContentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+        ),
     ) {
-        Row(
-            modifier = Modifier
-                .clip(MaterialTheme.shapes.large)
-                .background(container)
-                .padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Icon(
-                imageVector = SparklesIcon,
-                contentDescription = null,
-                modifier = Modifier.size(16.dp),
-                tint = content,
-            )
-            Text(
-                text = "Swarm",
-                style = MaterialTheme.typography.labelMedium,
-                color = content,
-                maxLines = 1,
-                softWrap = false,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
+        Icon(
+            imageVector = SparklesIcon,
+            contentDescription = null,
+            modifier = Modifier.size(AssistChipDefaults.IconSize),
+        )
     }
 }
 
-/** Stable test tag of the composer's swarm chip (ticket 174). */
 internal const val SWARM_MODE_CHIP_TAG = "swarmModeChip"
 
 /** One staged attachment above the input (ticket 033): a bounded thumbnail for images,

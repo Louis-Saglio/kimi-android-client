@@ -274,13 +274,20 @@ class SearchViewModelTest {
         assertNull(state.results)
         assertFalse(state.isLoading)
 
-        // Terminal: neither Retry, a new submit nor a changed query re-issues it.
+        assertEquals("/api/v1/search", server.takeRequest(5, TimeUnit.SECONDS)?.target)
+
+        // Terminal: neither Retry, a new submit nor a changed query re-issues it. A load
+        // flips isLoading/isLoadingMore synchronously at launch (Main is Unconfined), so
+        // checking them right after each call proves no load started.
         viewModel.onRetry()
+        assertFalse(viewModel.uiState.value.isLoading)
         viewModel.onQueryChange("login timeout")
         viewModel.onSearch()
+        assertFalse(viewModel.uiState.value.isLoading)
         viewModel.onEndReached()
+        assertFalse(viewModel.uiState.value.isLoadingMore)
         assertTrue(viewModel.uiState.value.searchDisabled)
-        assertEquals(1, server.requestCount)
+        assertNull(server.takeRequest(200, TimeUnit.MILLISECONDS))
     }
 
     @Test

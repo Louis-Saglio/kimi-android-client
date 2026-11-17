@@ -339,6 +339,44 @@ class TranscriptFoldTest {
         assertEquals(AgentCallDisplay("explore", "look around", true), (events.single() as SessionEvent.ToolCallStarted).agentCall)
     }
 
+    @Test
+    fun `a live tool frame renders exactly like the same frame on a REST transcript page`() {
+        // The cold start seeds rows from the REST page and the live ops heal them in
+        // place (ticket 176): both paths must render one call identically (ticket 185).
+        val bodies = listOf(
+            """{"kind":"tool","frameId":"f1","toolCallId":"call_1","name":"Bash","state":"running","inputText":"{\"comm"}""",
+            """{"kind":"tool","frameId":"f2","toolCallId":"call_2","name":"Bash","state":"running","inputText":"{\"command\":\"pwd\"}"}""",
+            """{"kind":"tool","frameId":"f3","toolCallId":"call_3","name":"Bash","state":"running",""" +
+                """"input":{"command":"ls -la","description":"List files"},"display":{"kind":"command","command":"ls -la"}}""",
+            """{"kind":"tool","frameId":"f4","toolCallId":"call_4","name":"Agent","state":"running","input":{"prompt":"look"},""" +
+                """"display":{"kind":"agent_call","agent_name":"explore","prompt":"look","background":true}}""",
+            """{"kind":"tool","frameId":"f5","toolCallId":"call_5","name":"Read","state":"running","input":{"path":"/a"},"display":{"kind":["x"]}}""",
+        )
+        for (body in bodies) {
+            val live = fold("""{"op":"frame.upsert","turnId":"t1","stepId":"t1.1","frame":$body}""")
+                .single() as SessionEvent.ToolCallStarted
+            val page = ChatMessageMapper(json).toDomain(
+                TranscriptData(
+                    items = listOf(
+                        TranscriptItemDto(
+                            kind = "turn",
+                            turnId = "t0",
+                            state = "running",
+                            steps = listOf(TranscriptStepDto(stepId = "t0.1", frames = listOf(json.decodeFromString(body)))),
+                        ),
+                    ),
+                ),
+            )
+            val seeded = page.turns.single().steps.single().frames.single() as TranscriptFrame.Tool
+
+            assertEquals(body, live.name, seeded.name)
+            assertEquals(body, live.preview, seeded.preview)
+            assertEquals(body, live.input, seeded.input)
+            assertEquals(body, live.args, seeded.args)
+            assertEquals(body, live.agentCall, seeded.agentCall)
+        }
+    }
+
     // --- marker.upsert -----------------------------------------------------------------
 
     @Test

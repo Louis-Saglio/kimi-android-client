@@ -1,5 +1,9 @@
 package fr.louissaglio.kimi.android.ui.chat
 
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -72,7 +76,10 @@ class JobOutputBlockTest {
             ),
         )
 
-        composeTestRule.onNodeWithText("Output unavailable: task not found").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Output unavailable: task not found")
+            .assertIsDisplayed()
+            // Ticket 185 (C6): the error lands while the user watches — announced politely.
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.LiveRegion, LiveRegionMode.Polite))
         composeTestRule.onNodeWithText("done").assertIsDisplayed()
     }
 

@@ -45,6 +45,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
@@ -122,9 +123,7 @@ internal fun ToolGroupCard(
     onOpenSwarm: (String) -> Unit = {},
     /** Ticket 158: the spawn row's "Next step" Continue (the composer prefill). */
     onContinueSubagent: (String) -> Unit = {},
-    /** Ticket 184: a tool-result image's thumbnail tap (the full-screen viewer). */
     onImageClick: (ChatMessage.Part.Image) -> Unit = {},
-    /** Ticket 184: resolves a tool-result image's bytes (the session-media fetch). */
     loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray? = { null },
 ) {
     val status = when {
@@ -474,9 +473,7 @@ internal fun ToolRow(
     /** Ticket 158: the spawn row's "Next step" Continue — invoked with the
      * composer prefill (the hint's suggested `Agent(resume=…)` call text). */
     onContinueSubagent: (String) -> Unit = {},
-    /** Ticket 184: a result image's thumbnail tap (the full-screen viewer). */
     onImageClick: (ChatMessage.Part.Image) -> Unit = {},
-    /** Ticket 184: resolves a result image's bytes (the session-media fetch). */
     loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray? = { null },
 ) {
     val swarmMemberList = swarmMembers[activity.id].orEmpty()
@@ -801,7 +798,6 @@ internal fun ToolRow(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            // Ticket 184: the collapsed row's only media change — a small indicator.
             if (activity.media.isNotEmpty()) ToolMediaIndicator(activity.media, tint = detailColor)
             ToolStatusIcon(activity.status, runningDescription = "Tool running", modifier = Modifier.size(12.dp))
             if (expandable) {
@@ -1008,9 +1004,7 @@ private fun ToolMediaIndicator(media: List<ToolMedia>, tint: Color) {
         videos.takeIf { it > 0 }?.let { if (it == 1) "1 video" else "$it videos" },
     ).joinToString(", ")
     Row(
-        modifier = Modifier
-            .semantics(mergeDescendants = true) { contentDescription = description }
-            .testTag("toolMediaIndicator"),
+        modifier = Modifier.semantics(mergeDescendants = true) { contentDescription = description },
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(2.dp),
     ) {
@@ -1036,11 +1030,12 @@ private fun ToolMediaBlock(
         media.forEach { item ->
             val image = item.toImagePart()
             if (image != null) {
-                Column(Modifier.testTag("toolMediaImage")) {
+                Column(Modifier.testTag(TOOL_MEDIA_IMAGE_TAG)) {
                     HistoryImageThumbnail(
                         image = image,
                         loadImageBytes = loadImageBytes,
                         onClick = { onImageClick(image) },
+                        contentDescription = item.name?.let { "Tool result image $it" } ?: "Tool result image",
                     )
                     if (item.name != null) {
                         Text(
@@ -1057,7 +1052,10 @@ private fun ToolMediaBlock(
                 Surface(
                     color = MaterialTheme.colorScheme.secondaryContainer,
                     shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.testTag("toolMediaVideoChip"),
+                    // One description instead of the decorative "▶" glyph's text.
+                    modifier = Modifier.clearAndSetSemantics {
+                        contentDescription = item.name?.let { "Video $it" } ?: "Video"
+                    },
                 ) {
                     Text(
                         text = "▶ ${item.name ?: "video"}",
@@ -1071,6 +1069,11 @@ private fun ToolMediaBlock(
         }
     }
 }
+
+/** Test tag of one tool-result image's container (thumbnail + name caption): a
+ * thumbnail still loading or failed has no description of its own, so no user-visible
+ * semantics identifies it. Shared with the instrumented tests (ticket 185). */
+internal const val TOOL_MEDIA_IMAGE_TAG = "toolMediaImage"
 
 /** Where an `agent_call` spawn row's tap navigates (ticket 157): the spawn's own deep
  * link — the sub-agent page for a foreground spawn (the 045 link, learned from

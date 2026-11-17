@@ -1,6 +1,7 @@
 package fr.louissaglio.kimi.android.data.chat
 
 import android.util.Log
+import fr.louissaglio.kimi.android.data.parseOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -54,14 +55,6 @@ internal class TranscriptFold(
         class Ignored(override val turnId: String) : FrameState
     }
 
-    private data class ToolRendering(
-        val name: String,
-        val preview: String,
-        val input: String,
-        val args: JsonObject?,
-        val agentCall: AgentCallDisplay?,
-    )
-
     private data class Key(val agentId: String, val id: String)
 
     private data class StepState(val turnId: String, val state: String)
@@ -77,9 +70,9 @@ internal class TranscriptFold(
     fun fold(agentId: String, ops: List<JsonObject>): List<SessionEvent> {
         val events = mutableListOf<SessionEvent>()
         for (raw in ops) {
-            val op = runCatching { json.decodeFromJsonElement<TranscriptOpDto>(raw) }
-                .onFailure { Log.w(TAG, "Dropping undecodable transcript op", it) }
-                .getOrNull() ?: continue
+            val op = parseOrNull(onFailure = { Log.w(TAG, "Dropping undecodable transcript op", it) }) {
+                json.decodeFromJsonElement<TranscriptOpDto>(raw)
+            } ?: continue
             when (op.op) {
                 "prompt.upsert" -> op.prompt?.let { onPrompt(agentId, it, events) }
                 "turn.upsert" -> op.turn?.let { onTurn(agentId, it, events) }
@@ -223,7 +216,7 @@ internal class TranscriptFold(
             "running" -> {
                 if (previous != "running") events += SessionEvent.StepStarted(step.ordinal, step.stepId, agentId)
                 step.retry?.let { raw ->
-                    runCatching { json.decodeFromJsonElement<StepRetryDto>(raw) }.getOrNull()
+                    parseOrNull { json.decodeFromJsonElement<StepRetryDto>(raw) }
                         ?.takeIf { it.maxAttempts > 0 }
                         ?.let {
                             events += SessionEvent.StepRetrying(
@@ -295,7 +288,7 @@ internal class TranscriptFold(
         val state = frames[key] as? FrameState.Tool
             ?: FrameState.Tool(turnId, rendering = null, settled = false).also { frames[key] = it }
         if (state.settled) return
-        val rendering = render(frame)
+        val rendering = mapper.toolRendering(frame)
         if (rendering != state.rendering) {
             state.rendering = rendering
             events += SessionEvent.ToolCallStarted(
@@ -315,27 +308,6 @@ internal class TranscriptFold(
             val output = mapper.toolOutput(frame.output)
             events += SessionEvent.ToolCallResult(toolCallId, frame.state == "error", output.text, agentId, output.media)
         }
-    }
-
-    /** The live row's rendering of a tool frame: the `input` object — or, while the
-     * call streams, `inputText` once it parses as a complete object (a partial one
-     * renders nothing: the row's first-writer-wins preview must not lock onto a
-     * fragment) — plus the server's `display` (command, `agent_call`). */
-    private fun render(frame: TranscriptFrameDto): ToolRendering {
-        val name = frame.name.orEmpty()
-        val args = frame.input ?: frame.inputText?.let {
-            runCatching { json.parseToJsonElement(it) as? JsonObject }.getOrNull()
-        }
-        val display = frame.display?.let {
-            runCatching { json.decodeFromJsonElement<ToolInputDisplayDto>(it) }.getOrNull()
-        }
-        return ToolRendering(
-            name = name,
-            preview = mapper.preview(name, args, display),
-            input = mapper.formatDetail(args),
-            args = args,
-            agentCall = mapper.agentCall(display),
-        )
     }
 
     private fun onAppend(agentId: String, target: AppendTargetDto, offset: Int, text: String, events: MutableList<SessionEvent>) {
@@ -382,9 +354,9 @@ internal class TranscriptFold(
             return
         }
         val payload = item.payload?.let {
-            runCatching { json.decodeFromJsonElement<UndoMarkerPayload>(it) }
-                .onFailure { e -> Log.w(TAG, "Dropping undecodable undo marker '${item.markerId}'", e) }
-                .getOrNull()
+            parseOrNull(onFailure = { e -> Log.w(TAG, "Dropping undecodable undo marker '${item.markerId}'", e) }) {
+                json.decodeFromJsonElement<UndoMarkerPayload>(it)
+            }
         } ?: return
         // Injections (the interruption reminder, the compaction continuation) are the
         // harness talking to the model, never a sent bubble.
@@ -400,9 +372,9 @@ internal class TranscriptFold(
      * marker without a result, or an unknown phase, emits nothing. */
     private fun onCompactionMarker(agentId: String, item: MarkerItemDto, events: MutableList<SessionEvent>) {
         val payload = item.payload?.let {
-            runCatching { json.decodeFromJsonElement<CompactionMarkerPayload>(it) }
-                .onFailure { e -> Log.w(TAG, "Dropping undecodable compaction marker '${item.markerId}'", e) }
-                .getOrNull()
+            parseOrNull(onFailure = { e -> Log.w(TAG, "Dropping undecodable compaction marker '${item.markerId}'", e) }) {
+                json.decodeFromJsonElement<CompactionMarkerPayload>(it)
+            }
         } ?: return
         when (payload.phase) {
             "started" -> events += SessionEvent.CompactionStarted(payload.trigger.orEmpty(), agentId)

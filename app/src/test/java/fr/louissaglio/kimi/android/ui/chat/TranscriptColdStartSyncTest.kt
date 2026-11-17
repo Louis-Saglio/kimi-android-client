@@ -9,9 +9,16 @@ import fr.louissaglio.kimi.android.fakes.FakePreferencesDataStore
 import fr.louissaglio.kimi.android.testutil.testChatRepository
 import fr.louissaglio.kimi.android.testutil.testColdStart
 import fr.louissaglio.kimi.android.testutil.testSubagentStreamStore
+import fr.louissaglio.kimi.android.data.DataError
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -61,6 +68,14 @@ class TranscriptColdStartSyncTest {
     @Volatile
     private var promptsBody = EMPTY_QUEUE
 
+    // Holds the messages read open until released (tearDown releases it too, so the
+    // server's dispatch thread never outlives the test).
+    @Volatile
+    private var holdMessages: CountDownLatch? = null
+
+    // Counted down by every read reaching the server.
+    private val arrived = CountDownLatch(3)
+
     @Before
     fun setUp() {
         Dispatchers.setMain(UnconfinedTestDispatcher())
@@ -69,8 +84,12 @@ class TranscriptColdStartSyncTest {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 val path = request.target.orEmpty()
                 paths += path
+                arrived.countDown()
                 return when {
-                    path.startsWith("/api/v1/sessions/session_1/messages") -> MockResponse(body = messagesBody)
+                    path.startsWith("/api/v1/sessions/session_1/messages") -> {
+                        holdMessages?.await(30, TimeUnit.SECONDS)
+                        MockResponse(body = messagesBody)
+                    }
                     path.startsWith("/api/v1/sessions/session_1/transcript?agent_id=main") ->
                         MockResponse(body = transcriptBody)
                     path == "/api/v1/sessions/session_1/prompts" -> MockResponse(body = promptsBody)
@@ -94,6 +113,7 @@ class TranscriptColdStartSyncTest {
 
     @After
     fun tearDown() {
+        holdMessages?.countDown()
         runBlocking { coldStart.awaitInFlight() }
         Dispatchers.resetMain()
         appScope.cancel()
@@ -145,6 +165,42 @@ class TranscriptColdStartSyncTest {
         promptsBody = EMPTY_QUEUE
         assertTrue(coldStart.sync(SESSION_ID).getOrThrow() is TranscriptColdStart.Outcome.Fresh)
         assertEquals(6, server.requestCount)
+    }
+
+    @Test
+    fun `a failed read fails the cold start without waiting for a hung sibling`() = runBlocking {
+        holdMessages = CountDownLatch(1)
+        promptsBody = """{"code":50000,"msg":"boom","data":null,"request_id":"r"}"""
+
+        // Without the sibling cancel this waits for the held messages read (OkHttp's
+        // read timeout, 10 s on the test client): the timeout fails the test first.
+        val result = withTimeout(5_000) { coldStart.sync(SESSION_ID) }
+
+        assertEquals("boom", (result.exceptionOrNull() as DataError.Api).serverMessage)
+        assertEquals(1L, holdMessages!!.count)
+    }
+
+    @Test
+    fun `forget cancels the in-flight fetch, which applies nothing, and its awaiter gets a failure`() = runBlocking {
+        holdMessages = CountDownLatch(1)
+        transcriptBody = transcript(
+            agents = """[{"agentId":"main","type":"main"},{"agentId":"agent-1","type":"sub","parentAgentId":"main"}]""",
+            seq = 42,
+        )
+        val awaiter = async(start = CoroutineStart.UNDISPATCHED) { coldStart.sync(SESSION_ID) }
+        withContext(Dispatchers.IO) { assertTrue(arrived.await(5, TimeUnit.SECONDS)) }
+
+        // The session-left signal while the messages read is still held.
+        store.release(SESSION_ID)
+        val result = withTimeout(5_000) { awaiter.await() }
+        holdMessages!!.countDown()
+        coldStart.awaitInFlight()
+
+        assertTrue(result.exceptionOrNull() is TranscriptColdStart.Interrupted)
+        assertNull(repository.transcriptWatermark(SESSION_ID, MAIN_AGENT_ID))
+        assertNull(store.entry(SESSION_ID, "agent-1").first())
+        // The next entry starts a fresh fetch rather than joining the cancelled one.
+        assertTrue(coldStart.sync(SESSION_ID).getOrThrow() is TranscriptColdStart.Outcome.Fresh)
     }
 
     @Test

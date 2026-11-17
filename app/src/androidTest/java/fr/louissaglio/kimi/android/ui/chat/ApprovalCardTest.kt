@@ -3,6 +3,9 @@ package fr.louissaglio.kimi.android.ui.chat
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
@@ -133,6 +136,29 @@ class ApprovalCardTest {
         lastStep.assertIsDisplayed()
         // Scrolling the plan never moves the buttons.
         composeTestRule.onNodeWithText("Allow").assertIsDisplayed()
+    }
+
+    @Test
+    fun theNextPlanReviewOpensAtTheTopOfItsPlan() {
+        // Ticket 185 (C3): the bottom bar renders the queue head; when it resolves and
+        // the next head is also a plan review, the new plan must not inherit the old
+        // one's scroll offset.
+        fun plan(name: String) = (1..80).joinToString("\n\n") { "$name step $it." }
+        var head by mutableStateOf(
+            ChatViewModel.PendingApproval("approval_a", "ExitPlanMode", "First plan", plan = plan("First")),
+        )
+        composeTestRule.setContent {
+            KimiTheme {
+                ApprovalCard(approval = head, queueSize = 1, onAllow = {}, onDeny = {})
+            }
+        }
+        composeTestRule.onNode(hasText("First step 80.", substring = true)).performScrollTo()
+        composeTestRule.onNode(hasText("First step 1.", substring = true)).assertIsNotDisplayed()
+
+        head = ChatViewModel.PendingApproval("approval_b", "ExitPlanMode", "Second plan", plan = plan("Second"))
+
+        composeTestRule.onNode(hasText("Second step 1.", substring = true)).assertIsDisplayed()
+        composeTestRule.onNode(hasText("Second step 80.", substring = true)).assertIsNotDisplayed()
     }
 
     @Test

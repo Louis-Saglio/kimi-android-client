@@ -213,6 +213,9 @@ class SubagentStreamStoreKeepAliveTest {
         // The user backs out to the chat: its entry composes, the gate opens (the
         // open page alone holds it), signals the store, and collects.
         val viewModel = newChatViewModel()
+        // The gate starts on the first ON_START, never inside the constructor: until
+        // then the keep-alive stays the feeder.
+        assertNotNull(store.keepAliveJob(SESSION_ID))
         viewModel.onScreenStarted()
 
         // The hand-off: the keep-alive is cancelled before the chat's collection

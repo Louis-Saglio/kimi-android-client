@@ -23,6 +23,7 @@ import java.io.File
 import java.util.concurrent.TimeUnit
 import javax.inject.Qualifier
 import javax.inject.Singleton
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -32,6 +33,16 @@ import okhttp3.OkHttpClient
 @Qualifier
 @Retention(AnnotationRetention.BINARY)
 annotation class ApplicationScope
+
+/** `Dispatchers.Main.immediate`, injected so JVM tests can swap it. */
+@Qualifier
+@Retention(AnnotationRetention.BINARY)
+annotation class MainImmediateDispatcher
+
+/** `Dispatchers.Default`, for CPU work (decoding) kept off the main thread. */
+@Qualifier
+@Retention(AnnotationRetention.BINARY)
+annotation class DefaultDispatcher
 
 /** Coalescing window for chat streaming deltas (see ChatViewModel.startSocket). */
 @Qualifier
@@ -45,6 +56,14 @@ object AppModule {
     @Provides
     @StreamCoalesceWindowMillis
     fun provideStreamCoalesceWindowMillis(): Long = 100L
+
+    @Provides
+    @MainImmediateDispatcher
+    fun provideMainImmediateDispatcher(): CoroutineDispatcher = Dispatchers.Main.immediate
+
+    @Provides
+    @DefaultDispatcher
+    fun provideDefaultDispatcher(): CoroutineDispatcher = Dispatchers.Default
 
     @Provides
     @Singleton

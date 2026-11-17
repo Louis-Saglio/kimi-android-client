@@ -462,9 +462,9 @@ abstract class ChatViewModelTestBase {
     @After
     fun tearDown() {
         // Cancel the ViewModels' coroutines AND wait for them to die while Main is
-        // still set and the server still up: an in-flight REST call's OkHttp execute()
-        // is not cancellable and resumes its parent on Main when the response comes
-        // back — joining after resetMain would crash it on the dispatcher thread
+        // still set and the server still up: an in-flight POST's OkHttp execute() is
+        // not cancellable (only GETs abort — ApiClient) and resumes its parent on Main
+        // when the response comes back — joining after resetMain would crash it on the dispatcher thread
         // ("Module with the Main dispatcher had failed to initialize"). See
         // startedViewModels (ticket 049).
         runBlocking {

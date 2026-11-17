@@ -1,6 +1,7 @@
 package fr.louissaglio.kimi.android.ui.chat
 
 import androidx.datastore.preferences.core.preferencesOf
+import androidx.lifecycle.viewModelScope
 import androidx.datastore.preferences.core.stringPreferencesKey
 import fr.louissaglio.kimi.android.data.chat.ChatRepository
 import fr.louissaglio.kimi.android.data.chat.SessionEvent
@@ -32,7 +33,9 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job as CoroutineJob
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -72,6 +75,7 @@ class JobDetailViewModelTest {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
 
     private lateinit var repository: ChatRepository
+    private val mainDispatcher = UnconfinedTestDispatcher()
     private lateinit var settingsRepository: SettingsRepository
     private lateinit var subagentStore: SubagentStreamStore
 
@@ -82,7 +86,7 @@ class JobDetailViewModelTest {
 
     @Before
     fun setUp() {
-        Dispatchers.setMain(UnconfinedTestDispatcher())
+        Dispatchers.setMain(mainDispatcher)
         server.start()
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
@@ -121,15 +125,29 @@ class JobDetailViewModelTest {
         subagentStore.chatCollectionStarted("session_1")
     }
 
+    /** Every ViewModel a test built: their scopes collect live socket state. */
+    private val viewModels = CopyOnWriteArrayList<JobDetailViewModel>()
+
+    /** The session socket collections [connect] started. */
+    private val socketJobs = CopyOnWriteArrayList<CoroutineJob>()
+
     @After
     fun tearDown() {
+        // Cancel the ViewModels' collectors and the socket collections AND join them
+        // while Main is still set and the server still up: a frame still in flight on
+        // an OkHttp thread would otherwise resume a collector on the real Main after
+        // resetMain (the ticket-049 crash).
+        runBlocking {
+            viewModels.forEach { it.viewModelScope.coroutineContext.job.cancelAndJoin() }
+            socketJobs.forEach { it.cancelAndJoin() }
+        }
         appScope.cancel()
         server.close()
         Dispatchers.resetMain()
     }
 
     private fun newViewModel(route: JobDetail = JobDetail("session_1", "bash-1")) =
-        JobDetailViewModel(repository, subagentStore, route)
+        JobDetailViewModel(repository, subagentStore, route).also { viewModels += it }
 
     private fun collectEffects(viewModel: JobDetailViewModel): CopyOnWriteArrayList<JobDetailViewModel.Effect> {
         val effects = CopyOnWriteArrayList<JobDetailViewModel.Effect>()
@@ -142,6 +160,7 @@ class JobDetailViewModelTest {
         val job = appScope.launch {
             repository.observeSession(settingsRepository.current(), "session_1").collect {}
         }
+        socketJobs += job
         awaitCondition { serverSocket != null }
         val socket = serverSocket!!
         socket.send(ackFrame())
@@ -333,10 +352,17 @@ class JobDetailViewModelTest {
 
         awaitState(viewModel.uiState) { it.output == "tick 1\ntick 2\n" }
         assertFalse(viewModel.uiState.value.isLoading)
-        // Longer than the old 2 s poll: still one watch, nothing else, no REST at all.
-        delay(2_500)
+        // Longer than the old 2 s poll, on the clock viewModelScope's timers run on (the
+        // Main test scheduler; a real-time wait would never fire them).
+        mainDispatcher.scheduler.advanceTimeBy(2_500)
+        mainDispatcher.scheduler.runCurrent()
+        // Sentinel: leaving sends task.unwatch on the same socket, so any frame a timer
+        // sent above reaches the server before it.
+        viewModel.onScreenStopped()
+        awaitCondition { sentUnwatches().isNotEmpty() }
+        // Still one watch, one unwatch (the sentinel's own), no REST at all.
         assertEquals(1, sentWatches().size)
-        assertTrue(sentUnwatches().isEmpty())
+        assertEquals(1, sentUnwatches().size)
         assertTrue(requests.all { it.startsWith("/api/v1/ws") })
     }
 
@@ -447,6 +473,27 @@ class JobDetailViewModelTest {
         awaitCondition { sentUnwatches().size == 1 }
         assertEquals("exit 1\n", viewModel.uiState.value.output)
         assertEquals(Job.Status.Failed, viewModel.uiState.value.status)
+    }
+
+    @Test
+    fun `a watch left unanswered on an open connection is re-sent on it`() = runBlocking {
+        val (_, socket) = connect()
+        val viewModel = newViewModel()
+        socket.send(taskListFrame(taskState("bash-1")))
+        awaitState(viewModel.uiState) { it.status == Job.Status.Running }
+
+        viewModel.onScreenStarted()
+        awaitCondition { sentWatches().size == 1 }
+        // No reply: the control's 15 s timeout (on the Main test clock) passes while
+        // the connection stays up.
+        mainDispatcher.scheduler.advanceTimeBy(15_001)
+
+        awaitCondition { sentWatches().size == 2 }
+        val retry = sentWatches().last()
+        assertEquals(32768, retry["tail_bytes"]?.jsonPrimitive?.int)
+        socket.send(taskResponseFrame(retry.requestId(), task = taskState("bash-1")))
+        socket.send(taskOutputFrame("bash-1", offset = 0, text = "after retry\n"))
+        awaitState(viewModel.uiState) { it.output == "after retry\n" }
     }
 
     @Test

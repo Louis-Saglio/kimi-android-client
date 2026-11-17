@@ -49,6 +49,7 @@ internal fun HistoryImageThumbnail(
     image: ChatMessage.Part.Image,
     loadImageBytes: suspend (ChatMessage.Part.Image) -> ByteArray?,
     onClick: () -> Unit,
+    contentDescription: String = "Attached image",
 ) {
     var resolved by remember(image) { mutableStateOf(false) }
     val thumbnail by produceState<ImageBitmap?>(initialValue = null, image) {
@@ -63,7 +64,7 @@ internal fun HistoryImageThumbnail(
     if (bitmap != null) {
         Image(
             bitmap = bitmap,
-            contentDescription = "Attached image",
+            contentDescription = contentDescription,
             modifier = Modifier
                 .size(120.dp)
                 .clip(shape)

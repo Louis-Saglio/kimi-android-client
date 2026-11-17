@@ -2,7 +2,11 @@
 
 - `data/network/` — `ApiClient` is the shared HTTP scaffold (URL building,
   401/HTTP/IO → `DataError`, envelope unwrap). Every REST call goes through it;
-  never hand-roll `Request.Builder` in a repository. `SocketStallWatchdog`
+  never hand-roll `Request.Builder` in a repository. Cancelling the caller of a GET
+  aborts its OkHttp call (ticket 185 — `execute()` alone blocks until the response or
+  the read timeout, so a cancelled read would still hold its parent); a POST is left
+  to finish, since aborting a write mid-flight could drop a prompt the server
+  half-received. `SocketStallWatchdog`
   (ticket 152) is the shared stalled-socket detection both WebSockets run: one
   instance per connection, armed at socket open, fed `heartbeat_ms` from each
   connection's `server_hello`; inbound silence past 3× it unwinds the connection
@@ -86,7 +90,15 @@
   drops the entry). The socket also keeps the latest state per (agent, task) at
   instance level (`observeTask` — every frame and control reply upserts, a
   `task.list` drops the agent's running entries it no longer names, ended ones
-  stay) and sends the flat task controls (`sendTaskControl` — `task.stop`/
+  stay). That per-session state (tasks, output stream, open-connection id, folds,
+  watermarks) is bounded by an LRU (ticket 185, A1): `SubagentStreamStore.release`
+  → `ChatRepository.releaseSession` → `SessionSocket.release` keeps the
+  `RETAINED_SESSIONS` (5) most recently used left sessions — so a recent session's
+  ended task still shows on its job screen — and evicts older ones whole, closing a
+  connection still open and failing its in-flight controls. A session being
+  collected again leaves the LRU until its next release; a read of a left
+  session's state (`seedTranscript`, `observeTask`) makes it the most recent. The
+  socket also sends the flat task controls (`sendTaskControl` — `task.stop`/
   `task.background`, `{type, request_id, session_id, agent_id, task_id}` on the
   session's open connection): the `{type:"response", request_id, code, msg?,
   task?}` reply is matched by `request_id`, a code-0 reply's task is emitted as
@@ -110,7 +122,9 @@
   `tool_input_display`/`action`, the asking `agent_id`; a `plan_review`
   display — `ExitPlanMode`, ticket 173 — also carries its plan Markdown,
   `ChatMessageMapper.planReview`, which the card renders with the chat's
-  `MarkdownBody` in a height-capped scroll area above Allow/Deny; the
+  `MarkdownBody` in a height-capped scroll area above Allow/Deny — capped at 30% of
+  the window height the IME leaves, between 72 and 240 dp, and keyed by the
+  approval id so the next plan opens at its top (ticket 185); the
   transcript entity's camelCase `display` maps the same way), `ended` →
   `ApprovalResolved` for every outcome — the card closes on that frame, never
   on the POST response, and a turn end does not clear it (an abort ends its
@@ -170,7 +184,12 @@
   `permission_mode` (ticket 177, after 165's live variant) follows the same
   guard for the chip — read-only, never written through; the ViewModel shows
   the stored pick on every start, ahead of the frame. The composer's swarm chip
-  (ticket 174) is NOT stored at all: `UiState.swarmMode` seeds from the
+  (ticket 174; icon-only since 185, like the permission chip — "Swarm mode" in the
+  semantics; an M3 `IconToggleButton` since 185 (C7) — Checkbox role, 48 dp target,
+  `secondaryContainer` fill for on — next to the model and permission selectors,
+  which are borderless M3 `AssistChip`s — so the shared middle zone keeps its
+  48 dp targets and the model chip room; the composer's Steer button runs 16 dp
+  sides for the same budget) is NOT stored at all: `UiState.swarmMode` seeds from the
   subscribe's first `agent` frame and follows every later one unless an unsent
   toggle is in force (`pendingSwarmPick`, cleared by the send that carries it);
   `ChatApi.postPrompt` ALWAYS sends `swarm_mode` — true and false alike, since an
@@ -182,7 +201,11 @@
   `text`/`image`/`video`) yields its text parts joined "\n" — a bare
   `<image …>`/`</image>` wrapper tag dropped when the array carried media — plus one
   `ToolMedia(fileId, kind, name?)` per `session_media` image/video part (other part
-  types and sources ignored); any other value keeps `formatDetail`'s rendering. The
+  types and sources ignored); any other value keeps `formatDetail`'s rendering.
+  Likewise a tool FRAME's call rendering — name, preview, pretty input, raw args,
+  `agent_call` — is ONE derivation, `toolRendering` (ticket 185), shared by the
+  live fold's `ToolCallStarted` and the REST transcript's `TranscriptFrame.Tool`,
+  so a cold-start-seeded row and the live op that heals it render alike. The
   media ride `Part.ToolResult`/`TranscriptFrame.Tool`/`ToolCallResult` to
   `ChatItem.ToolActivity.media` under the output's merge rules; a tool call's raw
   `args` JsonObject rides the domain/end-to-end
@@ -339,10 +362,13 @@
   session through the plain Chat route — or, scoped, just pops back to the chat
   below (every hit is that session's) — jump-to-message is out of scope. A
   server with its global search index off (the 2.5.0 default) answers every
-  call with a 50001 whose message starts `global search is disabled`
-  (`isGlobalSearchDisabled` — code AND prefix, so other 50001s keep the generic
-  `toUserMessage()` error); ticket 183 maps it to the terminal
-  `UiState.searchDisabled` state — a phone-level explanation, no Retry, the query
+  call with a 50001 whose message starts `global search is disabled`;
+  `SearchApi` maps exactly that (`isGlobalSearchDisabled` — code AND prefix, so other
+  50001s stay a plain `DataError.Api` with the generic `toUserMessage()` error) to
+  `DataError.SearchDisabled` (ticket 185 — the ViewModel never reads wire codes for
+  it), which ticket 183's ViewModel turns into the terminal
+  `UiState.searchDisabled` state — a phone-level explanation (the shared `EmptyState`
+  with its `supportingText` line, ticket 185), no Retry, the query
   field disabled and every request entry point a no-op. There is no probe: both
   magnifier entry points stay visible and the screen explains on first submit.
 - `data/attachments/` — `AttachmentStore` owns all platform file I/O (content
@@ -351,13 +377,25 @@
   FileProvider URIs). Composables never touch `ContentResolver`/`File`.
 - Errors: repositories return `Result` + sealed `DataError`; ViewModels map them
   with `toUserMessage()` (kept next to `DataError`). Dropped WebSocket frames
-  get a `Log.w` — never swallow silently.
+  get a `Log.w` — never swallow silently. A parse that tolerates malformed wire
+  input goes through `parseOrNull` (`data/ParseOrNull.kt`, ticket 185), which
+  catches only the parsers' failures (`IllegalArgumentException` — kotlinx
+  serialization's — and `DateTimeParseException`), never `runCatching`: an
+  `Error` or a mapper bug must crash, not turn into a silently dropped frame.
+  (Older call sites outside `data/chat`'s socket/fold/mapper/tasks paths still
+  use `runCatching`; convert them when touched.) A server condition a screen
+  branches on is a typed `DataError` produced in the data layer
+  (`SessionNotFound`, `SearchDisabled`), never a code/message decoded in a ViewModel.
+  Dispatchers are injected through the `di/AppModule.kt` qualifiers
+  (`@MainImmediateDispatcher`, `@DefaultDispatcher`) where a class picks one itself;
+  `ApiClient`'s `Dispatchers.IO` and the sub-agent store's scope predate them.
 - `ui/<screen>/` — screen composable + ViewModel. Chat building blocks live in
   `ui/chat/components/` (same package, `internal` — androidTests import them; the
   `ModelPickerSheet` doubles as the Settings screen's server-default model/effort
   editor, ticket 109, and the `PermissionPickerSheet` as its server-default
   permission-mode editor, ticket 142).
-  `ui/common/` holds shared `StateViews` (loading/error/empty) and
+  `ui/common/` holds shared `StateViews` (loading/error/empty — `EmptyState` takes an
+  optional `supportingText`; widen these rather than copying them) and
   `Formatters` — reuse them instead of adding one-off copies. Large tool-payload
   content reaches its detail screen through `ToolContentStore` (ui/chat,
   process-lifetime @Singleton — ticket 119): the row's navigation callback `put`s
@@ -396,7 +434,12 @@
   through the user bubble's `HistoryImageThumbnail` + full-screen viewer, bytes via
   the shared `resolveImageBytes` (ChatAttachments.kt — the ticket-104 session-media
   fetch; the chat's `ChatAttachments.imageBytes` and `SubagentViewModel.imageBytes`
-  both call it), labelled with `name`; a video is a "▶ name" chip, never decoded;
+  both call it, passing the injected `@DefaultDispatcher` the inline base64 decodes
+  on — ticket 185 — and cached in the process-lifetime `ImageBytesCache`, a 16 MiB
+  LRU keyed by server/session/file id, so a re-entering thumbnail or the full-screen
+  open costs no second download), labelled with `name` and described as "Tool result
+  image <name>" (the bubble's "Attached image" is the parameter's default); a video
+  is a "▶ name" chip read as "Video <name>", never decoded;
   the collapsed row adds only a small media indicator —, ExitPlanMode the fixed
   "Plan ready for review" label plus option-label chips above the generic args
   table, UpdateGoal a status badge instead of a preview — colored per the
@@ -466,7 +509,11 @@
   no poll): while the screen is started and the socket has an open connection,
   one watch per connection (`tail_bytes` 32 KiB; once output is held,
   `since_offset` = its UTF-8 byte end, so a reconnect or ON_STOP→ON_START
-  re-entry neither loses nor duplicates). Chunks append into a
+  re-entry neither loses nor duplicates). A watch the socket's 15 s control timeout
+  fails while the SAME connection stays open is re-sent at once (ticket 185 — no new
+  connection id would ever re-watch it; at most 3 re-sends per connection, reset by a
+  reply or a new connection); a watch lost with its connection waits for the next
+  one. Chunks append into a
   `TaskOutputTail` by BYTE offset (never `String.length`): a chunk ending at or
   before the held end is a duplicate, a straddling one keeps its new bytes, a
   later one opens a segment rendered behind a `[… N bytes missing …]` marker,
@@ -474,7 +521,9 @@
   `[… N earlier bytes not shown …]`). ON_STOP sends `task.unwatch` before the
   page count drops; an ended task unwatches once the watch's first chunk (its
   final tail) is in and is never re-watched. A watch error (`40406`, `50003`)
-  stops watching for good: `outputError` above the output, which falls back
+  stops watching for good: `outputError` above the output (a polite live region —
+  it lands while the user watches; `JobOutputBlock` is one root Column carrying the
+  caller's weight), which falls back
   to the ended frame's `result_summary`/`error` like a task with no streamed
   text. The store-backed mode sends no watch.
   The live activity status line (ticket 148) is smaller than a collaborator and
@@ -518,7 +567,9 @@
   newest turn plus the session's global state: pending interactions, prompt
   entities, the `agents` roster, the `seq` watermark — `TranscriptPage` carries
   them, mapped in `ChatMessageMapper`) and `GET .../prompts` (the queue,
-  `TranscriptSyncApi`) — any failed read failing the whole cold start. It is taken
+  `TranscriptSyncApi`) — any failed read failing the whole cold start at once (ticket
+  185: the failure cancels the two sibling reads, whose GETs abort, instead of
+  waiting for the slowest). Its scope runs on the injected `@MainImmediateDispatcher`. It is taken
   BEFORE the session's first socket subscribe (the chat's gate and the store's
   keep-alive both await it; the chat claims the feeder role before awaiting, so the
   keep-alive never folds the socket while the chat rebuilds). On success it seeds the
@@ -546,7 +597,12 @@
   subscribe's `agent`/`usage` frames seed them (ticket 177), and its `todo` frame
   the widget (ticket 178).
   The fetch is cached per session only until the session is LEFT:
-  `SubagentStreamStore.release` calls `TranscriptColdStart.forget`, so the next entry
+  `SubagentStreamStore.release` calls `TranscriptColdStart.forget`, which also
+  cancels a fetch still in flight (ticket 185 — applied late, it would re-seed the
+  socket and re-create the released session's store records; the apply step checks
+  `ensureActive()`, and a caller still awaiting the cancelled fetch gets a
+  `TranscriptColdStart.Interrupted` failure — the ordinary load error with Retry —
+  never a CancellationException of its own), so the next entry
   re-fetches (one cheap round per entry — no process-lifetime cache of mutable
   server state) while chat → page → chat costs zero fetches. A chat joining someone
   else's fetch (`AlreadyFresh` — the keep-alive restoring a page on top) takes a
@@ -646,7 +702,9 @@
   pin, or the settled call's result per the refined tier above). The store is fed by
   exactly ONE session-socket collection at a time (064): the chat's while its
   socket gate holds the session (ChatViewModel signals
-  chatCollectionStarted/Stopped), otherwise the store's own keep-alive
+  chatCollectionStarted/Stopped; the gate is a `CoroutineStart.LAZY` job started by
+  the first `onScreenStarted`, never during construction — with a page already open
+  it opens at once and runs its cold start inline, ticket 185), otherwise the store's own keep-alive
   collection while a sub-agent page is open (SubagentViewModel registers via
   pageOpened/pageClosed; the job screen registers the same page count so the
   socket — and with it the live task frames — survives watching a job) — the keep-alive lives in the store because after
@@ -714,3 +772,31 @@
   recomposition/layout churn rather than parse cost — the value stays
   (no regression measured; phone-frame eyeball is Louis's). The
   window is injectable (`streamCoalesceWindowMillis`; 0 in unit tests).
+- Tests (ticket 185 tightened these): the real-I/O unit harness (a real socket and
+  `MockWebServer`, `runBlocking`, real-clock `awaitCondition`/`awaitState` from
+  `testutil/Await.kt`) is a deliberate choice over `runTest` — the socket does real
+  I/O. Its rules:
+  - `Dispatchers.Main` is an `UnconfinedTestDispatcher` kept in a field, so every
+    `viewModelScope` timer runs on ITS virtual clock: nothing advances it under
+    `runBlocking`, so a real-time `delay` never fires one. A test about a timer (a
+    poll that must not exist, a control's timeout) drives it with
+    `main.scheduler.advanceTimeBy(…)` + `runCurrent()` (`JobDetailViewModelTest`).
+  - A negative assertion ("nothing else happened") ends on a trailing sentinel on
+    the same ordered channel and awaits it — a later task frame
+    (`bash-sentinel`), a later main todo frame, a refetched page carrying a new
+    item, an unwatch sent after the timer window — never on a `delay`/`Thread.sleep`
+    margin. Where the call under test launches on the Unconfined Main, a state flag
+    it flips at launch (`isLoading`) is checked synchronously instead.
+  - A collector of a replay-less `SharedFlow` is launched with
+    `CoroutineStart.UNDISPATCHED`, so it is subscribed before `launch` returns.
+  - `tearDown` cancels AND joins every ViewModel scope and socket collection the
+    test started, while Main is still set and the server still up, before
+    `resetMain` (the ticket-049 crash): `ChatViewModelTestBase.startedViewModels`,
+    `JobDetailViewModelTest.viewModels`/`socketJobs`, `SubagentViewModelTest.socketJobs`.
+  - Compose tests select by semantics first (text, content description,
+    `assertIsOn/Off`); a test tag only where no user-visible semantics identifies the
+    node, as an `internal const` shared with production (`SWARM_MODE_CHIP_TAG`,
+    `APPROVAL_PLAN_TAG`, `TOOL_MEDIA_IMAGE_TAG`) — never a duplicated literal, which
+    lets an absence check pass after a rename. A Compose test asserts what the
+    composable owns (render state, emit callbacks); a behaviour behind a callback
+    (e.g. the swarm flag on a send) is the state holder's JVM test.

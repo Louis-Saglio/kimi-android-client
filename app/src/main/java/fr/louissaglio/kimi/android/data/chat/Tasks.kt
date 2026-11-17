@@ -1,5 +1,6 @@
 package fr.louissaglio.kimi.android.data.chat
 
+import fr.louissaglio.kimi.android.data.parseOrNull
 import java.time.Instant
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
@@ -127,7 +128,7 @@ private fun JsonPrimitive?.toInstantOrNull(): Instant? {
     val primitive = this ?: return null
     if (primitive is JsonNull) return null
     if (!primitive.isString) return primitive.longOrNull?.let(Instant::ofEpochMilli)
-    return runCatching { Instant.parse(primitive.content) }.getOrNull()
+    return parseOrNull { Instant.parse(primitive.content) }
 }
 
 private val TASK_ID = Regex("""task_id:\s*(\S+)""")
@@ -193,7 +194,7 @@ private val bashArgsJson = Json { ignoreUnknownKeys = true }
  * blank/unparseable input (the row then carries no input-derived information). */
 private fun bashArgsOf(toolName: String, argsJson: String): JsonObject? {
     if (toolName != "Bash" || argsJson.isBlank()) return null
-    return runCatching { bashArgsJson.parseToJsonElement(argsJson).jsonObject }.getOrNull()
+    return parseOrNull { bashArgsJson.parseToJsonElement(argsJson).jsonObject }
 }
 
 /** The timeout knobs of an already-parsed Bash input object — the ONE derivation
