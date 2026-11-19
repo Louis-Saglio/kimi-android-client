@@ -13,11 +13,16 @@ queued behind a running turn answered `{"aborted":true}` and left the queue
 immediately; a second call for the same id, and an unknown id, answer `40402`
 (`prompt … not found`, no `stack`). Withdrawing a queued prompt produces no
 WebSocket frame; the queue snapshot simply drops it. On the running prompt
-the route aborts it like `:abort`.
+the route aborts it like `:abort` did (now `:cancel`, ticket 209).
 
 The app renders a queued bubble with its position ("Queued #N") but offers no
 way to withdraw it: on a phone, a prompt queued by mistake can only be waited
 out.
+
+Server 2.7.0 (2026-11-19 drift; commit `b9574579`) renamed the session-level
+abort action to `:cancel`. This ticket's own route
+(`/prompts/{prompt_id}:abort`) is unchanged; its running-prompt delegation
+must post `:cancel` instead of the removed `:abort` (ticket 209).
 
 ## Description
 
@@ -29,8 +34,8 @@ out.
   frame.
 - On `40402`, close the bubble as ended without an error snackbar (the prompt
   started or was withdrawn elsewhere).
-- Keep the existing session-level `:abort` for the running turn; the bubble
-  action for a running prompt may delegate to it.
+- Keep the existing session-level cancel for the running turn (ticket 209);
+  the bubble action for a running prompt may delegate to it.
 - Do not send `prompts:steer` or any other request as part of the cancel.
 
 ## Acceptance criteria
@@ -38,7 +43,8 @@ out.
 - [ ] A queued bubble shows a cancel action; tapping it sends exactly one
       `POST .../prompts/{prompt_id}:abort` and removes the bubble.
 - [ ] A `40402` response closes the bubble as ended with no error snackbar.
-- [ ] The running bubble still uses the existing session `:abort` path.
+- [ ] The running bubble still uses the existing session `:cancel` path
+      (ticket 209).
 - [ ] A MockWebServer test covers both the success and `40402` branches.
 - [ ] Live against 2.6.3: queue a prompt behind a slow turn, cancel it, and
       `GET .../prompts` no longer lists it while the running turn continues.
