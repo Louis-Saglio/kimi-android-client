@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-11-19
-(server version `2.7.0`; since 2.6.0 the WebSocket has no handshake, and since
+by Kimi Code Web. Documented and verified against the live server on 2026-11-20
+(server version `2.7.2`; since 2.6.0 the WebSocket has no handshake, and since
 2.7.0 `/meta` publishes `kimi_agent_protocol_version` instead of `backend`).
 
 Scope: core loop + user interaction: auth check, sessions, the conversation
@@ -20,7 +20,8 @@ Every core-loop endpoint below was executed against the live server unless
 its paragraph says **source-derived**. The exact commands are shown with each
 section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `2.6.3`
+**Protocol history:** this document previously described server `2.7.0`
+(verified 2026-11-19; see git history), `2.6.3`
 (verified 2026-11-17; see git history), `2.5.3`
 (verified 2026-11-13; see git history) and the withdrawn `2.6.0` revision
 (verified 2026-11-12; see git history). Before that it described `2.5.2`
@@ -67,6 +68,63 @@ job installed it and restarted the server at 19:23 UTC. This revision
 therefore reinstates the 2.6 conversation protocol, now verified against
 `2.6.3`.
 
+The drift from 2.7.0 to 2.7.2 is **a patch release with one durability
+guarantee, one fork-slicing fix and no wire-shape change — plus several
+route/field corrections the previous revision of this document missed (two of
+them from 2.7.0's `b9574579`, the rest stale text from older revisions)**.
+The nightly job's `pending-changelog.md` covered 2.7.0→2.7.2 (11 commits);
+only `07e61204` touches `packages/kap-server`. `170c729e` and `f0ea8ac1`
+change `packages/agent-core-v2` — the latter adds engine events that
+kap-server does not forward. Live verification used server `2.7.2`, started
+`2026-11-20T19:23:54.093Z`.
+
+- **`:wait` is durable now** (commit `07e61204`; answer shape unchanged,
+  verified live). `POST ...:wait` flushes every agent's wire records and the
+  session metadata before it answers `timed_out:false`, so a server that
+  crashes right after the reply restarts with the same turns. The body, the
+  `timeout_ms:0` fast path and the 40401 family are unchanged: a busy probe
+  with `timeout_ms:0` answered `timed_out:true` in 69 ms, and a 15 s wait
+  blocked ~4.9 s until the turn ended, after which `GET .../turns` held the
+  ended turn.
+- **Fork slicing normalizes legacy steer records** (commit `170c729e`;
+  behavior only). `:fork` now normalizes legacy turn-steer records before it
+  slices the source history, so `turn_index` forks of sessions written by
+  older binaries keep the restored turn ids aligned. The fork answer and the
+  copied turns are unchanged; a live `{"turn_index":0}` fork copied the
+  source turn with the same `turn_id` and ordinal.
+- **New `loop.drained` / `loop.idle` engine events** (commit `f0ea8ac1`;
+  `packages/agent-core-v2` plus the new optional `loopLifecycleEvents` field
+  on the SDK session status; source-derived): shape
+  `{type:"loop.drained"|"loop.idle", generation, time?}`. **They are not
+  forwarded by `packages/kap-server`'s WebSocket transport** — no such frame
+  exists on `/api/v1/ws`, so clients of this server never see them.
+- **Doc corrections found live (the first two are 2.7.0's `b9574579`,
+  missed last run):**
+  - `POST /api/v1/client_configs` is **gone**; the route is now
+    `GET /api/v1/client-configs/{name}` (verified live; the old path is a
+    plain HTTP 404). The `{name, config}` payloads are unchanged.
+  - `GET|PATCH /api/v1/sessions/{id}/goal` are **gone** (plain 404s;
+    `POST .../goal` hits the action catch-all as `40001 "unsupported action:
+    goal"`). The `goal` WS frame still exists and still carries the goal.
+  - A system turn (compaction) **omits `turn_number`** instead of sending
+    `null`; treat an absent key as null.
+  - An answered `single` question flattens to the **option label**
+    (`{"Coffee or tea?":"Coffee"}`); the 2.7.0 capture of
+    `{"Coffee or tea?":"opt_0_0"}` was an anomaly. The value is informational.
+  - A corrupted session-list `page_token` answers **`40922`**
+    (`page_token is corrupted; discard it and restart from the first page`),
+    not the `40001` the previous revision recorded.
+  - Older stale text: `POST /api/v1/workspaces/{id}/add-dir` (gone before
+    2.6.3) and `POST /api/v1/mcp/servers/{id}:restart` (gone in 2.7.0) are
+    plain 404s; `GET /api/v1/mcp/servers` returns a bare array of
+    `{name, config, source, origin, mutable}`, not `{servers:[…]}`.
+- **App impact: one breakage.** `ModelsRepository.fetchClientConfig` still
+  POSTs `/api/v1/client_configs`, a 404 now, so the `model_switch_confirm`
+  gate and the `effort_switch_confirm` descriptions silently disappear
+  (`getOrNull()` → null). Ticket 212 moves the call to the GET route. No
+  other app-visible drift: sessions, conversation, tasks, interactions,
+  todos, files and compaction are byte-identical to 2.7.0.
+
 The drift from 2.6.3 to 2.7.0 is **a session- and transport-level refactor
 around an unchanged conversation protocol: turns, items, the interaction
 frame, task frames, the prompt ACK and the file routes are byte-identical to
@@ -75,8 +133,11 @@ several routes changed**. The nightly job's `pending-changelog.md` covered
 2.6.3→2.7.0 (72 commits). The protocol-bearing commits are `f538d534`
 (sessions and MCP converged onto `/api/v1`; the `/api/v2` session table is
 gone), `2f33641b` (compact session state, unified global events, snake_case
-contracts), `b9574579` (deprecated routes removed; session abort became
-cancel; `/messages` deleted), `84439d5f` (agent-to-agent `:wait`, the pending
+contracts), `b9574579` (deprecated routes removed: session abort became
+cancel, `/messages` was deleted, both `/goal` routes and the old
+`client_configs` POST went with it — the last two missed by the first
+revision of this drift report, corrected under 2.7.2 above), `84439d5f`
+(agent-to-agent `:wait`, the pending
 interactions list and `/kap.md`), `baa7b4bc` (`product` and
 `kimi_agent_protocol_version` in `/meta`) and `13d363e1` (SSH hosts:
 `event.host.changed`, `hosts=include`, out of scope here). `482936af` adds
@@ -2974,20 +3035,20 @@ Every REST response is JSON wrapped in an envelope:
 curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
 ```
 
-Verified live on 2.7.0 (2026-11-19; `features` trimmed to 5 of 18):
+Verified live on 2.7.2 (2026-11-20; `features` trimmed to 5 of 18):
 
 ```json
 {
   "code": 0, "msg": "success",
   "data": {
     "kimi_agent_protocol_version": "1.0.0",
-    "server_version": "2.7.0",
+    "server_version": "2.7.2",
     "product": "kimi-code-cli",
     "capabilities": {"websocket": true, "file_upload": true, "fs_query": true,
                      "mcp": true, "tasks": true,
                      "interactions_list": true, "session_wait": true},
-    "server_id": "01M7TM7XDPBA9EV4JYDT9H1W73",
-    "started_at": "2026-11-19T19:23:54.427Z",
+    "server_id": "01M7X6MM397VTKS5V0MR2M2VNS",
+    "started_at": "2026-11-20T19:23:54.093Z",
     "open_in_apps": [],
     "dangerous_bypass_auth": false,
     "experimental_flags": {"notify_user": false, "wait_for": true,
@@ -3001,7 +3062,7 @@ Verified live on 2.7.0 (2026-11-19; `features` trimmed to 5 of 18):
       {"name": "plan", "state": "Active", "meta": {}}
     ]
   },
-  "request_id": "01M7TMAJECW02ZDQMAGPSXSFF7"
+  "request_id": "01M7X6N7STKNKM98TM46FCRD6P"
 }
 ```
 
@@ -3014,7 +3075,7 @@ Verified live on 2.7.0 (2026-11-19; `features` trimmed to 5 of 18):
   same names. `experimental_flags` gained `prompt_prediction` (`false`
   here — the experimental next-prompt suggestion unit). Treat every flag and
   feature as optional; the app only checks the envelope.
-- `features` has **18 entries** on 2.7.0 — the 2.6.3 list plus
+- `features` has **18 entries** on 2.7.2 — the 2.6.3 list plus
   `promptPrediction`: `skill`, `btw`, `promptPrediction`, `dateChange`,
   `plan`, `fileHistory`, `externalHooks`, `debugEvents`, `swarm`, `goal`,
   `tower`, `usage`, `cron`, `reminder`, `tokenCounting`, `sessionInit`,
@@ -3174,25 +3235,28 @@ unchanged from 0.29.2):
 
 ## Client configs
 
-### Fetch — `POST /api/v1/client_configs`
+### Fetch — `GET /api/v1/client-configs/{name}`
 
-**New in 2.3.0** (commit `3f80896a`; verified live 2026-10-22). Server-proxied,
+**New in 2.3.0** (commit `3f80896a`), as `POST /api/v1/client_configs` with a
+`{"name": …}` body. **2.7.0 (commit `b9574579`) moved it to a GET with the name
+in the path** — the old POST, and the old snake_case path, are plain HTTP 404s
+(verified live on 2.7.2). The payloads stayed the same. Server-proxied,
 cloud-controlled client configs. These are named JSON blobs the managed
 service distributes (from the region or `KIMI_CODE_BASE_URL`), so Kimi can
-change client behavior without a release. Body `{"name":"<config name>"}`;
-the answer is `{"name":<echo>, "config": <object>|null}`. An unregistered
-name returns `config:null` without a network call, and a registered name
-returns `null` when the cloud value is absent or malformed. Every request
-fetches the cloud value again; there is no server-side cache.
+change client behavior without a release. The answer is
+`{"name":<echo>, "config": <object>|null}`. An unregistered name returns
+`config:null` without a network call, and a registered name returns `null`
+when the cloud value is absent or malformed. Every request fetches the cloud
+value again; there is no server-side cache.
 
 ```bash
-curl -s -X POST -H "Authorization: Bearer <token>" \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"model_switch_confirm"}' http://127.0.0.1:58627/api/v1/client_configs
+curl -s -H "Authorization: Bearer <token>" \
+  http://127.0.0.1:58627/api/v1/client-configs/model_switch_confirm
 ```
 
-Two names are registered on 2.3.3: **`model_switch_confirm`** and
-**`effort_switch_confirm`**.
+Two names are registered on 2.7.2: **`model_switch_confirm`** and
+**`effort_switch_confirm`**. The Android app still POSTs the 2.7.0-removed
+path (ticket 212).
 
 ### `model_switch_confirm`
 
@@ -3302,13 +3366,13 @@ are optional:
 curl -s -H "Authorization: Bearer <token>" 'http://127.0.0.1:58627/api/v1/sessions?page_size=2'
 ```
 
-Session object, verified live on 2.7.0 (create/list/get share it):
+Session object, verified live on 2.7.2 (create/list/get share it):
 
 ```json
-{"id":"session_cea6ce9e-c464-490b-9913-155591948b33",
+{"id":"session_aebb0ec8-2133-4b22-9ecd-52c6e6d361a7",
  "workspace_id":"wd_spike_6baf4c130e63","cwd":"/path/to/project",
- "title":"drift 2.7.0 probe","created_at":"2026-11-19T19:25:42.967Z",
- "updated_at":"2026-11-19T19:25:42.967Z","activity":"idle",
+ "title":"drift 2.7.2 probe","created_at":"2026-11-20T19:25:31.716Z",
+ "updated_at":"2026-11-20T19:25:31.716Z","activity":"idle",
  "pending_interaction":"none","archived":false}
 ```
 
@@ -3330,7 +3394,9 @@ Session object, verified live on 2.7.0 (create/list/get share it):
 - Flat answer: `{items[], total, has_more, next_page_token?}` (plus
   `unavailable_hosts?` when `hosts=include`). `total` counts the full
   filtered set. `page_size=2&page_token=<next>` walks pages without overlap;
-  an invalid token answers `40001`.
+  a corrupted/foreign token answers **`40922`** (`page_token is corrupted;
+  discard it and restart from the first page`; verified live on 2.7.2 — the
+  previous text said `40001`).
 - **Grouped answer** (`view=by_workspace`), verified live:
 
   ```json
@@ -3377,16 +3443,16 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions \
   -d '{"metadata":{"cwd":"/path/to/project"}}'
 ```
 
-Returns the session object above — verbatim from 2.7.0 (a `title` was passed):
+Returns the session object above — verbatim from 2.7.2 (a `title` was passed):
 
 ```json
 {"code":0,"msg":"success",
- "data":{"id":"session_cea6ce9e-c464-490b-9913-155591948b33",
+ "data":{"id":"session_aebb0ec8-2133-4b22-9ecd-52c6e6d361a7",
   "workspace_id":"wd_spike_6baf4c130e63","cwd":"/path/to/project",
-  "title":"drift 2.7.0 probe","created_at":"2026-11-19T19:25:42.967Z",
-  "updated_at":"2026-11-19T19:25:42.967Z","activity":"idle",
+  "title":"drift 2.7.2 probe","created_at":"2026-11-20T19:25:31.716Z",
+  "updated_at":"2026-11-20T19:25:31.716Z","activity":"idle",
   "pending_interaction":"none","archived":false},
- "request_id":"01M7TMB7F50E1JB2T6ST9DZ5WV"}
+ "request_id":"01M7X6QKFGK7ME71C6G934Z32K"}
 ```
 
 Fresh sessions created without a `title` come back with `"title": ""` —
@@ -3407,14 +3473,17 @@ deletion is the `:delete` action.
 Returns the same session object as the list. Query `hosts=include` also
 searches SSH hosts (out of scope). There is still no cursor field: the
 conversation is read page by page with `before_ordinal`. Unknown id →
-`40401` with the standard envelope (no `stack`; verified live on 2.7.0).
+`40401` with the standard envelope (no `stack`; verified live on 2.7.2).
 
 ### Wait — `POST /api/v1/sessions/{id}:wait`
 
 **New in 2.7.0** (commit `84439d5f`; the `session_wait` capability; verified
-live). Long-polls until the session is "settled": no main turn running, or a
-pending interaction exists. Body `{timeout_ms?}` — default 15000, max 60000,
-`0` returns a snapshot without blocking. Success:
+live on 2.7.0 and 2.7.2). Long-polls until the session is "settled": no main
+turn running, or a pending interaction exists. Body `{timeout_ms?}` — default
+15000, max 60000, `0` returns a snapshot without blocking. **2.7.2 (commit
+`07e61204`):** a `timed_out:false` answer is durable — the server flushes the
+agents' wire records and the session metadata to disk first, so a restart
+right after the reply shows the same turns. Success:
 
 ```json
 {"code":0,"msg":"success",
@@ -3514,7 +3583,7 @@ with `archived:false` — verbatim capture, trimmed:
 ```
 
 - Archive pushes a `{"type":"session","change":"archived"}` global frame;
-  restore pushes `change:"restored"` (both verified live on 2.7.0). The frame
+  restore pushes `change:"restored"` (both verified live on 2.7.2). The frame
   carries the full session object, so other clients patch the row without a
   refetch.
 - Archiving never bumps `updated_at` (upstream commit `43c68f58`): the capture
@@ -3646,7 +3715,7 @@ idle).
 
 Writes session-level agent config — the per-session permission-mode override
 the chat permission-mode picker (ticket 141) writes through as
-`agent_config.permission_mode`. Verified live on 2.7.0 (2026-11-19).
+`agent_config.permission_mode`. Verified live on 2.7.2 (2026-11-20).
 
 ```bash
 curl -s -X POST 'http://127.0.0.1:58627/api/v1/sessions/session_ff2d15fc-.../profile' \
@@ -3655,7 +3724,7 @@ curl -s -X POST 'http://127.0.0.1:58627/api/v1/sessions/session_ff2d15fc-.../pro
   -d '{"agent_config":{"permission_mode":"manual"}}'
 ```
 
-**2.7.0 answers `{session, agent}`** — the session object plus the main
+**2.7.x answers `{session, agent}`** — the session object plus the main
 agent's state, verbatim (trimmed):
 
 ```json
@@ -3683,14 +3752,16 @@ agent's state, verbatim (trimmed):
   recorded once at the 0.40.1 drift notes, commit `08a2fb00`; the per-prompt
   `permission_mode` override in Prompts takes the same values).
 
-### Session goal — `GET|PATCH /api/v1/sessions/{id}/goal`
+### Removed: session goal routes (2.7.0)
 
-**New in 2.5.0** (`GET` verified live 2026-11-04; `PATCH` source-derived).
-`GET` returns `data: null` when the session has no goal; otherwise the goal
-object: `{objective, status:"active"|"paused"|"blocked"|"complete",
-completion_criterion?, turns_used, tokens_used, wall_clock_ms}`. The same
-object rides the `goal` WS frame. `PATCH` edits the current goal's objective
-in place (commit `07723966`); the app does not call either route.
+`GET|PATCH /api/v1/sessions/{id}/goal` were removed in 2.7.0 (commit
+`b9574579`; verified live on 2.7.2 — both are plain HTTP 404s, and
+`POST .../goal` answers `40001 "unsupported action: goal"` through the action
+catch-all). The goal itself is still live on the wire: the `goal` WS frame
+carries `{objective, status:"active"|"paused"|"blocked"|"complete",
+completion_criterion?, turns_used, tokens_used, wall_clock_ms}`, and the
+`CreateGoal`/`GetGoal`/`UpdateGoal`/`SetGoalBudget` tools remain. The app
+never called the routes.
 
 ### Session warnings — `GET /api/v1/sessions/{id}/warnings`
 
@@ -3802,29 +3873,14 @@ envelope **leaks a `stack` field** (the first route observed doing so; since
 0.32.0 every Error2 domain-error envelope carries one — see Response
 envelope).
 
-### Add a directory — `POST /api/v1/workspaces/{id}/add-dir`
+### Removed: add a directory (before 2.6.3)
 
-**New in 0.40.1** (upstream commit `a23ff563`; every behavior below verified
-live 2026-09-02 on 0.40.1). Adds an extra root directory to a workspace.
-Body: `{"path": "<dir>", "persist": <bool, optional>}` — `path` accepts a
-relative path (resolved against the workspace root) and `~`/`~/…`
-(expanded); `persist` defaults to `true` and appends the dir to
-`<root>/.kimi-code/local.toml` (`[workspace] additional_dir = [...]`).
-
-```bash
-curl -s -X POST http://127.0.0.1:58627/api/v1/workspaces/wd_…/add-dir \
-  -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
-  -d '{"path":"subdir-a"}'
-# {"code":0,"msg":"success","data":{"project_root":"/path/to/project",
-#  "config_path":"/path/to/project/.kimi-code/local.toml",
-#  "additional_dirs":["/path/to/project/subdir-a"],"persisted":true},"request_id":"…"}
-```
-
-Errors (all HTTP-200 envelopes): empty `path` → `40001` with `details`;
-missing/non-directory path → **`40409`** `"path <p> does not exist"` (same
-code as session-create's unknown `cwd`, different message); unknown
-workspace → `40410` (same code as the trust route's). The Android app never
-calls this route.
+`POST /api/v1/workspaces/{id}/add-dir` was the 0.40.1 way to add an extra
+root directory (`{"path", "persist"}` → `{project_root, config_path,
+additional_dirs, persisted}`). It is a plain HTTP 404 on 2.7.2 and is absent
+from the 2.6.3 source too — the route had already gone before the 2.6 line.
+Extra roots now come from the workspace object's `additional_dirs[]` and the
+`workspaces` config projection. The Android app never called the route.
 
 ## Messages (removed in 2.7.0)
 
@@ -3872,7 +3928,7 @@ This replaced the transcript protocol in 2.6.0. There is no op stream, no
 | `end_reason` | For `interrupted`: `user_cancelled` / `aborted`. For `failed`: `error` / `max_steps` / `filtered` / `blocked` |
 | `error` | Failed turns only: `{code, message, name?, status_code?, request_id?, retryable?}` |
 | `retry` | Schema-derived (not observed live). Running turns only, while a failed model request waits to retry: `{attempt, next_attempt, max_attempts, delay_ms, error:{name,message,status_code?}}`. Cleared when the next step starts, a step ends, or the turn ends |
-| `turn_number` | The engine's turn number; the file-history routes key on it. `null` on `system` turns (verified live 2.6.3) |
+| `turn_number` | The engine's turn number; the file-history routes key on it. Absent on `system` turns on 2.7.2 (it was `null` on 2.6.3) |
 | `started_at`, `ended_at?`, `duration_ms?` | Timing |
 | `usage` | Sum of the steps' usage: `{input_other, output, input_cache_read, input_cache_creation}` |
 | `steps` | Ended steps, ordered by `index`: `{index, outcome, started_at, ended_at?, finish_reason?, usage?}`. `outcome` is `completed`/`interrupted`/`failed` |
@@ -4428,7 +4484,7 @@ curl -s -X POST 'http://127.0.0.1:58627/api/v1/sessions/<session>:cancel' \
 # {"code":0,"msg":"success","data":{"cancelled":true},"request_id":"01M7TMM41WF18QBTPRCD36N0Z1"}
 ```
 
-**Sequence (verified live on 2.7.0):** the active step's `turn.updated`
+**Sequence (verified live on 2.7.2):** the active step's `turn.updated`
 carries `outcome:"interrupted"`, `finish_reason:"interrupted"`; `turn.ended`
 reports `outcome:"interrupted"`, `end_reason:"user_cancelled"`; the session's
 `{"type":"session","change":"updated"}` global frame goes to
@@ -4513,14 +4569,17 @@ trimmed):
 - The result item has no `result` object: its fields sit directly on the item
   (`summary`, `tokens_before`, `tokens_after`, `compacted_count`,
   `instruction?`, `trigger`). There is no `kept_user_message_count` and no
-  `context.spliced` frame on 2.6.x.
+  `context.spliced` frame on 2.6.x. **2.7.2:** the system turn omits
+  `turn_number` entirely (2.6.3 sent `null`) — treat an absent key as null.
 - **Counters are optional in practice (2.6.3).** The first `{}` compaction of
   this run returned a `system` item with `trigger` and `summary` only: no
   `tokens_before`, no `tokens_after`, no `compacted_count`. The next
   `{"instruction":…}` compaction on the same session carried all three
   (`24419`, `23825`, `23`). The system turn's header carries
   `turn_number:null` and arrives with `status:"ended"` and
-  `outcome:"completed"` already set.
+  `outcome:"completed"` already set. **2.7.2:** both compactions of the run
+  carried all three counters (`22395`/`23134`/`10` and `23282`/`23293`/`4`),
+  and the header omitted `turn_number`.
 - A cancelled or failed compaction leaves nothing in the conversation and
   pushes a `notice` frame with `code:"compaction.cancelled"` (example in
   WebSocket → Session frames). No `compaction.started`/`.completed`/`.failed`
@@ -4681,9 +4740,9 @@ After `{"kind":"question","answers":{"q_0":{"kind":"single","option_id":"opt_0_0
  "request":{…},"response":{"answers":{"Do you prefer cake or pie?":"Cake"}}}
 ```
 
-The live 2.7.0 capture of an option pick flattened to the option id
-(`{"Coffee or tea?":"opt_0_0"}`); the value is informational — the client
-knows what it picked.
+The live 2.7.2 capture of an option pick flattened to the option label
+(`{"Coffee or tea?":"Coffee"}`); a 2.7.0 capture read `opt_0_0` instead. The
+value is informational — the client knows what it picked.
 
 Notes:
 
@@ -4980,13 +5039,15 @@ list no longer contains `EnterPlanMode` (plan mode became user-only), and
 (verified live 2026-11-05): 36 entries — 27 builtins + 9 MCP; the builtin
 set includes `ReadMediaFile`** (the count stays model/session-state
 dependent — keep treating it as live state). The app reads tool names and
-`source`, so the swing is invisible to it. Two MCP routes ride along (both verified live
-2026-08-27):
-
-- `GET /api/v1/mcp/servers` →
-  `{"servers":[{"id":"tavily","name":"tavily","transport":"http","status":"connected","tool_count":5},…]}`.
-- `POST /api/v1/mcp/servers/{id}:restart` → `{"restarting":true}`;
-  unknown id → `404` family (`mcp_server_not_found`).
+`source`, so the swing is invisible to it. The MCP management plane is out of
+this document's scope, but its list route's shape changed in 2.7.0: **verified
+live on 2.7.2** `GET /api/v1/mcp/servers` returns `data` as a **bare array** of
+`{name, config:{transport, url, headers?}, source:"global"|…, origin,
+mutable}` — no `{servers:[…]}`, and no `id`/`status`/`tool_count` fields. The
+0.39.0 `POST /api/v1/mcp/servers/{id}:restart` route is gone; 2.7.2 registers
+`GET /mcp/servers/{name}`, `POST /mcp/servers`, `PATCH|DELETE
+/mcp/servers/{name}` and the `mcp/servers::test`/`::inspect` actions. The app
+reads no MCP route.
 
 **Liveness caveat (verified 2026-07-31, again 2026-08-27 on 0.39.0):** the
 route resolves the catalog from
@@ -5584,18 +5645,22 @@ restore:
   are never replayed. Refresh over REST after a gap.
 
 
-### Captured round-trips (2.7.0)
+### Captured round-trips (2.7.2)
 
 A plain prompt on a subscribed session (one Bash tool-calling turn) produced,
-in order: `session`/`updated` (`last_prompt`, `activity:"turn"`) →
-`turn.started` → `item.ended` (`user_message`) → `agent` (running) →
-`context` → tool `item.started`/`item.delta` (`input_text`) → `item.updated`
-(`stage:"executing"`, `input`, `display`) → `task` (running) →
-`item.delta` (`output`) → `task` (ended) → tool `item.ended` →
+in order: `session`/`updated` (`last_prompt`, `activity:"idle"` at acceptance)
+→ `turn.started` → `item.ended` (`user_message`) → `agent` (running) →
+`session`/`updated` (`activity:"turn"`) → `context` → tool
+`item.started`/`item.delta` (`input_text`) → `item.ended` (empty `reasoning`)
+→ `item.updated` (`stage:"executing"`, `input`, `display`) → `task` (running)
+→ `item.delta` (`output`) → `task` (ended) → tool `item.ended` →
 `turn.updated` (step completed) → reply `item.started`/`item.delta`/`item.ended`
 → `turn.updated` (last step) → `turn.ended` → `agent` (idle) →
 `session`/`updated` (`activity:"idle"`, `last_turn_outcome:"completed"`) →
-`context`. The exact item captures are in Conversation.
+`context`. The exact item captures are in Conversation. Also new on 2.7.2:
+empty `reasoning` items (one per step here, `text:""`, `duration_ms:0`) end
+between the tool call and the reply; clients that render `reasoning` should
+skip empty text.
 
 **Steer** (prompt A running, direct steer B): A's step ends `interrupted`
 (`finish_reason:"interrupted"`), A's turn ends `completed`, B's `item.ended`
@@ -5639,9 +5704,11 @@ still no `subagent.*` frames.
 
 ### Removed or renamed in 2.7.0
 
-`GET /api/v2/sessions*` (the whole v2 plane), `GET .../messages*`, the
-`:abort` action, the `usage` session frame (now `context`), the
-`session.meta.updated` and `event.session.work_changed` events (now
+`GET /api/v2/sessions*` (the whole v2 plane), `GET .../messages*`,
+`GET|PATCH .../goal`, the `:abort` action, the `POST /api/v1/client_configs`
+form (now `GET /api/v1/client-configs/{name}`), the `usage` session frame
+(now `context`), the `session.meta.updated` and
+`event.session.work_changed` events (now
 `session`/`updated`), the `event.session.created|archived|restored|deleted`
 family (now `session`/`created|archived|restored|deleted`),
 `event.config.changed`/`event.config.warning` (now `config`),
@@ -5662,6 +5729,53 @@ There are no `seq`, `epoch` or `resync_required` fields on 2.6.0. The old v3
 protocol (0.43.0, removed in 2.0.2) remains gone.
 
 ## Verification log
+
+- 2026-11-20 re-verification on `2.7.2` (server 2.7.0 → 2.7.2; the nightly
+  job's `pending-changelog.md` covered the 11 commits, reviewed via the
+  GitHub API — `07e61204` flushes `:wait` state to disk, `170c729e`
+  normalizes legacy turn-steer records before fork slicing, `f0ea8ac1` adds
+  the internal `loop.drained`/`loop.idle` engine events (not forwarded by
+  kap-server), the rest is desktop/TUI/web/CI; throwaway sessions created
+  with `metadata.cwd=/path/to/project` and deleted after probing; live probes
+  over REST and websocat against `127.0.0.1:58627`, server started
+  `2026-11-20T19:23:54.093Z`). Drift found: no wire-shape change from 2.7.0;
+  two 2.7.0 route changes missed by the previous report (client configs moved
+  to `GET /api/v1/client-configs/{name}`; `GET|PATCH .../goal` removed), the
+  compaction system turn omits `turn_number`, answered single questions
+  flatten to the option label, a corrupted session-list `page_token` answers
+  `40922`, and older stale text was corrected (`add-dir` and
+  `mcp/servers/{id}:restart` 404, the MCP list is a bare array). Verified
+  live: `/meta` (18 features, 7
+  capabilities), config (`deepseek/deepseek-v4-flash`, `max`, `auto`, 3
+  providers), models (12), tools (36 = 27 builtins + 9 MCP after a session
+  ran), flat/grouped/`fields` session lists, create/get/profile/warnings,
+  `:wait` idle + `timeout_ms:0` + a 15 s wait across a running turn (the
+  ended turn readable afterwards), fork `{}` and `{"turn_index":0}` (same
+  turn id and ordinal), archive/restore/delete global frames, turns REST, a
+  full prompt round-trip (`session`/`updated` → `turn.started` → user
+  `item.ended` → `agent` → `context` → tool `item.*`/`task` → empty
+  `reasoning` → reply `item.*` → `turn.updated` → `turn.ended` → idle),
+  queued steer (`prompts:steer` → next turn opener), direct `/steer`,
+  `prompts:steer` idle `40402`, `:cancel` mid-turn (killed task, interrupted
+  tool, `user_cancelled`) and idle `{"cancelled":false}`, `:abort` `40001`,
+  compactions `{}` and `{"instruction":…}` (system turn, all counters, no
+  `turn_number`), the empty-history `40910` and the busy-session `40910`,
+  questions (pending REST list, `?status=pending` accepted, answer →
+  `answered` with the option label, re-answer `40902`, unknown `40404`),
+  approvals (pending/ended frames, `approved`, re-answer `40902`), the
+  `TodoList` write and `{}` read (`todo` frames, `display.todo_list`),
+  foreground/background sub-agents (`task` frames, `agent_refs`,
+  `detached` true/false, REST `/tasks` 404), files (upload, download 200,
+  `Range` 206, prompt image → `session_media` + `name`, delete → `40407`,
+  session media 200), WS subscribe order (response → pending interactions →
+  `task.list`/`agent`/`context`/`goal`/`todo` → `turns`), unknown-session
+  `40401`, malformed subscribe `40001`, bare ping/pong, and the
+  `kimi-code/k3` `provider.auth_error` turn + `notice`. Not probed: SSH
+  hosts, MCP management, plugins, capabilities install, `task.watch`/`stop`
+  (unchanged since 2.6.3), `:undo` beyond its `40911` boundary check.
+  App impact: ticket 212 (client-configs route). Unit tests:
+  `:app:testDebugUnitTest --rerun-tasks` — 1100 tests, 0 failures,
+  1 skipped.
 
 - 2026-11-19 re-verification on `2.7.0` (server 2.6.3 → 2.7.0; the nightly
   job's `pending-changelog.md` covered the 72 commits, reviewed through the
