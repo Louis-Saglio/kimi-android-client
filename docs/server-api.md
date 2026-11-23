@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-11-20
-(server version `2.7.2`; since 2.6.0 the WebSocket has no handshake, and since
+by Kimi Code Web. Documented and verified against the live server on 2026-11-23
+(server version `2.7.3`; since 2.6.0 the WebSocket has no handshake, and since
 2.7.0 `/meta` publishes `kimi_agent_protocol_version` instead of `backend`).
 
 Scope: core loop + user interaction: auth check, sessions, the conversation
@@ -14,13 +14,16 @@ todos, the tools catalog, the client-configs proxy and the session-rating
 rules, plus
 the workspace list used by the mobile create-session flow. Explicitly skipped:
 `fs:*`, terminals, cron, goals' write path, providers, skills, plugins, the
-SSH hosts plane and remote environments.
+SSH hosts plane, remote environments and the feedback service (2.7.3; its
+routes are summarised in the drift block only, as they are desktop/web
+product feedback).
 
 Every core-loop endpoint below was executed against the live server unless
 its paragraph says **source-derived**. The exact commands are shown with each
 section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `2.7.0`
+**Protocol history:** this document previously described server `2.7.2`
+(verified 2026-11-20; see git history), `2.7.0`
 (verified 2026-11-19; see git history), `2.6.3`
 (verified 2026-11-17; see git history), `2.5.3`
 (verified 2026-11-13; see git history) and the withdrawn `2.6.0` revision
@@ -67,6 +70,103 @@ was re-pointed to `2.5.3` at 18:53 UTC that day and the nightly job installed
 job installed it and restarted the server at 19:23 UTC. This revision
 therefore reinstates the 2.6 conversation protocol, now verified against
 `2.6.3`.
+
+The drift from 2.7.2 to 2.7.3 is **one additive REST surface (feedback), one
+model-recovery fix and one additive tool-state family; no core-loop frame,
+route body or existing enum changed**. The nightly job's `pending-changelog.md` covered
+2.7.2→2.7.3 (6 commits). Only `2348f531` (sessions whose saved model became
+unavailable), `fce3af9e` (feedback routes and reply attribution) and
+`f81c924b` (MCP OAuth tool state) change server-visible behaviour; the rest
+is desktop/web UI, engine-internal MCP probing and CI. Live verification used
+server `2.7.3`, started `2026-11-23T19:23:56.698Z`.
+
+- **`/meta` gains `feedback`** (commit `fce3af9e`; verified live). The
+  capability list is 8 entries now: `websocket`, `file_upload`, `feedback`,
+  `fs_query`, `mcp`, `tasks`, `interactions_list`, `session_wait`.
+  `features` stays 18 and `experimental_flags` is unchanged. Verbatim
+  (`features` trimmed to 5 of 18):
+
+  ```json
+  {"code":0,"msg":"success","data":{
+    "kimi_agent_protocol_version":"1.0.0","server_version":"2.7.3",
+    "product":"kimi-code-cli",
+    "capabilities":{"websocket":true,"file_upload":true,"feedback":true,
+                    "fs_query":true,"mcp":true,"tasks":true,
+                    "interactions_list":true,"session_wait":true},
+    "server_id":"01M84XTVK0MZ6G16J4HHSMR892",
+    "started_at":"2026-11-23T19:23:56.698Z",
+    "open_in_apps":[],"dangerous_bypass_auth":false,
+    "experimental_flags":{"notify_user":false,"wait_for":true,
+                          "prompt_prediction":false,"subagent_fork":false,
+                          "tower":false,"tool-select":false},
+    "features":[{"name":"skill","state":"Active","meta":{}},
+                {"name":"btw","state":"Active","meta":{}},
+                {"name":"promptPrediction","state":"Active","meta":{}},
+                {"name":"dateChange","state":"Active","meta":{}},
+                {"name":"plan","state":"Active","meta":{}}]},
+   "request_id":"01M84XTV…"}
+  ```
+
+- **New feedback routes** (same commit; source-derived, only the `40001`
+  validation envelope probed live: submitting feedback sends data to Kimi's
+  service, which this probe does not do). `POST /api/v1/feedback` takes a
+  discriminated union: a global report
+  `{kind:"global", source:"sidebar"|"command", category:"bug"|"suggestion"|
+  "other", content (1–2000 chars), session_id?, client?:"desktop"|"web",
+  upload_session?, upload_logs?}` or a reply rating `{kind:"turn",
+  session_id, turn_id, reply_id?, rating:"up"|"down", client?}`; it answers
+  `{feedback_id}`. `PATCH /api/v1/feedback/{feedback_id}` adds details
+  (`{kind:"details", reasons:[…], content?, upload_session?}`) or cancels
+  (`{kind:"cancel"}`). `POST /api/v1/feedback/{id}/attachments?kind=media|
+  diagnostics` takes one multipart `file` (images ≤10 MiB, video ≤100 MiB,
+  diagnostics zip ≤500 MiB) and answers `{upload_id}`;
+  `POST /api/v1/feedback/{id}/attachments/session` exports and uploads the
+  named session (`{session_id, host_id?}`); `POST
+  /api/v1/feedback/session-archives` prepares an expiring session-only zip
+  (`{file_id, size}`, 24 h TTL). Validation failures answer `40001`, a
+  missing or wrong bearer token `40101`, an unknown session/turn `40401`, an
+  oversized attachment `41301`, and a rejected feedback record the new
+  **`40936`** (`feedback_rejected`). There is no WebSocket feedback event.
+  The client enum is `desktop`|`web` only: an Android caller is recorded as
+  `desktop` unless it claims `client:"web"`, so this surface is out of scope
+  for the app. `GET /api/v1/client-configs/feedback_form` is now a registered
+  config (verified live):
+  `{version:1, reply_reasons:{negative:[{id,label:{zh,en}}…],
+  positive:[…]}, learn_more_url?:{en,zh}}`.
+- **A session whose saved model was removed opens again** (commit `2348f531`;
+  source-derived from the 2.7.3 conversation contract test, because probing it
+  needs a config edit and a server restart). The session loads its history and
+  the main agent's `agent` frame omits `model`/`thinking`. After the `turns`
+  page the server sends one warning notice, once per subscribe:
+  `{"type":"notice","level":"warning","title":"<the removed alias>",
+  "code":"model.not_configured", …}`. A prompt that does not override the
+  model runs on the configured default; the session's stored alias stays as
+  it was. This is the first `notice` sent at subscribe time (all earlier ones
+  were turn-time).
+- **Turn-end model attribution stays engine-internal** (commit `fce3af9e`).
+  The engine's `TurnEnded` payload gained optional
+  `replyModel:{provider,model}` and
+  `modelSteps:[{step,role:"step"|"subagent",model,provider,isKfc,requestId?}]`;
+  `packages/kap-server` consumes them for the feedback rating and never adds
+  them to the conversation. A live `turn.ended` frame on 2.7.3 still carries
+  only the turn header (`turn_id`, `ordinal`, `kind`, `status`,
+  `turn_number`, `started_at`, `steps`, `usage?`, `outcome`, `ended_at`,
+  `duration_ms`, `error?`). No client change.
+- **MCP OAuth tool state** (commit `f81c924b`; additive). A built-in MCP auth
+  call carries `display:{kind:"generic",summary,detail:{kind:"mcp_oauth",
+  serverName}}`. While it waits, the tool item's `fields` map gains
+  `"mcp.oauth.authorization_url":{waitId,serverName,authorizationUrl,
+  expiresAt}`; a reconnect sets `fields["mcp.oauth.reconnecting"]:true`. A
+  failed flow ends with `note:"mcp.oauth.cancelled"|"mcp.oauth.expired"|
+  "mcp.oauth.reconnect_failed"` and no longer appends the authorization URL
+  to the error output. The URL is dropped from the item when the call ends.
+  No frame or route shape changed; the app has no MCP auth surface.
+- **App impact: none breaking.** The session/list/conversation/prompt/steer/
+  cancel/compact/interaction/todo/sub-agent/file shapes above were re-probed
+  unchanged. The one app-visible addition is the `model.not_configured`
+  warning: the app decodes no `notice` frame today, so ticket 198 will surface
+  it as a banner, and improvement ticket 213 clears the stale per-session
+  model so the next prompt stops carrying the dead alias.
 
 The drift from 2.7.0 to 2.7.2 is **a patch release with one durability
 guarantee, one fork-slicing fix and no wire-shape change — plus several
@@ -3035,20 +3135,20 @@ Every REST response is JSON wrapped in an envelope:
 curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
 ```
 
-Verified live on 2.7.2 (2026-11-20; `features` trimmed to 5 of 18):
+Verified live on 2.7.3 (2026-11-23; `features` trimmed to 5 of 18):
 
 ```json
 {
   "code": 0, "msg": "success",
   "data": {
     "kimi_agent_protocol_version": "1.0.0",
-    "server_version": "2.7.2",
+    "server_version": "2.7.3",
     "product": "kimi-code-cli",
-    "capabilities": {"websocket": true, "file_upload": true, "fs_query": true,
-                     "mcp": true, "tasks": true,
+    "capabilities": {"websocket": true, "file_upload": true, "feedback": true,
+                     "fs_query": true, "mcp": true, "tasks": true,
                      "interactions_list": true, "session_wait": true},
-    "server_id": "01M7X6MM397VTKS5V0MR2M2VNS",
-    "started_at": "2026-11-20T19:23:54.093Z",
+    "server_id": "01M84XTVK0MZ6G16J4HHSMR892",
+    "started_at": "2026-11-23T19:23:56.698Z",
     "open_in_apps": [],
     "dangerous_bypass_auth": false,
     "experimental_flags": {"notify_user": false, "wait_for": true,
@@ -3062,7 +3162,7 @@ Verified live on 2.7.2 (2026-11-20; `features` trimmed to 5 of 18):
       {"name": "plan", "state": "Active", "meta": {}}
     ]
   },
-  "request_id": "01M7X6N7STKNKM98TM46FCRD6P"
+  "request_id": "01M84XTV…"
 }
 ```
 
@@ -3070,13 +3170,15 @@ Verified live on 2.7.2 (2026-11-20; `features` trimmed to 5 of 18):
   speaks) and `product` (`"kimi-code-cli"` here; a hosted or desktop build
   names itself) are new; **`backend` is gone**. `capabilities` reads
   `{websocket, file_upload, fs_query, mcp, tasks, interactions_list,
-  session_wait}` — `terminal` is gone (`GET .../environments` still exists),
+  session_wait}` on 2.7.0–2.7.2 and adds **`feedback`** (commit `fce3af9e`)
+  on 2.7.3. `terminal` is gone (`GET .../environments` still exists),
   `interactions_list` and `session_wait` document the 2.7.0 routes of the
-  same names. `experimental_flags` gained `prompt_prediction` (`false`
+  same names, and `feedback` documents the 2.7.3 feedback routes.
+  `experimental_flags` gained `prompt_prediction` (`false`
   here — the experimental next-prompt suggestion unit). Treat every flag and
   feature as optional; the app only checks the envelope.
-- `features` has **18 entries** on 2.7.2 — the 2.6.3 list plus
-  `promptPrediction`: `skill`, `btw`, `promptPrediction`, `dateChange`,
+- `features` has **18 entries** on 2.7.3 — the same list as 2.7.2:
+  `skill`, `btw`, `promptPrediction`, `dateChange`,
   `plan`, `fileHistory`, `externalHooks`, `debugEvents`, `swarm`, `goal`,
   `tower`, `usage`, `cron`, `reminder`, `tokenCounting`, `sessionInit`,
   `todo`, `notify`. All `"Active"` with empty `meta`. The `usage` entry is
@@ -5448,7 +5550,11 @@ booleans `plan_mode`/`swarm_mode`/`tower_mode`. Verbatim:
 ```
 
 A model-less session omits `model`/`thinking`. `compacting` is true for the
-whole of a context compaction, inside or outside a turn. The running turn and
+whole of a context compaction, inside or outside a turn. **2.7.3:** a session
+whose saved model alias is no longer configured in `config.toml` also omits
+`model`/`thinking` (it used to fail to open), and the subscribe-time
+`model.not_configured` warning notice below explains it; the next prompt
+runs on the default model. The running turn and
 the retry state come with the conversation frames, not here. `agent` is sent
 when a connection starts receiving an agent and on every change.
 
@@ -5503,7 +5609,17 @@ offset. The first chunk is the tail (32 KiB default) after `since_offset`;
 
 A failed compaction's shape is source-derived (not triggered this run):
 `{"type":"notice","level":"error","title":"…","code":"compaction.cancelled"}`.
-Notices are not replayed on subscribe.
+Notices are not replayed on subscribe, with one exception: since 2.7.3 a
+session whose saved model is no longer configured gets a **subscribe-time**
+warning, sent once per `subscribe` right after its
+`turns` page (source-derived from the 2.7.3 contract test):
+
+```json
+{"type":"notice","level":"warning","title":"old","code":"model.not_configured",
+ "session_id":"session_…","agent_id":"main","event_created_at":"…"}
+```
+
+`title` is the removed model alias. The frame carries no `detail`.
 
 **`turns` / `turns.removed` / `turns.failed`** — the conversation page and its
 removals. Verbatim `turns.removed` after an undo:
@@ -5702,6 +5818,10 @@ id:<task>}`, `output.file`), and `session`/`updated` reported
 `activity:"background"` while only that sub-agent kept working. There are
 still no `subagent.*` frames.
 
+The whole list repeated unchanged on **2.7.3 (2026-11-23)**: the order and the
+item/frame payloads above were re-captured from a fresh session, with the same
+`provider.auth_error` turn and notice for `kimi-code/k3`.
+
 ### Removed or renamed in 2.7.0
 
 `GET /api/v2/sessions*` (the whole v2 plane), `GET .../messages*`,
@@ -5729,6 +5849,47 @@ There are no `seq`, `epoch` or `resync_required` fields on 2.6.0. The old v3
 protocol (0.43.0, removed in 2.0.2) remains gone.
 
 ## Verification log
+
+- 2026-11-23 re-verification on `2.7.3` (server 2.7.2 → 2.7.3; the nightly
+  job's `pending-changelog.md` covered the 6 commits, reviewed via the GitHub
+  API: `2348f531` keeps a session with a removed model open, `fce3af9e` adds
+  the feedback routes and reply attribution, `f81c924b` reports MCP OAuth tool
+  state, the rest is desktop/web UI and CI; throwaway sessions created with
+  `metadata.cwd=/path/to/project` and deleted after probing; live probes
+  over REST and WebSocket against `127.0.0.1:58627`, server started
+  `2026-11-23T19:23:56.698Z`). Drift found: no core-loop wire-shape change.
+  Verified live: `/meta` (8 capabilities including `feedback`, 18 features,
+  unchanged flags), config (`deepseek/deepseek-v4-flash`, `max`, `auto`, 3
+  providers), models (12), the new `feedback_form` client config, flat/grouped
+  and `fields` session lists, a corrupted `page_token` (`40922`),
+  create/get/warnings/profile POST (`{session, agent}`), fork/archive/restore/
+  delete, `:wait` idle `timeout_ms:0`, default and a 6 s busy wait, `/status`,
+  `/snapshot`, `/tasks`, `/messages` and `/goal` all 404, turns REST, a full
+  prompt round-trip (same frame set as 2.7.2), prompt idempotency (same id and
+  body, `40927` on a changed body), the `kimi-code/k3` 403 turn + notice,
+  queued steer, direct steer, `:cancel` busy/idle and `:abort` `40001`,
+  compact `{}` and `{"instruction":…}` (system turn without `turn_number`,
+  the agent `compacting` true/false frames) plus the empty and busy `40910`s,
+  questions (pending list with and without `?status=pending`, an answer
+  flattening to the option label, dismiss, re-answer `40902`, unknown
+  `40404`), approvals (pending/ended frames, `approved`), the `TodoList` write
+  and `{}` read (`todo` frames, `display.todo_list`), foreground/background
+  sub-agents (`task` frames, `agent_refs`, the child's `turns`), files
+  (upload, download 200, `Range` 206, delete → HTTP-404 `40407`, session
+  media, an image prompt rewriting to `session_media`), subscribe order
+  (response → pending interactions → `task.list`/`agent`/`context`/`goal`/
+  `todo` → `turns`), pending interactions re-sent after a reconnect, `:reload`
+  replaying the state frames and `turns`, the heartbeat `{"type":"ping"}`,
+  unknown-session `40401`, malformed-subscribe `40001`, and the
+  missing-`request_id` close (`invalid message`). Source-derived, not probed
+  live: the 2.7.3
+  `model.not_configured` subscribe notice and its model-less `agent` frame
+  (needs a config edit and restart; shape from the upstream contract test),
+  and the feedback routes beyond their `40001` validation envelope. App
+  impact: no breakage; improvement ticket 213 (clear the dead per-session
+  model when the notice arrives). Unit tests: ran
+  `:app:testDebugUnitTest --rerun-tasks`, 1100 tests, 0 failures,
+  1 skipped.
 
 - 2026-11-20 re-verification on `2.7.2` (server 2.7.0 → 2.7.2; the nightly
   job's `pending-changelog.md` covered the 11 commits, reviewed via the
