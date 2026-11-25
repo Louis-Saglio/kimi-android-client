@@ -1,28 +1,32 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-11-23
-(server version `2.7.3`; since 2.6.0 the WebSocket has no handshake, and since
-2.7.0 `/meta` publishes `kimi_agent_protocol_version` instead of `backend`).
+by Kimi Code Web. Documented and verified against the live server on 2026-11-25
+(server version `2.8.0`; since 2.6.0 the WebSocket has no handshake, since
+2.7.0 `/meta` publishes `kimi_agent_protocol_version` instead of `backend`, and
+since 2.8.0 sessions name their project root and environment, turn headers
+carry `continuation`, and the server exposes `:continue`, agent `:close` and
+the context-inspection routes).
 
 Scope: core loop + user interaction: auth check, sessions, the conversation
 (turns and items), prompts,
 steer, interactions (approvals and questions, their pending list and the
 session wait), cancel, WebSocket events, file attachments,
 tool-result media, sub-agents (foreground lifecycle + background task store),
-todos, the tools catalog, the client-configs proxy and the session-rating
-rules, plus
+todos, the tools catalog, context inspection, the client-configs proxy and the
+session-rating rules, plus
 the workspace list used by the mobile create-session flow. Explicitly skipped:
 `fs:*`, terminals, cron, goals' write path, providers, skills, plugins, the
-SSH hosts plane, remote environments and the feedback service (2.7.3; its
-routes are summarised in the drift block only, as they are desktop/web
-product feedback).
+SSH hosts plane, remote environments, side-chat UI and the feedback service
+(2.8.0; its routes are summarised in the drift block only, as they are
+desktop/web product feedback).
 
 Every core-loop endpoint below was executed against the live server unless
 its paragraph says **source-derived**. The exact commands are shown with each
 section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `2.7.2`
+**Protocol history:** this document previously described server `2.7.3`
+(verified 2026-11-23; see git history), `2.7.2`
 (verified 2026-11-20; see git history), `2.7.0`
 (verified 2026-11-19; see git history), `2.6.3`
 (verified 2026-11-17; see git history), `2.5.3`
@@ -70,6 +74,138 @@ was re-pointed to `2.5.3` at 18:53 UTC that day and the nightly job installed
 job installed it and restarted the server at 19:23 UTC. This revision
 therefore reinstates the 2.6 conversation protocol, now verified against
 `2.6.3`.
+
+The drift from 2.7.3 to 2.8.0 is **four additive surfaces (session naming,
+`:continue`, context inspection and side-channel agent close), one new turn
+field, and `/meta` bookkeeping; no existing frame, route body or enum changed
+shape**. The nightly job's `pending-changelog.md` covered 2.7.3→2.8.0 (117
+commits), reviewed through the GitHub API. The protocol-bearing commits are
+`13b09d99` (sessions name their project root and environment), `b695ed92`
+(`POST /sessions/{id}:continue`), `638fd94b` and `ca71dc29` (context usage and
+the session context-inspection routes), `ba2491ca` and `ecc92e33` (`turn.ended`
+replaces `loopEnd` with `continuation`), `f9ee8bbf` (agent `:close` and the
+`agent_close` capability), `cafb392f` (session frames report the current pending
+interaction), `314a6bd9` and `253212d2` (the `subagent_fork` and `tool-select`
+experimental flags are gone), and `c0e9faf0` (statically read-only Bash
+commands are approved without an interaction). Live verification used server
+`2.8.0`, started `2026-11-25T19:23:26.999Z`.
+
+- **Sessions name their project root and environment** (commit `13b09d99`;
+  verified live). The session object gained optional **`workspace_root`** and
+  **`environment_id`**; `cwd` is still present but marked deprecated in the
+  wire schema. A local session reads `workspace_root` equal to `cwd` and
+  `environment_id:"local"`:
+
+  ```json
+  {"id":"session_d112f970-2354-4696-8f2e-397104211917",
+   "workspace_id":"wd_spike_6baf4c130e63","workspace_root":"/path/to/project",
+   "cwd":"/path/to/project","environment_id":"local","title":"drift 2.8.0 probe",
+   "created_at":"2026-11-25T19:25:18.650Z","updated_at":"2026-11-25T19:25:18.650Z",
+   "activity":"idle","pending_interaction":"none","archived":false}
+  ```
+
+  `POST /api/v1/sessions` accepts a top-level **`workspace_root`** in place of
+  the legacy `cwd`/`metadata.cwd`; when more than one spelling is sent they
+  must agree, and a mismatch answers `40001` (verified live:
+  `"cwd: cwd (/x) must equal workspace_root (/y)"`). The legacy
+  `metadata.cwd` create body still works and still derives the workspace.
+  `GET /api/v1/sessions/{id}/environment` answers
+  `{workspace_id, environment_id, cwd?}` and `GET .../environments` lists
+  `{environments:[{environment_id,type:"local"|"ssh"|"docker"|"command",
+  status,connect_error?}]}` — both unchanged; a local session reads
+  `{"workspace_id":"wd_…","environment_id":"local"}` and one
+  `{"environment_id":"local","type":"local","status":"ready"}` entry.
+- **`:continue` resumes an interrupted or failed turn** (commit `b695ed92`;
+  verified live; the `session_continue` capability). `POST
+  /api/v1/sessions/{id}:continue` takes **no body** and answers
+  `{"continued":true}`. It is accepted only when the latest main-agent turn
+  ended `interrupted`, or `failed` with an `end_reason` other than `blocked`;
+  otherwise it answers the new **`40940`** `"session … has no interrupted or
+  failed turn to continue"`. A busy session answers **`40901`**. The resumed
+  work starts a fresh `agent` turn (verified live: the interrupted turn was
+  `turn_number:4`, the continuation `turn_number:5`); it injects a hidden
+  system-reminder user message, so **no visible `user_message` item is
+  appended** and the turn opens directly with the model's next output.
+  `:continue` on a session whose last turn was itself a cancelled
+  continuation is accepted again.
+- **Context inspection routes** (commits `638fd94b` and `ca71dc29`; verified
+  live). Three read-only routes, no WebSocket frame:
+  - `GET /api/v1/sessions/{id}/context/summary` (optional `agent_id` query) →
+    `{session_id, agent_id, captured_at (epoch ms), model?, tokens:{used,max?},
+    groups:[{role,count,tokens}]}`. `role` groups are `system`, `definition`
+    (one per tool), `user`, `reminder`, `assistant`, `tool` and `compaction`;
+    `tokens.used` is the measured count when the session has one, otherwise a
+    scaled estimate.
+  - `GET /api/v1/sessions/{id}/context/items?agent_id?&role=…&offset=&limit=`
+    → `{summary, tools:[<item>], items:[<item>], total, has_more}`. `role`
+    may be repeated, one value per param; `limit` is 1–500 (default 100). An
+    item is
+    `{id, role, segment?("thinking"|"reply"|"tool_call"), name?, sequence?,
+    preview, tokens, has_media}`. Tool definitions ride `tools` separately and
+    only appear in `items` when `role=definition` is requested.
+  - `GET .../context/items/{item_id}` (optional `agent_id` query) → the same item without
+    `preview`, plus `parts[]` (`{kind:"text"|"think"|"definition"|"function"|
+    "media", text?, name?, tokens?, data?}`) and `raw` (the engine message or
+    tool object, with encoded media redacted). Ids are `system`, `tool-<n>`
+    and `message-<index>[-part-<n>|-call-<n>]`; an unknown item answers
+    **`40403`** `"Context item not found: …"` (verified live), an unknown
+    session `40401`.
+- **`turn.ended` gains `continuation`** (commits `ba2491ca`, `ecc92e33`;
+  verified live). Every turn header may now carry
+  `continuation:"turn"|"background"|"none"`, replacing the engine's internal
+  `loopEnd` boolean. Live: a turn that ended because a steered prompt opened
+  the next turn read `continuation:"turn"`; a turn whose background sub-agent
+  was still running read `continuation:"background"` (and the session frame
+  read `activity:"background"`, `last_turn_outcome:"completed"`); an ordinary
+  finished turn, and a turn that failed before the model answered, read
+  `continuation:"none"`. The same field rides `turn.started` (absent there)
+  and the REST turns page.
+- **Close a side-channel agent** (commit `f9ee8bbf`; verified live; the
+  `agent_close` capability). `POST /api/v1/sessions/{id}/agents/{agent_id}:close`
+  closes a `btw` side-chat agent and answers `{"closed":true}`. The main agent
+  answers the new **`40939`** `"Agent \"main\" is not a side-channel agent and
+  cannot be closed"`; an already-closed or unknown agent `40401`; an unknown
+  action `40001` (`"unsupported action: agent-2:nope"`). Start a side chat
+  with `POST /api/v1/sessions/{id}:btw` → `{agent_id}` (unchanged).
+- **`/meta` bookkeeping** (verified live). `capabilities` gained
+  `agent_close` and `session_continue` (10 entries) and the payload gained
+  **`home_dir`** (the server's home directory, an absolute path).
+  `experimental_flags` lost **`subagent_fork`** (commit `314a6bd9` removed the
+  experimental subagent context forking) and **`tool-select`** (commit
+  `253212d2` legalized deferred tools in the resolver), leaving four flags:
+  `notify_user`, `wait_for`, `prompt_prediction`, `tower`. The 18-entry
+  `features` list is unchanged.
+- **Session frames report the pending interaction** (commit `cafb392f`;
+  verified live). Every `{"type":"session","change":"updated"}` frame now
+  carries the session's current `pending_interaction`, recomputed when the
+  frame is sent. The live approval and question probes saw
+  `pending_interaction:"approval"`/`"question"` on the session frame that
+  accompanied the interaction, instead of a stale `"none"` — clients that
+  upsert the session object no longer need a REST poll to clear a pending
+  badge.
+- **Read-only Bash is approved without an interaction** (commit `c0e9faf0`;
+  observed live). In `permission_mode:"manual"`, a statically read-only Bash
+  command (`echo …` was probed) ran without a pending `approval` interaction;
+  a mutating command (`rm -rf …`) still raised one with the usual
+  `{tool_name,action,tool_input_display,expires_at}` request. A client that
+  waits for an approval card before a tool's output must not assume every
+  manual-mode Bash call produces one.
+- **Engine-internal, wire-invisible** (reviewed, no client change):
+  `9dadda17` labels user media with its local session path and materializes
+  steered media (the wire still shows the `session_media` attachment and the
+  text part; the path stays in the model-facing message and the compaction
+  summary); `1ef139e6` delivers subagent model choices through a system
+  reminder (no session-field change); `16550990` records measured tool
+  durations in engine attributes (no `duration_ms` appears on `tool_call`
+  items); `c7d3576d`, `17613196`, `a3de86aa`, `701bb530` and `94927667` are
+  conversation-fold/loop internals.
+- **App impact: none new breaking.** The session object, conversation, prompts,
+  steer, cancel, compact, interaction, todo, sub-agent and file shapes above
+  were re-probed live and match 2.7.3 byte-for-byte apart from the additive
+  fields. The app's pre-existing 2.7 drift (tickets 197–213) is unchanged; the
+  new fields only extend it. Improvement tickets from this run: 214
+  (`:continue`), 215 (`continuation`), 216 (context breakdown), 217
+  (`workspace_root` on create).
 
 The drift from 2.7.2 to 2.7.3 is **one additive REST surface (feedback), one
 model-recovery fix and one additive tool-state family; no core-loop frame,
@@ -3135,25 +3271,27 @@ Every REST response is JSON wrapped in an envelope:
 curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
 ```
 
-Verified live on 2.7.3 (2026-11-23; `features` trimmed to 5 of 18):
+Verified live on 2.8.0 (2026-11-25; `features` trimmed to 5 of 18, `home_dir`
+shown as a placeholder):
 
 ```json
 {
   "code": 0, "msg": "success",
   "data": {
     "kimi_agent_protocol_version": "1.0.0",
-    "server_version": "2.7.3",
+    "server_version": "2.8.0",
     "product": "kimi-code-cli",
     "capabilities": {"websocket": true, "file_upload": true, "feedback": true,
                      "fs_query": true, "mcp": true, "tasks": true,
-                     "interactions_list": true, "session_wait": true},
-    "server_id": "01M84XTVK0MZ6G16J4HHSMR892",
-    "started_at": "2026-11-23T19:23:56.698Z",
+                     "interactions_list": true, "session_wait": true,
+                     "agent_close": true, "session_continue": true},
+    "server_id": "01M8A2KCKBY3Z0EEWYEH27FMZT",
+    "started_at": "2026-11-25T19:23:26.999Z",
+    "home_dir": "/home/user/.kimi-code",
     "open_in_apps": [],
     "dangerous_bypass_auth": false,
     "experimental_flags": {"notify_user": false, "wait_for": true,
-                           "prompt_prediction": false, "subagent_fork": false,
-                           "tower": false, "tool-select": false},
+                           "prompt_prediction": false, "tower": false},
     "features": [
       {"name": "skill", "state": "Active", "meta": {}},
       {"name": "btw", "state": "Active", "meta": {}},
@@ -3162,7 +3300,7 @@ Verified live on 2.7.3 (2026-11-23; `features` trimmed to 5 of 18):
       {"name": "plan", "state": "Active", "meta": {}}
     ]
   },
-  "request_id": "01M84XTV…"
+  "request_id": "01M8A2M1…"
 }
 ```
 
@@ -3174,10 +3312,18 @@ Verified live on 2.7.3 (2026-11-23; `features` trimmed to 5 of 18):
   on 2.7.3. `terminal` is gone (`GET .../environments` still exists),
   `interactions_list` and `session_wait` document the 2.7.0 routes of the
   same names, and `feedback` documents the 2.7.3 feedback routes.
-  `experimental_flags` gained `prompt_prediction` (`false`
+- **2.8.0:** `capabilities` gained **`agent_close`** (the side-channel agent
+  `:close` route) and **`session_continue`** (the `:continue` route), and the
+  payload gained **`home_dir`** — the server process's home directory as an
+  absolute path. The two removed experimental flags are `subagent_fork`
+  (commit `314a6bd9` removed experimental subagent context forking) and
+  `tool-select` (commit `253212d2` legalized deferred tools); all four
+  remaining flags read as above. `home_dir` is instance metadata, not a
+  capability: clients must not assume it exists on older builds.
+- `experimental_flags` gained `prompt_prediction` on 2.7.3 (`false`
   here — the experimental next-prompt suggestion unit). Treat every flag and
   feature as optional; the app only checks the envelope.
-- `features` has **18 entries** on 2.7.3 — the same list as 2.7.2:
+- `features` has **18 entries** on 2.8.0 — the same list as 2.7.2/2.7.3:
   `skill`, `btw`, `promptPrediction`, `dateChange`,
   `plan`, `fileHistory`, `externalHooks`, `debugEvents`, `swarm`, `goal`,
   `tower`, `usage`, `cron`, `reminder`, `tokenCounting`, `sessionInit`,
@@ -3468,21 +3614,27 @@ are optional:
 curl -s -H "Authorization: Bearer <token>" 'http://127.0.0.1:58627/api/v1/sessions?page_size=2'
 ```
 
-Session object, verified live on 2.7.2 (create/list/get share it):
+Session object, verified live on 2.8.0 (create/list/get share it):
 
 ```json
-{"id":"session_aebb0ec8-2133-4b22-9ecd-52c6e6d361a7",
- "workspace_id":"wd_spike_6baf4c130e63","cwd":"/path/to/project",
- "title":"drift 2.7.2 probe","created_at":"2026-11-20T19:25:31.716Z",
- "updated_at":"2026-11-20T19:25:31.716Z","activity":"idle",
+{"id":"session_d112f970-2354-4696-8f2e-397104211917",
+ "workspace_id":"wd_spike_6baf4c130e63","workspace_root":"/path/to/project",
+ "cwd":"/path/to/project","environment_id":"local",
+ "title":"drift 2.8.0 probe","created_at":"2026-11-25T19:25:18.650Z",
+ "updated_at":"2026-11-25T19:25:18.650Z","activity":"idle",
  "pending_interaction":"none","archived":false}
 ```
 
-- `cwd` is top-level now; `metadata` carries only custom keys (the reserved
-  `goal` key is dropped). `activity` is `idle` / `turn` (a main-agent turn
-  runs) / `background` (no main turn, but detached tasks or sub-agents are
-  still working). `pending_interaction` is `none`/`approval`/`question` and is
-  omitted on some cold snapshots — treat an absent key as `none`.
+- **2.8.0:** `workspace_root` (the project root the workspace was created
+  for) and `environment_id` (`"local"` on this server; remote environments
+  use their own id) are new. `cwd` is still present but deprecated in the wire
+  schema — prefer `workspace_root`.
+- `cwd` is top-level since 2.7.0; `metadata` carries only custom keys (the
+  reserved `goal` key is dropped). `activity` is `idle` / `turn` (a
+  main-agent turn runs) / `background` (no main turn, but detached tasks or
+  sub-agents are still working). `pending_interaction` is
+  `none`/`approval`/`question` and is omitted on some cold snapshots — treat
+  an absent key as `none`.
 - `last_turn_outcome` is `completed` / `interrupted` / `failed` and absent
   until the session's first ended turn (a cold session's persisted fallback
   fills it). `archived_at` appears only while archived; `archived` is
@@ -3529,9 +3681,12 @@ Session object, verified live on 2.7.2 (create/list/get share it):
 
 ### Create — `POST /api/v1/sessions`
 
-Body: `{"metadata": {"cwd": "<working directory>"}}`, optional top-level
-`"title"`. A `cwd` is expected; the server auto-creates a workspace for new
-cwds. A non-existent `cwd` is refused with envelope code `40409` over HTTP 200.
+Body: `{"workspace_root": "<project root>"}`, optional top-level `"title"`.
+The 2.8.0 field is `workspace_root`; the legacy `{"metadata":{"cwd":…}}` and
+top-level `cwd` spellings are still accepted and derive the same workspace
+(when several are sent they must agree — a mismatch answers `40001`). A
+project root is expected; the server auto-creates a workspace for new roots. A
+non-existent root is refused with envelope code `40409` over HTTP 200.
 **Note for this VPS:** the `kimi-web.service` unit runs with `PrivateTmp=yes`,
 so the server's `/tmp` is a private namespace — host-side `/tmp` directories
 are invisible to it. Use a path outside `/tmp` instead; the throwaway-session
@@ -3542,27 +3697,30 @@ examples in this document use `/path/to/project` (pre-created, owned by the
 curl -s -X POST http://127.0.0.1:58627/api/v1/sessions \
   -H "Authorization: Bearer <token>" \
   -H 'Content-Type: application/json; charset=utf-8' \
-  -d '{"metadata":{"cwd":"/path/to/project"}}'
+  -d '{"workspace_root":"/path/to/project"}'
 ```
 
-Returns the session object above — verbatim from 2.7.2 (a `title` was passed):
+Returns the session object above — verbatim from 2.8.0 (a `title` was passed):
 
 ```json
 {"code":0,"msg":"success",
- "data":{"id":"session_aebb0ec8-2133-4b22-9ecd-52c6e6d361a7",
-  "workspace_id":"wd_spike_6baf4c130e63","cwd":"/path/to/project",
-  "title":"drift 2.7.2 probe","created_at":"2026-11-20T19:25:31.716Z",
-  "updated_at":"2026-11-20T19:25:31.716Z","activity":"idle",
+ "data":{"id":"session_d112f970-2354-4696-8f2e-397104211917",
+  "workspace_id":"wd_spike_6baf4c130e63","workspace_root":"/path/to/project",
+  "cwd":"/path/to/project","environment_id":"local",
+  "title":"drift 2.8.0 probe","created_at":"2026-11-25T19:25:18.650Z",
+  "updated_at":"2026-11-25T19:25:18.650Z","activity":"idle",
   "pending_interaction":"none","archived":false},
- "request_id":"01M7X6QKFGK7ME71C6G934Z32K"}
+ "request_id":"01M8A2PSHGGKGY9TFJ41DH0JAB"}
 ```
 
 Fresh sessions created without a `title` come back with `"title": ""` —
-clients should fall back to their own placeholder. **2.7.0:** the body is
-still `{title?, cwd?, metadata?, agent_config?, workspace_id?,
-environment_id?, environment_cwd?}`; `cwd` is accepted top-level or as
-`metadata.cwd` (both must agree when both are present) and is echoed as
-top-level `cwd`. `agent_config` still binds the model/profile at create, but
+clients should fall back to their own placeholder. **2.8.0:** the body is
+`{title?, workspace_root?, cwd?, metadata?, agent_config?, workspace_id?,
+environment_id?, environment_cwd?}`; `workspace_root` is the canonical
+spelling, `cwd`/`metadata.cwd` are deprecated but still accepted, and a
+mismatch between any two answers `40001` (verified live:
+`"cwd: cwd (/x) must equal workspace_root (/y)"`). `environment_cwd` still
+requires `environment_id`. `agent_config` still binds the model/profile at create, but
 **the response no longer echoes it** — read the bound model off the `agent`
 frame (or the profile route). `agent_config.tower_mode:true` is refused with
 `40001`; reserved metadata keys are dropped. A non-existent `cwd` answers
@@ -3600,6 +3758,32 @@ still the current one. An idle session answers immediately with
 `timed_out:false`; an unknown session answers `40401`. A client that already
 holds a session subscription does not need this route; it is meant for
 agent-to-agent HTTP clients without a socket.
+
+### Continue — `POST /api/v1/sessions/{id}:continue`
+
+**New in 2.8.0** (commit `b695ed92`; the `session_continue` capability;
+verified live). Resumes the latest main-agent turn when it ended
+`interrupted`, or `failed` with an `end_reason` other than `blocked` — the
+one-tap retry after a Stop, a dropped connection or a provider error. Body:
+none (send `{}` or no body). Answers:
+
+```json
+{"code":0,"msg":"success","data":{"continued":true},"request_id":"01M8A2V26NZ73T0YY2XQPYGBAW"}
+```
+
+- The continuation opens a **new `agent` turn** (verified live: the
+  interrupted turn was `turn_number:4`, the continuation `turn_number:5`) with
+  a hidden system-reminder user message; no visible `user_message` item is
+  appended. The prior turn's items stay untouched.
+- No continuable turn → **`40940`**
+  (`"session session_… has no interrupted or failed turn to continue"`); a
+  running turn or compaction → **`40901`** (`"session … is currently busy"`).
+  An unknown session → `40401`.
+- `:continue` after a session whose last turn was itself a cancelled
+  continuation is accepted again (the cancelled continuation is also an
+  interrupted turn).
+- There is no body field for a new instruction: to say something new, send a
+  prompt; `:continue` only re-opens the model loop.
 
 ### Delete — `POST /api/v1/sessions/{id}:delete`
 
@@ -3756,6 +3940,30 @@ locks left behind by a crashed or exited process. Body `{}`. Success answers
   a retried 40931 → Cancel/Take over ("danger" tone). Ticket 169 ports it.
 - The lock can be turned off server-wide with `KIMI_CODE_SESSION_LOCK=0`
   (same commit; env switch, wire-invisible).
+
+### Side-channel agents — `POST ...:btw` / `POST .../agents/{id}:close`
+
+A `btw` side chat is an extra agent beside `main` (the web/desktop "ask in a
+side chat"). **2.8.0 adds the close action** (commit `f9ee8bbf`; the
+`agent_close` capability; verified live):
+
+```bash
+curl -s -X POST 'http://127.0.0.1:58627/api/v1/sessions/<session>:btw' -H "Authorization: Bearer <token>"
+# {"code":0,"msg":"success","data":{"agent_id":"agent-2"},"request_id":"…"}
+
+curl -s -X POST 'http://127.0.0.1:58627/api/v1/sessions/<session>/agents/agent-2:close' \
+  -H "Authorization: Bearer <token>"
+# {"code":0,"msg":"success","data":{"closed":true},"request_id":"…"}
+```
+
+- Closing `main` answers **`40939`** (`"Agent \"main\" is not a side-channel
+  agent and cannot be closed"`); closing it twice or naming an unknown agent
+  answers `40401` (`"Agent \"agent-2\" was not found"`); an unknown action
+  answers `40001` (`"unsupported action: agent-2:nope"`).
+- The side agent's turns are readable while it lives
+  (`GET .../agents/agent-2/turns`); after close that route answers `40401`.
+- The app has no side-chat surface; this route is documented for
+  completeness.
 
 ### Occupancy lock — 40931 / 40932
 
@@ -4030,7 +4238,8 @@ This replaced the transcript protocol in 2.6.0. There is no op stream, no
 | `end_reason` | For `interrupted`: `user_cancelled` / `aborted`. For `failed`: `error` / `max_steps` / `filtered` / `blocked` |
 | `error` | Failed turns only: `{code, message, name?, status_code?, request_id?, retryable?}` |
 | `retry` | Schema-derived (not observed live). Running turns only, while a failed model request waits to retry: `{attempt, next_attempt, max_attempts, delay_ms, error:{name,message,status_code?}}`. Cleared when the next step starts, a step ends, or the turn ends |
-| `turn_number` | The engine's turn number; the file-history routes key on it. Absent on `system` turns on 2.7.2 (it was `null` on 2.6.3) |
+| `continuation` | 2.8.0: `turn` (the loop opens another turn immediately, e.g. a steered prompt), `background` (a detached task/sub-agent still runs after this turn), `none` (the session goes idle). Optional on `turn.started`; set by `turn.ended` and stored on the ended turn. See the 2.8.0 drift block |
+| `turn_number` | The engine's turn number; the file-history routes key on it. The first turn is `0` (verified live: 0, 1, 2…). Absent on `system` turns since 2.7.2 (it was `null` on 2.6.3) |
 | `started_at`, `ended_at?`, `duration_ms?` | Timing |
 | `usage` | Sum of the steps' usage: `{input_other, output, input_cache_read, input_cache_creation}` |
 | `steps` | Ended steps, ordered by `index`: `{index, outcome, started_at, ended_at?, finish_reason?, usage?}`. `outcome` is `completed`/`interrupted`/`failed` |
@@ -4127,7 +4336,7 @@ curl -s -H "Authorization: Bearer <token>" \
     "outcome":"failed","end_reason":"error",
     "error":{"code":"provider.auth_error","message":"…","name":"APIStatusError",
              "status_code":403,"retryable":false},
-    "ended_at":"…","duration_ms":1076}],
+    "ended_at":"…","duration_ms":1076,"continuation":"none"}],
   "has_more":false},
  "request_id":"…"}
 ```
@@ -4154,6 +4363,108 @@ conversation read, per agent and per turn.
 
 The frames may repeat content the `turns` page already holds; applying them as
 replacements keeps the result correct.
+
+**2.8.0:** `turn.ended` may carry `continuation` (`turn`/`background`/`none`).
+It is the server's own answer to "is the agent really done?": `turn` means a
+queued/steered turn starts next, `background` means detached work is still
+running, and only `none` means the session is going idle. Live captures: a
+`sleep` turn that a steered prompt followed ended `continuation:"turn"` (and
+the next `turn.started` followed immediately); a turn that launched a
+background sub-agent ended `continuation:"background"` with the session frame
+at `activity:"background"`, `last_turn_outcome:"completed"`; the background
+completion then arrived as a new turn ending `continuation:"none"`.
+
+## Context inspection
+
+**New in 2.8.0** (commits `638fd94b` and `ca71dc29`; verified live). Three
+read-only routes describe what fills an agent's context window — the data
+behind the web/desktop context-usage view. They take `agent_id` as an optional
+query param (default `main`), never a body, and are served from the agent's
+current projected request: system prompt, tool definitions and the message
+list, not persisted history.
+
+### Summary — `GET /api/v1/sessions/{id}/context/summary`
+
+```bash
+curl -s -H "Authorization: Bearer <token>" \
+  'http://127.0.0.1:58627/api/v1/sessions/<session>/context/summary'
+```
+
+```json
+{"code":0,"msg":"success","data":{
+  "session_id":"session_d112f970-…","agent_id":"main",
+  "captured_at":1795634844383,"model":"deepseek/deepseek-v4-flash",
+  "tokens":{"used":23053,"max":1000000},
+  "groups":[{"role":"system","count":1,"tokens":7451},
+            {"role":"definition","count":32,"tokens":14419},
+            {"role":"user","count":4,"tokens":120},
+            {"role":"reminder","count":3,"tokens":221},
+            {"role":"assistant","count":8,"tokens":514},
+            {"role":"tool","count":8,"tokens":326}]},
+ "request_id":"…"}
+```
+
+`tokens.used` is the measured context count when the engine has one,
+otherwise a scaled estimate; `max` is the model's window and may be absent.
+`groups` are the non-empty roles: `system`, `definition` (one per tool),
+`user`, `reminder` (a system-injected reminder such as `date_change` or
+`permission_mode`), `assistant`, `tool`, and `compaction` for a summary
+message. `captured_at` is epoch milliseconds.
+
+### Items — `GET /api/v1/sessions/{id}/context/items`
+
+Query: optional `agent_id`, repeated `role=…`, `offset` (≥ 0), `limit` (1–500,
+default 100). `role` filters the non-tool items; adding `role=definition`
+also puts the tool definitions into `items`. Answer:
+
+```json
+{"code":0,"msg":"success","data":{
+  "summary":{…as above…},
+  "tools":[{"id":"tool-0","role":"definition","name":"Agent",
+            "preview":"Launch a subagent to handle a task…",
+            "tokens":1180,"has_media":false}],
+  "items":[{"id":"system","role":"system",
+            "preview":"You are Kimi Code CLI, an interactive general AI agent…",
+            "tokens":7451,"has_media":false},
+           {"id":"message-0","role":"user","sequence":1,
+            "preview":"Use the TodoList tool to plan exactly two steps…",
+            "tokens":30,"has_media":false}],
+  "total":34,"has_more":true},
+ "request_id":"…"}
+```
+
+An item is `{id, role, segment?, name?, sequence?, preview, tokens,
+has_media}`; `segment` is `thinking`/`reply`/`tool_call` for a split
+assistant message, `name` is the tool name for `definition`/`tool_call` rows
+and the reminder variant for `reminder`, `sequence` is the 1-based message
+index (absent for the system/tool rows), and `preview` is capped at 240
+characters.
+
+### Item detail — `GET /api/v1/sessions/{id}/context/items/{item_id}`
+
+Ids are `system`, `tool-<n>` and
+`message-<index>[-part-<n>|-call-<n>]`. Answers the same item without
+`preview`, plus `parts[]` and `raw`:
+
+```json
+{"code":0,"msg":"success","data":{
+  "id":"message-0","role":"user","sequence":1,"tokens":30,"has_media":false,
+  "parts":[{"kind":"text","text":"Use the TodoList tool to plan exactly two steps…"}],
+  "raw":{"role":"user","content":[{"type":"text","text":"…"}],
+         "attributes":{"promptId":"msg_…","origin":{"kind":"user"},
+                       "createdAt":"…","userMessageId":"msg_…"}}},
+ "request_id":"…"}
+```
+
+`parts[].kind` is `text`, `think`, `definition`, `function` or `media`;
+encoded media payloads are redacted to `[encoded media · N chars]` and the
+`media` part carries the redacted object. `raw` is the engine message/tool
+object (media redacted); for `system` it is the system-prompt string. An
+unknown item answers **`40403`**
+(`"Context item not found: bogus"`, verified live); an unknown session answers
+`40401` (source-derived — the route resolves the session first). `tool-0`'s
+detail carries the tool's `{name, description, parameters}` object as
+`parts[0].data` and `raw`.
 
 ## Search
 
@@ -4936,6 +5247,14 @@ row's id; every REST action keys on `interaction_id`. Posting a previously
 used `approval_<uuid>` answers `40902`; posting an unknown id `40404`. A
 rejected decision ends the same way with `outcome:"rejected"`; the tool does
 not run.
+
+**2.8.0: statically read-only Bash commands skip the interaction** (commit
+`c0e9faf0`; observed live). With `permission_mode:"manual"`, a Bash call the
+server classifies as read-only (`echo drift-280` was probed) executed
+immediately — no `interaction` frame, no `interaction_id` on the tool item.
+A mutating command (`rm -rf …`) still produced the usual pending approval.
+Clients must treat "manual mode" as "approvals are required for the calls the
+server decides are risky", not "every tool call waits".
 
 ### Question flow, end to end
 
@@ -5748,7 +6067,10 @@ restore:
   appeared, `activity:"background"` while only a background sub-agent ran,
   and `activity:"idle"` + `last_turn_outcome` on the end edge. The frame
   carries the full session object, so clients upsert it instead of patching
-  fields.
+  fields. **2.8.0** (commit `cafb392f`): the server recomputes and includes
+  the current `pending_interaction` when it sends the frame, so a session
+  frame that accompanies an approval/question reads `"approval"`/`"question"`
+  rather than a stale `"none"` (verified live for both kinds).
 - `session`/`created` fires for a plain create AND for a fork (verified
   live); the session's own id is not a separate envelope field any more.
 - `session`/`deleted` replaces the old deletion event; the session object is
@@ -5849,6 +6171,43 @@ There are no `seq`, `epoch` or `resync_required` fields on 2.6.0. The old v3
 protocol (0.43.0, removed in 2.0.2) remains gone.
 
 ## Verification log
+
+- 2026-11-25 re-verification on `2.8.0` (server 2.7.3 → 2.8.0; the nightly
+  job's `pending-changelog.md` covered the 117 commits, reviewed via the
+  GitHub API and the raw files at tag `@moonshot-ai/kimi-code@2.8.0`;
+  throwaway sessions created with `workspace_root=/path/to/project` and
+  deleted after probing; live probes over REST and websocat against
+  `127.0.0.1:58627`, server started `2026-11-25T19:23:26.999Z`). Drift found:
+  four additive surfaces and one turn field, no breaking core-loop change.
+  Verified live: `/meta` (10 capabilities with `agent_close`/
+  `session_continue`, `home_dir`, 4 experimental flags without
+  `subagent_fork`/`tool-select`, the same 18 features), session create with
+  `workspace_root` plus the `cwd`/`metadata.cwd` mismatch `40001`, the session
+  object with `workspace_root`/`environment_id`, flat/grouped/`fields` lists,
+  get/fork/undo/archive/restore/delete/reload/takeover, `:wait` idle,
+  `:continue` success/`40940`/busy `40901` and its hidden-injection turn,
+  turns REST with `continuation`, a full prompt round-trip (TodoList write,
+  Bash task frames, `item.*`/`turn.*`, `turn.ended`
+  `continuation:"none"`), prompts queue + `prompts:steer` (`continuation:
+  "turn"` on the steered turn), queued-prompt `:abort`, `:cancel` busy/idle,
+  `:abort` `40001`, `:compact` `{}` and `{"instruction":…}` (system turn,
+  counters, no `compaction.started`/`context.spliced`), the empty and busy
+  `40910`s, questions (pending list, answer flattening to the label, dismiss
+  with its `ended` frame), approvals (read-only `echo` auto-approved, a
+  mutating `rm -rf` pending → approved), foreground/background sub-agents
+  (`continuation:"background"`, the completion turn, unchanged `task`
+  frames), the `TodoList` write contract (32 tools, `input_schema` null),
+  files (upload/download/delete, image prompt → `session_media`), the new
+  context routes (summary, items with a role filter, item detail, `40403`),
+  the btw `:btw`/agent `:close` round-trip (`40939` main, `40401` closed),
+  `:fork` + `:undo` + `:delete`, workspaces, search disabled (`50001`), and
+  `/status`, `/snapshot`, `/questions`, `/tasks` all 404. Not probed:
+  task.watch/stop (unchanged since 2.6.3), feedback routes, SSH hosts, MCP
+  management. App impact: no new breakage — the session object, conversation,
+  prompts, steer, cancel, compact, interactions, todos, sub-agents and files
+  match 2.7.3 apart from additive fields; improvement tickets 214–217.
+  Unit tests: `:app:testDebugUnitTest --rerun-tasks` — 1100 tests, 0
+  failures, 1 skipped.
 
 - 2026-11-23 re-verification on `2.7.3` (server 2.7.2 → 2.7.3; the nightly
   job's `pending-changelog.md` covered the 6 commits, reviewed via the GitHub
