@@ -1,8 +1,8 @@
 # Kimi Code server wire protocol (core loop)
 
 Wire protocol of the HTTP+WebSocket server embedded in the `kimi` binary, as used
-by Kimi Code Web. Documented and verified against the live server on 2026-11-25
-(server version `2.8.0`; since 2.6.0 the WebSocket has no handshake, since
+by Kimi Code Web. Documented and verified against the live server on 2026-11-26
+(server version `2.8.1`; since 2.6.0 the WebSocket has no handshake, since
 2.7.0 `/meta` publishes `kimi_agent_protocol_version` instead of `backend`, and
 since 2.8.0 sessions name their project root and environment, turn headers
 carry `continuation`, and the server exposes `:continue`, agent `:close` and
@@ -25,7 +25,8 @@ Every core-loop endpoint below was executed against the live server unless
 its paragraph says **source-derived**. The exact commands are shown with each
 section. Secrets are redacted (`<token>`).
 
-**Protocol history:** this document previously described server `2.7.3`
+**Protocol history:** this document previously described server `2.8.0`
+(verified 2026-11-25; see git history), `2.7.3`
 (verified 2026-11-23; see git history), `2.7.2`
 (verified 2026-11-20; see git history), `2.7.0`
 (verified 2026-11-19; see git history), `2.6.3`
@@ -74,6 +75,56 @@ was re-pointed to `2.5.3` at 18:53 UTC that day and the nightly job installed
 job installed it and restarted the server at 19:23 UTC. This revision
 therefore reinstates the 2.6 conversation protocol, now verified against
 `2.6.3`.
+
+The drift from 2.8.0 to 2.8.1 is **none on the wire**: the patch release
+touches one provider client and one engine tool-lifecycle filter, and no
+frame, route, field or enum changed shape. The nightly job's
+`pending-changelog.md` covered 2.8.0→2.8.1 (4 commits), reviewed through the
+GitHub API: `4849d86d` aborts Google GenAI requests and forwards streamed
+usage (`packages/core/src/llm/builtin/protocol/google-genai/`), `0a9c794c`
+unloads only previously declared dynamic tools in the tool-select service
+(`packages/agent-core-v2/src/agent/toolSelect/toolSelectService.ts`),
+`2ad500f9` adds changeset notes and `62402f17` is the release commit. No file
+under `packages/kap-server` or the agent-core-v2 wire definitions changed.
+Live verification used server `2.8.1`, started
+`2026-11-26T19:23:24.034Z`.
+
+- **Google GenAI: request abort and streamed usage** (commit `4849d86d`;
+  engine/provider-internal). The Google provider now passes its abort signal
+  into `generateContent`/`generateContentStream` and reports usage as soon as
+  a chunk carries it, even without a finish reason. Wire-visible only as more
+  accurate `context`/step usage on Google-backed models; this server's
+  configured providers are DeepSeek and Kimi, so nothing changes here.
+- **Tool-select unloads only previously declared dynamic tools** (commit
+  `0a9c794c`; engine-internal). The lifecycle-announcement shaper now filters
+  each removed tool name against the set this session declared, so a removal
+  announcement for a tool the session never had keeps its original text. It
+  shapes model-facing messages only; no tool item, catalog or frame shape
+  changed.
+- **App impact: none.** The core-loop shapes below were re-probed live on
+  2.8.1 and match 2.8.0: `/meta` (same 10 capabilities, 4 flags, 18 features,
+  `home_dir`), the session object (including `workspace_root`/
+  `environment_id`), flat/grouped lists, create/get/`:wait`/`:continue`/
+  `:fork`/`:archive`/`:restore`/`:delete`/`:reload`/`:takeover`, one full
+  prompt round-trip (`turn.*`, `item.*`, `task`, `todo`, `context`, `agent`,
+  `session` frames; `turn.ended.continuation:"none"`), steer (queue +
+  `prompts:steer` → next-turn opener), cancel + `:continue` (interrupted
+  turn, then a fresh agent turn), questions (pending list, answer, dismiss),
+  approvals (manual Bash), `:compact` with `{}` and `{"instruction":…}`
+  (system turn, counters, both `40910`s), foreground/background sub-agents
+  (`task` frames, `agent_refs`, the completion turn), the `TodoList`
+  contract, files (upload/download/`Range`/delete, image prompt →
+  `session_media`), the context routes (summary/items/detail/`40403`),
+  `:btw`/`:close` (`40939` on main), child-agent turns, workspaces, search
+  (`50001`), title generation (`40923`), rating (`{"appearance":null}`),
+  and `/status`, `/snapshot`, `/tasks`, `/messages`, `/questions`,
+  `/approvals`, `/goal` and `/api/v2/sessions` all 404. Two content
+  observations, not shape: with `?session_id=` the tool catalog resolves
+  **32 tools (27 builtins + 5 MCP)** — the kiln MCP server published no tools
+  in this run — while the bare route answered `[]` because the most recent
+  session was cold; and an answer map keyed by question text (instead of the
+  item id) flattens to the raw `option_id` (see Interactions). No breakage
+  ticket and no improvement ticket: 2.8.1 adds no client capability.
 
 The drift from 2.7.3 to 2.8.0 is **four additive surfaces (session naming,
 `:continue`, context inspection and side-channel agent close), one new turn
@@ -3271,7 +3322,7 @@ Every REST response is JSON wrapped in an envelope:
 curl -s -H "Authorization: Bearer <token>" http://127.0.0.1:58627/api/v1/meta
 ```
 
-Verified live on 2.8.0 (2026-11-25; `features` trimmed to 5 of 18, `home_dir`
+Verified live on 2.8.1 (2026-11-26; `features` trimmed to 5 of 18, `home_dir`
 shown as a placeholder):
 
 ```json
@@ -3279,14 +3330,14 @@ shown as a placeholder):
   "code": 0, "msg": "success",
   "data": {
     "kimi_agent_protocol_version": "1.0.0",
-    "server_version": "2.8.0",
+    "server_version": "2.8.1",
     "product": "kimi-code-cli",
     "capabilities": {"websocket": true, "file_upload": true, "feedback": true,
                      "fs_query": true, "mcp": true, "tasks": true,
                      "interactions_list": true, "session_wait": true,
                      "agent_close": true, "session_continue": true},
-    "server_id": "01M8A2KCKBY3Z0EEWYEH27FMZT",
-    "started_at": "2026-11-25T19:23:26.999Z",
+    "server_id": "01M8CN00PNZ2S7QSDFG4MBF31J",
+    "started_at": "2026-11-26T19:23:24.034Z",
     "home_dir": "/home/user/.kimi-code",
     "open_in_apps": [],
     "dangerous_bypass_auth": false,
@@ -3300,7 +3351,7 @@ shown as a placeholder):
       {"name": "plan", "state": "Active", "meta": {}}
     ]
   },
-  "request_id": "01M8A2M1…"
+  "request_id": "01M8CN0K…"
 }
 ```
 
@@ -3320,6 +3371,8 @@ shown as a placeholder):
   `tool-select` (commit `253212d2` legalized deferred tools); all four
   remaining flags read as above. `home_dir` is instance metadata, not a
   capability: clients must not assume it exists on older builds.
+- **2.8.1:** `/meta` is byte-identical apart from `server_version`,
+  `server_id` and `started_at` (re-verified live 2026-11-26).
 - `experimental_flags` gained `prompt_prediction` on 2.7.3 (`false`
   here — the experimental next-prompt suggestion unit). Treat every flag and
   feature as optional; the app only checks the envelope.
@@ -3614,14 +3667,14 @@ are optional:
 curl -s -H "Authorization: Bearer <token>" 'http://127.0.0.1:58627/api/v1/sessions?page_size=2'
 ```
 
-Session object, verified live on 2.8.0 (create/list/get share it):
+Session object, verified live on 2.8.1 (create/list/get share it):
 
 ```json
-{"id":"session_d112f970-2354-4696-8f2e-397104211917",
+{"id":"session_b6b059c2-0ddc-4b11-9ca9-4a38967095de",
  "workspace_id":"wd_spike_6baf4c130e63","workspace_root":"/path/to/project",
  "cwd":"/path/to/project","environment_id":"local",
- "title":"drift 2.8.0 probe","created_at":"2026-11-25T19:25:18.650Z",
- "updated_at":"2026-11-25T19:25:18.650Z","activity":"idle",
+ "title":"drift 2.8.1 probe","created_at":"2026-11-26T19:24:14.346Z",
+ "updated_at":"2026-11-26T19:24:14.346Z","activity":"idle",
  "pending_interaction":"none","archived":false}
 ```
 
@@ -3700,17 +3753,17 @@ curl -s -X POST http://127.0.0.1:58627/api/v1/sessions \
   -d '{"workspace_root":"/path/to/project"}'
 ```
 
-Returns the session object above — verbatim from 2.8.0 (a `title` was passed):
+Returns the session object above — verbatim from 2.8.1 (a `title` was passed):
 
 ```json
 {"code":0,"msg":"success",
- "data":{"id":"session_d112f970-2354-4696-8f2e-397104211917",
+ "data":{"id":"session_b6b059c2-0ddc-4b11-9ca9-4a38967095de",
   "workspace_id":"wd_spike_6baf4c130e63","workspace_root":"/path/to/project",
   "cwd":"/path/to/project","environment_id":"local",
-  "title":"drift 2.8.0 probe","created_at":"2026-11-25T19:25:18.650Z",
-  "updated_at":"2026-11-25T19:25:18.650Z","activity":"idle",
+  "title":"drift 2.8.1 probe","created_at":"2026-11-26T19:24:14.346Z",
+  "updated_at":"2026-11-26T19:24:14.346Z","activity":"idle",
   "pending_interaction":"none","archived":false},
- "request_id":"01M8A2PSHGGKGY9TFJ41DH0JAB"}
+ "request_id":"01M8CN1HTHVGZM6YERMQG3Z6XV"}
 ```
 
 Fresh sessions created without a `title` come back with `"title": ""` —
@@ -5275,7 +5328,11 @@ labels joined with `", "`; `multi_with_other` → labels then free text, same
 join; `skipped` → item omitted. The `ended` frame's `response.answers` uses
 the **question text** as the key. Option ids are not validated against the
 item's options (a bogus id flattens verbatim), so clients must validate their
-own selections. A `multi` answer with an empty `option_ids` array fails
+own selections. **2.8.1 re-observed:** the lookup is keyed by the answer map's
+key matching the question item's `id` (`q_0`). An answers map keyed by the
+question text still answers `outcome:"answered"` but its value flattens to the
+raw `option_id` (`{"Coffee or tea?":"opt_0_0"}`) — this is the 2.7.0 capture
+the 2.7.2 revision called an anomaly. Send item ids. A `multi` answer with an empty `option_ids` array fails
 `40001` and leaves the interaction pending. A dismissal posts
 `{"kind":"question","dismissed":true}` and produces `outcome:"dismissed"`;
 the `response` is omitted.
@@ -5469,6 +5526,12 @@ mutable}` — no `{servers:[…]}`, and no `id`/`status`/`tool_count` fields. Th
 `GET /mcp/servers/{name}`, `POST /mcp/servers`, `PATCH|DELETE
 /mcp/servers/{name}` and the `mcp/servers::test`/`::inspect` actions. The app
 reads no MCP route.
+
+**2.8.1 (verified live 2026-11-26): with `?session_id=<id>` the catalog
+resolved 32 entries — 27 builtins + 5 MCP tools (tavily; the kiln MCP server
+published no tools in this run).** The bare route answered
+`{"tools":[]}` because the most recent session was cold — the caveat below
+still holds.
 
 **Liveness caveat (verified 2026-07-31, again 2026-08-27 on 0.39.0):** the
 route resolves the catalog from
@@ -6171,6 +6234,48 @@ There are no `seq`, `epoch` or `resync_required` fields on 2.6.0. The old v3
 protocol (0.43.0, removed in 2.0.2) remains gone.
 
 ## Verification log
+
+- 2026-11-26 re-verification on `2.8.1` (server 2.8.0 → 2.8.1; the nightly
+  job's `pending-changelog.md` covered the 4 commits, reviewed via the GitHub
+  API: `4849d86d` fixes Google GenAI request aborts and forwards streamed
+  usage, `0a9c794c` shapes dynamic-tool unload announcements to tools the
+  session declared, `2ad500f9` is changeset notes and `62402f17` the release
+  commit; throwaway sessions created with `workspace_root=/path/to/project`
+  and deleted after probing; live probes over REST and websocat against
+  `127.0.0.1:58627`, server started `2026-11-26T19:23:24.034Z`). Drift found:
+  **no wire-shape change**. Verified live: `/meta` (10 capabilities, 4 flags,
+  18 features, `home_dir`), config (`deepseek/deepseek-v4-flash`, `max`,
+  `auto`, 3 providers), models (12), the tools catalog (32 entries with
+  `?session_id=` — 27 builtins + 5 MCP; `[]` on the bare route), flat/grouped
+  session lists, create/get/fork/archive/restore/delete/reload/takeover,
+  `:wait` idle, `:continue` after a cancelled turn (a fresh agent turn; the
+  `40940`/`40901` envelopes were not re-probed), a full prompt round-trip
+  (`session`/`updated` →
+  `turn.started` → user `item.ended` → `agent` → `context` → `TodoList`/
+  `Bash` `item.*` + `task` + `todo` → reply → `turn.ended`
+  `continuation:"none"` → idle), prompts queue + `prompts:steer` (next-turn
+  opener), `:cancel` (`user_cancelled`), `:compact` `{}` and
+  `{"instruction":…}` (system turn without `turn_number`, counters, no
+  `compaction.*`), both `40910`s, questions (pending list, an answer keyed by
+  the item id flattens to the option label, dismiss, re-answer `40902`),
+  approvals (mutating Bash pending → `approved`), foreground/background
+  sub-agents (`task` frames, `agent_refs`, the completion turn, child turns,
+  `/tasks` 404), the `TodoList` write contract (`input.todos`,
+  `display.todo_list`, `todo` frames), files (upload, download 200, `Range`
+  206, delete → `40407`, image prompt → `session_media` + attachments), the
+  context routes (summary/items/detail/`40403`), `:btw`/`:close` (`40939`
+  main), the `kimi-code/k3` `provider.auth_error` turn, global `session`
+  frames (created/updated/archived/restored/deleted), the bare
+  `{"type":"ping"}`, subscribe order (response → pending interactions →
+  `task.list`/`agent`/`context`/`goal`/`todo` → `turns`), malformed
+  subscribe `40001`, unknown-session subscribe `40401`, `POST
+  .../title/generate` `40923`, and `/status`, `/snapshot`, `/tasks`,
+  `/messages`, `/questions`, `/approvals`, `/goal` and `/api/v2/sessions`
+  all 404. Not probed: `task.watch`/`stop`, feedback routes, SSH hosts, MCP
+  management, plugins. App impact: no new breakage — every shape the app
+  parses matches 2.8.0, and 2.8.1 adds no client capability, so no ticket.
+  Unit tests: `:app:testDebugUnitTest --rerun-tasks` — 1100 tests, 0
+  failures, 1 skipped.
 
 - 2026-11-25 re-verification on `2.8.0` (server 2.7.3 → 2.8.0; the nightly
   job's `pending-changelog.md` covered the 117 commits, reviewed via the
